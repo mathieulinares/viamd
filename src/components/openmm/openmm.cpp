@@ -1,4 +1,4 @@
-﻿#include <event.h>
+#include <event.h>
 
 #ifdef VIAMD_ENABLE_OPENMM
 
