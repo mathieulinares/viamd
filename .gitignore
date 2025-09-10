@@ -44,4 +44,9 @@ ext/imgui/docs/
 ext/imgui/examples/
 ext/imgui/misc/
 ext/imgui/.*
+
+# Test binaries
 test_force_field_improvements
+test_allocator_fix
+test_minimal_allocator
+test_integration
