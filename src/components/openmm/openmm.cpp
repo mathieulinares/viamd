@@ -200,7 +200,12 @@ public:
         if (state.mold.mol.atom.count > 0) {
             MD_LOG_INFO("Topology loaded, OpenMM system can be initialized");
             // Reset simulation state when new topology is loaded
-            cleanup_simulation(state);
+            // Apply memory isolation pattern to prevent allocator conflicts
+            {
+                cleanup_simulation(state);
+            }
+            // Memory barrier to ensure OpenMM cleanup is complete
+            std::atomic_thread_fence(std::memory_order_seq_cst);
         }
 #endif
     }
@@ -271,7 +276,12 @@ public:
                        
         } catch (const std::exception& e) {
             MD_LOG_ERROR("Failed to initialize OpenMM system: %s", e.what());
-            cleanup_simulation(state);
+            // Apply memory isolation pattern around cleanup to prevent allocator conflicts  
+            {
+                cleanup_simulation(state);
+            }
+            // Memory barrier to ensure OpenMM cleanup is complete
+            std::atomic_thread_fence(std::memory_order_seq_cst);
         }
 #endif
     }
@@ -823,7 +833,13 @@ public:
                 // If system is already initialized, we need to reinitialize with new force field
                 if (state.simulation.initialized) {
                     MD_LOG_INFO("Reinitializing system with new force field...");
-                    cleanup_simulation(state);
+                    // Apply memory isolation pattern around cleanup to prevent allocator conflicts
+                    {
+                        cleanup_simulation(state);
+                    }
+                    // Memory barrier to ensure OpenMM cleanup is complete before proceeding
+                    std::atomic_thread_fence(std::memory_order_seq_cst);
+                    
                     setup_system(state);
                 }
             }
@@ -1851,7 +1867,14 @@ namespace openmm_interface {
             if (original_ff != openmm::ForceFieldType::UFF) {
                 openmm::g_openmm_component.sim_context.force_field_type = openmm::ForceFieldType::UFF;
                 openmm::g_openmm_component.sim_context.force_field_name = "UFF";
-                openmm::g_openmm_component.cleanup_simulation(state);
+                
+                // Apply memory isolation pattern around cleanup to prevent allocator conflicts
+                {
+                    openmm::g_openmm_component.cleanup_simulation(state);
+                }
+                // Memory barrier to ensure OpenMM cleanup is complete before proceeding
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                
                 openmm::g_openmm_component.setup_system(state);
             }
             
@@ -1861,7 +1884,14 @@ namespace openmm_interface {
             if (original_ff != openmm::ForceFieldType::UFF) {
                 openmm::g_openmm_component.sim_context.force_field_type = original_ff;
                 openmm::g_openmm_component.sim_context.force_field_name = (original_ff == openmm::ForceFieldType::AMBER) ? "AMBER14" : "UFF";
-                openmm::g_openmm_component.cleanup_simulation(state);
+                
+                // Apply memory isolation pattern around cleanup to prevent allocator conflicts
+                {
+                    openmm::g_openmm_component.cleanup_simulation(state);
+                }
+                // Memory barrier to ensure OpenMM cleanup is complete before proceeding
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                
                 openmm::g_openmm_component.setup_system(state);
             }
         } else {
@@ -1873,8 +1903,12 @@ namespace openmm_interface {
             openmm::g_openmm_component.setup_system(state);
             openmm::g_openmm_component.minimize_energy(state);
             
-            // Always cleanup after minimization to prevent memory issues
-            openmm::g_openmm_component.cleanup_simulation(state);
+            // Apply memory isolation pattern around cleanup to prevent allocator conflicts
+            {
+                openmm::g_openmm_component.cleanup_simulation(state);
+            }
+            // Memory barrier to ensure OpenMM cleanup is complete before proceeding
+            std::atomic_thread_fence(std::memory_order_seq_cst);
             
             // Restore original force field type for consistency
             openmm::g_openmm_component.sim_context.force_field_type = original_ff;
