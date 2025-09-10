@@ -51,3 +51,5 @@ test_allocator_fix
 test_minimal_allocator
 test_integration
 test_openmm_segfault_fix
+test_openmm_memory_fix
+**/test_*
