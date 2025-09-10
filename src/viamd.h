@@ -463,6 +463,7 @@ struct ApplicationState {
         vec3_t              mol_aabb_max = {};
 
         uint32_t dirty_buffers = 0;
+        bool from_builder = false;  // Flag to indicate molecule was created by builder
     } mold;
 
     DisplayProperty* display_properties = nullptr;

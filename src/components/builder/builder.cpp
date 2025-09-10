@@ -143,6 +143,9 @@ struct MoleculeBuilder : viamd::EventHandler {
         // Update app state flags
         app_state->mold.dirty_buffers = MolBit_DirtyPosition | MolBit_DirtyRadius | MolBit_DirtyBonds;
         
+        // Clear the builder flag
+        app_state->mold.from_builder = false;
+        
         // Reset animation
         app_state->animation.frame = 0.0;
         
@@ -156,7 +159,8 @@ struct MoleculeBuilder : viamd::EventHandler {
         
         MD_LOG_INFO("Molecule builder: cleared molecule from VIAMD");
         
-        // Broadcast topology initialization event to recreate GL resources
+        // First clear representations, then broadcast topology initialization event to recreate GL resources
+        viamd::event_system_broadcast_event(viamd::EventType_ViamdRepresentationsClear, viamd::EventPayloadType_ApplicationState, app_state);
         viamd::event_system_broadcast_event(viamd::EventType_ViamdTopologyInit, viamd::EventPayloadType_ApplicationState, app_state);
     }
 
@@ -340,6 +344,9 @@ struct MoleculeBuilder : viamd::EventHandler {
         // Transfer ownership by clearing our copy without freeing
         built_molecule.mol = {};
         built_molecule.valid = false;
+
+        // Mark that this molecule came from the builder
+        app_state->mold.from_builder = true;
 
         // Update app state flags
         app_state->mold.dirty_buffers = MolBit_DirtyPosition | MolBit_DirtyRadius | MolBit_DirtyBonds;

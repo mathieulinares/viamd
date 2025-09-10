@@ -28,6 +28,7 @@ enum : EventType {
 
 	EventType_ViamdTopologyInit			= HASH_STR_LIT("VIAMD Topology Initialize"),	// Called when topology is initialized
 	EventType_ViamdTopologyFree			= HASH_STR_LIT("VIAMD Topology Free"),			// Called when topology is freed
+	EventType_ViamdRepresentationsClear	= HASH_STR_LIT("VIAMD Representations Clear"),	// Called to clear all representations
 
 	EventType_ViamdTrajectoryInit		= HASH_STR_LIT("VIAMD Trajectory Initialize"),	// Called when a trajectory is initialized
 	EventType_ViamdTrajectoryFree		= HASH_STR_LIT("VIAMD Trajectory Free"),		// Called when a trajectory is freed

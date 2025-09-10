@@ -635,6 +635,13 @@ struct MainEventHandler : viamd::EventHandler {
                     }
                     break;
                 }
+                case viamd::EventType_ViamdRepresentationsClear: {
+                    if (e.payload_type == viamd::EventPayloadType_ApplicationState && app_state) {
+                        MD_LOG_DEBUG("Clearing all representations");
+                        clear_representations(app_state);
+                    }
+                    break;
+                }
                 default:
                     // Ignore other events
                     break;
@@ -7848,6 +7855,8 @@ static bool load_dataset_from_file(ApplicationState* data, const LoadParam& para
 
             str_copy_to_char_buf(data->files.molecule, sizeof(data->files.molecule), path_to_file);
             data->files.coarse_grained = param.coarse_grained;
+            // Clear the builder flag since this molecule was loaded from a file
+            data->mold.from_builder = false;
             // @NOTE: If the dataset is coarse-grained, then postprocessing must be aware
             md_util_postprocess_flags_t flags = param.coarse_grained ? MD_UTIL_POSTPROCESS_COARSE_GRAINED : MD_UTIL_POSTPROCESS_ALL;
             md_util_molecule_postprocess(&data->mold.mol, data->mold.mol_alloc, flags);
@@ -8646,6 +8655,13 @@ static void create_default_representations(ApplicationState* state) {
     bool water_present = false;
     bool ligand_present = false;
     bool orbitals_present = state->representation.info.alpha.num_orbitals > 0;
+
+    // If molecule was created by the builder, always create ball and stick with "all" filter
+    if (state->mold.from_builder) {
+        Representation* rep = create_representation(state, RepresentationType::BallAndStick, ColorMapping::Cpk, STR_LIT("all"));
+        snprintf(rep->name, sizeof(rep->name), "builder molecule");
+        goto done;
+    }
 
     if (state->mold.mol.atom.count > 4'000'000) {
         LOG_INFO("Large molecule detected, creating default representation for all atoms");
