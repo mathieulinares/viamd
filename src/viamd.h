@@ -823,6 +823,17 @@ struct ApplicationState {
         // Performance metrics
         double steps_per_second = 0.0;
         double last_update_time = 0.0;
+        
+        // Trajectory frame storage for real-time analysis
+        struct {
+            md_array(float*) stored_x = nullptr;  // Array of x coordinate arrays for each frame
+            md_array(float*) stored_y = nullptr;  // Array of y coordinate arrays for each frame  
+            md_array(float*) stored_z = nullptr;  // Array of z coordinate arrays for each frame
+            md_array(double) frame_times = nullptr;  // Time for each stored frame
+            size_t atom_count = 0;  // Number of atoms per frame
+            int max_frames = 1000;  // Maximum frames to store
+            bool enabled = true;    // Whether to capture frames
+        } trajectory_capture;
     } simulation;
 #endif
 

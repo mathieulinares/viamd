@@ -70,6 +70,10 @@
 #include <viamd.h>
 #include <serialization_utils.h>
 
+#ifdef VIAMD_ENABLE_OPENMM
+#include "components/openmm/openmm.cpp"
+#endif
+
 #define MAX_POPULATION_SIZE 256
 #define MAX_TEMPORAL_SUBPLOTS 10
 #define MAX_DISTRIBUTION_SUBPLOTS 10
@@ -877,7 +881,13 @@ int main(int argc, char** argv) {
 #endif
 
         const size_t num_frames  = md_trajectory_num_frames(data.mold.traj);
-        const size_t last_frame  = num_frames > 0 ? num_frames - 1 : 0;
+#ifdef VIAMD_ENABLE_OPENMM
+        const size_t sim_frames = openmm::g_openmm_component.get_simulation_frame_count(data);
+        const size_t total_frames = (num_frames > 0) ? num_frames : sim_frames;
+#else
+        const size_t total_frames = num_frames;
+#endif
+        const size_t last_frame  = total_frames > 0 ? total_frames - 1 : 0;
         const double   max_frame = (double)last_frame;
 
         if (!file_queue_empty(&data.file_queue) && !data.load_dataset.show_window) {
@@ -1124,6 +1134,13 @@ int main(int argc, char** argv) {
             if (data.mold.traj) {
                 interpolate_atomic_properties(&data);
             }
+#ifdef VIAMD_ENABLE_OPENMM
+            else if (openmm::g_openmm_component.get_simulation_frame_count(data) > 0) {
+                // Use simulation frames for animation when no trajectory file is loaded
+                int64_t frame_idx = CLAMP((int64_t)(data.animation.frame + 0.5), 0, (int64_t)openmm::g_openmm_component.get_simulation_frame_count(data) - 1);
+                openmm::g_openmm_component.load_simulation_frame(data, frame_idx);
+            }
+#endif
             POP_CPU_SECTION()
 
             PUSH_CPU_SECTION("Update dynamic representations")
