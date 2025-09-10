@@ -1,3 +1,6 @@
+#ifndef IMGUI_WIDGETS_H
+#define IMGUI_WIDGETS_H
+
 #include <imgui.h>
 
 #include <core/md_vec_math.h>
@@ -57,3 +60,5 @@ void DrawCheckerboard(ImDrawList* draw_list, ImVec2 p_min, ImVec2 p_max, ImU32 c
 bool DrawCoordinateSystemWidget(const CoordSystemWidgetParam& param);
 
 }  // namespace ImGui
+
+#endif // IMGUI_WIDGETS_H
