@@ -910,10 +910,10 @@ public:
         
         // Initialize arrays if not already done
         if (!capture.stored_x) {
-            capture.stored_x = md_array_create(float*, capture.max_frames, persistent_alloc);
-            capture.stored_y = md_array_create(float*, capture.max_frames, persistent_alloc);
-            capture.stored_z = md_array_create(float*, capture.max_frames, persistent_alloc);
-            capture.frame_times = md_array_create(double, capture.max_frames, persistent_alloc);
+            capture.stored_x = md_array_create(float*, capture.max_frames, state.allocator.persistent);
+            capture.stored_y = md_array_create(float*, capture.max_frames, state.allocator.persistent);
+            capture.stored_z = md_array_create(float*, capture.max_frames, state.allocator.persistent);
+            capture.frame_times = md_array_create(double, capture.max_frames, state.allocator.persistent);
         }
         
         capture.atom_count = state.mold.mol.atom.count;
@@ -921,9 +921,9 @@ public:
         // Clear existing frames
         for (size_t i = 0; i < md_array_size(capture.stored_x); ++i) {
             if (capture.stored_x[i]) {
-                md_free(persistent_alloc, capture.stored_x[i], capture.atom_count * sizeof(float));
-                md_free(persistent_alloc, capture.stored_y[i], capture.atom_count * sizeof(float));
-                md_free(persistent_alloc, capture.stored_z[i], capture.atom_count * sizeof(float));
+                md_free(state.allocator.persistent, capture.stored_x[i], capture.atom_count * sizeof(float));
+                md_free(state.allocator.persistent, capture.stored_y[i], capture.atom_count * sizeof(float));
+                md_free(state.allocator.persistent, capture.stored_z[i], capture.atom_count * sizeof(float));
             }
         }
         
@@ -943,16 +943,16 @@ public:
         // Free stored coordinate arrays
         for (size_t i = 0; i < md_array_size(capture.stored_x); ++i) {
             if (capture.stored_x[i]) {
-                md_free(persistent_alloc, capture.stored_x[i], capture.atom_count * sizeof(float));
-                md_free(persistent_alloc, capture.stored_y[i], capture.atom_count * sizeof(float));
-                md_free(persistent_alloc, capture.stored_z[i], capture.atom_count * sizeof(float));
+                md_free(state.allocator.persistent, capture.stored_x[i], capture.atom_count * sizeof(float));
+                md_free(state.allocator.persistent, capture.stored_y[i], capture.atom_count * sizeof(float));
+                md_free(state.allocator.persistent, capture.stored_z[i], capture.atom_count * sizeof(float));
             }
         }
         
-        md_array_free(capture.stored_x, persistent_alloc);
-        md_array_free(capture.stored_y, persistent_alloc);
-        md_array_free(capture.stored_z, persistent_alloc);
-        md_array_free(capture.frame_times, persistent_alloc);
+        md_array_free(capture.stored_x, state.allocator.persistent);
+        md_array_free(capture.stored_y, state.allocator.persistent);
+        md_array_free(capture.stored_z, state.allocator.persistent);
+        md_array_free(capture.frame_times, state.allocator.persistent);
         
         capture.stored_x = nullptr;
         capture.stored_y = nullptr;
@@ -973,9 +973,9 @@ public:
         // Remove oldest frame if we've reached max capacity
         if (md_array_size(capture.stored_x) >= capture.max_frames) {
             // Free the oldest frame's memory
-            md_free(persistent_alloc, capture.stored_x[0], capture.atom_count * sizeof(float));
-            md_free(persistent_alloc, capture.stored_y[0], capture.atom_count * sizeof(float));
-            md_free(persistent_alloc, capture.stored_z[0], capture.atom_count * sizeof(float));
+            md_free(state.allocator.persistent, capture.stored_x[0], capture.atom_count * sizeof(float));
+            md_free(state.allocator.persistent, capture.stored_y[0], capture.atom_count * sizeof(float));
+            md_free(state.allocator.persistent, capture.stored_z[0], capture.atom_count * sizeof(float));
             
             // Shift all frames down by one position
             for (size_t i = 1; i < md_array_size(capture.stored_x); ++i) {
@@ -993,9 +993,9 @@ public:
         }
         
         // Allocate memory for new frame
-        float* x_frame = (float*)md_alloc(persistent_alloc, capture.atom_count * sizeof(float));
-        float* y_frame = (float*)md_alloc(persistent_alloc, capture.atom_count * sizeof(float));
-        float* z_frame = (float*)md_alloc(persistent_alloc, capture.atom_count * sizeof(float));
+        float* x_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
+        float* y_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
+        float* z_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
         
         // Copy current positions
         for (size_t i = 0; i < capture.atom_count; ++i) {
@@ -1005,10 +1005,10 @@ public:
         }
         
         // Store the frame
-        md_array_push(capture.stored_x, x_frame, persistent_alloc);
-        md_array_push(capture.stored_y, y_frame, persistent_alloc);
-        md_array_push(capture.stored_z, z_frame, persistent_alloc);
-        md_array_push(capture.frame_times, state.simulation.simulation_time, persistent_alloc);
+        md_array_push(capture.stored_x, x_frame, state.allocator.persistent);
+        md_array_push(capture.stored_y, y_frame, state.allocator.persistent);
+        md_array_push(capture.stored_z, z_frame, state.allocator.persistent);
+        md_array_push(capture.frame_times, state.simulation.simulation_time, state.allocator.persistent);
 #endif
     }
 
