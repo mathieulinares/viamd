@@ -603,6 +603,7 @@ static void draw_script_editor_window(ApplicationState* data);
 static void draw_dataset_window(ApplicationState* data);
 static void draw_debug_window(ApplicationState* data);
 static void draw_property_export_window(ApplicationState* data);
+static void draw_scatter_plot_window(ApplicationState* data);
 static void draw_notifications_window();
 
 static void update_md_buffers(ApplicationState* data);
@@ -958,6 +959,7 @@ int main(int argc, char** argv) {
         if (data.selection.grow.show_window) draw_selection_grow_window(&data);
         if (data.show_property_export_window) draw_property_export_window(&data);
         if (data.show_debug_window) draw_debug_window(&data);
+        if (data.show_scatter_plot_window) draw_scatter_plot_window(&data);
 
         data.selection.selecting = false;
 
@@ -2853,6 +2855,7 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Checkbox("Script Editor", &data->show_script_window);
             ImGui::Checkbox("Timelines", &data->timeline.show_window);
             ImGui::Checkbox("Distributions", &data->distributions.show_window);
+            ImGui::Checkbox("Scatter Plot", &data->show_scatter_plot_window);
             ImGui::Checkbox("Density Volumes", &data->density_volume.show_window);
             ImGui::Checkbox("Dataset", &data->dataset.show_window);
 #ifdef VIAMD_ENABLE_OPENMM
@@ -7525,6 +7528,118 @@ static void draw_property_export_window(ApplicationState* data) {
             }
         }
         ImGui::PopItemWidth();
+    }
+    ImGui::End();
+}
+
+static void draw_scatter_plot_window(ApplicationState* data) {
+    ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Scatter Plot", &data->show_scatter_plot_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
+        static int x_property_idx = -1;
+        static int y_property_idx = -1;
+        
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("Properties")) {
+                DisplayProperty* props = data->display_properties;
+                const int num_props = (int)md_array_size(props);
+                
+                if (num_props == 0) {
+                    ImGui::Text("No properties available");
+                } else {
+                    ImGui::Text("Select properties to plot:");
+                    ImGui::Separator();
+                    
+                    // X-axis property selection
+                    if (ImGui::BeginMenu("X-Axis")) {
+                        for (int i = 0; i < num_props; ++i) {
+                            const DisplayProperty& dp = props[i];
+                            if (!data->timeline.filter.enabled && dp.partial_evaluation) {
+                                continue; // Skip partial evaluations when filter is not enabled
+                            }
+                            
+                            bool selected = (x_property_idx == i);
+                            if (ImGui::MenuItem(dp.label, nullptr, selected)) {
+                                x_property_idx = i;
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                    
+                    // Y-axis property selection
+                    if (ImGui::BeginMenu("Y-Axis")) {
+                        for (int i = 0; i < num_props; ++i) {
+                            const DisplayProperty& dp = props[i];
+                            if (!data->timeline.filter.enabled && dp.partial_evaluation) {
+                                continue; // Skip partial evaluations when filter is not enabled
+                            }
+                            
+                            bool selected = (y_property_idx == i);
+                            if (ImGui::MenuItem(dp.label, nullptr, selected)) {
+                                y_property_idx = i;
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+        
+        // Display current selection
+        DisplayProperty* props = data->display_properties;
+        const int num_props = (int)md_array_size(props);
+        
+        if (num_props > 0) {
+            ImGui::Text("X-Axis: %s", (x_property_idx >= 0 && x_property_idx < num_props) ? props[x_property_idx].label : "Not selected");
+            ImGui::Text("Y-Axis: %s", (y_property_idx >= 0 && y_property_idx < num_props) ? props[y_property_idx].label : "Not selected");
+            
+            // Check if both properties are selected and valid
+            if (x_property_idx >= 0 && x_property_idx < num_props && 
+                y_property_idx >= 0 && y_property_idx < num_props &&
+                x_property_idx != y_property_idx) {
+                
+                const DisplayProperty& x_prop = props[x_property_idx];
+                const DisplayProperty& y_prop = props[y_property_idx];
+                
+                // Check if properties have data
+                if (x_prop.prop_data && y_prop.prop_data && 
+                    x_prop.prop_data->values && y_prop.prop_data->values &&
+                    x_prop.prop_data->num_values > 0 && y_prop.prop_data->num_values > 0) {
+                    
+                    // Use the minimum number of values from both properties
+                    const size_t num_points = MIN(x_prop.prop_data->num_values, y_prop.prop_data->num_values);
+                    
+                    if (num_points > 0) {
+                        // Create the scatter plot
+                        if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
+                            // Set axis labels
+                            ImPlot::SetupAxis(ImAxis_X1, x_prop.label);
+                            ImPlot::SetupAxis(ImAxis_Y1, y_prop.label);
+                            
+                            // Plot the scatter data
+                            ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 3.0f);
+                            ImPlot::PlotScatter("Correlation", 
+                                                x_prop.prop_data->values, 
+                                                y_prop.prop_data->values, 
+                                                (int)num_points);
+                            
+                            ImPlot::EndPlot();
+                        }
+                    } else {
+                        ImGui::Text("No data points available for plotting.");
+                    }
+                } else {
+                    ImGui::Text("Selected properties do not have valid data.");
+                }
+            } else if (x_property_idx == y_property_idx && x_property_idx >= 0) {
+                ImGui::Text("Please select different properties for X and Y axes.");
+            } else {
+                ImGui::Text("Please select both X and Y axis properties from the menu.");
+            }
+        } else {
+            ImGui::Text("No properties available. Please evaluate a script with properties first.");
+        }
     }
     ImGui::End();
 }

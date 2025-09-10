@@ -828,6 +828,7 @@ struct ApplicationState {
     bool show_script_window = true;
     bool show_debug_window = false;
     bool show_property_export_window = false;
+    bool show_scatter_plot_window = false;
 };
 
 static inline void modify_field(md_bitfield_t* bf, const md_bitfield_t* mask, SelectionOperator op) {
