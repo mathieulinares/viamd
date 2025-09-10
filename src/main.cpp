@@ -70,6 +70,10 @@
 #include <viamd.h>
 #include <serialization_utils.h>
 
+#ifdef VIAMD_ENABLE_OPENMM
+#include "components/openmm/openmm.cpp"
+#endif
+
 #define MAX_POPULATION_SIZE 256
 #define MAX_TEMPORAL_SUBPLOTS 10
 #define MAX_DISTRIBUTION_SUBPLOTS 10
@@ -635,6 +639,13 @@ struct MainEventHandler : viamd::EventHandler {
                     }
                     break;
                 }
+                case viamd::EventType_ViamdRepresentationsClear: {
+                    if (e.payload_type == viamd::EventPayloadType_ApplicationState && app_state) {
+                        MD_LOG_DEBUG("Clearing all representations");
+                        clear_representations(app_state);
+                    }
+                    break;
+                }
                 default:
                     // Ignore other events
                     break;
@@ -870,7 +881,13 @@ int main(int argc, char** argv) {
 #endif
 
         const size_t num_frames  = md_trajectory_num_frames(data.mold.traj);
-        const size_t last_frame  = num_frames > 0 ? num_frames - 1 : 0;
+#ifdef VIAMD_ENABLE_OPENMM
+        const size_t sim_frames = openmm::g_openmm_component.get_simulation_frame_count(data);
+        const size_t total_frames = (num_frames > 0) ? num_frames : sim_frames;
+#else
+        const size_t total_frames = num_frames;
+#endif
+        const size_t last_frame  = total_frames > 0 ? total_frames - 1 : 0;
         const double   max_frame = (double)last_frame;
 
         if (!file_queue_empty(&data.file_queue) && !data.load_dataset.show_window) {
@@ -1117,6 +1134,13 @@ int main(int argc, char** argv) {
             if (data.mold.traj) {
                 interpolate_atomic_properties(&data);
             }
+#ifdef VIAMD_ENABLE_OPENMM
+            else if (openmm::g_openmm_component.get_simulation_frame_count(data) > 0) {
+                // Use simulation frames for animation when no trajectory file is loaded
+                int64_t frame_idx = CLAMP((int64_t)(data.animation.frame + 0.5), 0, (int64_t)openmm::g_openmm_component.get_simulation_frame_count(data) - 1);
+                openmm::g_openmm_component.load_simulation_frame(data, frame_idx);
+            }
+#endif
             POP_CPU_SECTION()
 
             PUSH_CPU_SECTION("Update dynamic representations")
@@ -7848,6 +7872,8 @@ static bool load_dataset_from_file(ApplicationState* data, const LoadParam& para
 
             str_copy_to_char_buf(data->files.molecule, sizeof(data->files.molecule), path_to_file);
             data->files.coarse_grained = param.coarse_grained;
+            // Clear the builder flag since this molecule was loaded from a file
+            data->mold.from_builder = false;
             // @NOTE: If the dataset is coarse-grained, then postprocessing must be aware
             md_util_postprocess_flags_t flags = param.coarse_grained ? MD_UTIL_POSTPROCESS_COARSE_GRAINED : MD_UTIL_POSTPROCESS_ALL;
             md_util_molecule_postprocess(&data->mold.mol, data->mold.mol_alloc, flags);
@@ -8646,6 +8672,13 @@ static void create_default_representations(ApplicationState* state) {
     bool water_present = false;
     bool ligand_present = false;
     bool orbitals_present = state->representation.info.alpha.num_orbitals > 0;
+
+    // If molecule was created by the builder, always create ball and stick with "all" filter
+    if (state->mold.from_builder) {
+        Representation* rep = create_representation(state, RepresentationType::BallAndStick, ColorMapping::Cpk, STR_LIT("all"));
+        snprintf(rep->name, sizeof(rep->name), "builder molecule");
+        goto done;
+    }
 
     if (state->mold.mol.atom.count > 4'000'000) {
         LOG_INFO("Large molecule detected, creating default representation for all atoms");

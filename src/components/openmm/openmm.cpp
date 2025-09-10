@@ -250,6 +250,9 @@ public:
             state.simulation.current_frame = 0;
             state.simulation.simulation_time = 0.0;
             
+            // Initialize trajectory capture for real-time analysis
+            init_trajectory_capture(state);
+            
             MD_LOG_INFO("OpenMM simulation system initialized with %zu atoms", 
                        state.mold.mol.atom.count);
                        
@@ -699,6 +702,9 @@ public:
                 state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
             }
             
+            // Capture frame for trajectory if enabled
+            capture_simulation_frame(state);
+            
             // Mark buffers as dirty for visualization update
             state.mold.dirty_buffers |= MolBit_DirtyPosition;
             
@@ -889,9 +895,152 @@ public:
         state.simulation.paused = false;
         state.simulation.initialized = false;
         
+        // Clean up trajectory capture
+        cleanup_trajectory_capture(state);
+        
         sim_context.context.reset();
         sim_context.integrator.reset();
         sim_context.system.reset();
+#endif
+    }
+
+    void init_trajectory_capture(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        auto& capture = state.simulation.trajectory_capture;
+        
+        // Initialize arrays if not already done
+        if (!capture.stored_x) {
+            capture.stored_x = md_array_create(float*, capture.max_frames, persistent_alloc);
+            capture.stored_y = md_array_create(float*, capture.max_frames, persistent_alloc);
+            capture.stored_z = md_array_create(float*, capture.max_frames, persistent_alloc);
+            capture.frame_times = md_array_create(double, capture.max_frames, persistent_alloc);
+        }
+        
+        capture.atom_count = state.mold.mol.atom.count;
+        
+        // Clear existing frames
+        for (size_t i = 0; i < md_array_size(capture.stored_x); ++i) {
+            if (capture.stored_x[i]) {
+                md_free(persistent_alloc, capture.stored_x[i], capture.atom_count * sizeof(float));
+                md_free(persistent_alloc, capture.stored_y[i], capture.atom_count * sizeof(float));
+                md_free(persistent_alloc, capture.stored_z[i], capture.atom_count * sizeof(float));
+            }
+        }
+        
+        md_array_shrink(capture.stored_x, 0);
+        md_array_shrink(capture.stored_y, 0);
+        md_array_shrink(capture.stored_z, 0);
+        md_array_shrink(capture.frame_times, 0);
+        
+        MD_LOG_INFO("Trajectory capture initialized for %zu atoms", capture.atom_count);
+#endif
+    }
+
+    void cleanup_trajectory_capture(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        auto& capture = state.simulation.trajectory_capture;
+        
+        // Free stored coordinate arrays
+        for (size_t i = 0; i < md_array_size(capture.stored_x); ++i) {
+            if (capture.stored_x[i]) {
+                md_free(persistent_alloc, capture.stored_x[i], capture.atom_count * sizeof(float));
+                md_free(persistent_alloc, capture.stored_y[i], capture.atom_count * sizeof(float));
+                md_free(persistent_alloc, capture.stored_z[i], capture.atom_count * sizeof(float));
+            }
+        }
+        
+        md_array_free(capture.stored_x, persistent_alloc);
+        md_array_free(capture.stored_y, persistent_alloc);
+        md_array_free(capture.stored_z, persistent_alloc);
+        md_array_free(capture.frame_times, persistent_alloc);
+        
+        capture.stored_x = nullptr;
+        capture.stored_y = nullptr;
+        capture.stored_z = nullptr;
+        capture.frame_times = nullptr;
+        capture.atom_count = 0;
+#endif
+    }
+
+    void capture_simulation_frame(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        auto& capture = state.simulation.trajectory_capture;
+        
+        if (!capture.enabled || capture.atom_count != state.mold.mol.atom.count) {
+            return;
+        }
+        
+        // Remove oldest frame if we've reached max capacity
+        if (md_array_size(capture.stored_x) >= capture.max_frames) {
+            // Free the oldest frame's memory
+            md_free(persistent_alloc, capture.stored_x[0], capture.atom_count * sizeof(float));
+            md_free(persistent_alloc, capture.stored_y[0], capture.atom_count * sizeof(float));
+            md_free(persistent_alloc, capture.stored_z[0], capture.atom_count * sizeof(float));
+            
+            // Shift all frames down by one position
+            for (size_t i = 1; i < md_array_size(capture.stored_x); ++i) {
+                capture.stored_x[i-1] = capture.stored_x[i];
+                capture.stored_y[i-1] = capture.stored_y[i];
+                capture.stored_z[i-1] = capture.stored_z[i];
+                capture.frame_times[i-1] = capture.frame_times[i];
+            }
+            
+            // Resize arrays to remove the last element
+            md_array_shrink(capture.stored_x, md_array_size(capture.stored_x) - 1);
+            md_array_shrink(capture.stored_y, md_array_size(capture.stored_y) - 1);
+            md_array_shrink(capture.stored_z, md_array_size(capture.stored_z) - 1);
+            md_array_shrink(capture.frame_times, md_array_size(capture.frame_times) - 1);
+        }
+        
+        // Allocate memory for new frame
+        float* x_frame = (float*)md_alloc(persistent_alloc, capture.atom_count * sizeof(float));
+        float* y_frame = (float*)md_alloc(persistent_alloc, capture.atom_count * sizeof(float));
+        float* z_frame = (float*)md_alloc(persistent_alloc, capture.atom_count * sizeof(float));
+        
+        // Copy current positions
+        for (size_t i = 0; i < capture.atom_count; ++i) {
+            x_frame[i] = state.mold.mol.atom.x[i];
+            y_frame[i] = state.mold.mol.atom.y[i];
+            z_frame[i] = state.mold.mol.atom.z[i];
+        }
+        
+        // Store the frame
+        md_array_push(capture.stored_x, x_frame, persistent_alloc);
+        md_array_push(capture.stored_y, y_frame, persistent_alloc);
+        md_array_push(capture.stored_z, z_frame, persistent_alloc);
+        md_array_push(capture.frame_times, state.simulation.simulation_time, persistent_alloc);
+#endif
+    }
+
+    size_t get_simulation_frame_count(const ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        return md_array_size(state.simulation.trajectory_capture.stored_x);
+#else
+        return 0;
+#endif
+    }
+
+    bool load_simulation_frame(ApplicationState& state, size_t frame_idx) {
+#ifdef VIAMD_ENABLE_OPENMM
+        const auto& capture = state.simulation.trajectory_capture;
+        
+        if (frame_idx >= md_array_size(capture.stored_x) || capture.atom_count != state.mold.mol.atom.count) {
+            return false;
+        }
+        
+        // Load the requested frame's coordinates
+        for (size_t i = 0; i < capture.atom_count; ++i) {
+            state.mold.mol.atom.x[i] = capture.stored_x[frame_idx][i];
+            state.mold.mol.atom.y[i] = capture.stored_y[frame_idx][i];
+            state.mold.mol.atom.z[i] = capture.stored_z[frame_idx][i];
+        }
+        
+        // Mark buffers as dirty to trigger visualization update
+        state.mold.dirty_buffers |= MolBit_DirtyPosition;
+        
+        return true;
+#else
+        return false;
 #endif
     }
 
