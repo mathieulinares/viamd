@@ -1,3 +1,6 @@
+#ifndef IMPLOT_WIDGETS_H
+#define IMPLOT_WIDGETS_H
+
 #include <implot.h>
 
 typedef int ImPlotDragRangeFlags;          // -> enum ImPlotBin_
@@ -27,3 +30,5 @@ IMPLOT_API bool ColormapQualitative(ImPlotColormap idx);
 IMPLOT_API void SyncAxesY();
 
 }  // namespace ImPlot
+
+#endif // IMPLOT_WIDGETS_H
