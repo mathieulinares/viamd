@@ -616,6 +616,9 @@ static void init_trajectory_data(ApplicationState* data);
 
 static void interrupt_async_tasks(ApplicationState* data);
 
+// Forward declaration needed by MainEventHandler
+static void clear_representations(ApplicationState*);
+
 // Event handler for main application
 struct MainEventHandler : viamd::EventHandler {
     ApplicationState* app_state = nullptr;
@@ -674,7 +677,6 @@ static void update_representation_info(ApplicationState*);
 static void update_all_representations(ApplicationState*);
 static void init_representation(ApplicationState*, Representation* rep);
 static void init_all_representations(ApplicationState*);
-static void clear_representations(ApplicationState*);
 static void create_default_representations(ApplicationState*);
 static void recompute_atom_visibility_mask(ApplicationState*);
 
