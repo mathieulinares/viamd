@@ -60,6 +60,7 @@ make -j$(nproc)
   - Initialize the Langevin integrator
 
 ### 4. Configure Simulation Parameters
+- **Force Field**: Choose between AMBER14 (biomolecular systems) and UFF (Universal Force Field, general purpose)
 - **Temperature**: Set the simulation temperature (default: 300 K)
 - **Timestep**: Adjust the integration timestep (default: 0.002 ps)
 - **Friction**: Control the friction coefficient (default: 1.0 ps⁻¹)
@@ -75,10 +76,28 @@ make -j$(nproc)
 ## Technical Details
 
 ### Force Field Implementation
-The current implementation uses a simplified force field with:
+The OpenMM integration supports two force fields:
+
+#### AMBER14 Force Field
+- **Best for**: Biomolecular systems (proteins, nucleic acids, lipids)
+- **Features**: 
+  - Atom-type specific parameters optimized for biological molecules
+  - Partial charges based on chemical environment
+  - Well-tested for protein dynamics and folding studies
+- **Parameters**: Bond lengths, angles, and Lennard-Jones parameters from AMBER14
+
+#### UFF (Universal Force Field)
+- **Best for**: General molecular systems, organics, inorganics
+- **Features**:
+  - Element-based parameters that work for any atom in the periodic table
+  - No partial charges by default (neutral systems)
+  - General-purpose parameters based on atomic numbers and hybridization
+- **Parameters**: Based on Rappé et al., J. Am. Chem. Soc. 1992, 114, 10024-10035
+
+Both force fields use:
 - **Harmonic bonds**: Applied to all bonds detected in the molecular structure
+- **Harmonic angles**: Applied to all angles formed by bonded atoms
 - **Non-bonded interactions**: Lennard-Jones potential with cutoff
-- **Simplified parameters**: Based on atom types with reasonable defaults
 
 ### Coordinate System
 - OpenMM uses nanometers; VIAMD uses Angstroms
@@ -146,11 +165,11 @@ The current implementation uses a simplified force field with:
 - **No advanced sampling methods**: Only basic Langevin dynamics
 
 ### Future Enhancements
-- Integration with standard force fields (AMBER, CHARMM, etc.)
 - Periodic boundary conditions support
 - Enhanced force field parameter assignment
 - Advanced simulation methods (replica exchange, enhanced sampling)
 - Trajectory saving and analysis tools
+- Additional force fields (CHARMM, OPLS, etc.)
 
 ## API Integration
 
