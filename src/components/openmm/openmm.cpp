@@ -604,6 +604,13 @@ public:
     }
 
     void set_positions(ApplicationState& state) {
+        // Add defensive checks before accessing atom coordinates
+        if (!state.mold.mol.atom.x || !state.mold.mol.atom.y || !state.mold.mol.atom.z || 
+            state.mold.mol.atom.count == 0) {
+            MD_LOG_ERROR("Invalid atom coordinate arrays in set_positions");
+            return;
+        }
+        
         std::vector<OpenMM::Vec3> positions;
         positions.reserve(state.mold.mol.atom.count);
         
@@ -624,6 +631,13 @@ public:
             return;
         }
         
+        // Validate system state before attempting minimization
+        if (!state.mold.mol.atom.x || !state.mold.mol.atom.y || !state.mold.mol.atom.z || 
+            state.mold.mol.atom.count == 0) {
+            MD_LOG_ERROR("Invalid molecular system state for energy minimization");
+            return;
+        }
+        
         try {
             MD_LOG_INFO("Performing energy minimization to stabilize system...");
             
@@ -636,10 +650,20 @@ public:
             const std::vector<OpenMM::Vec3>& positions = minimizedState.getPositions();
             
             // Update VIAMD atom positions with minimized coordinates
-            for (size_t i = 0; i < state.mold.mol.atom.count && i < positions.size(); ++i) {
-                state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
-                state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
-                state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+            // Add defensive checks to prevent segmentation faults
+            if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z && 
+                state.mold.mol.atom.count > 0 && !positions.empty()) {
+                
+                size_t update_count = std::min(state.mold.mol.atom.count, positions.size());
+                MD_LOG_DEBUG("Updating %zu atom positions after energy minimization", update_count);
+                
+                for (size_t i = 0; i < update_count; ++i) {
+                    state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
+                    state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
+                    state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+                }
+            } else {
+                MD_LOG_ERROR("Invalid atom coordinate arrays detected during energy minimization update");
             }
             
             // Mark buffers as dirty for visualization update
@@ -708,10 +732,19 @@ public:
             }
             
             // Update VIAMD atom positions (convert from nm to Angstroms)
-            for (size_t i = 0; i < state.mold.mol.atom.count && i < positions.size(); ++i) {
-                state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
-                state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
-                state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+            // Add defensive checks to prevent segmentation faults
+            if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z && 
+                state.mold.mol.atom.count > 0 && !positions.empty()) {
+                
+                size_t update_count = std::min(state.mold.mol.atom.count, positions.size());
+                
+                for (size_t i = 0; i < update_count; ++i) {
+                    state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
+                    state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
+                    state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+                }
+            } else {
+                MD_LOG_ERROR("Invalid atom coordinate arrays detected during simulation update");
             }
             
             // Capture frame to internal storage (not the main trajectory)
@@ -1034,11 +1067,19 @@ public:
         float* y_frame = (float*)md_alloc(allocator, capture.atom_count * sizeof(float));
         float* z_frame = (float*)md_alloc(allocator, capture.atom_count * sizeof(float));
         
-        // Copy current positions
-        for (size_t i = 0; i < capture.atom_count; ++i) {
-            x_frame[i] = state.mold.mol.atom.x[i];
-            y_frame[i] = state.mold.mol.atom.y[i];
-            z_frame[i] = state.mold.mol.atom.z[i];
+        // Copy current positions with defensive checks
+        if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z) {
+            for (size_t i = 0; i < capture.atom_count; ++i) {
+                x_frame[i] = state.mold.mol.atom.x[i];
+                y_frame[i] = state.mold.mol.atom.y[i];
+                z_frame[i] = state.mold.mol.atom.z[i];
+            }
+        } else {
+            MD_LOG_ERROR("Invalid atom coordinate arrays during trajectory capture");
+            md_free(allocator, x_frame, capture.atom_count * sizeof(float));
+            md_free(allocator, y_frame, capture.atom_count * sizeof(float));
+            md_free(allocator, z_frame, capture.atom_count * sizeof(float));
+            return;
         }
         
         // Store the frame
@@ -1065,11 +1106,16 @@ public:
             return false;
         }
         
-        // Load the requested frame's coordinates
-        for (size_t i = 0; i < capture.atom_count; ++i) {
-            state.mold.mol.atom.x[i] = capture.stored_x[frame_idx][i];
-            state.mold.mol.atom.y[i] = capture.stored_y[frame_idx][i];
-            state.mold.mol.atom.z[i] = capture.stored_z[frame_idx][i];
+        // Load the requested frame's coordinates with defensive checks
+        if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z) {
+            for (size_t i = 0; i < capture.atom_count; ++i) {
+                state.mold.mol.atom.x[i] = capture.stored_x[frame_idx][i];
+                state.mold.mol.atom.y[i] = capture.stored_y[frame_idx][i];
+                state.mold.mol.atom.z[i] = capture.stored_z[frame_idx][i];
+            }
+        } else {
+            MD_LOG_ERROR("Invalid atom coordinate arrays during trajectory load");
+            return false;
         }
         
         // Mark buffers as dirty to trigger visualization update
