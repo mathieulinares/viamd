@@ -95,12 +95,24 @@ struct SimulationContext {
     std::string force_field_name = "AMBER14";
 };
 
+// Internal trajectory storage for OpenMM simulation
+struct InternalTrajectoryStorage {
+    md_array(float*) stored_x = nullptr;  // Array of x coordinate arrays for each frame
+    md_array(float*) stored_y = nullptr;  // Array of y coordinate arrays for each frame  
+    md_array(float*) stored_z = nullptr;  // Array of z coordinate arrays for each frame
+    md_array(double) frame_times = nullptr;  // Time for each stored frame
+    size_t atom_count = 0;  // Number of atoms per frame
+    int max_frames = 1000;  // Maximum frames to store
+    bool enabled = true;    // Whether to capture frames
+};
+
 class OpenMMComponent : public viamd::EventHandler {
 public:
     SimulationContext sim_context;
     
 private:
     md_allocator_i* allocator = nullptr;
+    InternalTrajectoryStorage internal_trajectory;
 
 public:
     OpenMMComponent() { 
@@ -250,8 +262,8 @@ public:
             state.simulation.current_frame = 0;
             state.simulation.simulation_time = 0.0;
             
-            // Initialize trajectory capture for real-time analysis
-            init_trajectory_capture(state);
+            // Initialize internal trajectory capture
+            init_internal_trajectory_capture(state);
             
             MD_LOG_INFO("OpenMM simulation system initialized with %zu atoms", 
                        state.mold.mol.atom.count);
@@ -702,8 +714,8 @@ public:
                 state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
             }
             
-            // Capture frame for trajectory if enabled
-            capture_simulation_frame(state);
+            // Capture frame to internal storage (not the main trajectory)
+            capture_frame_to_internal_storage(state);
             
             // Mark buffers as dirty for visualization update
             state.mold.dirty_buffers |= MolBit_DirtyPosition;
@@ -868,6 +880,31 @@ public:
                 reset_simulation(state);
             }
         }
+        
+        // Trajectory export section
+        ImGui::Separator();
+        ImGui::Text("Trajectory Export");
+        
+        size_t frame_count = md_array_size(internal_trajectory.stored_x);
+        ImGui::Text("Stored frames: %zu", frame_count);
+        
+        if (frame_count > 0) {
+            if (ImGui::Button("Export to VIAMD Trajectory")) {
+                if (export_trajectory_to_viamd(state)) {
+                    MD_LOG_INFO("Trajectory exported successfully");
+                } else {
+                    MD_LOG_ERROR("Failed to export trajectory");
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Stored Frames")) {
+                cleanup_internal_trajectory_capture(state);
+                init_internal_trajectory_capture(state);
+                MD_LOG_INFO("Internal trajectory storage cleared");
+            }
+        } else {
+            ImGui::TextDisabled("No frames stored");
+        }
 
         ImGui::End();
 #endif
@@ -895,8 +932,8 @@ public:
         state.simulation.paused = false;
         state.simulation.initialized = false;
         
-        // Clean up trajectory capture
-        cleanup_trajectory_capture(state);
+        // Clean up internal trajectory capture
+        cleanup_internal_trajectory_capture(state);
         
         sim_context.context.reset();
         sim_context.integrator.reset();
@@ -904,16 +941,16 @@ public:
 #endif
     }
 
-    void init_trajectory_capture(ApplicationState& state) {
+    void init_internal_trajectory_capture(ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
-        auto& capture = state.simulation.trajectory_capture;
+        auto& capture = internal_trajectory;
         
         // Initialize arrays if not already done
         if (!capture.stored_x) {
-            capture.stored_x = md_array_create(float*, capture.max_frames, state.allocator.persistent);
-            capture.stored_y = md_array_create(float*, capture.max_frames, state.allocator.persistent);
-            capture.stored_z = md_array_create(float*, capture.max_frames, state.allocator.persistent);
-            capture.frame_times = md_array_create(double, capture.max_frames, state.allocator.persistent);
+            capture.stored_x = md_array_create(float*, capture.max_frames, allocator);
+            capture.stored_y = md_array_create(float*, capture.max_frames, allocator);
+            capture.stored_z = md_array_create(float*, capture.max_frames, allocator);
+            capture.frame_times = md_array_create(double, capture.max_frames, allocator);
         }
         
         capture.atom_count = state.mold.mol.atom.count;
@@ -921,9 +958,9 @@ public:
         // Clear existing frames
         for (size_t i = 0; i < md_array_size(capture.stored_x); ++i) {
             if (capture.stored_x[i]) {
-                md_free(state.allocator.persistent, capture.stored_x[i], capture.atom_count * sizeof(float));
-                md_free(state.allocator.persistent, capture.stored_y[i], capture.atom_count * sizeof(float));
-                md_free(state.allocator.persistent, capture.stored_z[i], capture.atom_count * sizeof(float));
+                md_free(allocator, capture.stored_x[i], capture.atom_count * sizeof(float));
+                md_free(allocator, capture.stored_y[i], capture.atom_count * sizeof(float));
+                md_free(allocator, capture.stored_z[i], capture.atom_count * sizeof(float));
             }
         }
         
@@ -932,27 +969,27 @@ public:
         md_array_shrink(capture.stored_z, 0);
         md_array_shrink(capture.frame_times, 0);
         
-        MD_LOG_INFO("Trajectory capture initialized for %zu atoms", capture.atom_count);
+        MD_LOG_INFO("Internal trajectory capture initialized for %zu atoms", capture.atom_count);
 #endif
     }
 
-    void cleanup_trajectory_capture(ApplicationState& state) {
+    void cleanup_internal_trajectory_capture(ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
-        auto& capture = state.simulation.trajectory_capture;
+        auto& capture = internal_trajectory;
         
         // Free stored coordinate arrays
         for (size_t i = 0; i < md_array_size(capture.stored_x); ++i) {
             if (capture.stored_x[i]) {
-                md_free(state.allocator.persistent, capture.stored_x[i], capture.atom_count * sizeof(float));
-                md_free(state.allocator.persistent, capture.stored_y[i], capture.atom_count * sizeof(float));
-                md_free(state.allocator.persistent, capture.stored_z[i], capture.atom_count * sizeof(float));
+                md_free(allocator, capture.stored_x[i], capture.atom_count * sizeof(float));
+                md_free(allocator, capture.stored_y[i], capture.atom_count * sizeof(float));
+                md_free(allocator, capture.stored_z[i], capture.atom_count * sizeof(float));
             }
         }
         
-        md_array_free(capture.stored_x, state.allocator.persistent);
-        md_array_free(capture.stored_y, state.allocator.persistent);
-        md_array_free(capture.stored_z, state.allocator.persistent);
-        md_array_free(capture.frame_times, state.allocator.persistent);
+        md_array_free(capture.stored_x, allocator);
+        md_array_free(capture.stored_y, allocator);
+        md_array_free(capture.stored_z, allocator);
+        md_array_free(capture.frame_times, allocator);
         
         capture.stored_x = nullptr;
         capture.stored_y = nullptr;
@@ -962,20 +999,20 @@ public:
 #endif
     }
 
-    void capture_simulation_frame(ApplicationState& state) {
+    void capture_frame_to_internal_storage(ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
-        auto& capture = state.simulation.trajectory_capture;
+        auto& capture = internal_trajectory;
         
         if (!capture.enabled || capture.atom_count != state.mold.mol.atom.count) {
             return;
         }
         
         // Remove oldest frame if we've reached max capacity
-        if (md_array_size(capture.stored_x) >= capture.max_frames) {
+        if (md_array_size(capture.stored_x) >= (size_t)capture.max_frames) {
             // Free the oldest frame's memory
-            md_free(state.allocator.persistent, capture.stored_x[0], capture.atom_count * sizeof(float));
-            md_free(state.allocator.persistent, capture.stored_y[0], capture.atom_count * sizeof(float));
-            md_free(state.allocator.persistent, capture.stored_z[0], capture.atom_count * sizeof(float));
+            md_free(allocator, capture.stored_x[0], capture.atom_count * sizeof(float));
+            md_free(allocator, capture.stored_y[0], capture.atom_count * sizeof(float));
+            md_free(allocator, capture.stored_z[0], capture.atom_count * sizeof(float));
             
             // Shift all frames down by one position
             for (size_t i = 1; i < md_array_size(capture.stored_x); ++i) {
@@ -993,9 +1030,9 @@ public:
         }
         
         // Allocate memory for new frame
-        float* x_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
-        float* y_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
-        float* z_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
+        float* x_frame = (float*)md_alloc(allocator, capture.atom_count * sizeof(float));
+        float* y_frame = (float*)md_alloc(allocator, capture.atom_count * sizeof(float));
+        float* z_frame = (float*)md_alloc(allocator, capture.atom_count * sizeof(float));
         
         // Copy current positions
         for (size_t i = 0; i < capture.atom_count; ++i) {
@@ -1005,16 +1042,16 @@ public:
         }
         
         // Store the frame
-        md_array_push(capture.stored_x, x_frame, state.allocator.persistent);
-        md_array_push(capture.stored_y, y_frame, state.allocator.persistent);
-        md_array_push(capture.stored_z, z_frame, state.allocator.persistent);
-        md_array_push(capture.frame_times, state.simulation.simulation_time, state.allocator.persistent);
+        md_array_push(capture.stored_x, x_frame, allocator);
+        md_array_push(capture.stored_y, y_frame, allocator);
+        md_array_push(capture.stored_z, z_frame, allocator);
+        md_array_push(capture.frame_times, state.simulation.simulation_time, allocator);
 #endif
     }
 
     size_t get_simulation_frame_count(const ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
-        return md_array_size(state.simulation.trajectory_capture.stored_x);
+        return md_array_size(internal_trajectory.stored_x);
 #else
         return 0;
 #endif
@@ -1022,7 +1059,7 @@ public:
 
     bool load_simulation_frame(ApplicationState& state, size_t frame_idx) {
 #ifdef VIAMD_ENABLE_OPENMM
-        const auto& capture = state.simulation.trajectory_capture;
+        const auto& capture = internal_trajectory;
         
         if (frame_idx >= md_array_size(capture.stored_x) || capture.atom_count != state.mold.mol.atom.count) {
             return false;
@@ -1037,6 +1074,80 @@ public:
         
         // Mark buffers as dirty to trigger visualization update
         state.mold.dirty_buffers |= MolBit_DirtyPosition;
+        
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    bool export_trajectory_to_viamd(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        const auto& capture = internal_trajectory;
+        size_t num_frames = md_array_size(capture.stored_x);
+        
+        if (num_frames == 0) {
+            MD_LOG_ERROR("No simulation frames to export");
+            return false;
+        }
+        
+        MD_LOG_INFO("Exporting %zu simulation frames to viamd trajectory", num_frames);
+        
+        // For now, we'll copy the frames back to the ApplicationState's trajectory capture
+        // This is a simple way to make the frames available to viamd's trajectory system
+        // A full implementation would create a proper md_trajectory_i
+        auto& target_capture = state.simulation.trajectory_capture;
+        
+        // Initialize target if needed
+        if (!target_capture.stored_x) {
+            target_capture.stored_x = md_array_create(float*, num_frames, state.allocator.persistent);
+            target_capture.stored_y = md_array_create(float*, num_frames, state.allocator.persistent);
+            target_capture.stored_z = md_array_create(float*, num_frames, state.allocator.persistent);
+            target_capture.frame_times = md_array_create(double, num_frames, state.allocator.persistent);
+        } else {
+            // Clear existing data
+            for (size_t i = 0; i < md_array_size(target_capture.stored_x); ++i) {
+                if (target_capture.stored_x[i]) {
+                    md_free(state.allocator.persistent, target_capture.stored_x[i], target_capture.atom_count * sizeof(float));
+                    md_free(state.allocator.persistent, target_capture.stored_y[i], target_capture.atom_count * sizeof(float));
+                    md_free(state.allocator.persistent, target_capture.stored_z[i], target_capture.atom_count * sizeof(float));
+                }
+            }
+            md_array_shrink(target_capture.stored_x, 0);
+            md_array_shrink(target_capture.stored_y, 0);
+            md_array_shrink(target_capture.stored_z, 0);
+            md_array_shrink(target_capture.frame_times, 0);
+        }
+        
+        target_capture.atom_count = capture.atom_count;
+        target_capture.max_frames = (int)num_frames;
+        target_capture.enabled = true;
+        
+        // Copy all frames from internal storage to trajectory capture
+        for (size_t i = 0; i < num_frames; ++i) {
+            // Allocate memory for frame
+            float* x_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
+            float* y_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
+            float* z_frame = (float*)md_alloc(state.allocator.persistent, capture.atom_count * sizeof(float));
+            
+            // Copy coordinates
+            for (size_t j = 0; j < capture.atom_count; ++j) {
+                x_frame[j] = capture.stored_x[i][j];
+                y_frame[j] = capture.stored_y[i][j];
+                z_frame[j] = capture.stored_z[i][j];
+            }
+            
+            // Store the frame
+            md_array_push(target_capture.stored_x, x_frame, state.allocator.persistent);
+            md_array_push(target_capture.stored_y, y_frame, state.allocator.persistent);
+            md_array_push(target_capture.stored_z, z_frame, state.allocator.persistent);
+            md_array_push(target_capture.frame_times, capture.frame_times[i], state.allocator.persistent);
+        }
+        
+        MD_LOG_INFO("Successfully exported %zu frames to viamd trajectory", num_frames);
+        
+        // Trigger trajectory initialization event
+        viamd::event_system_broadcast_event(viamd::EventType_ViamdTrajectoryInit, viamd::EventPayloadType_Undefined, &state);
         
         return true;
 #else
@@ -1707,6 +1818,14 @@ namespace openmm_interface {
     bool load_simulation_frame(ApplicationState& state, size_t frame_idx) {
 #ifdef VIAMD_ENABLE_OPENMM
         return openmm::g_openmm_component.load_simulation_frame(state, frame_idx);
+#else
+        return false;
+#endif
+    }
+    
+    bool export_trajectory_to_viamd(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        return openmm::g_openmm_component.export_trajectory_to_viamd(state);
 #else
         return false;
 #endif
