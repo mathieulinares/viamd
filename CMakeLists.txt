@@ -136,6 +136,13 @@ if(VIAMD_ENABLE_BUILDER AND VIAMD_ENABLE_RDKIT)
     endif()
 endif()
 
+# Apply mdlib patches before building
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/mdlib_patches/core/md_tracking_allocator.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ext/mdlib/src/core/md_tracking_allocator.c"
+    COPYONLY
+)
+
 add_subdirectory(ext/mdlib)
 add_subdirectory(ext/glfw)
 add_subdirectory(ext/imgui)
