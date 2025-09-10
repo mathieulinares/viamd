@@ -646,36 +646,39 @@ public:
             OpenMM::LocalEnergyMinimizer::minimize(*sim_context.context, 1e-6, 5000);
             
             // Get minimized positions and update VIAMD coordinates
-            OpenMM::State minimizedState = sim_context.context->getState(OpenMM::State::Positions | OpenMM::State::Energy);
-            const std::vector<OpenMM::Vec3>& positions = minimizedState.getPositions();
-            
-            // Update VIAMD atom positions with minimized coordinates
-            // Add defensive checks to prevent segmentation faults
-            if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z && 
-                state.mold.mol.atom.count > 0 && !positions.empty()) {
+            // Create a scope to ensure proper cleanup of OpenMM state objects
+            {
+                OpenMM::State minimizedState = sim_context.context->getState(OpenMM::State::Positions | OpenMM::State::Energy);
+                const std::vector<OpenMM::Vec3>& positions = minimizedState.getPositions();
                 
-                size_t update_count = std::min(state.mold.mol.atom.count, positions.size());
-                MD_LOG_DEBUG("Updating %zu atom positions after energy minimization", update_count);
-                
-                for (size_t i = 0; i < update_count; ++i) {
-                    state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
-                    state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
-                    state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+                // Update VIAMD atom positions with minimized coordinates
+                // Add defensive checks to prevent segmentation faults
+                if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z && 
+                    state.mold.mol.atom.count > 0 && !positions.empty()) {
+                    
+                    size_t update_count = std::min(state.mold.mol.atom.count, positions.size());
+                    MD_LOG_DEBUG("Updating %zu atom positions after energy minimization", update_count);
+                    
+                    for (size_t i = 0; i < update_count; ++i) {
+                        state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
+                        state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
+                        state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+                    }
+                } else {
+                    MD_LOG_ERROR("Invalid atom coordinate arrays detected during energy minimization update");
                 }
-            } else {
-                MD_LOG_ERROR("Invalid atom coordinate arrays detected during energy minimization update");
-            }
-            
-            // Mark buffers as dirty for visualization update
-            state.mold.dirty_buffers |= MolBit_DirtyPosition;
-            
-            double energy = minimizedState.getPotentialEnergy();
-            MD_LOG_INFO("Energy minimization completed. Final energy: %.3f kJ/mol", energy);
-            
-            // Check if energy is reasonable after minimization
-            if (std::isnan(energy) || std::isinf(energy) || energy > 1e6) {
-                MD_LOG_ERROR("Energy after minimization is suspicious (%.3f kJ/mol). System may be unstable.", energy);
-            }
+                
+                // Mark buffers as dirty for visualization update
+                state.mold.dirty_buffers |= MolBit_DirtyPosition;
+                
+                double energy = minimizedState.getPotentialEnergy();
+                MD_LOG_INFO("Energy minimization completed. Final energy: %.3f kJ/mol", energy);
+                
+                // Check if energy is reasonable after minimization
+                if (std::isnan(energy) || std::isinf(energy) || energy > 1e6) {
+                    MD_LOG_ERROR("Energy after minimization is suspicious (%.3f kJ/mol). System may be unstable.", energy);
+                }
+            } // Ensure minimizedState goes out of scope and is properly destroyed
             
         } catch (const std::exception& e) {
             MD_LOG_ERROR("Energy minimization failed: %s. Proceeding without minimization.", e.what());
@@ -694,58 +697,61 @@ public:
             sim_context.integrator->step(state.simulation.steps_per_update);
             
             // Get updated positions and check for explosion
-            OpenMM::State openmmState = sim_context.context->getState(OpenMM::State::Positions | OpenMM::State::Energy);
-            const std::vector<OpenMM::Vec3>& positions = openmmState.getPositions();
-            
-            // Check for simulation explosion (coordinates too large)
-            bool explosion_detected = false;
-            double max_coord = 0.0;
-            
-            for (size_t i = 0; i < positions.size(); ++i) {
-                double x = positions[i][0] * 10.0; // Convert to Angstroms
-                double y = positions[i][1] * 10.0;
-                double z = positions[i][2] * 10.0;
+            // Create a scope to ensure proper cleanup of OpenMM state objects
+            {
+                OpenMM::State openmmState = sim_context.context->getState(OpenMM::State::Positions | OpenMM::State::Energy);
+                const std::vector<OpenMM::Vec3>& positions = openmmState.getPositions();
                 
-                double coord_magnitude = sqrt(x*x + y*y + z*z);
-                max_coord = std::max(max_coord, coord_magnitude);
+                // Check for simulation explosion (coordinates too large)
+                bool explosion_detected = false;
+                double max_coord = 0.0;
                 
-                // Check for explosion: coordinates > 50 Angstroms from origin (more sensitive)
-                if (coord_magnitude > 50.0) {
+                for (size_t i = 0; i < positions.size(); ++i) {
+                    double x = positions[i][0] * 10.0; // Convert to Angstroms
+                    double y = positions[i][1] * 10.0;
+                    double z = positions[i][2] * 10.0;
+                    
+                    double coord_magnitude = sqrt(x*x + y*y + z*z);
+                    max_coord = std::max(max_coord, coord_magnitude);
+                    
+                    // Check for explosion: coordinates > 50 Angstroms from origin (more sensitive)
+                    if (coord_magnitude > 50.0) {
+                        explosion_detected = true;
+                        break;
+                    }
+                }
+                
+                // Check for NaN or infinite values in energy
+                double energy = openmmState.getPotentialEnergy();
+                if (std::isnan(energy) || std::isinf(energy)) {
                     explosion_detected = true;
-                    break;
                 }
-            }
-            
-            // Check for NaN or infinite values in energy
-            double energy = openmmState.getPotentialEnergy();
-            if (std::isnan(energy) || std::isinf(energy)) {
-                explosion_detected = true;
-            }
-            
-            if (explosion_detected) {
-                MD_LOG_ERROR("Simulation explosion detected! Max coordinate: %.3f Å, Energy: %.3f kJ/mol", 
-                            max_coord, energy);
-                MD_LOG_ERROR("Stopping simulation to prevent further instability");
-                state.simulation.running = false;
-                state.simulation.paused = false;
-                return;
-            }
-            
-            // Update VIAMD atom positions (convert from nm to Angstroms)
-            // Add defensive checks to prevent segmentation faults
-            if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z && 
-                state.mold.mol.atom.count > 0 && !positions.empty()) {
                 
-                size_t update_count = std::min(state.mold.mol.atom.count, positions.size());
-                
-                for (size_t i = 0; i < update_count; ++i) {
-                    state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
-                    state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
-                    state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+                if (explosion_detected) {
+                    MD_LOG_ERROR("Simulation explosion detected! Max coordinate: %.3f Å, Energy: %.3f kJ/mol", 
+                                max_coord, energy);
+                    MD_LOG_ERROR("Stopping simulation to prevent further instability");
+                    state.simulation.running = false;
+                    state.simulation.paused = false;
+                    return;
                 }
-            } else {
-                MD_LOG_ERROR("Invalid atom coordinate arrays detected during simulation update");
-            }
+                
+                // Update VIAMD atom positions (convert from nm to Angstroms)
+                // Add defensive checks to prevent segmentation faults
+                if (state.mold.mol.atom.x && state.mold.mol.atom.y && state.mold.mol.atom.z && 
+                    state.mold.mol.atom.count > 0 && !positions.empty()) {
+                    
+                    size_t update_count = std::min(state.mold.mol.atom.count, positions.size());
+                    
+                    for (size_t i = 0; i < update_count; ++i) {
+                        state.mold.mol.atom.x[i] = static_cast<float>(positions[i][0] * 10.0);
+                        state.mold.mol.atom.y[i] = static_cast<float>(positions[i][1] * 10.0);
+                        state.mold.mol.atom.z[i] = static_cast<float>(positions[i][2] * 10.0);
+                    }
+                } else {
+                    MD_LOG_ERROR("Invalid atom coordinate arrays detected during simulation update");
+                }
+            } // Ensure openmmState goes out of scope and is properly destroyed
             
             // Capture frame to internal storage (not the main trajectory)
             capture_frame_to_internal_storage(state);
@@ -1842,9 +1848,12 @@ namespace openmm_interface {
             openmm::g_openmm_component.setup_system(state);
             openmm::g_openmm_component.minimize_energy(state);
             
-            // Optionally cleanup after minimization to return to uninitialized state
-            // or keep it initialized for further use
-            // openmm::g_openmm_component.cleanup_simulation(state);
+            // Always cleanup after minimization to prevent memory issues
+            openmm::g_openmm_component.cleanup_simulation(state);
+            
+            // Restore original force field type for consistency
+            openmm::g_openmm_component.sim_context.force_field_type = original_ff;
+            openmm::g_openmm_component.sim_context.force_field_name = (original_ff == openmm::ForceFieldType::AMBER) ? "AMBER14" : "UFF";
             
             MD_LOG_INFO("Energy minimization completed with UFF");
         }
