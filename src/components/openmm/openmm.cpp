@@ -1008,7 +1008,7 @@ public:
         }
         
         // Remove oldest frame if we've reached max capacity
-        if (md_array_size(capture.stored_x) >= capture.max_frames) {
+        if (md_array_size(capture.stored_x) >= (size_t)capture.max_frames) {
             // Free the oldest frame's memory
             md_free(allocator, capture.stored_x[0], capture.atom_count * sizeof(float));
             md_free(allocator, capture.stored_y[0], capture.atom_count * sizeof(float));
@@ -1087,7 +1087,7 @@ public:
         size_t num_frames = md_array_size(capture.stored_x);
         
         if (num_frames == 0) {
-            MD_LOG_WARNING("No simulation frames to export");
+            MD_LOG_ERROR("No simulation frames to export");
             return false;
         }
         
