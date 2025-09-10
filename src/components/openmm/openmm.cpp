@@ -1695,6 +1695,22 @@ namespace openmm_interface {
         MD_LOG_INFO("OpenMM not available - skipping energy minimization");
 #endif
     }
+
+    size_t get_simulation_frame_count(const ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        return openmm::g_openmm_component.get_simulation_frame_count(state);
+#else
+        return 0;
+#endif
+    }
+
+    bool load_simulation_frame(ApplicationState& state, size_t frame_idx) {
+#ifdef VIAMD_ENABLE_OPENMM
+        return openmm::g_openmm_component.load_simulation_frame(state, frame_idx);
+#else
+        return false;
+#endif
+    }
 }
 
 #endif // VIAMD_ENABLE_OPENMM

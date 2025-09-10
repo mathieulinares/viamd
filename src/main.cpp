@@ -71,7 +71,7 @@
 #include <serialization_utils.h>
 
 #ifdef VIAMD_ENABLE_OPENMM
-#include "components/openmm/openmm.cpp"
+#include "components/openmm/openmm_interface.h"
 #endif
 
 #define MAX_POPULATION_SIZE 256
@@ -884,7 +884,7 @@ int main(int argc, char** argv) {
 
         const size_t num_frames  = md_trajectory_num_frames(data.mold.traj);
 #ifdef VIAMD_ENABLE_OPENMM
-        const size_t sim_frames = openmm::g_openmm_component.get_simulation_frame_count(data);
+        const size_t sim_frames = openmm_interface::get_simulation_frame_count(data);
         const size_t total_frames = (num_frames > 0) ? num_frames : sim_frames;
 #else
         const size_t total_frames = num_frames;
@@ -1137,10 +1137,10 @@ int main(int argc, char** argv) {
                 interpolate_atomic_properties(&data);
             }
 #ifdef VIAMD_ENABLE_OPENMM
-            else if (openmm::g_openmm_component.get_simulation_frame_count(data) > 0) {
+            else if (openmm_interface::get_simulation_frame_count(data) > 0) {
                 // Use simulation frames for animation when no trajectory file is loaded
-                int64_t frame_idx = CLAMP((int64_t)(data.animation.frame + 0.5), 0, (int64_t)openmm::g_openmm_component.get_simulation_frame_count(data) - 1);
-                openmm::g_openmm_component.load_simulation_frame(data, frame_idx);
+                int64_t frame_idx = CLAMP((int64_t)(data.animation.frame + 0.5), 0, (int64_t)openmm_interface::get_simulation_frame_count(data) - 1);
+                openmm_interface::load_simulation_frame(data, frame_idx);
             }
 #endif
             POP_CPU_SECTION()
