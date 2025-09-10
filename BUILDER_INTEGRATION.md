@@ -39,8 +39,8 @@ VIAMD now includes a powerful molecule builder component that allows users to cr
 
 ### Ubuntu/Debian Installation
 ```bash
-# Install RDKit development libraries
-sudo apt install librdkit-dev librdkit1
+# Install RDKit development libraries and Boost headers
+sudo apt install librdkit-dev librdkit1 libboost-dev
 
 # Optional: Install additional RDKit components
 sudo apt install rdkit-data rdkit-doc
@@ -51,8 +51,8 @@ sudo apt install rdkit-data rdkit-doc
 # Enable EPEL repository if needed
 sudo dnf install epel-release
 
-# Install RDKit
-sudo dnf install rdkit-devel rdkit
+# Install RDKit and Boost development headers
+sudo dnf install rdkit-devel rdkit boost-devel
 ```
 
 ### Building VIAMD with Molecule Builder

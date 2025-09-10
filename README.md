@@ -31,7 +31,7 @@ Build molecules from SMILES strings with 3D coordinate generation and geometry o
 **Installation requirements:**
 ```bash
 # Ubuntu/Debian
-sudo apt install librdkit-dev librdkit1
+sudo apt install librdkit-dev librdkit1 libboost-dev
 
 # Build with molecule builder support (enabled by default)
 cmake .. -DVIAMD_ENABLE_BUILDER=ON -DVIAMD_ENABLE_RDKIT=ON
