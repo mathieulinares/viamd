@@ -27,7 +27,17 @@
 #include <algorithm>
 #include <cmath>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace openmm {
+
+// Force field enumeration
+enum class ForceFieldType {
+    AMBER,
+    UFF
+};
 
 // AMBER force field parameter structures
 struct AmberAtomType {
@@ -48,12 +58,33 @@ struct AmberAngleType {
     double theta0;   // Equilibrium angle (radians)
 };
 
+// UFF (Universal Force Field) parameter structures
+struct UFFAtomType {
+    std::string name;
+    double mass;
+    double radius;   // VdW radius (Angstroms)
+    double depth;    // Well depth (kcal/mol)
+    double charge;   // Partial charge (default, can be overridden)
+    int hybridization;  // SP, SP2, SP3, etc.
+};
+
+struct UFFBondType {
+    double k;        // Force constant (kcal/mol/Å^2)
+    double r0;       // Equilibrium length (Angstroms)
+};
+
+struct UFFAngleType {
+    double k;        // Force constant (kcal/mol/rad^2)
+    double theta0;   // Equilibrium angle (radians)
+};
+
 struct SimulationContext {
     std::unique_ptr<OpenMM::System> system;
     std::unique_ptr<OpenMM::Context> context;
     std::unique_ptr<OpenMM::Integrator> integrator;
     
-    // AMBER force field identifier
+    // Force field selection
+    ForceFieldType force_field_type = ForceFieldType::AMBER;
     std::string force_field_name = "AMBER14";
 };
 
@@ -221,6 +252,14 @@ private:
     }
 
     void setup_force_field(ApplicationState& state) {
+        if (sim_context.force_field_type == ForceFieldType::AMBER) {
+            setup_amber_force_field(state);
+        } else if (sim_context.force_field_type == ForceFieldType::UFF) {
+            setup_uff_force_field(state);
+        }
+    }
+
+    void setup_amber_force_field(ApplicationState& state) {
         MD_LOG_INFO("Setting up AMBER force field...");
         
         // Step 1: Build connectivity information and assign AMBER atom types
@@ -341,6 +380,130 @@ private:
         MD_LOG_INFO("Added non-bonded forces with AMBER parameters");
         
         MD_LOG_INFO("AMBER force field setup complete: %zu atoms, %zu bonds, %zu angles", 
+                   state.mold.mol.atom.count, state.mold.mol.bond.count, angle_count);
+    }
+
+    void setup_uff_force_field(ApplicationState& state) {
+        MD_LOG_INFO("Setting up UFF force field...");
+        
+        // Step 1: Build connectivity information and assign atomic numbers
+        std::vector<uint8_t> atomic_numbers(state.mold.mol.atom.count);
+        std::vector<std::vector<uint32_t>> connectivity(state.mold.mol.atom.count);
+        
+        // Build connectivity matrix
+        for (size_t i = 0; i < state.mold.mol.bond.count; ++i) {
+            const auto& bond = state.mold.mol.bond.pairs[i];
+            uint32_t atom1 = bond.idx[0];
+            uint32_t atom2 = bond.idx[1];
+            connectivity[atom1].push_back(atom2);
+            connectivity[atom2].push_back(atom1);
+        }
+        
+        // Get atomic numbers for all atoms
+        for (size_t i = 0; i < state.mold.mol.atom.count; ++i) {
+            atomic_numbers[i] = get_atomic_number_from_atom_type(state.mold.mol.atom.type[i]);
+        }
+        
+        // Step 2: Set up bond forces with UFF parameters
+        if (state.mold.mol.bond.count > 0) {
+            auto* bondForce = new OpenMM::HarmonicBondForce();
+            
+            for (size_t i = 0; i < state.mold.mol.bond.count; ++i) {
+                const auto& bond = state.mold.mol.bond.pairs[i];
+                uint32_t atom1 = bond.idx[0];
+                uint32_t atom2 = bond.idx[1];
+                
+                // Get UFF bond parameters
+                UFFBondType bond_params = get_uff_bond_params(atomic_numbers[atom1], atomic_numbers[atom2]);
+                
+                // Calculate current bond length as starting point
+                double dx = state.mold.mol.atom.x[atom1] - state.mold.mol.atom.x[atom2];
+                double dy = state.mold.mol.atom.y[atom1] - state.mold.mol.atom.y[atom2];
+                double dz = state.mold.mol.atom.z[atom1] - state.mold.mol.atom.z[atom2];
+                double current_length = sqrt(dx*dx + dy*dy + dz*dz) * 0.1; // Convert to nm
+                
+                // Use UFF equilibrium length, but if current length is reasonable, use it
+                double equilibrium_length = bond_params.r0;
+                if (current_length > 0.05 && current_length < 0.30) {  // Reasonable bond length range
+                    equilibrium_length = current_length;
+                }
+                
+                bondForce->addBond(atom1, atom2, equilibrium_length, bond_params.k);
+                
+                MD_LOG_DEBUG("UFF Bond %zu-%zu: elements %u-%u, k=%.1f, r0=%.4f nm", 
+                           atom1, atom2, atomic_numbers[atom1], atomic_numbers[atom2],
+                           bond_params.k, equilibrium_length);
+            }
+            
+            sim_context.system->addForce(bondForce);
+            MD_LOG_INFO("Added %zu UFF bond forces", state.mold.mol.bond.count);
+        }
+        
+        // Step 3: Set up angle forces
+        auto* angleForce = new OpenMM::HarmonicAngleForce();
+        size_t angle_count = 0;
+        
+        for (size_t center = 0; center < state.mold.mol.atom.count; ++center) {
+            const auto& bonded = connectivity[center];
+            
+            // For each pair of atoms bonded to the center atom, create an angle
+            for (size_t i = 0; i < bonded.size(); ++i) {
+                for (size_t j = i + 1; j < bonded.size(); ++j) {
+                    uint32_t atom1 = bonded[i];
+                    uint32_t atom2 = static_cast<uint32_t>(center);
+                    uint32_t atom3 = bonded[j];
+                    
+                    // Get UFF angle parameters
+                    UFFAngleType angle_params = get_uff_angle_params(
+                        atomic_numbers[atom1], atomic_numbers[atom2], atomic_numbers[atom3]);
+                    
+                    angleForce->addAngle(atom1, atom2, atom3, angle_params.theta0, angle_params.k);
+                    angle_count++;
+                    
+                    MD_LOG_DEBUG("UFF Angle %u-%u-%u: elements %u-%u-%u, k=%.1f, theta0=%.3f rad", 
+                               atom1, atom2, atom3, 
+                               atomic_numbers[atom1], atomic_numbers[atom2], atomic_numbers[atom3],
+                               angle_params.k, angle_params.theta0);
+                }
+            }
+        }
+        
+        if (angle_count > 0) {
+            sim_context.system->addForce(angleForce);
+            MD_LOG_INFO("Added %zu UFF angle forces", angle_count);
+        } else {
+            delete angleForce;
+        }
+        
+        // Step 4: Set up non-bonded forces with UFF parameters
+        auto* nonbondedForce = new OpenMM::NonbondedForce();
+        
+        for (size_t i = 0; i < state.mold.mol.atom.count; ++i) {
+            UFFAtomType atom_params = get_uff_atom_params(atomic_numbers[i]);
+            
+            // Convert UFF parameters to OpenMM format
+            double charge = atom_params.charge; // Usually zero for UFF
+            
+            // Convert UFF radius and depth to OpenMM sigma and epsilon
+            // UFF uses radius in Angstroms, OpenMM needs sigma in nm
+            double sigma = atom_params.radius * 0.1; // Convert Å to nm
+            
+            // Convert UFF depth from kcal/mol to kJ/mol
+            double epsilon = atom_params.depth * 4.184; // kcal/mol to kJ/mol
+            
+            nonbondedForce->addParticle(charge, sigma, epsilon);
+            
+            MD_LOG_DEBUG("UFF Atom %zu (element %u): charge=%.3f, sigma=%.3f nm, epsilon=%.3f kJ/mol", 
+                       i, atomic_numbers[i], charge, sigma, epsilon);
+        }
+        
+        nonbondedForce->setNonbondedMethod(OpenMM::NonbondedForce::CutoffNonPeriodic);
+        nonbondedForce->setCutoffDistance(1.0); // nm - standard cutoff for non-periodic
+        
+        sim_context.system->addForce(nonbondedForce);
+        MD_LOG_INFO("Added non-bonded forces with UFF parameters");
+        
+        MD_LOG_INFO("UFF force field setup complete: %zu atoms, %zu bonds, %zu angles", 
                    state.mold.mol.atom.count, state.mold.mol.bond.count, angle_count);
     }
 
@@ -494,6 +657,32 @@ private:
 
         // Simulation parameters
         if (ImGui::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Force field selection (only allow change when not initialized)
+            if (!state.simulation.initialized) {
+                ImGui::Text("Force Field:");
+                ImGui::SameLine();
+                
+                static const char* force_field_items[] = { "AMBER14", "UFF" };
+                static int force_field_current = (sim_context.force_field_type == ForceFieldType::AMBER) ? 0 : 1;
+                
+                if (ImGui::Combo("##force_field", &force_field_current, force_field_items, IM_ARRAYSIZE(force_field_items))) {
+                    if (force_field_current == 0) {
+                        sim_context.force_field_type = ForceFieldType::AMBER;
+                        sim_context.force_field_name = "AMBER14";
+                    } else {
+                        sim_context.force_field_type = ForceFieldType::UFF;
+                        sim_context.force_field_name = "UFF";
+                    }
+                    MD_LOG_INFO("Force field changed to: %s", sim_context.force_field_name.c_str());
+                }
+                
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("AMBER: Biomolecular force field (proteins, nucleic acids)\nUFF: Universal force field (general purpose)");
+                }
+                
+                ImGui::Separator();
+            }
+            
             float temp = static_cast<float>(state.simulation.temperature);
             if (ImGui::SliderFloat("Temperature (K)", &temp, 250.0f, 400.0f)) {
                 // Bounds checking for temperature
@@ -834,6 +1023,106 @@ private:
         
         // Ultimate fallback
         return {527.184, 1.9373};  // Generic tetrahedral angle
+    }
+
+    // UFF (Universal Force Field) parameter functions
+    UFFAtomType get_uff_atom_params(uint8_t atomic_number) {
+        // UFF atom parameters based on atomic number and hybridization
+        // Reference: Rappé et al., J. Am. Chem. Soc. 1992, 114, 10024-10035
+        static const std::map<uint8_t, UFFAtomType> uff_atom_types = {
+            // Element symbol, mass, radius(Å), depth(kcal/mol), charge, hybridization
+            {1,  {"H_", 1.008,  2.886, 0.044, 0.0, 0}},      // Hydrogen
+            {6,  {"C_3", 12.011, 3.851, 0.105, 0.0, 3}},     // Carbon sp3
+            {7,  {"N_3", 14.007, 3.660, 0.069, 0.0, 3}},     // Nitrogen sp3  
+            {8,  {"O_3", 15.999, 3.500, 0.060, 0.0, 3}},     // Oxygen sp3
+            {9,  {"F_", 18.998,  3.364, 0.050, 0.0, 0}},     // Fluorine
+            {15, {"P_3", 30.974, 4.147, 0.305, 0.0, 3}},     // Phosphorus sp3
+            {16, {"S_3", 32.065, 4.035, 0.274, 0.0, 3}},     // Sulfur sp3
+            {17, {"Cl", 35.453,  3.947, 0.227, 0.0, 0}},     // Chlorine
+            {35, {"Br", 79.904,  4.189, 0.251, 0.0, 0}},     // Bromine
+            {53, {"I_", 126.904, 4.463, 0.339, 0.0, 0}},     // Iodine
+        };
+        
+        auto it = uff_atom_types.find(atomic_number);
+        if (it != uff_atom_types.end()) {
+            return it->second;
+        }
+        
+        // Fallback based on element type
+        if (atomic_number == 1) return uff_atom_types.at(1);  // H
+        if (atomic_number >= 3 && atomic_number <= 10) return uff_atom_types.at(6);  // C for period 2
+        if (atomic_number >= 11 && atomic_number <= 18) return uff_atom_types.at(6); // C for period 3
+        
+        return uff_atom_types.at(6);  // Default to carbon
+    }
+    
+    UFFBondType get_uff_bond_params(uint8_t atom1_number, uint8_t atom2_number) {
+        // UFF bond parameters calculated using combining rules
+        UFFAtomType atom1_params = get_uff_atom_params(atom1_number);
+        UFFAtomType atom2_params = get_uff_atom_params(atom2_number);
+        
+        // Bond order (assuming single bonds for simplicity)
+        double bond_order = 1.0;
+        
+        // UFF bond length: r_ij = r_i + r_j - 0.1332(r_i + r_j)ln(n)
+        double r_sum = atom1_params.radius + atom2_params.radius;
+        double r0 = r_sum - 0.1332 * r_sum * std::log(bond_order);
+        
+        // Convert from Angstroms to nm for OpenMM
+        r0 *= 0.1;
+        
+        // UFF force constant: k = 664.12 * Z_i * Z_eff_j / r_ij^3
+        // Simplified approximation
+        double k = 700.0 * 4184.0; // Convert kcal/mol/Å² to kJ/mol/nm²
+        
+        return {k, r0};
+    }
+    
+    UFFAngleType get_uff_angle_params(uint8_t atom1_number, uint8_t atom2_number, uint8_t atom3_number) {
+        // UFF angle parameters based on center atom hybridization
+        UFFAtomType center_params = get_uff_atom_params(atom2_number);
+        
+        double theta0, k;
+        
+        // Determine angle based on hybridization of center atom
+        switch (center_params.hybridization) {
+        case 3: // sp3 - tetrahedral
+            theta0 = 109.47 * M_PI / 180.0; // radians
+            k = 100.0 * 4184.0; // kcal/mol -> kJ/mol
+            break;
+        case 2: // sp2 - trigonal planar
+            theta0 = 120.0 * M_PI / 180.0;
+            k = 100.0 * 4184.0;
+            break;
+        case 1: // sp - linear
+            theta0 = 180.0 * M_PI / 180.0;
+            k = 100.0 * 4184.0;
+            break;
+        default: // Default to tetrahedral
+            theta0 = 109.47 * M_PI / 180.0;
+            k = 100.0 * 4184.0;
+            break;
+        }
+        
+        return {k, theta0};
+    }
+    
+    std::string map_to_uff_type(const md_label_t& atom_type, uint8_t atomic_number) {
+        // Map to UFF atom type based on atomic number
+        // For now, use simple mapping - could be enhanced with connectivity analysis
+        switch (atomic_number) {
+        case 1: return "H_";
+        case 6: return "C_3";  // Assume sp3 carbon
+        case 7: return "N_3";  // Assume sp3 nitrogen
+        case 8: return "O_3";  // Assume sp3 oxygen
+        case 9: return "F_";
+        case 15: return "P_3";
+        case 16: return "S_3";
+        case 17: return "Cl";
+        case 35: return "Br";
+        case 53: return "I_";
+        default: return "C_3"; // Default to sp3 carbon
+        }
     }
 };
 
