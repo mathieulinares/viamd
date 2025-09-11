@@ -52,35 +52,20 @@ make -j$(nproc)
 cmake .. -DVIAMD_ENABLE_BUILDER=OFF
 ```
 
-## Legacy RDKit Support (Removed)
+## No External Dependencies Required
 
-**Note:** Previous versions of VIAMD used RDKit for molecule building. This has been replaced with a lightweight implementation that:
-- Removes the need for external RDKit installation
-- Reduces build complexity and dependencies
-- Provides faster build times
-- Supports the most common SMILES patterns used in molecular visualization
+**VIAMD's molecule builder now uses a lightweight, built-in implementation** that:
+- **Zero external dependencies** - no need for RDKit, Boost, or other chemistry libraries
+- **Faster build times** - eliminates dependency compilation and linking
+- **Simplified installation** - works out-of-the-box on any system that can build VIAMD
+- **Smaller binary size** - no heavy chemistry library linking
+- **Same functionality** - supports the common SMILES patterns needed for molecular visualization
 
-The following installation instructions are no longer needed:
-
-### ~~Ubuntu/Debian Installation~~ (No longer required)
-```bash
-# These are no longer needed:
-# sudo apt install librdkit-dev librdkit1 libboost-dev
-# sudo apt install rdkit-data rdkit-doc
-```
-
-### Fedora/CentOS Installation
-```bash
-# Enable EPEL repository if needed
-sudo dnf install epel-release
-
-# Install RDKit and Boost development headers
-sudo dnf install rdkit-devel rdkit boost-devel
-```
+**No additional packages need to be installed** - the builder is fully self-contained.
 
 ### Building VIAMD with Molecule Builder
 
-#### Standard Build (with Builder enabled by default)
+#### Standard Build (Builder enabled by default)
 ```bash
 mkdir build
 cd build
@@ -91,13 +76,17 @@ make -j$(nproc)
 #### Custom Build Options
 ```bash
 # Enable/disable builder module
-cmake .. -DVIAMD_ENABLE_BUILDER=ON
+cmake .. -DVIAMD_ENABLE_BUILDER=ON   # (default: ON)
 
-# Enable/disable RDKit support (requires VIAMD_ENABLE_BUILDER=ON)
-cmake .. -DVIAMD_ENABLE_BUILDER=ON -DVIAMD_ENABLE_RDKIT=ON
+# Disable builder if not needed
+cmake .. -DVIAMD_ENABLE_BUILDER=OFF
 
-# Complete build with all options
+# Complete build example
 cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DVIAMD_ENABLE_BUILDER=ON
+make -j$(nproc)
+```
   -DCMAKE_BUILD_TYPE=Release \
   -DVIAMD_ENABLE_BUILDER=ON \
   -DVIAMD_ENABLE_RDKIT=ON
@@ -108,13 +97,8 @@ cmake .. \
 | Option | Default | Description |
 |--------|---------|-------------|
 | `VIAMD_ENABLE_BUILDER` | `ON` | Enable Molecule Builder Module |
-| `VIAMD_ENABLE_RDKIT` | `ON` | Enable RDKit for molecule building |
 
-### Graceful Degradation
-If RDKit is not available:
-- Component compiles with informative messages
-- Builder menu item shows installation requirements
-- No impact on other VIAMD functionality
+The builder now works out-of-the-box with no additional configuration required.
 
 ## Usage
 
@@ -143,18 +127,16 @@ If RDKit is not available:
 
 ## Technical Details
 
-### RDKit Integration
-The molecule builder uses several RDKit libraries:
-- **RDKitGraphMol**: Core molecular graph functionality
-- **RDKitSmilesParse**: SMILES string parsing and validation
-- **RDKitDistGeomHelpers**: 3D coordinate generation using distance geometry
-- **RDKitForceFieldHelpers**: Force field setup for geometry optimization
-- **RDKitForceField**: UFF force field implementation
-- **RDKitDescriptors**: Molecular property calculations
+### Lightweight Implementation
+The molecule builder uses a custom, lightweight implementation:
+- **Built-in SMILES parser**: Supports common organic chemistry notation
+- **Automatic hydrogen addition**: Based on standard valence rules
+- **3D coordinate generation**: Uses standard bond lengths and angles
+- **Molecular formula calculation**: Automatic composition analysis
 
 ### Coordinate System and Format Conversion
-- **RDKit**: Uses Angstrom units (consistent with VIAMD)
-- **Automatic conversion**: Seamless translation between RDKit and VIAMD molecular representations
+- **Units**: Uses Angstrom units (consistent with VIAMD)
+- **Automatic conversion**: Seamless translation to VIAMD molecular representations
 - **Memory management**: Efficient use of VIAMD's custom allocators
 
 ### Event-Driven Architecture
@@ -178,17 +160,21 @@ The molecule builder uses several RDKit libraries:
    ```
 
 ### Building Complex Molecules
-1. **Caffeine**:
+1. **Basic alkanes and alcohols**:
    ```
-   SMILES: CN1C=NC2=C1C(=O)N(C(=O)N2C)C
-   Result: Complete caffeine structure with ~24 atoms
+   SMILES: CC        → Ethane (C₂H₆)
+   SMILES: CCO       → Ethanol (C₂H₆O)
+   SMILES: CCCO      → Propanol (C₃H₈O)
    ```
 
-2. **Aspirin**:
+2. **Simple organic molecules**:
    ```
-   SMILES: CC(=O)OC1=CC=CC=C1C(=O)O
-   Result: Acetylsalicylic acid with proper stereochemistry
+   SMILES: C=C       → Ethene (C₂H₄)
+   SMILES: C#C       → Ethyne (C₂H₂)
+   SMILES: CC(C)C    → Isobutane (C₄H₁₀)
    ```
+
+**Note**: The lightweight implementation focuses on common organic molecules. Very complex structures with exotic bonding patterns may not be fully supported.
 
 ### Integration with VIAMD Analysis
 1. **Generate molecule** using the builder
@@ -200,35 +186,22 @@ The molecule builder uses several RDKit libraries:
 
 ### Common Issues
 
-**"RDKit not found" during build**:
+**Builder not available in menu**:
 ```bash
-# Ensure RDKit development packages are installed
-sudo apt install librdkit-dev librdkit1
-
-# Verify CMake can find RDKit
-cmake .. -DVIAMD_ENABLE_RDKIT=ON
+# Ensure builder is enabled during build
+cmake .. -DVIAMD_ENABLE_BUILDER=ON
+make -j$(nproc)
 ```
 
 **"Invalid SMILES string" error**:
-- Check SMILES syntax (valence rules, ring closures, etc.)
-- Use RDKit documentation for SMILES specification
-- Try simpler molecules first to verify functionality
+- Check basic SMILES syntax (valid element symbols, bond notation)
+- The lightweight parser supports common organic molecules
+- Try simpler molecules first (C, O, CCO) to verify functionality
 
-**"Failed to generate 3D coordinates"**:
-- Some complex SMILES may fail distance geometry
-- Try different conformer generation parameters
-- Verify the molecule is chemically reasonable
-
-**Builder menu not visible**:
-```bash
-# Ensure builder is enabled during compilation
-cmake .. -DVIAMD_ENABLE_BUILDER=ON -DVIAMD_ENABLE_RDKIT=ON
-```
-
-### Performance Considerations
-- **Large molecules**: 3D generation time increases with molecular size
-- **Complex rings**: Strained ring systems may require longer optimization
-- **Memory usage**: Proportional to molecular size and conformer generation
+**Performance optimization needed**:
+- Very large molecules may take longer to process
+- If performance is poor, try simpler molecules first
+- The lightweight implementation prioritizes compatibility over speed for complex structures
 
 ## Validation and Testing
 
@@ -236,32 +209,37 @@ cmake .. -DVIAMD_ENABLE_BUILDER=ON -DVIAMD_ENABLE_RDKIT=ON
 ```bash
 # Simple molecules (fast generation)
 O              # Water
+C              # Methane
 CCO            # Ethanol
-c1ccccc1       # Benzene
 
 # Medium complexity
-CC(C)O         # Isopropanol
-CC(=O)O        # Acetic acid
-
-# Complex molecules (test full functionality)
-CN1C=NC2=C1C(=O)N(C(=O)N2C)C  # Caffeine
+CC             # Ethane
+C=C            # Ethene
+C#C            # Ethyne
+CC(C)C         # Isobutane
 ```
 
 ### Verification Steps
 1. **SMILES parsing**: Verify no syntax errors
 2. **3D generation**: Check reasonable coordinates
 3. **VIAMD loading**: Confirm proper molecule display
-4. **Statistics**: Verify atom count, molecular weight
+4. **Statistics**: Verify atom count, molecular formula
 
 ## Limitations
 
 ### Current Limitations
-- **SMILES format only**: No support for SDF, MOL, or other formats yet
+- **SMILES format only**: No support for SDF, MOL, or other formats
 - **Single conformer**: Generates one 3D structure per SMILES
-- **UFF optimization only**: Limited to Universal Force Field
-- **No fragment building**: Complete SMILES required
+- **Basic optimization**: Simple geometry optimization using standard bond lengths/angles
+- **Common molecules focus**: Optimized for typical organic chemistry examples
 
-### Future Enhancements
+### Supported Features
+- Standard organic elements (C, H, O, N, S, P, halogens)
+- Single, double, and triple bonds
+- Basic ring structures
+- Automatic hydrogen addition
+- Molecular formula calculation
+- 3D coordinate generation
 - **Multiple input formats**: SDF, MOL, XYZ file import
 - **Conformer ensembles**: Multiple 3D structures per molecule
 - **Advanced optimization**: MMFF, GAFF force field support
@@ -290,28 +268,46 @@ Developers can extend the builder by:
 - **Specialized builders**: Protein, nucleic acid constructors
 - **Analysis integration**: Property calculation, similarity searches
 
+## API Integration
+
+### Component Architecture
+The molecule builder follows VIAMD's component pattern:
+- **Location**: `src/components/builder/builder.cpp`
+- **Implementation**: `src/components/builder/lightweight_mol_builder.{h,cpp}`
+- **Event integration**: Uses VIAMD's event system
+- **Memory management**: VIAMD allocator compatibility
+- **Menu integration**: Automatic registration with main menu
+
+### Event Handling
+The component responds to:
+- `ViamdInitialize`: Component initialization and lightweight builder setup
+- `ViamdWindowDrawMenu`: Menu integration and UI rendering
+- `ViamdShutdown`: Cleanup and resource deallocation
+
+### Extension Points
+Developers can extend the builder by:
+- **Adding input formats**: SDF, MOL file parsers
+- **Enhanced SMILES support**: More complex molecular patterns
+- **Alternative optimization**: Different geometric optimization approaches
+- **Analysis integration**: Property calculation, molecular descriptors
+
 ## Installation Verification
 
-### Test RDKit Installation
+### Build Verification
 ```bash
-# Check RDKit libraries
-ldconfig -p | grep rdkit
-
-# Verify headers
-ls /usr/include/rdkit/GraphMol/
-
-# Test VIAMD build
+# Test VIAMD build with builder
 cd build
-cmake .. -DVIAMD_ENABLE_BUILDER=ON -DVIAMD_ENABLE_RDKIT=ON
+cmake .. -DVIAMD_ENABLE_BUILDER=ON
 make -j$(nproc)
 ```
 
 ### Runtime Verification
 1. **Start VIAMD**: `./viamd`
-2. **Check menu**: Builder → Molecule Builder should be available
-3. **Test building**: Try SMILES `CCO` and verify successful generation
-4. **Load molecule**: Confirm structure appears in visualization
+2. **Check console**: Look for "Lightweight molecule builder enabled" message
+3. **Check menu**: Builder → Molecule Builder should be available
+4. **Test building**: Try SMILES `CCO` and verify successful generation
+5. **Load molecule**: Confirm structure appears in visualization
 
 ## Conclusion
 
-The molecule builder integration provides VIAMD with powerful on-demand molecular structure generation capabilities. By leveraging RDKit's robust chemistry toolkit, users can quickly create molecules from SMILES notation and immediately visualize them using VIAMD's comprehensive analysis tools. This combination makes VIAMD an excellent platform for chemical education, drug discovery, and molecular research.
+The molecule builder integration provides VIAMD with efficient on-demand molecular structure generation capabilities. Using a lightweight, dependency-free implementation, users can quickly create common molecules from SMILES notation and immediately visualize them using VIAMD's comprehensive analysis tools. This makes VIAMD more accessible and easier to deploy while maintaining the core functionality needed for molecular visualization and education.
