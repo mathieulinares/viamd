@@ -1015,9 +1015,17 @@ public:
         // Clean up internal trajectory capture
         cleanup_internal_trajectory_capture(state);
         
-        sim_context.context.reset();
-        sim_context.integrator.reset();
-        sim_context.system.reset();
+        // Isolate OpenMM smart pointer reset calls to prevent allocator conflicts
+        // These destructors use standard C++ allocators which can conflict with VIAMD's memory management
+        {
+            // Reset in reverse order of dependency to ensure proper cleanup sequence
+            sim_context.context.reset();
+            sim_context.integrator.reset();
+            sim_context.system.reset();
+        }
+        
+        // Ensure all OpenMM cleanup is complete before returning
+        std::atomic_thread_fence(std::memory_order_seq_cst);
 #endif
     }
 
