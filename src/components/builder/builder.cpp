@@ -2,18 +2,8 @@
 
 #ifdef VIAMD_ENABLE_BUILDER
 
-// Include RDKit headers first to avoid naming conflicts
-#ifdef VIAMD_ENABLE_RDKIT
-#include <GraphMol/GraphMol.h>
-#include <GraphMol/SmilesParse/SmilesParse.h>
-#include <GraphMol/DistGeomHelpers/Embedder.h>
-#include <GraphMol/ForceFieldHelpers/UFF/UFF.h>
-#include <GraphMol/MolOps.h>
-#include <GraphMol/AtomIterators.h>
-#include <GraphMol/BondIterators.h>
-#include <GraphMol/Conformer.h>
-#include <GraphMol/Descriptors/MolDescriptors.h>
-#endif
+// Include lightweight molecule builder
+#include "lightweight_mol_builder.h"
 
 #include <viamd.h>
 
@@ -47,7 +37,7 @@ namespace builder {
 
 struct MoleculeBuilder : viamd::EventHandler {
     bool show_window = false;
-    bool rdkit_available = false;
+    bool molecule_builder_available = true; // Always available with lightweight implementation
     
     char smiles_input[256] = "CCO";  // Default to ethanol
     char error_message[512] = "";
@@ -55,6 +45,9 @@ struct MoleculeBuilder : viamd::EventHandler {
     
     ApplicationState* app_state = nullptr;
     md_allocator_i* arena = nullptr;
+    
+    // Lightweight molecule builder instance
+    lightweight_mol::MoleculeBuilder mol_builder;
     
     // Built molecule data
     struct BuiltMolecule {
@@ -67,14 +60,7 @@ struct MoleculeBuilder : viamd::EventHandler {
 
     MoleculeBuilder() { 
         viamd::event_system_register_handler(*this);
-        
-#ifdef VIAMD_ENABLE_RDKIT
-        rdkit_available = true;
-        MD_LOG_INFO("RDKit support enabled for molecule builder");
-#else
-        rdkit_available = false;
-        MD_LOG_INFO("RDKit not available - molecule builder will show informational message");
-#endif
+        MD_LOG_INFO("Lightweight molecule builder enabled");
     }
 
     void process_events(const viamd::Event* events, size_t num_events) final {
@@ -164,7 +150,6 @@ struct MoleculeBuilder : viamd::EventHandler {
         viamd::event_system_broadcast_event(viamd::EventType_ViamdTopologyInit, viamd::EventPayloadType_ApplicationState, app_state);
     }
 
-#ifdef VIAMD_ENABLE_RDKIT
     bool build_molecule_from_smiles(const char* smiles) {
         if (!smiles || strlen(smiles) == 0) {
             strcpy(error_message, "Please enter a SMILES string");
@@ -172,44 +157,27 @@ struct MoleculeBuilder : viamd::EventHandler {
         }
 
         try {
-            // Parse SMILES
-            std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol(smiles));
-            if (!mol) {
-                snprintf(error_message, sizeof(error_message), "Invalid SMILES: %s", smiles);
-                return false;
-            }
-
-            // Add hydrogens
-            RDKit::MolOps::addHs(*mol);
+            // Use lightweight molecule builder
+            lightweight_mol::Molecule lightweight_mol;
             
-            // Generate 3D coordinates
-            auto confId = RDKit::DGeomHelpers::EmbedMolecule(*mol);
-            if (confId == -1) {
-                strcpy(error_message, "Failed to generate 3D coordinates");
+            if (!mol_builder.build_from_smiles(std::string(smiles), lightweight_mol)) {
+                snprintf(error_message, sizeof(error_message), "Error: %s", mol_builder.get_error().c_str());
                 return false;
             }
 
-            // Optimize geometry with UFF
-            try {
-                RDKit::UFF::UFFOptimizeMolecule(*mol);
-            } catch (...) {
-                // UFF optimization failed, but we can still use the molecule
-                MD_LOG_DEBUG("UFF optimization failed, using unoptimized geometry");
-            }
-
-            // Convert RDKit molecule to VIAMD format
-            return convert_rdkit_to_viamd(*mol);
+            // Convert lightweight molecule to VIAMD format
+            return convert_lightweight_to_viamd(lightweight_mol);
 
         } catch (const std::exception& e) {
-            snprintf(error_message, sizeof(error_message), "RDKit error: %s", e.what());
+            snprintf(error_message, sizeof(error_message), "Error: %s", e.what());
             return false;
         } catch (...) {
-            strcpy(error_message, "Unknown error in RDKit processing");
+            strcpy(error_message, "Unknown error in molecule processing");
             return false;
         }
     }
 
-    bool convert_rdkit_to_viamd(const RDKit::RWMol& rdkit_mol) {
+    bool convert_lightweight_to_viamd(const lightweight_mol::Molecule& lightweight_mol) {
         cleanup_built_molecule();
 
         if (!app_state || !app_state->mold.mol_alloc) {
@@ -220,9 +188,8 @@ struct MoleculeBuilder : viamd::EventHandler {
         // Initialize VIAMD molecule structure - zero initialize
         built_molecule.mol = {};
 
-        const auto& conf = rdkit_mol.getConformer();
-        unsigned int num_atoms = rdkit_mol.getNumAtoms();
-        unsigned int num_bonds = rdkit_mol.getNumBonds();
+        unsigned int num_atoms = lightweight_mol.atoms.size();
+        unsigned int num_bonds = lightweight_mol.bonds.size();
 
         // Use the same allocator that will manage the molecule in VIAMD
         md_allocator_i* mol_alloc = app_state->mold.mol_alloc;
@@ -239,27 +206,26 @@ struct MoleculeBuilder : viamd::EventHandler {
 
         // Convert atoms
         for (unsigned int i = 0; i < num_atoms; ++i) {
-            const auto* atom = rdkit_mol.getAtomWithIdx(i);
-            const auto& pos = conf.getAtomPos(i);
+            const auto& atom = lightweight_mol.atoms[i];
 
             // Position (convert from Angstrom to nanometers)
-            built_molecule.mol.atom.x[i] = (float)(pos.x * 0.1);
-            built_molecule.mol.atom.y[i] = (float)(pos.y * 0.1);
-            built_molecule.mol.atom.z[i] = (float)(pos.z * 0.1);
+            built_molecule.mol.atom.x[i] = atom.x * 0.1f;
+            built_molecule.mol.atom.y[i] = atom.y * 0.1f;
+            built_molecule.mol.atom.z[i] = atom.z * 0.1f;
 
             // Element
-            built_molecule.mol.atom.element[i] = (uint8_t)atom->getAtomicNum();
+            built_molecule.mol.atom.element[i] = (uint8_t)atom.element;
 
             // Atom type (use element symbol)
-            str_t element_name = md_util_element_symbol(atom->getAtomicNum());
+            str_t element_name = md_util_element_symbol(atom.element);
             // Convert str_t to md_label_t by copying the string data
             size_t copy_len = MIN(element_name.len, sizeof(built_molecule.mol.atom.type[i].buf) - 1);
             memcpy(built_molecule.mol.atom.type[i].buf, element_name.ptr, copy_len);
             built_molecule.mol.atom.type[i].buf[copy_len] = '\0';
 
             // Properties
-            built_molecule.mol.atom.radius[i] = md_util_element_vdw_radius(atom->getAtomicNum());
-            built_molecule.mol.atom.mass[i] = (float)md_util_element_atomic_mass(atom->getAtomicNum());
+            built_molecule.mol.atom.radius[i] = md_util_element_vdw_radius(atom.element);
+            built_molecule.mol.atom.mass[i] = (float)md_util_element_atomic_mass(atom.element);
             built_molecule.mol.atom.flags[i] = 0;
         }
 
@@ -271,28 +237,15 @@ struct MoleculeBuilder : viamd::EventHandler {
             md_array_resize(built_molecule.mol.bond.order, num_bonds, mol_alloc);
 
             for (unsigned int i = 0; i < num_bonds; ++i) {
-                const auto* bond = rdkit_mol.getBondWithIdx(i);
+                const auto& bond = lightweight_mol.bonds[i];
                 
-                built_molecule.mol.bond.pairs[i].idx[0] = bond->getBeginAtomIdx();
-                built_molecule.mol.bond.pairs[i].idx[1] = bond->getEndAtomIdx();
+                built_molecule.mol.bond.pairs[i].idx[0] = bond.atom1;
+                built_molecule.mol.bond.pairs[i].idx[1] = bond.atom2;
                 
                 // Convert bond order
-                switch (bond->getBondType()) {
-                case RDKit::Bond::SINGLE:
-                    built_molecule.mol.bond.order[i] = 1;
-                    break;
-                case RDKit::Bond::DOUBLE:
-                    built_molecule.mol.bond.order[i] = 2;
-                    break;
-                case RDKit::Bond::TRIPLE:
-                    built_molecule.mol.bond.order[i] = 3;
-                    break;
-                case RDKit::Bond::AROMATIC:
-                    built_molecule.mol.bond.order[i] = 1 | MD_BOND_FLAG_AROMATIC;
-                    break;
-                default:
-                    built_molecule.mol.bond.order[i] = 1;
-                    break;
+                built_molecule.mol.bond.order[i] = bond.order;
+                if (bond.aromatic) {
+                    built_molecule.mol.bond.order[i] |= MD_BOND_FLAG_AROMATIC;
                 }
             }
             built_molecule.mol.bond.count = num_bonds;
@@ -301,7 +254,7 @@ struct MoleculeBuilder : viamd::EventHandler {
         // Set molecule info
         built_molecule.num_atoms = num_atoms;
         built_molecule.num_bonds = num_bonds;
-        built_molecule.formula = RDKit::Descriptors::calcMolFormula(rdkit_mol);
+        built_molecule.formula = lightweight_mol.formula;
         built_molecule.valid = true;
 
         snprintf(info_message, sizeof(info_message), 
@@ -311,7 +264,6 @@ struct MoleculeBuilder : viamd::EventHandler {
         error_message[0] = '\0';  // Clear any previous errors
         return true;
     }
-#endif
 
     void load_molecule_into_viamd() {
         if (!built_molecule.valid || !app_state) {
@@ -403,82 +355,57 @@ struct MoleculeBuilder : viamd::EventHandler {
         ImGui::SetNextWindowSize({400, 500}, ImGuiCond_FirstUseEver);
         
         if (ImGui::Begin("Molecule Builder", &show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
-            if (!rdkit_available) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.0f, 1.0f));
-                ImGui::TextWrapped("RDKit is not available. To use the molecule builder, please install RDKit development libraries:");
+            // SMILES input
+            ImGui::Text("SMILES String:");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##smiles", smiles_input, sizeof(smiles_input));
+            
+            ImGui::Separator();
+            
+            // Example buttons
+            draw_example_buttons();
+            
+            ImGui::Separator();
+            
+            // Build button
+            if (ImGui::Button("Build Molecule", ImVec2(-1, 0))) {
+                build_molecule_from_smiles(smiles_input);
+            }
+            
+            // Load button (only enabled if we have a valid molecule)
+            ImGui::BeginDisabled(!built_molecule.valid);
+            if (ImGui::Button("Load into VIAMD", ImVec2(-1, 0))) {
+                load_molecule_into_viamd();
+            }
+            ImGui::EndDisabled();
+            
+            // Clear button - clear any loaded molecule from VIAMD
+            if (ImGui::Button("Clear Molecule", ImVec2(-1, 0))) {
+                clear_molecule_from_viamd();
+            }
+            
+            ImGui::Separator();
+            
+            // Status messages
+            if (strlen(error_message) > 0) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                ImGui::TextWrapped("Error: %s", error_message);
                 ImGui::PopStyleColor();
-                
+            }
+            
+            if (strlen(info_message) > 0) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
+                ImGui::TextWrapped("Info: %s", info_message);
+                ImGui::PopStyleColor();
+            }
+            
+            // Molecule info
+            if (built_molecule.valid) {
                 ImGui::Separator();
-                ImGui::Text("Installation instructions:");
-                ImGui::BulletText("Ubuntu/Debian: sudo apt install librdkit-dev librdkit1");
-                ImGui::BulletText("Conda: conda install -c conda-forge rdkit");
-                ImGui::BulletText("Then rebuild VIAMD with -DVIAMD_ENABLE_RDKIT=ON");
-                
-                ImGui::Separator();
-                ImGui::TextWrapped("The molecule builder allows you to:");
-                ImGui::BulletText("Build molecules from SMILES strings");
-                ImGui::BulletText("Generate 3D coordinates automatically");
-                ImGui::BulletText("Load molecules directly into VIAMD");
-                ImGui::BulletText("Use common molecule examples");
-            } else {
-                // SMILES input
-                ImGui::Text("SMILES String:");
-                ImGui::SetNextItemWidth(-1);
-                ImGui::InputText("##smiles", smiles_input, sizeof(smiles_input));
-                
-                ImGui::Separator();
-                
-                // Example buttons
-                draw_example_buttons();
-                
-                ImGui::Separator();
-                
-                // Build button
-#ifdef VIAMD_ENABLE_RDKIT
-                if (ImGui::Button("Build Molecule", ImVec2(-1, 0))) {
-                    build_molecule_from_smiles(smiles_input);
-                }
-#else
-                ImGui::BeginDisabled();
-                ImGui::Button("Build Molecule (RDKit required)", ImVec2(-1, 0));
-                ImGui::EndDisabled();
-#endif
-                
-                // Load button (only enabled if we have a valid molecule)
-                ImGui::BeginDisabled(!built_molecule.valid);
-                if (ImGui::Button("Load into VIAMD", ImVec2(-1, 0))) {
-                    load_molecule_into_viamd();
-                }
-                ImGui::EndDisabled();
-                
-                // Clear button - clear any loaded molecule from VIAMD
-                if (ImGui::Button("Clear Molecule", ImVec2(-1, 0))) {
-                    clear_molecule_from_viamd();
-                }
-                
-                ImGui::Separator();
-                
-                // Status messages
-                if (strlen(error_message) > 0) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-                    ImGui::TextWrapped("Error: %s", error_message);
-                    ImGui::PopStyleColor();
-                }
-                
-                if (strlen(info_message) > 0) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
-                    ImGui::TextWrapped("Info: %s", info_message);
-                    ImGui::PopStyleColor();
-                }
-                
-                // Molecule info
-                if (built_molecule.valid) {
-                    ImGui::Separator();
-                    ImGui::Text("Built Molecule:");
-                    ImGui::BulletText("Formula: %s", built_molecule.formula.c_str());
-                    ImGui::BulletText("Atoms: %d", built_molecule.num_atoms);
-                    ImGui::BulletText("Bonds: %d", built_molecule.num_bonds);
-                }
+                ImGui::Text("Built Molecule:");
+                ImGui::BulletText("Formula: %s", built_molecule.formula.c_str());
+                ImGui::BulletText("Atoms: %d", built_molecule.num_atoms);
+                ImGui::BulletText("Bonds: %d", built_molecule.num_bonds);
             }
         }
         ImGui::End();
