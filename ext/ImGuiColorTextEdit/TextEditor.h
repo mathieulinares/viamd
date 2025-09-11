@@ -125,6 +125,17 @@ public:
 		std::string mDeclaration;
 	};
 
+	struct CompletionItem
+	{
+		std::string mText;
+		std::string mDetail;
+		std::string mDocumentation;
+		PaletteIndex mKind;
+		
+		CompletionItem(const std::string& text, const std::string& detail = "", const std::string& documentation = "", PaletteIndex kind = PaletteIndex::Identifier)
+			: mText(text), mDetail(detail), mDocumentation(documentation), mKind(kind) {}
+	};
+
 	struct Marker {
 		int type;
 		int line;
@@ -145,6 +156,7 @@ public:
 	typedef std::unordered_set<int> Breakpoints;
 	typedef std::array<ImU32, (unsigned)PaletteIndex::Max> Palette;
 	typedef uint8_t Char;
+	typedef std::vector<CompletionItem> CompletionItems;
 
 	struct Glyph
 	{
@@ -300,6 +312,17 @@ public:
 	void Undo(int aSteps = 1);
 	void Redo(int aSteps = 1);
 
+	// Autocomplete functionality
+	void ShowAutoComplete(bool aShow = true);
+	bool IsAutoCompleteShown() const { return mAutoCompleteShown; }
+	void TriggerAutoComplete();
+	const CompletionItems& GetCompletionItems() const { return mCompletionItems; }
+	void SetAutoCompleteMaxItems(int aMaxItems) { mAutoCompleteMaxItems = aMaxItems; }
+	int GetAutoCompleteMaxItems() const { return mAutoCompleteMaxItems; }
+	void RefreshCompletionsWithDataset(const std::vector<std::string>& resnames, 
+	                                   const std::vector<std::string>& atomTypes,
+	                                   const std::vector<std::string>& elements);
+
 	static const Palette& GetDarkPalette();
 	static const Palette& GetLightPalette();
 	static const Palette& GetRetroBluePalette();
@@ -387,6 +410,17 @@ private:
 	void HandleMouseInputs();
 	void Render();
 
+	// Autocomplete methods
+	void UpdateAutoComplete();
+	void RenderAutoComplete();
+	void FilterCompletions(const std::string& aPrefix);
+	void InsertCompletion(const CompletionItem& aItem);
+	std::string GetCurrentWord() const;
+	void BuildCompletionItems();
+	void AddDynamicCompletionItems(const std::vector<std::string>& resnames, 
+	                               const std::vector<std::string>& atomTypes,
+	                               const std::vector<std::string>& elements);
+
 	float mLineSpacing;
 	Lines mLines;
 	EditorState mState;
@@ -429,4 +463,13 @@ private:
 	uint64_t mStartTime;
 
 	float mLastClick;
+
+	// Autocomplete state
+	bool mAutoCompleteShown;
+	int mAutoCompleteSelectedIndex;
+	int mAutoCompleteMaxItems;
+	CompletionItems mCompletionItems;
+	CompletionItems mFilteredCompletionItems;
+	std::string mAutoCompletePrefix;
+	Coordinates mAutoCompleteStart;
 };

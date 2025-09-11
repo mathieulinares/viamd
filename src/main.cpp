@@ -66,6 +66,8 @@
 
 #include <stdio.h>
 #include <bitset>
+#include <set>
+#include <string>
 
 #include <viamd.h>
 #include <serialization_utils.h>
@@ -7029,6 +7031,27 @@ static void draw_script_editor_window(ApplicationState* data) {
                 ImGui::ColorEdit4("Triangle Color", data->script.triangle_color.elem);
                 ImGui::ColorEdit4("Text Color",     data->script.text_color.elem);
                 ImGui::ColorEdit4("Text Bg Color",  data->script.text_bg_color.elem);
+                
+                ImGui::Separator();
+                // Autocomplete settings
+                ImGui::Text("Autocomplete");
+                
+                int maxItems = editor.GetAutoCompleteMaxItems();
+                if (ImGui::SliderInt("Max Items", &maxItems, 5, 20)) {
+                    editor.SetAutoCompleteMaxItems(maxItems);
+                }
+                
+                if (ImGui::Button("Trigger Autocomplete (Ctrl+Space)")) {
+                    editor.TriggerAutoComplete();
+                }
+                
+                ImGui::Text("Completions: %d items", (int)editor.GetCompletionItems().size());
+                
+                if (editor.IsAutoCompleteShown()) {
+                    ImGui::Text("Status: Autocomplete active");
+                } else {
+                    ImGui::Text("Status: Autocomplete hidden");
+                }
 
                 ImGui::EndMenu();
             }
@@ -7049,6 +7072,14 @@ static void draw_script_editor_window(ApplicationState* data) {
 
         editor.Render("TextEditor", text_size);
         bool editor_hovered = ImGui::IsItemHovered();
+        
+        // Add autocomplete status indicator
+        if (editor.IsFocused()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+            ImGui::Text("Completions: %d | Press Ctrl+Space for autocomplete", (int)editor.GetCompletionItems().size());
+            ImGui::PopStyleColor();
+        }
+        
         bool eval = false;
         if (editor.IsFocused() && ImGui::IsKeyDown(KEY_SCRIPT_EVALUATE_MOD) && ImGui::IsKeyPressed(KEY_SCRIPT_EVALUATE)) {
             eval = true;
@@ -7832,6 +7863,46 @@ static void init_molecule_data(ApplicationState* data) {
     data->script.compile_ir = true;
 
     init_dataset_items(data);
+    
+    // Update script editor autocomplete with dataset information
+    if (data->mold.mol.atom.count > 0) {
+        // Extract unique residue names
+        std::vector<std::string> resnames;
+        std::set<std::string> unique_resnames;
+        for (size_t i = 0; i < data->mold.mol.residue.count; ++i) {
+            md_label_t resname = data->mold.mol.residue.name[i];
+            std::string resname_str(resname.buf, resname.len);
+            if (unique_resnames.insert(resname_str).second) {
+                resnames.push_back(resname_str);
+            }
+        }
+        
+        // Extract unique atom types  
+        std::vector<std::string> atomTypes;
+        std::set<std::string> unique_atom_types;
+        for (size_t i = 0; i < data->mold.mol.atom.count; ++i) {
+            md_label_t atom_type = data->mold.mol.atom.type[i];
+            std::string atom_type_str(atom_type.buf, atom_type.len);
+            if (unique_atom_types.insert(atom_type_str).second) {
+                atomTypes.push_back(atom_type_str);
+            }
+        }
+        
+        // Extract unique elements
+        std::vector<std::string> elements;
+        std::set<std::string> unique_elements;
+        for (size_t i = 0; i < data->mold.mol.atom.count; ++i) {
+            md_element_t element_type = data->mold.mol.atom.element[i];
+            str_t element_symbol = md_util_element_symbol(element_type);
+            std::string element_str(element_symbol.ptr, element_symbol.len);
+            if (unique_elements.insert(element_str).second) {
+                elements.push_back(element_str);
+            }
+        }
+        
+        // Update the editor's autocomplete with dataset information
+        editor.RefreshCompletionsWithDataset(resnames, atomTypes, elements);
+    }
 }
 
 static void launch_prefetch_job(ApplicationState* data) {
