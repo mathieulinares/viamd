@@ -1,19 +1,19 @@
 # Molecule Builder Integration in VIAMD
 
-This document describes the molecule builder component integration in VIAMD with RDKit support.
+This document describes the molecule builder component integration in VIAMD with a lightweight implementation.
 
 ## Overview
 
-VIAMD now includes a powerful molecule builder component that allows users to create and visualize molecules from SMILES strings using the RDKit C++ API. This enables on-demand molecular structure generation and seamless integration with VIAMD's visualization capabilities.
+VIAMD now includes a lightweight molecule builder component that allows users to create and visualize molecules from SMILES strings without external dependencies. This enables on-demand molecular structure generation and seamless integration with VIAMD's visualization capabilities.
 
 ## Features
 
 ### Molecule Building Capabilities
-- **SMILES parsing** with RDKit's robust chemical notation parser
-- **3D structure generation** using distance geometry algorithms
-- **Geometry optimization** with UFF (Universal Force Field) energy minimization
-- **Hydrogen addition** for complete molecular representation
+- **SMILES parsing** with custom lightweight parser for common chemical notation
+- **3D structure generation** using simple geometric rules and standard bond lengths/angles
+- **Hydrogen addition** based on valence rules for complete molecular representation
 - **Real-time molecule generation** with immediate visualization
+- **No external dependencies** - no need for RDKit or other chemistry libraries
 
 ### User Interface Features
 - **Menu integration** accessible via "Builder → Molecule Builder"
@@ -24,6 +24,7 @@ VIAMD now includes a powerful molecule builder component that allows users to cr
 
 ### Built-in Example Molecules
 - **Water (H₂O)**: `O`
+- **Methane (CH₄)**: `C`
 - **Ethanol**: `CCO`
 - **Benzene**: `c1ccccc1`
 - **Caffeine**: `CN1C=NC2=C1C(=O)N(C(=O)N2C)C`
@@ -33,17 +34,39 @@ VIAMD now includes a powerful molecule builder component that allows users to cr
 ## Installation
 
 ### Prerequisites
-- RDKit library and development headers
 - C++20 compatible compiler
 - CMake 3.20 or higher
+- No external chemistry libraries required
 
-### Ubuntu/Debian Installation
+### Building with Molecule Builder (Default)
 ```bash
-# Install RDKit development libraries and Boost headers
-sudo apt install librdkit-dev librdkit1 libboost-dev
+# Clone and build VIAMD (molecule builder enabled by default)
+mkdir build && cd build
+cmake .. -DVIAMD_ENABLE_BUILDER=ON
+make -j$(nproc)
+```
 
-# Optional: Install additional RDKit components
-sudo apt install rdkit-data rdkit-doc
+### Disabling Molecule Builder
+```bash
+# Build without molecule builder if not needed
+cmake .. -DVIAMD_ENABLE_BUILDER=OFF
+```
+
+## Legacy RDKit Support (Removed)
+
+**Note:** Previous versions of VIAMD used RDKit for molecule building. This has been replaced with a lightweight implementation that:
+- Removes the need for external RDKit installation
+- Reduces build complexity and dependencies
+- Provides faster build times
+- Supports the most common SMILES patterns used in molecular visualization
+
+The following installation instructions are no longer needed:
+
+### ~~Ubuntu/Debian Installation~~ (No longer required)
+```bash
+# These are no longer needed:
+# sudo apt install librdkit-dev librdkit1 libboost-dev
+# sudo apt install rdkit-data rdkit-doc
 ```
 
 ### Fedora/CentOS Installation
