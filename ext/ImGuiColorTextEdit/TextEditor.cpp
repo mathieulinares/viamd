@@ -55,9 +55,14 @@ TextEditor::TextEditor()
 	, mErrorMarkers()
 	, mStartTime(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
 	, mLastClick(-1.0f)
+	, mAutoCompleteShown(false)
+	, mAutoCompleteSelectedIndex(0)
+	, mAutoCompleteMaxItems(10)
+	, mAutoCompletePrefix("")
 {
 	SetPalette(GetDarkPalette());
 	SetLanguageDefinition(LanguageDefinition::VIAMD());
+	BuildCompletionItems();
 	mLines.push_back(Line());
 }
 
@@ -801,6 +806,34 @@ void TextEditor::HandleKeyboardInputs()
 		else if (!IsReadOnly() && !alt && !ctrl && !super && ImGui::IsKeyPressed(ImGuiKey_Tab))
 			InsertText("    ");
 
+		// Autocomplete handling
+		if (mAutoCompleteShown)
+		{
+			if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+			{
+				ShowAutoComplete(false);
+			}
+			else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+			{
+				mAutoCompleteSelectedIndex = std::max(0, mAutoCompleteSelectedIndex - 1);
+			}
+			else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+			{
+				mAutoCompleteSelectedIndex = std::min((int)mFilteredCompletionItems.size() - 1, mAutoCompleteSelectedIndex + 1);
+			}
+			else if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Tab))
+			{
+				if (mAutoCompleteSelectedIndex >= 0 && mAutoCompleteSelectedIndex < (int)mFilteredCompletionItems.size())
+				{
+					InsertCompletion(mFilteredCompletionItems[mAutoCompleteSelectedIndex]);
+				}
+			}
+		}
+		else if (isCtrlOnly && ImGui::IsKeyPressed(ImGuiKey_Space))
+		{
+			TriggerAutoComplete();
+		}
+
 		if (!IsReadOnly() && !io.InputQueueCharacters.empty() && !ctrl && !super)
 		{
 			for (int i = 0; i < io.InputQueueCharacters.Size; i++)
@@ -1261,6 +1294,9 @@ void TextEditor::Render(const char* aTitle, const ImVec2& aSize, bool aBorder)
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor();
 
+	// Render autocomplete popup after the main editor
+	RenderAutoComplete();
+
 	mWithinRender = false;
 }
 
@@ -1493,6 +1529,18 @@ void TextEditor::EnterCharacter(ImWchar aChar, bool aShift)
 
 	Colorize(coord.mLine - 1, 3);
 	EnsureCursorVisible();
+	
+	// Update autocomplete if shown
+	if (mAutoCompleteShown)
+	{
+		UpdateAutoComplete();
+		// Hide autocomplete if we're at beginning of line or after whitespace
+		if (mFilteredCompletionItems.empty() || 
+			(aChar == ' ' || aChar == '\t' || aChar == '\n' || aChar == '\r'))
+		{
+			ShowAutoComplete(false);
+		}
+	}
 }
 
 void TextEditor::SetReadOnly(bool aValue)
@@ -2025,6 +2073,16 @@ void TextEditor::Backspace()
 
 	u.mAfter = mState;
 	AddUndo(u);
+	
+	// Update autocomplete if shown
+	if (mAutoCompleteShown)
+	{
+		UpdateAutoComplete();
+		if (mFilteredCompletionItems.empty())
+		{
+			ShowAutoComplete(false);
+		}
+	}
 }
 
 void TextEditor::SelectWordUnderCursor()
@@ -3564,4 +3622,209 @@ const TextEditor::LanguageDefinition& TextEditor::LanguageDefinition::Lua()
 		inited = true;
 	}
 	return langDef;
+}
+
+// Autocomplete Implementation
+
+void TextEditor::ShowAutoComplete(bool aShow)
+{
+	mAutoCompleteShown = aShow;
+	if (aShow)
+	{
+		mAutoCompleteSelectedIndex = 0;
+		UpdateAutoComplete();
+	}
+}
+
+void TextEditor::TriggerAutoComplete()
+{
+	if (!mAutoCompleteShown)
+	{
+		mAutoCompleteStart = GetCursorPosition();
+		mAutoCompletePrefix = GetCurrentWord();
+		ShowAutoComplete(true);
+	}
+}
+
+void TextEditor::UpdateAutoComplete()
+{
+	if (!mAutoCompleteShown)
+		return;
+
+	std::string currentWord = GetCurrentWord();
+	if (currentWord != mAutoCompletePrefix)
+	{
+		mAutoCompletePrefix = currentWord;
+		FilterCompletions(mAutoCompletePrefix);
+	}
+}
+
+void TextEditor::FilterCompletions(const std::string& aPrefix)
+{
+	mFilteredCompletionItems.clear();
+	
+	std::string lowerPrefix = aPrefix;
+	std::transform(lowerPrefix.begin(), lowerPrefix.end(), lowerPrefix.begin(), ::tolower);
+	
+	for (const auto& item : mCompletionItems)
+	{
+		std::string lowerText = item.mText;
+		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::tolower);
+		
+		if (lowerText.find(lowerPrefix) == 0) // Starts with prefix
+		{
+			mFilteredCompletionItems.push_back(item);
+		}
+	}
+	
+	// Sort by relevance (exact match first, then alphabetical)
+	std::sort(mFilteredCompletionItems.begin(), mFilteredCompletionItems.end(),
+		[&lowerPrefix](const CompletionItem& a, const CompletionItem& b) {
+			std::string lowerA = a.mText;
+			std::string lowerB = b.mText;
+			std::transform(lowerA.begin(), lowerA.end(), lowerA.begin(), ::tolower);
+			std::transform(lowerB.begin(), lowerB.end(), lowerB.begin(), ::tolower);
+			
+			bool aExact = (lowerA == lowerPrefix);
+			bool bExact = (lowerB == lowerPrefix);
+			
+			if (aExact && !bExact) return true;
+			if (!aExact && bExact) return false;
+			
+			return lowerA < lowerB;
+		});
+	
+	// Clamp selected index
+	if (mAutoCompleteSelectedIndex >= (int)mFilteredCompletionItems.size())
+		mAutoCompleteSelectedIndex = std::max(0, (int)mFilteredCompletionItems.size() - 1);
+}
+
+void TextEditor::InsertCompletion(const CompletionItem& aItem)
+{
+	if (mAutoCompletePrefix.empty())
+	{
+		InsertText(aItem.mText);
+	}
+	else
+	{
+		// Replace the current word with the completion
+		Coordinates wordStart = FindWordStart(GetCursorPosition());
+		Coordinates wordEnd = GetCursorPosition();
+		
+		// Select the current word and replace it
+		SetSelection(wordStart, wordEnd);
+		InsertText(aItem.mText);
+	}
+	
+	ShowAutoComplete(false);
+}
+
+std::string TextEditor::GetCurrentWord() const
+{
+	Coordinates cursor = GetCursorPosition();
+	Coordinates wordStart = FindWordStart(cursor);
+	return GetText(wordStart, cursor);
+}
+
+void TextEditor::BuildCompletionItems()
+{
+	mCompletionItems.clear();
+	
+	// Add keywords
+	for (const auto& keyword : mLanguageDefinition.mKeywords)
+	{
+		mCompletionItems.emplace_back(keyword, "keyword", "", PaletteIndex::Keyword);
+	}
+	
+	// Add identifiers (built-in functions)
+	for (const auto& identifier : mLanguageDefinition.mIdentifiers)
+	{
+		mCompletionItems.emplace_back(identifier.first, identifier.second.mDeclaration, "", PaletteIndex::KnownIdentifier);
+	}
+}
+
+void TextEditor::RenderAutoComplete()
+{
+	if (!mAutoCompleteShown || mFilteredCompletionItems.empty())
+		return;
+
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 6));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 2));
+	ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+
+	// Calculate position for autocomplete window
+	ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
+	Coordinates cursor = GetCursorPosition();
+	
+	// Estimate cursor position in pixels
+	float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+	float charWidth = ImGui::CalcTextSize("M").x; // Use monospace character width estimate
+	
+	ImVec2 autoCompletePos;
+	autoCompletePos.x = cursorScreenPos.x + mTextStart + (cursor.mColumn * charWidth);
+	autoCompletePos.y = cursorScreenPos.y + ((cursor.mLine + 1) * lineHeight);
+
+	ImGui::SetNextWindowPos(autoCompletePos);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(200, 50), ImVec2(400, 300));
+
+	if (ImGui::Begin("##AutoComplete", nullptr, 
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
+		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+		ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		int displayCount = std::min(mAutoCompleteMaxItems, (int)mFilteredCompletionItems.size());
+		
+		for (int i = 0; i < displayCount; ++i)
+		{
+			const auto& item = mFilteredCompletionItems[i];
+			bool isSelected = (i == mAutoCompleteSelectedIndex);
+			
+			if (isSelected)
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
+			
+			// Color code by type
+			ImVec4 iconColor;
+			const char* icon;
+			if (item.mKind == PaletteIndex::Keyword)
+			{
+				iconColor = ImVec4(0.8f, 0.4f, 0.8f, 1.0f);
+				icon = "K";
+			}
+			else
+			{
+				iconColor = ImVec4(0.4f, 0.8f, 0.4f, 1.0f);
+				icon = "F";
+			}
+			
+			ImGui::PushStyleColor(ImGuiCol_Text, iconColor);
+			ImGui::Text("[%s]", icon);
+			ImGui::PopStyleColor();
+			
+			ImGui::SameLine();
+			ImGui::Text("%s", item.mText.c_str());
+			
+			if (!item.mDetail.empty())
+			{
+				ImGui::SameLine();
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+				ImGui::Text(" - %s", item.mDetail.c_str());
+				ImGui::PopStyleColor();
+			}
+			
+			if (isSelected)
+				ImGui::PopStyleColor();
+		}
+		
+		if (displayCount < (int)mFilteredCompletionItems.size())
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+			ImGui::Text("... and %d more", (int)mFilteredCompletionItems.size() - displayCount);
+			ImGui::PopStyleColor();
+		}
+	}
+	ImGui::End();
+
+	ImGui::PopStyleColor(2);
+	ImGui::PopStyleVar(2);
 }
