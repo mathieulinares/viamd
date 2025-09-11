@@ -209,9 +209,9 @@ struct MoleculeBuilder : viamd::EventHandler {
             const auto& atom = lightweight_mol.atoms[i];
 
             // Position (convert from Angstrom to nanometers)
-            built_molecule.mol.atom.x[i] = atom.x * 0.1f;
-            built_molecule.mol.atom.y[i] = atom.y * 0.1f;
-            built_molecule.mol.atom.z[i] = atom.z * 0.1f;
+            built_molecule.mol.atom.x[i] = atom.x;
+            built_molecule.mol.atom.y[i] = atom.y;
+            built_molecule.mol.atom.z[i] = atom.z;
 
             // Element
             built_molecule.mol.atom.element[i] = (uint8_t)atom.element;
@@ -292,6 +292,8 @@ struct MoleculeBuilder : viamd::EventHandler {
         
         // Copy the built molecule to the app state
         app_state->mold.mol = built_molecule.mol;
+
+        app_state->mold.gl_mol = md_gl_mol_create(&app_state->mold.mol);
         
         // Transfer ownership by clearing our copy without freeing
         built_molecule.mol = {};

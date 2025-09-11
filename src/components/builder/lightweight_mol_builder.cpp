@@ -270,9 +270,9 @@ int MoleculeBuilder::get_default_valence(int atomic_num) {
 void MoleculeBuilder::add_hydrogens(Molecule& mol) {
     int initial_atom_count = mol.atoms.size();
     
+    auto& atoms = mol.atoms;
     for (int i = 0; i < initial_atom_count; ++i) {
-        Atom& atom = mol.atoms[i];
-        int missing_bonds = atom.valence - atom.bonds_count;
+        int missing_bonds = atoms[i].valence - atoms[i].bonds_count;
         
         // Add hydrogens for missing bonds
         for (int h = 0; h < missing_bonds; ++h) {
@@ -295,9 +295,9 @@ void MoleculeBuilder::add_hydrogens(Molecule& mol) {
             mol.bonds.push_back(bond);
             
             // Update connectivity
-            atom.neighbors.push_back(h_idx);
+            atoms[i].neighbors.push_back(h_idx);
             mol.atoms[h_idx].neighbors.push_back(i);
-            atom.bonds_count++;
+            atoms[i].bonds_count++;
         }
     }
 }
