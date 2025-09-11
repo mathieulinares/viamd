@@ -7870,8 +7870,8 @@ static void init_molecule_data(ApplicationState* data) {
         std::vector<std::string> resnames;
         std::set<std::string> unique_resnames;
         for (size_t i = 0; i < data->mold.mol.residue.count; ++i) {
-            str_t resname = data->mold.mol.residue.name[i];
-            std::string resname_str(resname.ptr, resname.len);
+            md_label_t resname = data->mold.mol.residue.name[i];
+            std::string resname_str(resname.buf, resname.len);
             if (unique_resnames.insert(resname_str).second) {
                 resnames.push_back(resname_str);
             }
@@ -7881,10 +7881,10 @@ static void init_molecule_data(ApplicationState* data) {
         std::vector<std::string> atomTypes;
         std::set<std::string> unique_atom_types;
         for (size_t i = 0; i < data->mold.mol.atom.count; ++i) {
-            str_t atom_name = data->mold.mol.atom.name[i];
-            std::string atom_name_str(atom_name.ptr, atom_name.len);
-            if (unique_atom_types.insert(atom_name_str).second) {
-                atomTypes.push_back(atom_name_str);
+            md_label_t atom_type = data->mold.mol.atom.type[i];
+            std::string atom_type_str(atom_type.buf, atom_type.len);
+            if (unique_atom_types.insert(atom_type_str).second) {
+                atomTypes.push_back(atom_type_str);
             }
         }
         
@@ -7892,8 +7892,9 @@ static void init_molecule_data(ApplicationState* data) {
         std::vector<std::string> elements;
         std::set<std::string> unique_elements;
         for (size_t i = 0; i < data->mold.mol.atom.count; ++i) {
-            str_t element = data->mold.mol.atom.element[i];
-            std::string element_str(element.ptr, element.len);
+            md_element_t element_type = data->mold.mol.atom.element[i];
+            str_t element_symbol = md_util_element_symbol(element_type);
+            std::string element_str(element_symbol.ptr, element_symbol.len);
             if (unique_elements.insert(element_str).second) {
                 elements.push_back(element_str);
             }
