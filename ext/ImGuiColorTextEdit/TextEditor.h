@@ -319,6 +319,9 @@ public:
 	const CompletionItems& GetCompletionItems() const { return mCompletionItems; }
 	void SetAutoCompleteMaxItems(int aMaxItems) { mAutoCompleteMaxItems = aMaxItems; }
 	int GetAutoCompleteMaxItems() const { return mAutoCompleteMaxItems; }
+	void RefreshCompletionsWithDataset(const std::vector<std::string>& resnames, 
+	                                   const std::vector<std::string>& atomTypes,
+	                                   const std::vector<std::string>& elements);
 
 	static const Palette& GetDarkPalette();
 	static const Palette& GetLightPalette();
@@ -414,6 +417,9 @@ private:
 	void InsertCompletion(const CompletionItem& aItem);
 	std::string GetCurrentWord() const;
 	void BuildCompletionItems();
+	void AddDynamicCompletionItems(const std::vector<std::string>& resnames, 
+	                               const std::vector<std::string>& atomTypes,
+	                               const std::vector<std::string>& elements);
 
 	float mLineSpacing;
 	Lines mLines;

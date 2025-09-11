@@ -833,6 +833,11 @@ void TextEditor::HandleKeyboardInputs()
 		{
 			TriggerAutoComplete();
 		}
+		// Also try alternative key detection as backup
+		else if (ctrl && !alt && !shift && !super && ImGui::IsKeyPressed(ImGuiKey_Space))
+		{
+			TriggerAutoComplete();
+		}
 
 		if (!IsReadOnly() && !io.InputQueueCharacters.empty() && !ctrl && !super)
 		{
@@ -1539,6 +1544,16 @@ void TextEditor::EnterCharacter(ImWchar aChar, bool aShift)
 			(aChar == ' ' || aChar == '\t' || aChar == '\n' || aChar == '\r'))
 		{
 			ShowAutoComplete(false);
+		}
+	}
+	// Auto-trigger autocomplete when typing letters (but not if we just finished a word)
+	else if (!mAutoCompleteShown && (isalpha(aChar) || aChar == '_'))
+	{
+		std::string currentWord = GetCurrentWord();
+		// Only trigger if we have typed at least 2 characters
+		if (currentWord.length() >= 2)
+		{
+			TriggerAutoComplete();
 		}
 	}
 }
@@ -3638,6 +3653,11 @@ void TextEditor::ShowAutoComplete(bool aShow)
 
 void TextEditor::TriggerAutoComplete()
 {
+	// Make sure we have completion items
+	if (mCompletionItems.empty()) {
+		BuildCompletionItems();
+	}
+	
 	if (!mAutoCompleteShown)
 	{
 		mAutoCompleteStart = GetCursorPosition();
@@ -3671,7 +3691,8 @@ void TextEditor::FilterCompletions(const std::string& aPrefix)
 		std::string lowerText = item.mText;
 		std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::tolower);
 		
-		if (lowerText.find(lowerPrefix) == 0) // Starts with prefix
+		// If prefix is empty, show all items, otherwise filter by prefix
+		if (lowerPrefix.empty() || lowerText.find(lowerPrefix) == 0) // Starts with prefix
 		{
 			mFilteredCompletionItems.push_back(item);
 		}
@@ -3743,6 +3764,40 @@ void TextEditor::BuildCompletionItems()
 	}
 }
 
+void TextEditor::AddDynamicCompletionItems(const std::vector<std::string>& resnames, 
+                                           const std::vector<std::string>& atomTypes,
+                                           const std::vector<std::string>& elements)
+{
+	// Add residue names
+	for (const auto& resname : resnames)
+	{
+		mCompletionItems.emplace_back(resname, "residue name", "Dataset residue name", PaletteIndex::String);
+	}
+	
+	// Add atom types
+	for (const auto& atomType : atomTypes)
+	{
+		mCompletionItems.emplace_back(atomType, "atom type", "Dataset atom type", PaletteIndex::String);
+	}
+	
+	// Add chemical elements
+	for (const auto& element : elements)
+	{
+		mCompletionItems.emplace_back(element, "element", "Chemical element from dataset", PaletteIndex::String);
+	}
+}
+
+void TextEditor::RefreshCompletionsWithDataset(const std::vector<std::string>& resnames, 
+                                               const std::vector<std::string>& atomTypes,
+                                               const std::vector<std::string>& elements)
+{
+	// Rebuild base completion items (keywords and built-in functions)
+	BuildCompletionItems();
+	
+	// Add dynamic dataset-based completions
+	AddDynamicCompletionItems(resnames, atomTypes, elements);
+}
+
 void TextEditor::RenderAutoComplete()
 {
 	if (!mAutoCompleteShown || mFilteredCompletionItems.empty())
@@ -3790,6 +3845,11 @@ void TextEditor::RenderAutoComplete()
 			{
 				iconColor = ImVec4(0.8f, 0.4f, 0.8f, 1.0f);
 				icon = "K";
+			}
+			else if (item.mKind == PaletteIndex::String)
+			{
+				iconColor = ImVec4(0.4f, 0.8f, 0.8f, 1.0f);
+				icon = "D";  // D for Dataset
 			}
 			else
 			{
