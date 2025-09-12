@@ -1,0 +1,142 @@
+#version 450
+
+// Depth of Field (DOF) Compute Shader using Circle of Confusion
+// Agent C Task 3.5: Post-processing effects implementation
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_input_texture;
+layout(set = 0, binding = 1) uniform sampler2D u_depth_texture;
+layout(set = 0, binding = 2, rgba8) uniform writeonly image2D u_output_image;
+
+layout(set = 0, binding = 3) uniform DOFParams {
+    vec2 screen_size;
+    vec2 inv_screen_size;
+    float focus_distance;      // Distance to focus plane
+    float aperture;            // f-stop (lower = more blur)
+    float focal_length;        // Camera focal length in mm
+    float max_blur_size;       // Maximum blur radius in pixels
+    float near_plane;
+    float far_plane;
+    mat4 inv_projection_matrix;
+} u_params;
+
+float linear_depth(float depth) {
+    float z = depth * 2.0 - 1.0; // Back to NDC 
+    return (2.0 * u_params.near_plane * u_params.far_plane) / 
+           (u_params.far_plane + u_params.near_plane - z * (u_params.far_plane - u_params.near_plane));
+}
+
+float calculate_circle_of_confusion(float depth) {
+    float linear_d = linear_depth(depth);
+    
+    // Circle of confusion based on thin lens equation
+    float coc = abs(u_params.aperture * (u_params.focal_length * (linear_d - u_params.focus_distance)) / 
+                   (linear_d * (u_params.focus_distance - u_params.focal_length)));
+    
+    // Convert to screen space and clamp
+    coc = min(coc * u_params.screen_size.y / 1000.0, u_params.max_blur_size);
+    
+    return coc;
+}
+
+// Disk blur sampling pattern
+const vec2 disk_samples[16] = vec2[](
+    vec2(-0.326, -0.406),
+    vec2(-0.840, -0.074),
+    vec2(-0.696,  0.457),
+    vec2(-0.203,  0.621),
+    vec2( 0.962, -0.195),
+    vec2( 0.473, -0.480),
+    vec2( 0.519,  0.767),
+    vec2( 0.185, -0.893),
+    vec2( 0.507,  0.064),
+    vec2( 0.896,  0.412),
+    vec2(-0.322, -0.933),
+    vec2(-0.792, -0.598),
+    vec2(-0.177,  0.972),
+    vec2( 0.063, -0.457),
+    vec2(-0.412,  0.306),
+    vec2( 0.750, -0.732)
+);
+
+vec3 depth_of_field_blur(vec2 uv) {
+    float center_depth = texture(u_depth_texture, uv).r;
+    float center_coc = calculate_circle_of_confusion(center_depth);
+    
+    // If center pixel has no blur, return original color
+    if (center_coc < 0.5) {
+        return texture(u_input_texture, uv).rgb;
+    }
+    
+    vec3 color_sum = vec3(0.0);
+    float weight_sum = 0.0;
+    
+    // Sample in a disk pattern
+    for (int i = 0; i < 16; ++i) {
+        vec2 offset = disk_samples[i] * center_coc * u_params.inv_screen_size;
+        vec2 sample_uv = uv + offset;
+        
+        // Skip samples outside screen
+        if (sample_uv.x < 0.0 || sample_uv.x > 1.0 || sample_uv.y < 0.0 || sample_uv.y > 1.0) {
+            continue;
+        }
+        
+        float sample_depth = texture(u_depth_texture, sample_uv).r;
+        float sample_coc = calculate_circle_of_confusion(sample_depth);
+        vec3 sample_color = texture(u_input_texture, sample_uv).rgb;
+        
+        // Weight based on circle of confusion overlap
+        float weight = 1.0;
+        
+        // If sample is closer and has larger CoC, it should contribute more
+        if (sample_depth < center_depth) {
+            weight = clamp(sample_coc - length(offset) * u_params.screen_size.y, 0.0, 1.0);
+        }
+        
+        color_sum += sample_color * weight;
+        weight_sum += weight;
+    }
+    
+    // Include center sample
+    color_sum += texture(u_input_texture, uv).rgb;
+    weight_sum += 1.0;
+    
+    return color_sum / weight_sum;
+}
+
+// Separable Gaussian blur implementation for better performance
+vec3 gaussian_blur_horizontal(vec2 uv, float blur_radius) {
+    vec3 color = vec3(0.0);
+    float total_weight = 0.0;
+    
+    // Gaussian weights for 9-tap filter
+    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    
+    for (int i = -4; i <= 4; ++i) {
+        vec2 offset = vec2(float(i) * blur_radius * u_params.inv_screen_size.x, 0.0);
+        vec2 sample_uv = uv + offset;
+        
+        if (sample_uv.x >= 0.0 && sample_uv.x <= 1.0) {
+            float weight = weights[abs(i)];
+            color += texture(u_input_texture, sample_uv).rgb * weight;
+            total_weight += weight;
+        }
+    }
+    
+    return color / total_weight;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(u_params.screen_size.x) || coord.y >= int(u_params.screen_size.y)) {
+        return;
+    }
+    
+    vec2 uv = vec2(coord) * u_params.inv_screen_size;
+    
+    // Apply depth of field blur
+    vec3 blurred_color = depth_of_field_blur(uv);
+    
+    imageStore(u_output_image, coord, vec4(blurred_color, 1.0));
+}

@@ -1,0 +1,125 @@
+#version 450
+
+// SSAO (Screen Space Ambient Occlusion) Compute Shader
+// Agent C Task 3.5: Post-processing effects implementation
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_depth_texture;
+layout(set = 0, binding = 1) uniform sampler2D u_normal_texture;
+layout(set = 0, binding = 2) uniform sampler2D u_noise_texture;
+layout(set = 0, binding = 3, r16f) uniform writeonly image2D u_output_image;
+
+layout(set = 0, binding = 4) uniform SSAOParams {
+    mat4 projection_matrix;
+    mat4 inv_projection_matrix;
+    vec2 screen_size;
+    vec2 inv_screen_size;
+    
+    float radius;
+    float bias;
+    float intensity;
+    int sample_count;
+    
+    vec3 samples[64];  // Maximum 64 samples
+} u_params;
+
+// Random sample kernel
+const vec3 sample_kernel[16] = vec3[](
+    vec3(0.5381, 0.1856, -0.4319),
+    vec3(0.1379, 0.2486, 0.4430),
+    vec3(0.3371, 0.5679, -0.0057),
+    vec3(-0.6999, -0.0451, -0.0019),
+    vec3(0.0689, -0.1598, -0.8547),
+    vec3(0.0560, 0.0069, -0.1843),
+    vec3(-0.0146, 0.1402, 0.0762),
+    vec3(0.0100, -0.1924, -0.0344),
+    vec3(-0.3577, -0.5301, -0.4358),
+    vec3(-0.3169, 0.1063, 0.0158),
+    vec3(0.0103, -0.5869, 0.0046),
+    vec3(-0.0897, -0.4940, 0.3287),
+    vec3(0.7119, -0.0154, -0.0918),
+    vec3(-0.0533, 0.0596, -0.5411),
+    vec3(0.0352, -0.0631, 0.5460),
+    vec3(-0.4776, 0.2847, -0.0271)
+);
+
+vec3 reconstruct_position(vec2 uv, float depth) {
+    vec4 clip_space = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 view_space = u_params.inv_projection_matrix * clip_space;
+    return view_space.xyz / view_space.w;
+}
+
+vec3 get_normal(vec2 uv) {
+    vec3 normal = texture(u_normal_texture, uv).xyz;
+    return normalize(normal * 2.0 - 1.0);
+}
+
+float get_depth(vec2 uv) {
+    return texture(u_depth_texture, uv).r;
+}
+
+vec3 get_noise(vec2 uv) {
+    vec2 noise_scale = u_params.screen_size / textureSize(u_noise_texture, 0);
+    return texture(u_noise_texture, uv * noise_scale).xyz;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= int(u_params.screen_size.x) || coord.y >= int(u_params.screen_size.y)) {
+        return;
+    }
+    
+    vec2 uv = vec2(coord) * u_params.inv_screen_size;
+    
+    // Get depth and skip background pixels
+    float depth = get_depth(uv);
+    if (depth >= 1.0) {
+        imageStore(u_output_image, coord, vec4(1.0));
+        return;
+    }
+    
+    // Reconstruct view space position
+    vec3 position = reconstruct_position(uv, depth);
+    vec3 normal = get_normal(uv);
+    
+    // Get noise vector for sample rotation
+    vec3 noise = get_noise(uv);
+    
+    // Create TBN matrix for sample rotation
+    vec3 tangent = normalize(noise - normal * dot(noise, normal));
+    vec3 bitangent = cross(normal, tangent);
+    mat3 tbn = mat3(tangent, bitangent, normal);
+    
+    float occlusion = 0.0;
+    int samples_to_use = min(u_params.sample_count, 16);
+    
+    for (int i = 0; i < samples_to_use; ++i) {
+        // Get sample position in view space
+        vec3 sample_pos = tbn * sample_kernel[i];
+        sample_pos = position + sample_pos * u_params.radius;
+        
+        // Project sample to screen space
+        vec4 offset = u_params.projection_matrix * vec4(sample_pos, 1.0);
+        offset.xyz /= offset.w;
+        offset.xy = offset.xy * 0.5 + 0.5;
+        
+        // Skip samples outside screen
+        if (offset.x < 0.0 || offset.x > 1.0 || offset.y < 0.0 || offset.y > 1.0) {
+            continue;
+        }
+        
+        // Get sample depth
+        float sample_depth = get_depth(offset.xy);
+        vec3 sample_position = reconstruct_position(offset.xy, sample_depth);
+        
+        // Range check & accumulate occlusion
+        float range_check = smoothstep(0.0, 1.0, u_params.radius / abs(position.z - sample_position.z));
+        occlusion += (sample_position.z >= sample_pos.z + u_params.bias ? 1.0 : 0.0) * range_check;
+    }
+    
+    occlusion = 1.0 - (occlusion / float(samples_to_use));
+    occlusion = pow(occlusion, u_params.intensity);
+    
+    imageStore(u_output_image, coord, vec4(occlusion));
+}

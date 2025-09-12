@@ -156,7 +156,12 @@ set(SHADER_FILES
     src/shaders/volume/raycaster.comp
     src/shaders/volume/entry_exit.vert
     src/shaders/volume/entry_exit.frag
-) 
+    
+    # Vulkan-specific post-processing shaders
+    src/shaders/postprocess/ssao.comp
+    src/shaders/postprocess/dof.comp
+    src/shaders/postprocess/fxaa.comp
+    
     src/shaders/highlight.frag
     src/shaders/scale_hsv.frag
     src/shaders/compose_deferred.frag
