@@ -231,37 +231,9 @@ struct Correlation : viamd::EventHandler {
             
             const int num_props = (int)md_array_size(app_state->display_properties);
             
-            // Menu bar with Properties menu
+            // Show instructions to drag from main Properties menu
             if (ImGui::BeginMenuBar()) {
-                if (ImGui::BeginMenu("Properties")) {
-                    
-                    // Count temporal properties
-                    int num_temporal_props = 0;
-                    for (int i = 0; i < num_props; ++i) {
-                        if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
-                            num_temporal_props++;
-                        }
-                    }
-                    
-                    if (num_temporal_props > 0) {
-                        for (int i = 0; i < num_props; ++i) {
-                            if (get_display_property_type_by_index(app_state, i) != DisplayPropertyType_Temporal) continue;
-                            
-                            // Use helper functions to access fields safely
-                            ImGui::Selectable(get_display_property_label_by_index(app_state, i));
-                            
-                            if (ImGui::BeginDragDropSource()) {
-                                DisplayPropertyDragDropPayload payload = {i};
-                                ImGui::SetDragDropPayload("CORRELATION_DND", &payload, sizeof(payload));
-                                ImGui::TextUnformatted(get_display_property_label_by_index(app_state, i));
-                                ImGui::EndDragDropSource();
-                            }
-                        }
-                    } else {
-                        ImGui::Text("No temporal properties available");
-                    }
-                    ImGui::EndMenu();
-                }
+                ImGui::Text("Drag temporal properties from main Properties menu to X and Y drop zones");
                 ImGui::EndMenuBar();
             }
             
@@ -272,9 +244,29 @@ struct Correlation : viamd::EventHandler {
             ImVec2 avail = ImGui::GetContentRegionAvail();
             float y_drop_width = 120.0f;
             float x_drop_height = 60.0f;
+            float clear_button_width = 80.0f;
             
             // Y-axis drop target on the left
             ImGui::BeginChild("YAxisDrop", ImVec2(y_drop_width, avail.y - x_drop_height), true);
+            
+            // Check if we're being hovered by a drag operation
+            bool is_hovered_by_drag = false;
+            if (const ImGuiPayload* payload = ImGui::GetDragDropPayload()) {
+                if (payload->IsDataType("TEMPORAL_DND")) {
+                    ImVec2 mouse_pos = ImGui::GetMousePos();
+                    ImVec2 window_pos = ImGui::GetWindowPos();
+                    ImVec2 window_size = ImGui::GetWindowSize();
+                    if (mouse_pos.x >= window_pos.x && mouse_pos.x <= window_pos.x + window_size.x &&
+                        mouse_pos.y >= window_pos.y && mouse_pos.y <= window_pos.y + window_size.y) {
+                        is_hovered_by_drag = true;
+                    }
+                }
+            }
+            
+            if (is_hovered_by_drag) {
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.6f, 0.3f, 0.3f));
+            }
+            
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
             
             // Rotate text for Y-axis
@@ -297,8 +289,12 @@ struct Correlation : viamd::EventHandler {
             
             ImGui::PopStyleColor();
             
+            if (is_hovered_by_drag) {
+                ImGui::PopStyleColor(); // ChildBg
+            }
+            
             if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TEMPORAL_DND")) {
                     ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
                     DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
                     y_property_idx = dnd->prop_idx;
@@ -310,8 +306,27 @@ struct Correlation : viamd::EventHandler {
             
             ImGui::SameLine();
             
+            // Clear button to the left of the plot
+            ImGui::BeginChild("ClearButton", ImVec2(clear_button_width, avail.y - x_drop_height), false);
+            ImGui::SetCursorPosY(ImGui::GetContentRegionAvail().y * 0.5f - 15.0f);
+            if (ImGui::Button("Clear Plot", ImVec2(-1, 30))) {
+                x_property_idx = -1;
+                y_property_idx = -1;
+                // Clear series data
+                for (size_t i = 0; i < md_array_size(series); ++i) {
+                    md_array_free(series[i].x_data, arena);
+                    md_array_free(series[i].y_data, arena);
+                    md_array_free(series[i].frame_indices, arena);
+                }
+                md_array_resize(series, 0, arena);
+                error[0] = '\0';
+            }
+            ImGui::EndChild();
+            
+            ImGui::SameLine();
+            
             // Plot area in the center
-            ImGui::BeginChild("PlotArea", ImVec2(avail.x - y_drop_width, avail.y - x_drop_height), false);
+            ImGui::BeginChild("PlotArea", ImVec2(avail.x - y_drop_width - clear_button_width, avail.y - x_drop_height), false);
             
             // Always display the scatter plot if we have data
             if (x_property_idx >= 0 && y_property_idx >= 0 && md_array_size(series) > 0) {
@@ -402,14 +417,14 @@ struct Correlation : viamd::EventHandler {
                 // Show placeholder plot with instructions
                 if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
                     ImPlot::SetupAxes("X Property", "Y Property");
-                    ImPlot::PlotText("Drag properties from the menu\nto both X and Y axes", 0.5, 0.5);
+                    ImPlot::PlotText("Drag properties from main Properties menu\nto both X and Y drop zones", 0.5, 0.5);
                     ImPlot::EndPlot();
                 }
             } else {
                 // Show empty plot with instructions
                 if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
                     ImPlot::SetupAxes("X Property", "Y Property");
-                    ImPlot::PlotText("Drag temporal properties from the menu\nto X and Y axes to create correlation plot", 0.5, 0.5);
+                    ImPlot::PlotText("Drag temporal properties from main Properties menu\nto X and Y drop zones to create correlation plot", 0.5, 0.5);
                     ImPlot::EndPlot();
                 }
             }
@@ -417,7 +432,26 @@ struct Correlation : viamd::EventHandler {
             ImGui::EndChild();
             
             // X-axis drop target below the plot
-            ImGui::BeginChild("XAxisDrop", ImVec2(avail.x - y_drop_width, x_drop_height), true);
+            ImGui::SetCursorPosX(y_drop_width + clear_button_width);
+            ImGui::BeginChild("XAxisDrop", ImVec2(avail.x - y_drop_width - clear_button_width, x_drop_height), true);
+            
+            // Check if we're being hovered by a drag operation
+            bool x_is_hovered_by_drag = false;
+            if (const ImGuiPayload* payload = ImGui::GetDragDropPayload()) {
+                if (payload->IsDataType("TEMPORAL_DND")) {
+                    ImVec2 mouse_pos = ImGui::GetMousePos();
+                    ImVec2 window_pos = ImGui::GetWindowPos();
+                    ImVec2 window_size = ImGui::GetWindowSize();
+                    if (mouse_pos.x >= window_pos.x && mouse_pos.x <= window_pos.x + window_size.x &&
+                        mouse_pos.y >= window_pos.y && mouse_pos.y <= window_pos.y + window_size.y) {
+                        x_is_hovered_by_drag = true;
+                    }
+                }
+            }
+            
+            if (x_is_hovered_by_drag) {
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.6f, 0.3f, 0.3f));
+            }
             
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
             ImGui::Text("X-Axis");
@@ -441,8 +475,12 @@ struct Correlation : viamd::EventHandler {
             
             ImGui::PopStyleColor();
             
+            if (x_is_hovered_by_drag) {
+                ImGui::PopStyleColor(); // ChildBg
+            }
+            
             if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TEMPORAL_DND")) {
                     ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
                     DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
                     x_property_idx = dnd->prop_idx;
