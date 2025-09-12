@@ -25,10 +25,7 @@
 #define MEGABYTES(x) ((x) * 1024 * 1024)
 #endif
 
-struct DisplayPropertyDragDropPayload {
-    int prop_idx = 0;
-    int src_plot_idx = -1;
-};
+// Property selection buttons instead of drag-drop
 
 struct ScatterSeries {
     md_array(float) x_data = 0;
@@ -222,7 +219,7 @@ struct Correlation : viamd::EventHandler {
         
         ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
         
-        if (ImGui::Begin("Correlation Plot", &show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
+        if (ImGui::Begin("Correlation Plot", &show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
             if (!app_state) {
                 ImGui::Text("Application not initialized");
                 ImGui::End();
@@ -231,117 +228,72 @@ struct Correlation : viamd::EventHandler {
             
             const int num_props = (int)md_array_size(app_state->display_properties);
             
-            // Properties menu in menu bar
-            if (ImGui::BeginMenuBar()) {
-                if (ImGui::BeginMenu("Properties")) {
-                    // Count temporal properties first
-                    int num_temp_props = 0;
-                    for (int i = 0; i < num_props; ++i) {
-                        if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
-                            num_temp_props++;
-                        }
-                    }
-                    
-                    if (num_temp_props) {
-                        for (int i = 0; i < num_props; ++i) {
-                            if (get_display_property_type_by_index(app_state, i) != DisplayPropertyType_Temporal) continue;
-                            
-                            const char* label = get_display_property_label_by_index(app_state, i);
-                            ImVec4 color = get_display_property_color_by_index(app_state, i);
-                            
-                            ImPlot::ItemIcon(color);
-                            ImGui::SameLine();
-                            ImGui::Selectable(label);
-                            
-                            if (ImGui::BeginDragDropSource()) {
-                                DisplayPropertyDragDropPayload payload = {i};
-                                ImGui::SetDragDropPayload("TEMPORAL_DND", &payload, sizeof(payload));
-                                ImPlot::ItemIcon(color); 
-                                ImGui::SameLine();
-                                ImGui::TextUnformatted(label);
-                                ImGui::EndDragDropSource();
-                            }
-                        }
-                    } else {
-                        ImGui::Text("No temporal properties available, define and evaluate properties in the script editor");
-                    }
-                    ImGui::EndMenu();
-                }
-                ImGui::Text("Drag temporal properties from Properties menu to X and Y drop zones");
-                ImGui::EndMenuBar();
-            }
-            
-            // Plot area container
-            ImGui::BeginChild("PlotAreaContainer", ImVec2(-1, -1), false, ImGuiWindowFlags_NoScrollbar);
-            
             // Get available space for plot area
             ImVec2 plot_avail = ImGui::GetContentRegionAvail();
-            float y_drop_width = 120.0f;
-            float x_drop_height = 60.0f;
+            float y_button_width = 150.0f;
+            float x_button_height = 40.0f;
             float clear_button_width = 80.0f;
             
-            // Y-axis drop target on the left
-            ImGui::BeginChild("YAxisDrop", ImVec2(y_drop_width, plot_avail.y - x_drop_height), true);
+            // Y-axis property selection button on the left
+            ImGui::BeginChild("YAxisButton", ImVec2(y_button_width, plot_avail.y - x_button_height), false);
             
-            // Check if we're being hovered by a drag operation
-            bool is_hovered_by_drag = false;
-            if (const ImGuiPayload* payload = ImGui::GetDragDropPayload()) {
-                if (payload->IsDataType("TEMPORAL_DND")) {
-                    ImVec2 mouse_pos = ImGui::GetMousePos();
-                    ImVec2 window_pos = ImGui::GetWindowPos();
-                    ImVec2 window_size = ImGui::GetWindowSize();
-                    if (mouse_pos.x >= window_pos.x && mouse_pos.x <= window_pos.x + window_size.x &&
-                        mouse_pos.y >= window_pos.y && mouse_pos.y <= window_pos.y + window_size.y) {
-                        is_hovered_by_drag = true;
-                    }
-                }
-            }
+            ImGui::SetCursorPosY(ImGui::GetContentRegionAvail().y * 0.5f - 20.0f);
+            ImGui::Text("Y-Axis Property:");
             
-            if (is_hovered_by_drag) {
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.6f, 0.3f, 0.3f));
-            }
-            
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-            
-            // Rotate text for Y-axis
-            ImGui::SetCursorPosY(ImGui::GetContentRegionAvail().y * 0.5f - 50.0f);
-            ImGui::Text("Y-Axis");
-            
-            const char* y_label = y_property_idx >= 0 ? get_display_property_label_by_index(app_state, y_property_idx) : "Drop property here";
-            const char* y_unit = y_property_idx >= 0 ? get_display_property_unit_by_index(app_state, y_property_idx, 1) : "";
+            // Y-axis property selection button
+            const char* y_button_label = "Select Property";
+            char y_display_text[128] = "Select Property";
             
             if (y_property_idx >= 0) {
-                ImGui::TextWrapped("%s", y_label);
+                const char* y_label = get_display_property_label_by_index(app_state, y_property_idx);
+                const char* y_unit = get_display_property_unit_by_index(app_state, y_property_idx, 1);
                 if (strlen(y_unit) > 0) {
-                    ImGui::TextWrapped("(%s)", y_unit);
+                    snprintf(y_display_text, sizeof(y_display_text), "%s (%s)", y_label, y_unit);
+                } else {
+                    snprintf(y_display_text, sizeof(y_display_text), "%s", y_label);
                 }
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
-                ImGui::TextWrapped("%s", y_label);
-                ImGui::PopStyleColor();
             }
             
-            ImGui::PopStyleColor();
-            
-            if (is_hovered_by_drag) {
-                ImGui::PopStyleColor(); // ChildBg
+            if (ImGui::Button(y_display_text, ImVec2(-1, 0))) {
+                ImGui::OpenPopup("Y_Property_Selector");
             }
             
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TEMPORAL_DND")) {
-                    ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
-                    DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
-                    y_property_idx = dnd->prop_idx;
-                    update_scatter_data();
+            if (ImGui::BeginPopup("Y_Property_Selector")) {
+                ImGui::Text("Select Y-Axis Property:");
+                ImGui::Separator();
+                
+                bool has_temporal_props = false;
+                for (int i = 0; i < num_props; ++i) {
+                    if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
+                        has_temporal_props = true;
+                        const char* label = get_display_property_label_by_index(app_state, i);
+                        ImVec4 color = get_display_property_color_by_index(app_state, i);
+                        
+                        ImPlot::ItemIcon(color);
+                        ImGui::SameLine();
+                        
+                        if (ImGui::Selectable(label, y_property_idx == i)) {
+                            y_property_idx = i;
+                            update_scatter_data();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
                 }
-                ImGui::EndDragDropTarget();
+                
+                if (!has_temporal_props) {
+                    ImGui::Text("No temporal properties available.");
+                    ImGui::Text("Define and evaluate properties in the script editor.");
+                }
+                
+                ImGui::EndPopup();
             }
+            
             ImGui::EndChild();
             
             ImGui::SameLine();
             
             // Plot area in the center
-            ImGui::BeginChild("PlotArea", ImVec2(plot_avail.x - y_drop_width - clear_button_width, plot_avail.y - x_drop_height), false);
+            ImGui::BeginChild("PlotArea", ImVec2(plot_avail.x - y_button_width - clear_button_width, plot_avail.y - x_button_height), false);
             
             // Always display the scatter plot if we have data
             if (x_property_idx >= 0 && y_property_idx >= 0 && md_array_size(series) > 0) {
@@ -428,18 +380,11 @@ struct Correlation : viamd::EventHandler {
                     
                     ImPlot::EndPlot();
                 }
-            } else if (x_property_idx >= 0 || y_property_idx >= 0) {
-                // Show placeholder plot with instructions
-                if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
-                    ImPlot::SetupAxes("X Property", "Y Property");
-                    ImPlot::PlotText("Drag properties from Properties panel\nto both X and Y drop zones", 0.5, 0.5);
-                    ImPlot::EndPlot();
-                }
             } else {
                 // Show empty plot with instructions
                 if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
                     ImPlot::SetupAxes("X Property", "Y Property");
-                    ImPlot::PlotText("Drag temporal properties from Properties panel\nto X and Y drop zones to create correlation plot", 0.5, 0.5);
+                    ImPlot::PlotText("Select temporal properties using the property buttons\nto create correlation plot", 0.5, 0.5);
                     ImPlot::EndPlot();
                 }
             }
@@ -449,7 +394,7 @@ struct Correlation : viamd::EventHandler {
             ImGui::SameLine();
             
             // Clear button to the right of the plot
-            ImGui::BeginChild("ClearButton", ImVec2(clear_button_width, plot_avail.y - x_drop_height), false);
+            ImGui::BeginChild("ClearButton", ImVec2(clear_button_width, plot_avail.y - x_button_height), false);
             ImGui::SetCursorPosY(ImGui::GetContentRegionAvail().y * 0.5f - 15.0f);
             if (ImGui::Button("Clear Plot", ImVec2(-1, 30))) {
                 x_property_idx = -1;
@@ -465,66 +410,62 @@ struct Correlation : viamd::EventHandler {
             }
             ImGui::EndChild();
             
-            // X-axis drop target below the plot (spanning from Y-axis drop to clear button)
-            ImGui::SetCursorPosX(y_drop_width);
-            ImGui::BeginChild("XAxisDrop", ImVec2(plot_avail.x - y_drop_width - clear_button_width, x_drop_height), true);
+            // X-axis property selection button below the plot
+            ImGui::SetCursorPosX(y_button_width);
+            ImGui::BeginChild("XAxisButton", ImVec2(plot_avail.x - y_button_width - clear_button_width, x_button_height), false);
             
-            // Check if we're being hovered by a drag operation
-            bool x_is_hovered_by_drag = false;
-            if (const ImGuiPayload* payload = ImGui::GetDragDropPayload()) {
-                if (payload->IsDataType("TEMPORAL_DND")) {
-                    ImVec2 mouse_pos = ImGui::GetMousePos();
-                    ImVec2 window_pos = ImGui::GetWindowPos();
-                    ImVec2 window_size = ImGui::GetWindowSize();
-                    if (mouse_pos.x >= window_pos.x && mouse_pos.x <= window_pos.x + window_size.x &&
-                        mouse_pos.y >= window_pos.y && mouse_pos.y <= window_pos.y + window_size.y) {
-                        x_is_hovered_by_drag = true;
-                    }
-                }
-            }
+            ImGui::Text("X-Axis Property:");
+            ImGui::SameLine();
             
-            if (x_is_hovered_by_drag) {
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.3f, 0.6f, 0.3f, 0.3f));
-            }
-            
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-            ImGui::Text("X-Axis");
-            
-            const char* x_label = x_property_idx >= 0 ? get_display_property_label_by_index(app_state, x_property_idx) : "Drop property here";
-            const char* x_unit = x_property_idx >= 0 ? get_display_property_unit_by_index(app_state, x_property_idx, 0) : "";
+            // X-axis property selection button
+            const char* x_button_label = "Select Property";
+            char x_display_text[128] = "Select Property";
             
             if (x_property_idx >= 0) {
-                ImGui::SameLine();
-                ImGui::Text("%s", x_label);
+                const char* x_label = get_display_property_label_by_index(app_state, x_property_idx);
+                const char* x_unit = get_display_property_unit_by_index(app_state, x_property_idx, 0);
                 if (strlen(x_unit) > 0) {
-                    ImGui::SameLine();
-                    ImGui::Text("(%s)", x_unit);
+                    snprintf(x_display_text, sizeof(x_display_text), "%s (%s)", x_label, x_unit);
+                } else {
+                    snprintf(x_display_text, sizeof(x_display_text), "%s", x_label);
                 }
-            } else {
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
-                ImGui::Text("%s", x_label);
-                ImGui::PopStyleColor();
             }
             
-            ImGui::PopStyleColor();
-            
-            if (x_is_hovered_by_drag) {
-                ImGui::PopStyleColor(); // ChildBg
+            if (ImGui::Button(x_display_text, ImVec2(-1, 0))) {
+                ImGui::OpenPopup("X_Property_Selector");
             }
             
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TEMPORAL_DND")) {
-                    ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
-                    DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
-                    x_property_idx = dnd->prop_idx;
-                    update_scatter_data();
+            if (ImGui::BeginPopup("X_Property_Selector")) {
+                ImGui::Text("Select X-Axis Property:");
+                ImGui::Separator();
+                
+                bool has_temporal_props = false;
+                for (int i = 0; i < num_props; ++i) {
+                    if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
+                        has_temporal_props = true;
+                        const char* label = get_display_property_label_by_index(app_state, i);
+                        ImVec4 color = get_display_property_color_by_index(app_state, i);
+                        
+                        ImPlot::ItemIcon(color);
+                        ImGui::SameLine();
+                        
+                        if (ImGui::Selectable(label, x_property_idx == i)) {
+                            x_property_idx = i;
+                            update_scatter_data();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
                 }
-                ImGui::EndDragDropTarget();
+                
+                if (!has_temporal_props) {
+                    ImGui::Text("No temporal properties available.");
+                    ImGui::Text("Define and evaluate properties in the script editor.");
+                }
+                
+                ImGui::EndPopup();
             }
+            
             ImGui::EndChild();
-            
-            ImGui::EndChild(); // End PlotAreaContainer
             
             // Show error messages if any
             if (strlen(error) > 0) {
