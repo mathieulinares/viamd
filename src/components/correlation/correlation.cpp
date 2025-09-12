@@ -231,67 +231,47 @@ struct Correlation : viamd::EventHandler {
             
             const int num_props = (int)md_array_size(app_state->display_properties);
             
-            // Show instructions for properties
+            // Properties menu in menu bar
             if (ImGui::BeginMenuBar()) {
-                ImGui::Text("Drag temporal properties from Properties panel to X and Y drop zones");
+                if (ImGui::BeginMenu("Properties")) {
+                    // Count temporal properties first
+                    int num_temp_props = 0;
+                    for (int i = 0; i < num_props; ++i) {
+                        if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
+                            num_temp_props++;
+                        }
+                    }
+                    
+                    if (num_temp_props) {
+                        for (int i = 0; i < num_props; ++i) {
+                            if (get_display_property_type_by_index(app_state, i) != DisplayPropertyType_Temporal) continue;
+                            
+                            const char* label = get_display_property_label_by_index(app_state, i);
+                            ImVec4 color = get_display_property_color_by_index(app_state, i);
+                            
+                            ImPlot::ItemIcon(color);
+                            ImGui::SameLine();
+                            ImGui::Selectable(label);
+                            
+                            if (ImGui::BeginDragDropSource()) {
+                                DisplayPropertyDragDropPayload payload = {i};
+                                ImGui::SetDragDropPayload("TEMPORAL_DND", &payload, sizeof(payload));
+                                ImPlot::ItemIcon(color); 
+                                ImGui::SameLine();
+                                ImGui::TextUnformatted(label);
+                                ImGui::EndDragDropSource();
+                            }
+                        }
+                    } else {
+                        ImGui::Text("No temporal properties available, define and evaluate properties in the script editor");
+                    }
+                    ImGui::EndMenu();
+                }
+                ImGui::Text("Drag temporal properties from Properties menu to X and Y drop zones");
                 ImGui::EndMenuBar();
             }
             
-            // Create main layout: Properties panel on left, plot area on right
-            ImVec2 avail = ImGui::GetContentRegionAvail();
-            float properties_panel_width = 200.0f;
-            
-            // Properties panel on the left
-            ImGui::BeginChild("PropertiesPanel", ImVec2(properties_panel_width, -1), true);
-            ImGui::Text("Properties");
-            ImGui::Separator();
-            
-            // Count temporal properties first
-            int num_temp_props = 0;
-            for (int i = 0; i < num_props; ++i) {
-                if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
-                    num_temp_props++;
-                }
-            }
-            
-            if (num_temp_props) {
-                for (int i = 0; i < num_props; ++i) {
-                    if (get_display_property_type_by_index(app_state, i) != DisplayPropertyType_Temporal) continue;
-                    
-                    const char* label = get_display_property_label_by_index(app_state, i);
-                    ImVec4 color = get_display_property_color_by_index(app_state, i);
-                    
-                    // Use selectable for visual feedback
-                    ImGui::PushStyleColor(ImGuiCol_Header, color);
-                    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(color.x * 1.2f, color.y * 1.2f, color.z * 1.2f, color.w));
-                    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(color.x * 0.8f, color.y * 0.8f, color.z * 0.8f, color.w));
-                    
-                    bool selected = false;
-                    if (ImGui::Selectable(label, &selected)) {
-                        // Optional: could add selection behavior here
-                    }
-                    
-                    if (ImGui::BeginDragDropSource()) {
-                        DisplayPropertyDragDropPayload payload = {i};
-                        ImGui::SetDragDropPayload("TEMPORAL_DND", &payload, sizeof(payload));
-                        // Show color icon and label during drag
-                        ImGui::ColorButton("##color", color, ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
-                        ImGui::SameLine();
-                        ImGui::TextUnformatted(label);
-                        ImGui::EndDragDropSource();
-                    }
-                    
-                    ImGui::PopStyleColor(3);
-                }
-            } else {
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "No temporal properties available");
-            }
-            
-            ImGui::EndChild();
-            
-            ImGui::SameLine();
-            
-            // Plot area on the right
+            // Plot area container
             ImGui::BeginChild("PlotAreaContainer", ImVec2(-1, -1), false, ImGuiWindowFlags_NoScrollbar);
             
             // Get available space for plot area
