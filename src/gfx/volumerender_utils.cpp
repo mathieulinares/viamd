@@ -1,4 +1,5 @@
 #include "volumerender_utils.h"
+#include "vk_volume.h"
 
 #include <gfx/gl.h>
 #include <gfx/gl_utils.h>
@@ -13,6 +14,10 @@
 #include <implot.h>
 
 #include <shaders.inl>
+
+// Global state for backend management
+static volume::RenderBackend g_current_backend = volume::RenderBackend::OPENGL;
+static volume::VulkanVolumeRenderer* g_vulkan_renderer = nullptr;
 
 #define PUSH_GPU_SECTION(lbl)                                                                       \
     {                                                                                               \
@@ -346,7 +351,70 @@ void compute_transfer_function_texture(uint32_t* tex, int colormap, ramp_type_t 
     md_temp_set_pos_back(temp_pos);
 }
 
+// Backend management functions
+void set_render_backend(RenderBackend backend) {
+    g_current_backend = backend;
+}
+
+RenderBackend get_render_backend() {
+    return g_current_backend;
+}
+
+void set_vulkan_renderer(VulkanVolumeRenderer* renderer) {
+    g_vulkan_renderer = renderer;
+}
+
+VulkanVolumeRenderer* get_vulkan_renderer() {
+    return g_vulkan_renderer;
+}
+
+// Convert OpenGL render descriptor to Vulkan format
+VulkanRenderDesc convert_to_vulkan_desc(const RenderDesc& desc) {
+    VulkanRenderDesc vk_desc = {};
+    
+    // Note: This is a simplified conversion
+    // In practice, you would need to convert OpenGL texture handles to Vulkan handles
+    vk_desc.render_target.width = desc.render_target.width;
+    vk_desc.render_target.height = desc.render_target.height;
+    vk_desc.render_target.clear_color = desc.render_target.clear_color;
+    
+    vk_desc.matrix = desc.matrix;
+    vk_desc.clip_volume = desc.clip_volume;
+    vk_desc.temporal = desc.temporal;
+    vk_desc.iso = desc.iso;
+    vk_desc.dvr = desc.dvr;
+    vk_desc.shading = desc.shading;
+    vk_desc.voxel_spacing = desc.voxel_spacing;
+    vk_desc.max_steps = 512; // Default value
+    
+    return vk_desc;
+}
+
+void render_volume_opengl(const RenderDesc& desc);
+
 void render_volume(const RenderDesc& desc) {
+    // Route to appropriate backend
+    switch (g_current_backend) {
+        case RenderBackend::VULKAN: {
+            if (g_vulkan_renderer) {
+                VulkanRenderDesc vk_desc = convert_to_vulkan_desc(desc);
+                // Note: This would need a command buffer parameter in practice
+                // g_vulkan_renderer->render_volume(command_buffer, vk_desc);
+                MD_LOG_INFO("Vulkan volume rendering requested (implementation needed for command buffer integration)");
+            } else {
+                MD_LOG_ERROR("Vulkan renderer not set, falling back to OpenGL");
+                render_volume_opengl(desc);
+            }
+            break;
+        }
+        case RenderBackend::OPENGL:
+        default:
+            render_volume_opengl(desc);
+            break;
+    }
+}
+
+void render_volume_opengl(const RenderDesc& desc) {
     if (!desc.dvr.enabled && !desc.iso.enabled) return;
 
     int    iso_count = CLAMP((int)desc.iso.count, 0, 8);
