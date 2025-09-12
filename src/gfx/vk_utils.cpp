@@ -7,6 +7,8 @@
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
+#include <cstdlib>
+#include <cstdio>
 
 // For now, we'll create placeholder VMA functions until we integrate the actual VMA
 // This allows the interface to be defined while Agent A completes foundation work
@@ -91,11 +93,78 @@ bool has_stencil_component(VkFormat format) {
 }
 
 std::vector<uint32_t> compile_glsl_to_spirv(const std::string& glsl_source, VkShaderStageFlagBits stage) {
-    // TODO: Implement GLSL to SPIR-V compilation
-    // For now, return empty vector as placeholder
-    // This will be implemented in Task 1.6: SPIR-V compilation pipeline
-    std::cerr << "GLSL to SPIR-V compilation not yet implemented" << std::endl;
-    return {};
+    // For production use, this should use shaderc library for runtime compilation
+    // For now, we'll implement a simple file-based compilation approach using external tools
+    
+    // Determine shader stage suffix for temporary file
+    std::string stage_suffix;
+    switch (stage) {
+        case VK_SHADER_STAGE_VERTEX_BIT:
+            stage_suffix = ".vert";
+            break;
+        case VK_SHADER_STAGE_FRAGMENT_BIT:
+            stage_suffix = ".frag";
+            break;
+        case VK_SHADER_STAGE_COMPUTE_BIT:
+            stage_suffix = ".comp";
+            break;
+        case VK_SHADER_STAGE_GEOMETRY_BIT:
+            stage_suffix = ".geom";
+            break;
+        case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+            stage_suffix = ".tesc";
+            break;
+        case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+            stage_suffix = ".tese";
+            break;
+        default:
+            std::cerr << "Unsupported shader stage for compilation" << std::endl;
+            return {};
+    }
+    
+    // Create temporary files for compilation
+    std::string temp_glsl = "/tmp/shader_temp" + stage_suffix;
+    std::string temp_spirv = "/tmp/shader_temp.spv";
+    
+    // Write GLSL source to temporary file
+    std::ofstream glsl_file(temp_glsl);
+    if (!glsl_file.is_open()) {
+        std::cerr << "Failed to create temporary GLSL file: " << temp_glsl << std::endl;
+        return {};
+    }
+    glsl_file << glsl_source;
+    glsl_file.close();
+    
+    // Try to compile using glslc (from Vulkan SDK)
+    std::string compile_cmd = "glslc " + temp_glsl + " -o " + temp_spirv + " 2>/dev/null";
+    int result = system(compile_cmd.c_str());
+    
+    if (result != 0) {
+        // If glslc is not available, try glslangValidator
+        compile_cmd = "glslangValidator -V " + temp_glsl + " -o " + temp_spirv + " 2>/dev/null";
+        result = system(compile_cmd.c_str());
+        
+        if (result != 0) {
+            std::cerr << "SPIR-V compilation failed. Please install Vulkan SDK with glslc or glslangValidator." << std::endl;
+            // Clean up temporary files
+            remove(temp_glsl.c_str());
+            return {};
+        }
+    }
+    
+    // Read compiled SPIR-V
+    std::vector<uint32_t> spirv_code;
+    try {
+        spirv_code = load_spirv_from_file(temp_spirv);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to load compiled SPIR-V: " << e.what() << std::endl;
+    }
+    
+    // Clean up temporary files
+    remove(temp_glsl.c_str());
+    remove(temp_spirv.c_str());
+    
+    return spirv_code;
 }
 
 std::vector<uint32_t> load_spirv_from_file(const std::string& filename) {

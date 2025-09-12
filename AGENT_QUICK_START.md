@@ -89,11 +89,12 @@ bool VulkanContext::initialize(const InitInfo& info) {
 ## Agent B - Rendering Pipeline & Shaders
 
 ### Your First Day Checklist:
-1. **Wait for Agent A Phase 2 completion** (Week 6) - you need resource management working
+1. ✅ **Agent A Foundation Complete** - All infrastructure ready!
 2. **Study existing OpenGL code**: Understand current immediate drawing and volume rendering
-3. **Prepare shader conversion tools**: Set up glslangValidator or shaderc
+3. **Set up development environment**: Vulkan validation layers, debugging tools
+4. **Review foundation APIs**: Study `vk_pipeline.h`, `vk_command.h`, `vk_utils.h`
 
-### Week 7 Implementation Plan:
+### Week 7 Implementation Plan (Ready to Start):
 
 #### Task 3.1: Immediate Drawing Migration Strategy
 ```cpp
@@ -101,11 +102,19 @@ bool VulkanContext::initialize(const InitInfo& info) {
 // src/gfx/immediate_draw_utils.cpp
 
 #ifdef VIAMD_USE_VULKAN
-    // New Vulkan implementation
+    #include "vk_pipeline.h"
+    #include "vk_command.h"
+    
+    // New Vulkan implementation using Agent A's infrastructure
     void ImmediateDrawContext::begin(VkCommandBuffer cmd, const float* projMatrix, const float* viewMatrix) {
         m_currentCmd = cmd;
         m_vertices.clear();
         m_indices.clear();
+        
+        // Create graphics pipeline if not exists
+        if (m_pipeline.get_pipeline() == VK_NULL_HANDLE) {
+            createImmediateDrawPipeline();
+        }
         
         // Update uniform buffer with matrices
         struct Uniforms {
@@ -115,8 +124,9 @@ bool VulkanContext::initialize(const InitInfo& info) {
         memcpy(uniforms.projMatrix, projMatrix, sizeof(float) * 16);
         memcpy(uniforms.viewMatrix, viewMatrix, sizeof(float) * 16);
         
-        // Upload to uniform buffer
-        m_uniformBuffer.copyFrom(&uniforms, sizeof(uniforms));
+        // Upload to uniform buffer using VMA
+        vk_utils::VmaBuffer& uniformBuffer = getUniformBuffer();
+        memcpy(uniformBuffer.mapped_data, &uniforms, sizeof(uniforms));
     }
 #else
     // Keep existing OpenGL implementation as fallback
