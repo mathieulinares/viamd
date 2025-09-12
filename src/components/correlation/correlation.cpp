@@ -265,21 +265,38 @@ struct Correlation : viamd::EventHandler {
                 ImGui::EndMenuBar();
             }
             
-            // Current property selections
-            const char* x_label = x_property_idx >= 0 ? get_display_property_label_by_index(app_state, x_property_idx) : "Drop property here";
-            ImGui::Text("X-Axis: %s", x_label);
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
-                    ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
-                    DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
-                    x_property_idx = dnd->prop_idx;
-                    update_scatter_data();
-                }
-                ImGui::EndDragDropTarget();
-            }
+            // Create a layout with Y-axis drop on left, plot in center, and X-axis drop below
+            ImGui::BeginChild("CorrelationLayout", ImVec2(-1, -1), false, ImGuiWindowFlags_NoScrollbar);
+            
+            // Get available space
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            float y_drop_width = 120.0f;
+            float x_drop_height = 60.0f;
+            
+            // Y-axis drop target on the left
+            ImGui::BeginChild("YAxisDrop", ImVec2(y_drop_width, avail.y - x_drop_height), true);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+            
+            // Rotate text for Y-axis
+            ImGui::SetCursorPosY(ImGui::GetContentRegionAvail().y * 0.5f - 50.0f);
+            ImGui::Text("Y-Axis");
             
             const char* y_label = y_property_idx >= 0 ? get_display_property_label_by_index(app_state, y_property_idx) : "Drop property here";
-            ImGui::Text("Y-Axis: %s", y_label);
+            const char* y_unit = y_property_idx >= 0 ? get_display_property_unit_by_index(app_state, y_property_idx, 1) : "";
+            
+            if (y_property_idx >= 0) {
+                ImGui::TextWrapped("%s", y_label);
+                if (strlen(y_unit) > 0) {
+                    ImGui::TextWrapped("(%s)", y_unit);
+                }
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                ImGui::TextWrapped("%s", y_label);
+                ImGui::PopStyleColor();
+            }
+            
+            ImGui::PopStyleColor();
+            
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
                     ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
@@ -289,21 +306,41 @@ struct Correlation : viamd::EventHandler {
                 }
                 ImGui::EndDragDropTarget();
             }
+            ImGui::EndChild();
             
-            ImGui::Separator();
+            ImGui::SameLine();
+            
+            // Plot area in the center
+            ImGui::BeginChild("PlotArea", ImVec2(avail.x - y_drop_width, avail.y - x_drop_height), false);
             
             // Always display the scatter plot if we have data
             if (x_property_idx >= 0 && y_property_idx >= 0 && md_array_size(series) > 0) {
                 if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
                     
-                    // Set axis labels
+                    // Set axis labels with units
                     if (x_property_idx >= 0 && x_property_idx < num_props) {
-                        ImPlot::SetupAxisTicks(ImAxis_X1, nullptr, 0, nullptr, false);
-                        ImPlot::SetupAxis(ImAxis_X1, get_display_property_label_by_index(app_state, x_property_idx));
+                        const char* x_unit = get_display_property_unit_by_index(app_state, x_property_idx, 0);
+                        char x_axis_label[128];
+                        if (strlen(x_unit) > 0) {
+                            snprintf(x_axis_label, sizeof(x_axis_label), "%s (%s)", 
+                                get_display_property_label_by_index(app_state, x_property_idx), x_unit);
+                        } else {
+                            snprintf(x_axis_label, sizeof(x_axis_label), "%s", 
+                                get_display_property_label_by_index(app_state, x_property_idx));
+                        }
+                        ImPlot::SetupAxis(ImAxis_X1, x_axis_label);
                     }
                     if (y_property_idx >= 0 && y_property_idx < num_props) {
-                        ImPlot::SetupAxisTicks(ImAxis_Y1, nullptr, 0, nullptr, false);
-                        ImPlot::SetupAxis(ImAxis_Y1, get_display_property_label_by_index(app_state, y_property_idx));
+                        const char* y_unit = get_display_property_unit_by_index(app_state, y_property_idx, 1);
+                        char y_axis_label[128];
+                        if (strlen(y_unit) > 0) {
+                            snprintf(y_axis_label, sizeof(y_axis_label), "%s (%s)", 
+                                get_display_property_label_by_index(app_state, y_property_idx), y_unit);
+                        } else {
+                            snprintf(y_axis_label, sizeof(y_axis_label), "%s", 
+                                get_display_property_label_by_index(app_state, y_property_idx));
+                        }
+                        ImPlot::SetupAxis(ImAxis_Y1, y_axis_label);
                     }
                     
                     for (size_t s = 0; s < md_array_size(series); ++s) {
@@ -376,6 +413,46 @@ struct Correlation : viamd::EventHandler {
                     ImPlot::EndPlot();
                 }
             }
+            
+            ImGui::EndChild();
+            
+            // X-axis drop target below the plot
+            ImGui::BeginChild("XAxisDrop", ImVec2(avail.x - y_drop_width, x_drop_height), true);
+            
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+            ImGui::Text("X-Axis");
+            
+            const char* x_label = x_property_idx >= 0 ? get_display_property_label_by_index(app_state, x_property_idx) : "Drop property here";
+            const char* x_unit = x_property_idx >= 0 ? get_display_property_unit_by_index(app_state, x_property_idx, 0) : "";
+            
+            if (x_property_idx >= 0) {
+                ImGui::SameLine();
+                ImGui::Text("%s", x_label);
+                if (strlen(x_unit) > 0) {
+                    ImGui::SameLine();
+                    ImGui::Text("(%s)", x_unit);
+                }
+            } else {
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                ImGui::Text("%s", x_label);
+                ImGui::PopStyleColor();
+            }
+            
+            ImGui::PopStyleColor();
+            
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
+                    ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
+                    DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
+                    x_property_idx = dnd->prop_idx;
+                    update_scatter_data();
+                }
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::EndChild();
+            
+            ImGui::EndChild();
             
             // Show error messages if any
             if (strlen(error) > 0) {

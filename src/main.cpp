@@ -9623,3 +9623,13 @@ const md_script_property_data_t* get_display_property_data_by_index(ApplicationS
     }
     return app_state->display_properties[index].prop_data;
 }
+
+const char* get_display_property_unit_by_index(ApplicationState* app_state, int index, int unit_index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return "";
+    }
+    if (unit_index < 0 || unit_index >= 2) {
+        return "";
+    }
+    return app_state->display_properties[index].unit_str[unit_index];
+}
