@@ -158,6 +158,7 @@ const char* get_display_property_label_by_index(ApplicationState* app_state, int
 bool has_display_property_data_by_index(ApplicationState* app_state, int index);
 const struct md_script_property_data_t* get_display_property_data_by_index(ApplicationState* app_state, int index);
 const char* get_display_property_unit_by_index(ApplicationState* app_state, int index, int unit_index);
+ImVec4 get_display_property_color_by_index(ApplicationState* app_state, int index);
 
 struct LoadDatasetWindowState {
     char path_buf[1024] = "";

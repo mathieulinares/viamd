@@ -9633,3 +9633,10 @@ const char* get_display_property_unit_by_index(ApplicationState* app_state, int 
     }
     return app_state->display_properties[index].unit_str[unit_index];
 }
+
+ImVec4 get_display_property_color_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // Default white color
+    }
+    return app_state->display_properties[index].color;
+}
