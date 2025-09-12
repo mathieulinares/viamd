@@ -27,6 +27,13 @@
 
 // Property selection buttons instead of drag-drop
 
+enum CorrelationDisplayMode {
+    Points,
+    IsoLevels,
+    IsoLines,
+    Colormap,
+};
+
 struct ScatterSeries {
     md_array(float) x_data = 0;
     md_array(float) y_data = 0;
@@ -49,6 +56,21 @@ struct Correlation : viamd::EventHandler {
     // Interaction
     int hovered_point = -1;
     int clicked_frame = -1;
+    
+    // Layer system (similar to Ramachandran)
+    CorrelationDisplayMode display_mode[2] = { Points, Points }; // Full trajectory, Filtered trajectory
+    bool show_layer[3] = {true, true, true}; // Full trajectory, Filtered trajectory, Current
+    ImPlotColormap colormap[2] = { ImPlotColormap_Hot, ImPlotColormap_Plasma };
+    ImVec4 isoline_colors[2] = { {1,1,1,1}, {1,1,1,1} };
+    float full_alpha = 0.85f;
+    float filt_alpha = 0.85f;
+    
+    // Point style for current frame
+    struct {
+        ImVec4 outline = {1.0f, 1.0f, 1.0f, 1.0f};
+        ImVec4 fill = {0.8f, 0.3f, 0.3f, 1.0f};
+        float size = 5.0f;
+    } current_style;
     
     md_allocator_i* arena = 0;
     ApplicationState* app_state = 0;
@@ -85,6 +107,20 @@ struct Correlation : viamd::EventHandler {
                             viamd::extract_int(x_property_idx, arg);
                         } else if (str_eq(ident, STR_LIT("y_property_idx"))) {
                             viamd::extract_int(y_property_idx, arg);
+                        } else if (str_eq(ident, STR_LIT("display_mode_full"))) {
+                            int mode;
+                            viamd::extract_int(mode, arg);
+                            display_mode[0] = (CorrelationDisplayMode)mode;
+                        } else if (str_eq(ident, STR_LIT("display_mode_filt"))) {
+                            int mode;
+                            viamd::extract_int(mode, arg);
+                            display_mode[1] = (CorrelationDisplayMode)mode;
+                        } else if (str_eq(ident, STR_LIT("show_layer_full"))) {
+                            viamd::extract_bool(show_layer[0], arg);
+                        } else if (str_eq(ident, STR_LIT("show_layer_filt"))) {
+                            viamd::extract_bool(show_layer[1], arg);
+                        } else if (str_eq(ident, STR_LIT("show_layer_current"))) {
+                            viamd::extract_bool(show_layer[2], arg);
                         }
                     }
                 }
@@ -96,6 +132,11 @@ struct Correlation : viamd::EventHandler {
                 viamd::write_bool(state, STR_LIT("show_window"), show_window);
                 viamd::write_int(state, STR_LIT("x_property_idx"), x_property_idx);
                 viamd::write_int(state, STR_LIT("y_property_idx"), y_property_idx);
+                viamd::write_int(state, STR_LIT("display_mode_full"), (int)display_mode[0]);
+                viamd::write_int(state, STR_LIT("display_mode_filt"), (int)display_mode[1]);
+                viamd::write_bool(state, STR_LIT("show_layer_full"), show_layer[0]);
+                viamd::write_bool(state, STR_LIT("show_layer_filt"), show_layer[1]);
+                viamd::write_bool(state, STR_LIT("show_layer_current"), show_layer[2]);
                 break;
             }
             default:
@@ -214,16 +255,67 @@ struct Correlation : viamd::EventHandler {
         }
     }
 
+    // Compute 2D density for correlation data (placeholder for advanced display modes)
+    void compute_density_map() {
+        // This function will compute 2D histograms/density maps for IsoLevels, IsoLines, and Colormap modes
+        // Implementation will use similar approach to Ramachandran density computation
+        // For now, this is a placeholder - will be expanded when implementing texture-based rendering
+    }
+
     void draw_window() {
         if (!show_window) return;
         
         ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
         
-        if (ImGui::Begin("Correlation Plot", &show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
+        if (ImGui::Begin("Correlation Plot", &show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
             if (!app_state) {
                 ImGui::Text("Application not initialized");
                 ImGui::End();
                 return;
+            }
+            
+            // Add layers menu similar to Ramachandran
+            if (ImGui::BeginMenuBar()) {
+                if (ImGui::BeginMenu("Layers")) {
+                    constexpr const char* layer_labels[2] = { "Full Trajectory", "Filtered Trajectory" };
+                    constexpr const char* option_labels[4] = { "Points", "IsoLevels", "IsoLines", "Colormap" };
+                    
+                    ImGui::Text("Layers");
+                    ImGui::Separator();
+                    
+                    // Full Trajectory and Filtered Trajectory layers
+                    for (int i = 0; i < 2; ++i) {
+                        ImGui::Checkbox(layer_labels[i], &show_layer[i]);
+                        if (show_layer[i]) {
+                            ImGui::PushID(i);
+                            if (ImGui::BeginCombo(layer_labels[i], option_labels[display_mode[i]])) {
+                                if (ImGui::Selectable(option_labels[Points], display_mode[i] == Points)) display_mode[i] = Points;
+                                if (ImGui::Selectable(option_labels[IsoLevels], display_mode[i] == IsoLevels)) display_mode[i] = IsoLevels;
+                                if (ImGui::Selectable(option_labels[IsoLines], display_mode[i] == IsoLines)) display_mode[i] = IsoLines;
+                                if (ImGui::Selectable(option_labels[Colormap], display_mode[i] == Colormap)) display_mode[i] = Colormap;
+                                ImGui::EndCombo();
+                            }
+                            if (display_mode[i] == Colormap) {
+                                ImPlot::ColormapSelection("Color Map", &colormap[i]);
+                            } else if (display_mode[i] == IsoLines) {
+                                ImGui::ColorEdit4Minimal("Line Color", &isoline_colors[i].x);
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::Separator();
+                    }
+                    
+                    // Current frame layer
+                    ImGui::Checkbox("Current", &show_layer[2]);
+                    if (show_layer[2]) {
+                        ImGui::SliderFloat("Point Size", &current_style.size, 1.0f, 10.0f);
+                        ImGui::ColorEdit4Minimal("Point Outline", &current_style.outline.x);
+                        ImGui::ColorEdit4Minimal("Point Fill", &current_style.fill.x);
+                    }
+                    
+                    ImGui::EndMenu();
+                }
+                ImGui::EndMenuBar();
             }
             
             const int num_props = (int)md_array_size(app_state->display_properties);
@@ -325,17 +417,81 @@ struct Correlation : viamd::EventHandler {
                         ImPlot::SetupAxis(ImAxis_Y1, y_axis_label);
                     }
                     
-                    for (size_t s = 0; s < md_array_size(series); ++s) {
-                        const ScatterSeries& scatter = series[s];
-                        if (md_array_size(scatter.x_data) > 0) {
-                            ImPlot::PushStyleColor(ImPlotCol_MarkerFill, scatter.color);
-                            ImPlot::PlotScatter(scatter.name, 
-                                scatter.x_data, scatter.y_data, 
-                                (int)md_array_size(scatter.x_data));
-                            ImPlot::PopStyleColor();
-                            
-                            // Check for hover/click on points
-                            if (ImPlot::IsPlotHovered()) {
+                    // Plot layers based on layer settings
+                    // For now, implement Points mode for Full Trajectory layer
+                    if (show_layer[0]) { // Full Trajectory
+                        if (display_mode[0] == Points) {
+                            // Plot all points with trajectory transparency
+                            for (size_t s = 0; s < md_array_size(series); ++s) {
+                                const ScatterSeries& scatter = series[s];
+                                if (md_array_size(scatter.x_data) > 0) {
+                                    ImVec4 color = scatter.color;
+                                    color.w *= full_alpha;
+                                    ImPlot::PushStyleColor(ImPlotCol_MarkerFill, color);
+                                    ImPlot::PlotScatter(scatter.name, 
+                                        scatter.x_data, scatter.y_data, 
+                                        (int)md_array_size(scatter.x_data));
+                                    ImPlot::PopStyleColor();
+                                }
+                            }
+                        } else {
+                            // Placeholder for other display modes (IsoLevels, IsoLines, Colormap)
+                            // These will be implemented with density computation and texture rendering
+                            ImPlot::PlotText("Full Trajectory: Advanced display modes (IsoLevels, IsoLines, Colormap)\nwill be implemented with density computation", 0.5, 0.8);
+                        }
+                    }
+                    
+                    // Filtered Trajectory layer (placeholder for now)
+                    if (show_layer[1]) { // Filtered Trajectory  
+                        if (display_mode[1] == Points) {
+                            // For now, show the same data but with different color/transparency
+                            for (size_t s = 0; s < md_array_size(series); ++s) {
+                                const ScatterSeries& scatter = series[s];
+                                if (md_array_size(scatter.x_data) > 0) {
+                                    ImVec4 color = ImVec4(0.8f, 0.3f, 0.8f, filt_alpha); // Different color for filtered
+                                    ImPlot::PushStyleColor(ImPlotCol_MarkerFill, color);
+                                    char filtered_name[128];
+                                    snprintf(filtered_name, sizeof(filtered_name), "%s (Filtered)", scatter.name);
+                                    ImPlot::PlotScatter(filtered_name, 
+                                        scatter.x_data, scatter.y_data, 
+                                        (int)md_array_size(scatter.x_data));
+                                    ImPlot::PopStyleColor();
+                                }
+                            }
+                        } else {
+                            ImPlot::PlotText("Filtered Trajectory: Advanced display modes will be implemented", 0.5, 0.6);
+                        }
+                    }
+                    
+                    // Current frame layer
+                    if (show_layer[2] && app_state) { // Current frame
+                        // Find data point for current frame
+                        int current_frame = (int)app_state->animation.frame;
+                        for (size_t s = 0; s < md_array_size(series); ++s) {
+                            const ScatterSeries& scatter = series[s];
+                            for (size_t i = 0; i < md_array_size(scatter.frame_indices); ++i) {
+                                if (scatter.frame_indices[i] == current_frame) {
+                                    float x = scatter.x_data[i];
+                                    float y = scatter.y_data[i];
+                                    
+                                    // Plot current frame as a larger, highlighted point
+                                    ImPlot::PushStyleVar(ImPlotStyleVar_MarkerSize, current_style.size);
+                                    ImPlot::PushStyleColor(ImPlotCol_MarkerFill, current_style.fill);
+                                    ImPlot::PushStyleColor(ImPlotCol_MarkerOutline, current_style.outline);
+                                    ImPlot::PlotScatter("Current Frame", &x, &y, 1);
+                                    ImPlot::PopStyleColor(2);
+                                    ImPlot::PopStyleVar();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Handle interaction for all layers (only if plot is hovered)
+                    if (ImPlot::IsPlotHovered()) {
+                        for (size_t s = 0; s < md_array_size(series); ++s) {
+                            const ScatterSeries& scatter = series[s];
+                            if (md_array_size(scatter.x_data) > 0) {
                                 // Find closest point in screen space
                                 float min_dist_sq = FLT_MAX;
                                 int closest_point = -1;
