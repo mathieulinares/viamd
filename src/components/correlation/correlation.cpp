@@ -1,5 +1,6 @@
 ﻿#include <event.h>
 
+#include <core/md_compiler.h>
 #include <core/md_log.h>
 #include <core/md_array.h>
 #include <core/md_vec_math.h>
@@ -18,6 +19,11 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+#ifndef MEGABYTES
+#define MEGABYTES(x) ((x) * 1024 * 1024)
+#endif
 
 struct DisplayPropertyDragDropPayload {
     int prop_idx = 0;

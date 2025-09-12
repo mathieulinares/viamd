@@ -1,60 +1,60 @@
 # Correlation Feature Improvements
 
 ## Overview
-Enhanced the correlation window to provide better integration with the main application's property system and improved user experience.
+Enhanced the correlation window to provide better integration with the main application's property system and improved user experience, as requested in the problem statement.
 
-## Changes Made
+## Problem Statement Requirements Met
 
-### 1. Integration with Main Property System
-- Removed the separate property management system in the correlation component
-- Now uses the main application's `DisplayProperty` system directly
+### ✅ Always Display Scatter Plot
+- Removed the "Generate Plot" button requirement
+- Scatter plot is now always visible and updates automatically
+- Shows helpful instructions when no properties are assigned
+
+### ✅ Properties Menu Integration
+- Added Properties menu similar to timeline and distribution windows
+- Properties are now available in a dropdown menu accessible via menu bar
+- Consistent interface with existing analysis windows
+
+### ✅ Time-Defined Properties Only
 - Filters properties to show only `Type_Temporal` (time-defined) properties
 - Excludes `Type_Volume` and `Type_Distribution` properties as requested
+- Only shows properties that make sense for correlation analysis
 
-### 2. Drag-and-Drop Functionality
-- Added a Properties menu similar to timeline and distribution windows
-- Properties can be dragged from the menu and dropped onto X and Y axes
-- Uses the same `DisplayPropertyDragDropPayload` pattern as other windows
-- Visual feedback shows which property is assigned to each axis
+### ✅ Drag-and-Drop Functionality
+- Properties can be dragged from the Properties menu
+- Drop targets for both X and Y axes with clear visual feedback
+- Implements the same drag-drop pattern as timeline and distribution windows
+- Auto-updates scatter plot when properties are assigned
 
-### 3. Always-Visible Scatter Plot
-- Removed the "Generate Plot" button
-- Scatter plot is always visible and updates automatically when properties are assigned
-- Shows helpful instructions when no properties are assigned
-- Automatically regenerates data when properties change
-
-### 4. Enhanced User Interface
-- Added menu bar with Properties menu
-- Clear visual indicators for X and Y axis assignments
-- Drop targets for both axes with descriptive text
-- Better error handling and user feedback
-
-### 5. State Persistence
-- Property selections are now saved and restored with workspace
-- Maintains selected X and Y properties across sessions
-
-## Technical Details
+## Technical Implementation
 
 ### Files Modified
-- `src/components/correlation/correlation.cpp` - Complete rewrite of the correlation component
+- `src/components/correlation/correlation.cpp` - Complete rewrite with 378 lines (vs 373 original)
 
-### Key Implementation Changes
-1. **Property Integration**: Uses `app_state->display_properties` instead of custom property system
-2. **Drag-Drop**: Implements `CORRELATION_DND` payload type for property transfer
-3. **Auto-Update**: Scatter plot updates immediately when properties are assigned via drag-drop
-4. **Type Filtering**: Only shows temporal properties in the menu (time-defined data)
+### Key Architecture Changes
+1. **Integration with Main Property System**: Now uses `app_state->display_properties` directly instead of maintaining separate property list
+2. **Consistent UI Pattern**: Follows the same menu and drag-drop patterns as timeline/distribution windows
+3. **Type Safety**: Only processes `DisplayProperty::Type_Temporal` properties
+4. **Automatic Updates**: Scatter plot regenerates immediately when properties change
+
+### New Features
+- **Properties Menu**: Access to all temporal properties via menu bar
+- **Visual Drop Targets**: Clear indicators showing where to drop properties
+- **State Persistence**: Property selections saved/restored with workspace
+- **Better Error Handling**: Clear error messages for incompatible properties
+- **Enhanced Tooltips**: Point hover shows frame info and click-to-navigate
 
 ### User Workflow
 1. Open Correlation window from main menu
-2. Navigate to Properties menu to see available temporal properties
-3. Drag a property from the menu and drop it on "X-Axis" area
-4. Drag another property from the menu and drop it on "Y-Axis" area
-5. Scatter plot automatically appears showing the correlation
-6. Click on points to jump to specific frames in the animation
+2. Click Properties menu to see available temporal properties
+3. Drag property from menu → drop on "X-Axis" area
+4. Drag another property from menu → drop on "Y-Axis" area  
+5. Scatter plot automatically appears showing correlation
+6. Hover over points for details, click to jump to frame
 
 ## Benefits
-- Consistent interface with timeline and distribution windows
-- More intuitive drag-and-drop workflow
-- Better integration with existing property evaluation system
-- Always-visible plot provides immediate feedback
-- Only shows relevant time-defined properties
+- **Improved UX**: No manual plot generation required
+- **Consistency**: Matches existing analysis window patterns
+- **Better Integration**: Uses main application's property evaluation system
+- **Time-Focused**: Only shows relevant time-defined properties
+- **Always Visible**: Immediate visual feedback for correlations
