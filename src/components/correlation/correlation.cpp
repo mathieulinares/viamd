@@ -162,8 +162,8 @@ struct Correlation : viamd::EventHandler {
             for (size_t s = 0; s < max_series; ++s) {
                 ScatterSeries scatter = {};
                 snprintf(scatter.name, sizeof(scatter.name), "%s[%zu] vs %s[%zu]", 
-                    get_display_property_label(x_prop), x_values_per_frame > 1 ? s : 0,
-                    get_display_property_label(y_prop), y_values_per_frame > 1 ? s : 0);
+                    get_display_property_label_by_index(app_state, x_property_idx), x_values_per_frame > 1 ? s : 0,
+                    get_display_property_label_by_index(app_state, y_property_idx), y_values_per_frame > 1 ? s : 0);
                 
                 // Assign a color based on series index
                 scatter.color = ImPlot::GetColormapColor((int)s);
@@ -204,7 +204,7 @@ struct Correlation : viamd::EventHandler {
             // Simple case - single series
             ScatterSeries scatter = {};
             snprintf(scatter.name, sizeof(scatter.name), "%s vs %s", 
-                get_display_property_label(x_prop), get_display_property_label(y_prop));
+                get_display_property_label_by_index(app_state, x_property_idx), get_display_property_label_by_index(app_state, y_property_idx));
             scatter.color = ImPlot::GetColormapColor(0);
             
             for (size_t f = 0; f < num_frames; ++f) {
@@ -229,10 +229,11 @@ struct Correlation : viamd::EventHandler {
                 return;
             }
             
+            const int num_props = (int)md_array_size(app_state->display_properties);
+            
             // Menu bar with Properties menu
             if (ImGui::BeginMenuBar()) {
                 if (ImGui::BeginMenu("Properties")) {
-                    const int num_props = (int)md_array_size(app_state->display_properties);
                     
                     // Count temporal properties
                     int num_temporal_props = 0;
