@@ -954,7 +954,6 @@ struct Correlation : viamd::EventHandler {
             ImGui::Text("Y-Axis Property:");
             
             // Y-axis property selection button
-            const char* y_button_label = "Select Property";
             char y_display_text[128] = "Select Property";
             
             if (y_property_idx >= 0) {
@@ -1360,7 +1359,6 @@ struct Correlation : viamd::EventHandler {
             ImGui::SameLine();
             
             // X-axis property selection button
-            const char* x_button_label = "Select Property";
             char x_display_text[128] = "Select Property";
             
             if (x_property_idx >= 0) {
