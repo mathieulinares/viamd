@@ -1101,42 +1101,16 @@ struct Correlation : viamd::EventHandler {
                     if (should_render_full_advanced || should_render_filt_advanced) {
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
-                            // Fixed viewport coordinate mapping - ensure perfect alignment with scatter data
-                            float data_range_x = corr_data_full.max_x - corr_data_full.min_x;
-                            float data_range_y = corr_data_full.max_y - corr_data_full.min_y;
+                            // Simple fixed viewport approach like Ramachandran
+                            // The texture covers the exact data range [min_x, max_x] x [min_y, max_y]
+                            vec4_t viewport = {0.0f, 0.0f, 1.0f, 1.0f}; // Full texture coverage
                             
-                            // Ensure ranges are not zero to avoid division by zero
-                            if (data_range_x < 1e-6f) data_range_x = 1.0f;
-                            if (data_range_y < 1e-6f) data_range_y = 1.0f;
-                            
-                            // Critical fix: Map the current plot limits to the data coordinate system
-                            // The texture was created using the data range [min_x, max_x] x [min_y, max_y]
-                            // We need to map the current plot view to texture coordinates [0,1] x [0,1]
-                            vec4_t viewport = { 
-                                (float)(plot_rect.X.Min - corr_data_full.min_x) / data_range_x, 
-                                (float)(plot_rect.Y.Min - corr_data_full.min_y) / data_range_y, 
-                                (float)(plot_rect.X.Max - corr_data_full.min_x) / data_range_x, 
-                                (float)(plot_rect.Y.Max - corr_data_full.min_y) / data_range_y 
-                            };
-                            
-                            // Clamp viewport to [0,1] range to avoid rendering outside texture bounds
-                            viewport.x = MAX(0.0f, MIN(1.0f, viewport.x));
-                            viewport.y = MAX(0.0f, MIN(1.0f, viewport.y));
-                            viewport.z = MAX(0.0f, MIN(1.0f, viewport.z));
-                            viewport.w = MAX(0.0f, MIN(1.0f, viewport.w));
-                            
-                            // If the viewport is outside reasonable bounds, use the full texture
-                            if (viewport.z <= viewport.x || viewport.w <= viewport.y) {
-                                viewport = vec4_t{0.0f, 0.0f, 1.0f, 1.0f};
-                            }
-                            
-                            // Debug information for coordinate mapping (only show when density is actually rendered)
+                            // Debug information for coordinate mapping
                             char debug_coord[512];
                             snprintf(debug_coord, sizeof(debug_coord), 
-                                "Data: X[%.2f,%.2f] Y[%.2f,%.2f] | Plot: X[%.2f,%.2f] Y[%.2f,%.2f] | VP:[%.3f,%.3f,%.3f,%.3f] | den_sum:%.1f",
+                                "Texture range: X[%.2f,%.2f] Y[%.2f,%.2f] | den_sum:%.1f",
                                 corr_data_full.min_x, corr_data_full.max_x, corr_data_full.min_y, corr_data_full.max_y,
-                                plot_rect.X.Min, plot_rect.X.Max, plot_rect.Y.Min, plot_rect.Y.Max,
-                                viewport.x, viewport.y, viewport.z, viewport.w, corr_data_full.den_sum);
+                                corr_data_full.den_sum);
                             ImPlot::PlotText(debug_coord, plot_rect.X.Min, plot_rect.Y.Max - (plot_rect.Y.Max - plot_rect.Y.Min) * 0.05f);
                             
                             if (display_mode[0] == Colormap) {
@@ -1204,32 +1178,9 @@ struct Correlation : viamd::EventHandler {
                         }
                         
                         if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
-                            // Fixed viewport coordinate mapping - ensure perfect alignment with scatter data
-                            float data_range_x = corr_data_filt.max_x - corr_data_filt.min_x;
-                            float data_range_y = corr_data_filt.max_y - corr_data_filt.min_y;
-                            
-                            // Ensure ranges are not zero to avoid division by zero
-                            if (data_range_x < 1e-6f) data_range_x = 1.0f;
-                            if (data_range_y < 1e-6f) data_range_y = 1.0f;
-                            
-                            // Critical fix: Map the current plot limits to the data coordinate system
-                            vec4_t viewport = { 
-                                (float)(plot_rect.X.Min - corr_data_filt.min_x) / data_range_x, 
-                                (float)(plot_rect.Y.Min - corr_data_filt.min_y) / data_range_y, 
-                                (float)(plot_rect.X.Max - corr_data_filt.min_x) / data_range_x, 
-                                (float)(plot_rect.Y.Max - corr_data_filt.min_y) / data_range_y 
-                            };
-                            
-                            // Clamp viewport to [0,1] range to avoid rendering outside texture bounds
-                            viewport.x = MAX(0.0f, MIN(1.0f, viewport.x));
-                            viewport.y = MAX(0.0f, MIN(1.0f, viewport.y));
-                            viewport.z = MAX(0.0f, MIN(1.0f, viewport.z));
-                            viewport.w = MAX(0.0f, MIN(1.0f, viewport.w));
-                            
-                            // If the viewport is outside reasonable bounds, use the full texture
-                            if (viewport.z <= viewport.x || viewport.w <= viewport.y) {
-                                viewport = vec4_t{0.0f, 0.0f, 1.0f, 1.0f};
-                            }
+                            // Simple fixed viewport approach like Ramachandran
+                            // The texture covers the exact data range [min_x, max_x] x [min_y, max_y]
+                            vec4_t viewport = {0.0f, 0.0f, 1.0f, 1.0f}; // Full texture coverage
                             
                             if (display_mode[1] == Colormap) {
                                 uint32_t colors[32] = {0};
@@ -1302,12 +1253,18 @@ struct Correlation : viamd::EventHandler {
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
                             uint32_t full_tex = display_mode[0] == Colormap ? corr_data_full.map_tex : corr_data_full.iso_tex;
-                            dl->AddImage((ImTextureID)(intptr_t)full_tex, plot_min, plot_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, full_alpha));
+                            // Map texture to exact data coordinates used during density computation
+                            ImVec2 data_min = ImPlot::PlotToPixels(corr_data_full.min_x, corr_data_full.min_y);
+                            ImVec2 data_max = ImPlot::PlotToPixels(corr_data_full.max_x, corr_data_full.max_y);
+                            dl->AddImage((ImTextureID)(intptr_t)full_tex, data_min, data_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, full_alpha));
                         }
                         
                         if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
                             uint32_t filt_tex = display_mode[1] == Colormap ? corr_data_filt.map_tex : corr_data_filt.iso_tex;
-                            dl->AddImage((ImTextureID)(intptr_t)filt_tex, plot_min, plot_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
+                            // Map texture to exact data coordinates used during density computation  
+                            ImVec2 data_min = ImPlot::PlotToPixels(corr_data_filt.min_x, corr_data_filt.min_y);
+                            ImVec2 data_max = ImPlot::PlotToPixels(corr_data_filt.max_x, corr_data_filt.max_y);
+                            dl->AddImage((ImTextureID)(intptr_t)filt_tex, data_min, data_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
                         }
                         
                         ImPlot::PopPlotClipRect();
