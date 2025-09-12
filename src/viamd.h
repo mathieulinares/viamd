@@ -151,6 +151,12 @@ const char* get_display_property_label(const DisplayProperty* prop);
 bool has_display_property_data(const DisplayProperty* prop);
 const struct md_script_property_data_t* get_display_property_data(const DisplayProperty* prop);
 
+// Index-based helper functions to avoid direct DisplayProperty pointer access
+DisplayPropertyType get_display_property_type_by_index(ApplicationState* app_state, int index);
+const char* get_display_property_label_by_index(ApplicationState* app_state, int index);
+bool has_display_property_data_by_index(ApplicationState* app_state, int index);
+const struct md_script_property_data_t* get_display_property_data_by_index(ApplicationState* app_state, int index);
+
 struct LoadDatasetWindowState {
     char path_buf[1024] = "";
     char atom_format_buf[128] = "";

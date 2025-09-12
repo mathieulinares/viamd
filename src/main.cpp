@@ -9594,3 +9594,32 @@ const md_script_property_data_t* get_display_property_data(const DisplayProperty
     if (!prop) return nullptr;
     return prop->prop_data;
 }
+
+// Index-based helper functions to avoid direct DisplayProperty pointer access
+DisplayPropertyType get_display_property_type_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return DisplayPropertyType_Count;
+    }
+    return (DisplayPropertyType)app_state->display_properties[index].type;
+}
+
+const char* get_display_property_label_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return "";
+    }
+    return app_state->display_properties[index].label;
+}
+
+bool has_display_property_data_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return false;
+    }
+    return app_state->display_properties[index].prop_data != nullptr;
+}
+
+const md_script_property_data_t* get_display_property_data_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return nullptr;
+    }
+    return app_state->display_properties[index].prop_data;
+}
