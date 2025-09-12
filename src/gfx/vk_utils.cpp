@@ -354,6 +354,10 @@ void set_debug_name(VkDevice device, VkObjectType object_type, uint64_t object_h
     }
 }
 
+VmaAllocator get_vma_allocator() {
+    return g_vma_allocator;
+}
+
 } // namespace vk_utils
 } // namespace gfx
 } // namespace viamd

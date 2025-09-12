@@ -72,6 +72,9 @@ void destroy_sync_objects(VkDevice device, SyncObjects& sync);
 // Debug utilities
 void set_debug_name(VkDevice device, VkObjectType object_type, uint64_t object_handle, const char* name);
 
+// VMA allocator access
+VmaAllocator get_vma_allocator();
+
 } // namespace vk_utils
 } // namespace gfx
 } // namespace viamd

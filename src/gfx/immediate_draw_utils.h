@@ -2,6 +2,11 @@
 
 #include <core/md_vec_math.h>
 
+#ifdef VIAMD_ENABLE_VULKAN
+#include <vulkan/vulkan.h>
+namespace viamd { namespace gfx { class VulkanImmediateRenderer; } }
+#endif
+
 namespace immediate {
 
 struct Vertex {
@@ -11,6 +16,12 @@ struct Vertex {
 
 void initialize();
 void shutdown();
+
+#ifdef VIAMD_ENABLE_VULKAN
+// Vulkan backend management
+void set_vulkan_renderer(viamd::gfx::VulkanImmediateRenderer* renderer);
+void set_vulkan_frame_context(VkCommandBuffer command_buffer, uint32_t frame_index);
+#endif
 
 void set_model_view_matrix(const mat4_t& model_view_mat);
 void set_proj_matrix(const mat4_t& proj_mat);

@@ -3,16 +3,38 @@
 #include <gfx/gl_utils.h>
 #include <color_utils.h>
 
+#ifdef VIAMD_ENABLE_VULKAN
+#include <gfx/vk_immediate.h>
+#include <gfx/vk_context.h>
+#endif
+
 #include <core/md_common.h>
 #include <core/md_array.h>
 #include <core/md_arena_allocator.h>
 #include <core/md_log.h>
 
 #include <stddef.h>
+#include <alloca.h>
 
 namespace immediate {
 
 using Index = uint32_t;
+
+// Backend selection
+enum class RenderBackend {
+    OPENGL,
+#ifdef VIAMD_ENABLE_VULKAN
+    VULKAN
+#endif
+};
+
+static RenderBackend current_backend = RenderBackend::OPENGL;
+
+#ifdef VIAMD_ENABLE_VULKAN
+static viamd::gfx::VulkanImmediateRenderer* vulkan_renderer = nullptr;
+static VkCommandBuffer current_command_buffer = VK_NULL_HANDLE;
+static uint32_t current_frame_index = 0;
+#endif
 
 struct DrawCommand {
     uint32_t offset = 0;
@@ -116,6 +138,20 @@ static inline void append_draw_command(size_t count, GLenum primitive_type) {
 }
 
 void initialize() {
+#ifdef VIAMD_ENABLE_VULKAN
+    // Try to initialize Vulkan backend first if available
+    // This would be set by the main application
+    if (vulkan_renderer) {
+        current_backend = RenderBackend::VULKAN;
+        MD_LOG_INFO("Immediate drawing using Vulkan backend");
+        return;
+    }
+#endif
+
+    // Fall back to OpenGL backend
+    current_backend = RenderBackend::OPENGL;
+    MD_LOG_INFO("Immediate drawing using OpenGL backend");
+
     constexpr int BUFFER_SIZE = 1024;
     char buffer[BUFFER_SIZE];
 
@@ -186,6 +222,15 @@ void initialize() {
 }
 
 void shutdown() {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN) {
+        // Vulkan renderer cleanup is handled by the owner
+        vulkan_renderer = nullptr;
+        return;
+    }
+#endif
+
+    // OpenGL cleanup
     if (vbo) glDeleteBuffers(1, &vbo);
     if (ibo) glDeleteBuffers(1, &ibo);
     if (vao) glDeleteVertexArrays(1, &vao);
@@ -194,16 +239,39 @@ void shutdown() {
 }
 
 void set_model_view_matrix(const mat4_t& model_view_matrix) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        vulkan_renderer->set_model_view_matrix(model_view_matrix);
+        return;
+    }
+#endif
+
     curr_view_matrix_idx = (int)md_array_size(matrix_stack);
     md_array_push(matrix_stack, model_view_matrix, arena);
 }
 
 void set_proj_matrix(const mat4_t& proj_matrix) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        vulkan_renderer->set_proj_matrix(proj_matrix);
+        return;
+    }
+#endif
+
     curr_proj_matrix_idx = (int)md_array_size(matrix_stack);
     md_array_push(matrix_stack, proj_matrix, arena);
 }
 
 void render() {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer && current_command_buffer) {
+        vulkan_renderer->render(current_command_buffer, current_frame_index);
+        vulkan_renderer->reset_frame(current_frame_index);
+        return;
+    }
+#endif
+
+    // OpenGL rendering
     glBindVertexArray(vao);
 
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -273,8 +341,32 @@ void render() {
     curr_proj_matrix_idx = -1;
 }
 
+#ifdef VIAMD_ENABLE_VULKAN
+void set_vulkan_renderer(viamd::gfx::VulkanImmediateRenderer* renderer) {
+    vulkan_renderer = renderer;
+    if (renderer) {
+        current_backend = RenderBackend::VULKAN;
+    } else {
+        current_backend = RenderBackend::OPENGL;
+    }
+}
+
+void set_vulkan_frame_context(VkCommandBuffer command_buffer, uint32_t frame_index) {
+    current_command_buffer = command_buffer;
+    current_frame_index = frame_index;
+}
+#endif
+
 // PRIMITIVES
 void draw_point(vec3_t pos, uint32_t color) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        vulkan_renderer->draw_point(pos, color);
+        return;
+    }
+#endif
+
+    // OpenGL implementation
     const Index idx = (Index)md_array_size(vertices);
 
     Vertex v = {pos, color};
@@ -285,6 +377,22 @@ void draw_point(vec3_t pos, uint32_t color) {
 }
 
 void draw_points_v(const Vertex verts[], size_t count, vec4_t color_mult) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        // Convert Vertex to ImmediateVertex - simple stack allocation for reasonable sizes
+        if (count <= 10000) { // Reasonable limit for stack allocation
+            viamd::gfx::ImmediateVertex* vulkan_verts = (viamd::gfx::ImmediateVertex*)alloca(count * sizeof(viamd::gfx::ImmediateVertex));
+            for (size_t i = 0; i < count; ++i) {
+                vulkan_verts[i].position = verts[i].coord;
+                vulkan_verts[i].color = verts[i].color;
+            }
+            vulkan_renderer->draw_points_v(vulkan_verts, count, color_mult);
+        }
+        return;
+    }
+#endif
+
+    // OpenGL implementation
     const Index idx = (Index)md_array_size(vertices);
     md_array_resize(vertices, md_array_size(vertices) + count, arena);
     Vertex* v = md_array_end(vertices) - count;
@@ -305,6 +413,14 @@ void draw_points_v(const Vertex verts[], size_t count, vec4_t color_mult) {
 }
 
 void draw_line(vec3_t from, vec3_t to, uint32_t color) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        vulkan_renderer->draw_line(from, to, color);
+        return;
+    }
+#endif
+
+    // OpenGL implementation
     const Index idx = (Index)md_array_size(vertices);
 
     Vertex v[2] = {
@@ -320,6 +436,21 @@ void draw_line(vec3_t from, vec3_t to, uint32_t color) {
 }
 
 void draw_lines_v(const Vertex verts[], size_t count, vec4_t color_mult) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        // Convert Vertex to ImmediateVertex - simple stack allocation for reasonable sizes
+        if (count <= 10000) { // Reasonable limit for stack allocation
+            viamd::gfx::ImmediateVertex* vulkan_verts = (viamd::gfx::ImmediateVertex*)alloca(count * sizeof(viamd::gfx::ImmediateVertex));
+            for (size_t i = 0; i < count; ++i) {
+                vulkan_verts[i].position = verts[i].coord;
+                vulkan_verts[i].color = verts[i].color;
+            }
+            vulkan_renderer->draw_lines_v(vulkan_verts, count, color_mult);
+        }
+        return;
+    }
+#endif
+
     if ((count & 1) == 1) {
         MD_LOG_DEBUG("Expected even number of vertices as in function %s", __FUNCTION__);
     }
@@ -348,6 +479,14 @@ void draw_lines_v(const Vertex verts[], size_t count, vec4_t color_mult) {
 }
 
 void draw_triangle(vec3_t p0, vec3_t p1, vec3_t p2, uint32_t color) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        vulkan_renderer->draw_triangle(p0, p1, p2, color);
+        return;
+    }
+#endif
+
+    // OpenGL implementation
     const Index idx = (Index)md_array_size(vertices);
     //const vec3_t normal = vec3_normalize(vec3_cross(vec3_sub(p1, p0), vec3_sub(p2, p0)));
 
@@ -366,6 +505,21 @@ void draw_triangle(vec3_t p0, vec3_t p1, vec3_t p2, uint32_t color) {
 }
 
 void draw_triangles_v(const Vertex verts[], size_t count, vec4_t color_mult) {
+#ifdef VIAMD_ENABLE_VULKAN
+    if (current_backend == RenderBackend::VULKAN && vulkan_renderer) {
+        // Convert Vertex to ImmediateVertex - simple stack allocation for reasonable sizes
+        if (count <= 10000) { // Reasonable limit for stack allocation
+            viamd::gfx::ImmediateVertex* vulkan_verts = (viamd::gfx::ImmediateVertex*)alloca(count * sizeof(viamd::gfx::ImmediateVertex));
+            for (size_t i = 0; i < count; ++i) {
+                vulkan_verts[i].position = verts[i].coord;
+                vulkan_verts[i].color = verts[i].color;
+            }
+            vulkan_renderer->draw_triangles_v(vulkan_verts, count, color_mult);
+        }
+        return;
+    }
+#endif
+
     if ((count % 3) != 0) {
         MD_LOG_DEBUG("Expected number of vertices to be divisible by 3 in function %s", __FUNCTION__);
     }
