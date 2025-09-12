@@ -271,9 +271,9 @@ struct Correlation : viamd::EventHandler {
     float full_alpha = 0.85f;
     float filt_alpha = 0.85f;
     
-    // Enhanced iso-level configuration - adjusted for better correlation visualization
+    // Enhanced iso-level configuration - adjusted for better correlation visualization  
     int num_iso_levels = 3;
-    float iso_thresholds[8] = { 0.01f, 0.05f, 0.15f, 0.3f, 0.5f, 0.7f, 0.85f, 0.95f };
+    float iso_thresholds[8] = { 0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f }; // More reasonable thresholds
     bool preserve_series = true; // Whether to preserve individual series in advanced modes
     
     // Point style for current frame
@@ -282,6 +282,12 @@ struct Correlation : viamd::EventHandler {
         ImVec4 fill = {0.8f, 0.3f, 0.3f, 1.0f};
         float size = 5.0f;
     } current_style;
+    
+    // Point style for filtered trajectory
+    struct {
+        ImVec4 color = {0.8f, 0.3f, 0.8f, 1.0f}; // Purple color by default
+        float size = 2.0f;
+    } filtered_style;
     
     // Advanced rendering infrastructure
     corr_rep_t corr_data_full;
@@ -361,6 +367,10 @@ struct Correlation : viamd::EventHandler {
                                 iso_thresholds[i] = strtof(ptr, &ptr);
                                 if (*ptr == ',') ptr++;
                             }
+                        } else if (str_eq(ident, STR_LIT("filtered_style_size"))) {
+                            viamd::extract_float(filtered_style.size, arg);
+                        } else if (str_eq(ident, STR_LIT("filtered_style_color"))) {
+                            viamd::extract_float4(filtered_style.color, arg);
                         }
                     }
                 }
@@ -388,6 +398,10 @@ struct Correlation : viamd::EventHandler {
                     offset += snprintf(threshold_str + offset, sizeof(threshold_str) - offset, "%.3f", iso_thresholds[i]);
                 }
                 viamd::write_str(state, STR_LIT("iso_thresholds"), str_t{threshold_str, (size_t)offset});
+                
+                // Write filtered style properties
+                viamd::write_float(state, STR_LIT("filtered_style_size"), filtered_style.size);
+                viamd::write_float4(state, STR_LIT("filtered_style_color"), filtered_style.color);
                 break;
             }
             default:
@@ -897,7 +911,11 @@ struct Correlation : viamd::EventHandler {
                                 if (ImGui::Selectable(option_labels[Colormap], display_mode[i] == Colormap)) display_mode[i] = Colormap;
                                 ImGui::EndCombo();
                             }
-                            if (display_mode[i] == Colormap) {
+                            if (display_mode[i] == Points && i == 1) {
+                                // Filtered trajectory point customization
+                                ImGui::SliderFloat("Point Size", &filtered_style.size, 1.0f, 10.0f);
+                                ImGui::ColorEdit4Minimal("Point Color", &filtered_style.color.x);
+                            } else if (display_mode[i] == Colormap) {
                                 ImPlot::ColormapSelection("Color Map", &colormap[i]);
                             } else if (display_mode[i] == IsoLines) {
                                 ImGui::ColorEdit4Minimal("Line Color", &isoline_colors[i].x);
@@ -928,7 +946,7 @@ struct Correlation : viamd::EventHandler {
                     if (ImGui::TreeNode("Custom Thresholds")) {
                         for (int i = 0; i < num_iso_levels; ++i) {
                             ImGui::PushID(i);
-                            ImGui::SliderFloat("", &iso_thresholds[i], 0.01f, 0.99f, "%.2f");
+                            ImGui::SliderFloat("", &iso_thresholds[i], 0.1f, 5.0f, "%.1f"); // Better range for correlation data
                             ImGui::PopID();
                         }
                         ImGui::TreePop();
@@ -1046,6 +1064,14 @@ struct Correlation : viamd::EventHandler {
                     bool should_render_full_advanced = show_layer[0] && display_mode[0] != Points;
                     bool should_render_filt_advanced = show_layer[1] && display_mode[1] != Points && app_state && app_state->timeline.filter.enabled;
                     
+                    // Debug: Display density computation status in plot area
+                    if (should_render_full_advanced || should_render_filt_advanced) {
+                        char debug_text[256];
+                        snprintf(debug_text, sizeof(debug_text), "Full den_sum: %.1f | Filt den_sum: %.1f", 
+                                corr_data_full.den_sum, corr_data_filt.den_sum);
+                        ImPlot::PlotText(debug_text, 0.0, 0.0);
+                    }
+                    
                     if (should_render_full_advanced || should_render_filt_advanced) {
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
@@ -1077,13 +1103,13 @@ struct Correlation : viamd::EventHandler {
                                     .colors = colors,
                                     .count = num_colors,
                                     .min_value = 0.0f,
-                                    .max_value = corr_data_full.den_sum * 0.5f  // Better scaling like Ramachandran
+                                    .max_value = corr_data_full.den_sum * 0.1f  // Less aggressive scaling for better visibility
                                 };
                                 
                                 render_colormap(&corr_data_full, viewport.elem, corr_colormap);
                             } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
-                                // Better density scaling like Ramachandran - use raw density sum
-                                const float density_scale = corr_data_full.den_sum;
+                                // Improved density scaling for correlation data
+                                const float density_scale = corr_data_full.den_sum * 0.01f; // Much smaller base scale
                                 float iso_values[8] = {0};
                                 
                                 for (int i = 0; i < num_iso_levels; ++i) {
@@ -1100,14 +1126,14 @@ struct Correlation : viamd::EventHandler {
                                             ImVec4 series_color = series[series_idx].color;
                                             level_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(series_color.w * 128));
+                                                (int)(series_color.z * 255), (int)(series_color.w * 200)); // More opaque
                                         }
                                     } else {
                                         for (int i = 0; i < num_iso_levels; ++i) {
                                             float t = (float)i / (float)MAX(1, num_iso_levels - 1);
                                             level_colors[i] = IM_COL32(
-                                                (int)(255 * t), (int)(255 * (1-t)), (int)(255 * 0.5f), 
-                                                (int)(128 + 127 * t));
+                                                (int)(255 * (1-t)), (int)(255 * t), (int)(100), // Avoid green dominance
+                                                (int)(160 + 95 * t)); // Better opacity range
                                         }
                                     }
                                     memcpy(contour_colors, level_colors, sizeof(level_colors));
@@ -1158,13 +1184,13 @@ struct Correlation : viamd::EventHandler {
                                     .colors = colors,
                                     .count = num_colors,
                                     .min_value = 0.0f,
-                                    .max_value = corr_data_filt.den_sum * 0.5f  // Better scaling like Ramachandran
+                                    .max_value = corr_data_filt.den_sum * 0.1f  // Less aggressive scaling for better visibility
                                 };
                                 
                                 render_colormap(&corr_data_filt, viewport.elem, corr_colormap);
                             } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
-                                // Better density scaling like Ramachandran - use raw density sum
-                                const float density_scale = corr_data_filt.den_sum;
+                                // Improved density scaling for correlation data  
+                                const float density_scale = corr_data_filt.den_sum * 0.01f; // Much smaller base scale
                                 float iso_values[8] = {0};
                                 
                                 for (int i = 0; i < num_iso_levels; ++i) {
@@ -1273,13 +1299,16 @@ struct Correlation : viamd::EventHandler {
                                     }
                                     
                                     if (md_array_size(filtered_x) > 0) {
-                                        ImVec4 color = ImVec4(0.8f, 0.3f, 0.8f, filt_alpha); // Different color for filtered
+                                        ImVec4 color = filtered_style.color;
+                                        color.w *= filt_alpha; // Apply layer alpha
                                         ImPlot::PushStyleColor(ImPlotCol_MarkerFill, color);
+                                        ImPlot::PushStyleVar(ImPlotStyleVar_MarkerSize, filtered_style.size);
                                         char filtered_name[128];
                                         snprintf(filtered_name, sizeof(filtered_name), "%s (Filtered)", scatter.name);
                                         ImPlot::PlotScatter(filtered_name, 
                                             filtered_x, filtered_y, 
                                             (int)md_array_size(filtered_x));
+                                        ImPlot::PopStyleVar();
                                         ImPlot::PopStyleColor();
                                     }
                                 }
