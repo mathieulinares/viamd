@@ -19,13 +19,9 @@
 #include <string.h>
 #include <stdlib.h>
 
-struct PropertyInfo {
-    char name[64] = "";
-    int index = 0;
-    size_t num_values = 0;
-    size_t num_frames = 0;
-    const float* data = nullptr;
-    bool is_array = false;
+struct DisplayPropertyDragDropPayload {
+    int prop_idx = 0;
+    int src_plot_idx = -1;
 };
 
 struct ScatterSeries {
@@ -40,14 +36,9 @@ struct Correlation : viamd::EventHandler {
     char error[256] = "";
     bool show_window = false;
     
-    // Property selection
+    // Property selection using main application's display properties
     int x_property_idx = -1;
     int y_property_idx = -1;
-    int x_series_idx = 0;  // For array properties
-    int y_series_idx = 0;  // For array properties
-    
-    // Available properties
-    md_array(PropertyInfo) properties = 0;
     
     // Scatter plot data
     md_array(ScatterSeries) series = 0;
@@ -87,6 +78,10 @@ struct Correlation : viamd::EventHandler {
                     while (viamd::next_entry(ident, arg, state)) {
                         if (str_eq(ident, STR_LIT("show_window"))) {
                             viamd::extract_bool(show_window, arg);
+                        } else if (str_eq(ident, STR_LIT("x_property_idx"))) {
+                            viamd::extract_int(x_property_idx, arg);
+                        } else if (str_eq(ident, STR_LIT("y_property_idx"))) {
+                            viamd::extract_int(y_property_idx, arg);
                         }
                     }
                 }
@@ -96,6 +91,8 @@ struct Correlation : viamd::EventHandler {
                 viamd::serialization_state_t& state = *(viamd::serialization_state_t*)e.payload;
                 viamd::write_section_header(state, STR_LIT("Correlation"));
                 viamd::write_bool(state, STR_LIT("show_window"), show_window);
+                viamd::write_int(state, STR_LIT("x_property_idx"), x_property_idx);
+                viamd::write_int(state, STR_LIT("y_property_idx"), y_property_idx);
                 break;
             }
             default:
@@ -104,46 +101,23 @@ struct Correlation : viamd::EventHandler {
         }
     }
 
-    void update_properties() {
-        if (!app_state || !app_state->script.eval_ir) return;
-        
-        md_array_resize(properties, 0, arena);
-        
-        const md_script_ir_t* ir = app_state->script.eval_ir;
-        const size_t num_properties = md_script_ir_property_count(ir);
-        const str_t* property_names = md_script_ir_property_names(ir);
-        
-        for (size_t i = 0; i < num_properties; ++i) {
-            PropertyInfo info = {};
-            str_copy_to_char_buf(info.name, sizeof(info.name), property_names[i]);
-            info.index = (int)i;
-            
-            // Get property data from evaluation
-            if (app_state->script.full_eval) {
-                const md_script_property_data_t* eval_data = md_script_eval_property_data(app_state->script.full_eval, property_names[i]);
-                if (eval_data) {
-                    info.num_frames = eval_data->dim[0]; // Temporal dimension
-                    info.num_values = eval_data->num_values;
-                    info.data = eval_data->values;
-                    info.is_array = (eval_data->num_values > (size_t)eval_data->dim[0]);
-                }
-            }
-            
-            md_array_push(properties, info, arena);
-        }
-    }
-    
     void update_scatter_data() {
-        if (x_property_idx < 0 || y_property_idx < 0 || 
-            x_property_idx >= (int)md_array_size(properties) || 
-            y_property_idx >= (int)md_array_size(properties)) {
+        if (!app_state || x_property_idx < 0 || y_property_idx < 0) {
             return;
         }
         
-        const PropertyInfo& x_prop = properties[x_property_idx];
-        const PropertyInfo& y_prop = properties[y_property_idx];
+        const int num_props = (int)md_array_size(app_state->display_properties);
+        if (x_property_idx >= num_props || y_property_idx >= num_props) {
+            return;
+        }
         
-        if (!x_prop.data || !y_prop.data || x_prop.num_frames != y_prop.num_frames) {
+        const DisplayProperty& x_prop = app_state->display_properties[x_property_idx];
+        const DisplayProperty& y_prop = app_state->display_properties[y_property_idx];
+        
+        // Only process temporal properties with valid data
+        if (x_prop.type != DisplayProperty::Type_Temporal || 
+            y_prop.type != DisplayProperty::Type_Temporal ||
+            !x_prop.prop_data || !y_prop.prop_data) {
             return;
         }
         
@@ -155,20 +129,27 @@ struct Correlation : viamd::EventHandler {
         }
         md_array_resize(series, 0, arena);
         
-        const size_t num_frames = x_prop.num_frames;
+        const size_t num_frames = x_prop.prop_data->dim[0];
+        const size_t x_values_per_frame = x_prop.prop_data->num_values / num_frames;
+        const size_t y_values_per_frame = y_prop.prop_data->num_values / num_frames;
         
-        if (x_prop.is_array || y_prop.is_array) {
+        if (num_frames != y_prop.prop_data->dim[0]) {
+            strcpy(error, "Properties have different temporal dimensions");
+            return;
+        }
+        
+        // Clear any previous error
+        error[0] = '\0';
+        
+        if (x_values_per_frame > 1 || y_values_per_frame > 1) {
             // Handle array properties - create multiple series
-            const size_t x_values_per_frame = x_prop.is_array ? (x_prop.num_values / x_prop.num_frames) : 1;
-            const size_t y_values_per_frame = y_prop.is_array ? (y_prop.num_values / y_prop.num_frames) : 1;
-            
             const size_t max_series = ImMax(x_values_per_frame, y_values_per_frame);
             
             for (size_t s = 0; s < max_series; ++s) {
                 ScatterSeries scatter = {};
                 snprintf(scatter.name, sizeof(scatter.name), "%s[%zu] vs %s[%zu]", 
-                    x_prop.name, x_prop.is_array ? s : 0,
-                    y_prop.name, y_prop.is_array ? s : 0);
+                    x_prop.label, x_values_per_frame > 1 ? s : 0,
+                    y_prop.label, y_values_per_frame > 1 ? s : 0);
                 
                 // Assign a color based on series index
                 scatter.color = ImPlot::GetColormapColor((int)s);
@@ -176,24 +157,24 @@ struct Correlation : viamd::EventHandler {
                 for (size_t f = 0; f < num_frames; ++f) {
                     float x_val, y_val;
                     
-                    if (x_prop.is_array) {
+                    if (x_values_per_frame > 1) {
                         if (s < x_values_per_frame) {
-                            x_val = x_prop.data[f * x_values_per_frame + s];
+                            x_val = x_prop.prop_data->values[f * x_values_per_frame + s];
                         } else {
                             continue; // Skip this series if x doesn't have enough values
                         }
                     } else {
-                        x_val = x_prop.data[f];
+                        x_val = x_prop.prop_data->values[f];
                     }
                     
-                    if (y_prop.is_array) {
+                    if (y_values_per_frame > 1) {
                         if (s < y_values_per_frame) {
-                            y_val = y_prop.data[f * y_values_per_frame + s];
+                            y_val = y_prop.prop_data->values[f * y_values_per_frame + s];
                         } else {
                             continue; // Skip this series if y doesn't have enough values
                         }
                     } else {
-                        y_val = y_prop.data[f];
+                        y_val = y_prop.prop_data->values[f];
                     }
                     
                     md_array_push(scatter.x_data, x_val, arena);
@@ -208,12 +189,12 @@ struct Correlation : viamd::EventHandler {
         } else {
             // Simple case - single series
             ScatterSeries scatter = {};
-            snprintf(scatter.name, sizeof(scatter.name), "%s vs %s", x_prop.name, y_prop.name);
+            snprintf(scatter.name, sizeof(scatter.name), "%s vs %s", x_prop.label, y_prop.label);
             scatter.color = ImPlot::GetColormapColor(0);
             
             for (size_t f = 0; f < num_frames; ++f) {
-                md_array_push(scatter.x_data, x_prop.data[f], arena);
-                md_array_push(scatter.y_data, y_prop.data[f], arena);
+                md_array_push(scatter.x_data, x_prop.prop_data->values[f], arena);
+                md_array_push(scatter.y_data, y_prop.prop_data->values[f], arena);
                 md_array_push(scatter.frame_indices, (int)f, arena);
             }
             
@@ -224,104 +205,159 @@ struct Correlation : viamd::EventHandler {
     void draw_window() {
         if (!show_window) return;
         
-        if (ImGui::Begin("Correlation Plot", &show_window)) {
-            update_properties();
-            
-            // Property selection UI
-            ImGui::Text("X-Axis Property:");
-            ImGui::SameLine();
-            if (ImGui::BeginCombo("##x_property", x_property_idx >= 0 ? properties[x_property_idx].name : "Select...")) {
-                for (size_t i = 0; i < md_array_size(properties); ++i) {
-                    bool is_selected = (x_property_idx == (int)i);
-                    if (ImGui::Selectable(properties[i].name, is_selected)) {
-                        x_property_idx = (int)i;
-                    }
-                    if (is_selected) {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
+        ImGui::SetNextWindowSize(ImVec2(600, 500), ImGuiCond_FirstUseEver);
+        
+        if (ImGui::Begin("Correlation Plot", &show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
+            if (!app_state) {
+                ImGui::Text("Application not initialized");
+                ImGui::End();
+                return;
             }
             
-            ImGui::Text("Y-Axis Property:");
-            ImGui::SameLine();
-            if (ImGui::BeginCombo("##y_property", y_property_idx >= 0 ? properties[y_property_idx].name : "Select...")) {
-                for (size_t i = 0; i < md_array_size(properties); ++i) {
-                    bool is_selected = (y_property_idx == (int)i);
-                    if (ImGui::Selectable(properties[i].name, is_selected)) {
-                        y_property_idx = (int)i;
-                    }
-                    if (is_selected) {
-                        ImGui::SetItemDefaultFocus();
-                    }
+            // Count temporal properties
+            int num_temporal_props = 0;
+            const int num_props = (int)md_array_size(app_state->display_properties);
+            for (int i = 0; i < num_props; ++i) {
+                if (app_state->display_properties[i].type == DisplayProperty::Type_Temporal) {
+                    num_temporal_props++;
                 }
-                ImGui::EndCombo();
             }
             
-            if (x_property_idx >= 0 && y_property_idx >= 0) {
-                if (ImGui::Button("Generate Plot")) {
+            // Menu bar with Properties menu
+            if (ImGui::BeginMenuBar()) {
+                if (ImGui::BeginMenu("Properties")) {
+                    if (num_temporal_props > 0) {
+                        for (int i = 0; i < num_props; ++i) {
+                            const DisplayProperty& dp = app_state->display_properties[i];
+                            if (dp.type != DisplayProperty::Type_Temporal) continue;
+                            
+                            ImPlot::ItemIcon(dp.color);
+                            ImGui::SameLine();
+                            ImGui::Selectable(dp.label);
+                            
+                            if (ImGui::BeginDragDropSource()) {
+                                DisplayPropertyDragDropPayload payload = {i};
+                                ImGui::SetDragDropPayload("CORRELATION_DND", &payload, sizeof(payload));
+                                ImPlot::ItemIcon(dp.color); ImGui::SameLine();
+                                ImGui::TextUnformatted(dp.label);
+                                ImGui::EndDragDropSource();
+                            }
+                        }
+                    } else {
+                        ImGui::Text("No temporal properties available");
+                    }
+                    ImGui::EndMenu();
+                }
+                ImGui::EndMenuBar();
+            }
+            
+            // Current property selections
+            ImGui::Text("X-Axis: %s", x_property_idx >= 0 ? app_state->display_properties[x_property_idx].label : "Drop property here");
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
+                    ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
+                    DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
+                    x_property_idx = dnd->prop_idx;
                     update_scatter_data();
                 }
-                
-                // Display scatter plot
-                if (md_array_size(series) > 0) {
-                    if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
-                        
-                        for (size_t s = 0; s < md_array_size(series); ++s) {
-                            const ScatterSeries& scatter = series[s];
-                            if (md_array_size(scatter.x_data) > 0) {
-                                ImPlot::PushStyleColor(ImPlotCol_MarkerFill, scatter.color);
-                                ImPlot::PlotScatter(scatter.name, 
-                                    scatter.x_data, scatter.y_data, 
-                                    (int)md_array_size(scatter.x_data));
-                                ImPlot::PopStyleColor();
+                ImGui::EndDragDropTarget();
+            }
+            
+            ImGui::Text("Y-Axis: %s", y_property_idx >= 0 ? app_state->display_properties[y_property_idx].label : "Drop property here");
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("CORRELATION_DND")) {
+                    ASSERT(payload->DataSize == sizeof(DisplayPropertyDragDropPayload));
+                    DisplayPropertyDragDropPayload* dnd = (DisplayPropertyDragDropPayload*)(payload->Data);
+                    y_property_idx = dnd->prop_idx;
+                    update_scatter_data();
+                }
+                ImGui::EndDragDropTarget();
+            }
+            
+            ImGui::Separator();
+            
+            // Always display the scatter plot if we have data
+            if (x_property_idx >= 0 && y_property_idx >= 0 && md_array_size(series) > 0) {
+                if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
+                    
+                    // Set axis labels
+                    if (x_property_idx >= 0 && x_property_idx < num_props) {
+                        ImPlot::SetupAxisTicks(ImAxis_X1, nullptr, 0, nullptr, false);
+                        ImPlot::SetupAxis(ImAxis_X1, app_state->display_properties[x_property_idx].label);
+                    }
+                    if (y_property_idx >= 0 && y_property_idx < num_props) {
+                        ImPlot::SetupAxisTicks(ImAxis_Y1, nullptr, 0, nullptr, false);
+                        ImPlot::SetupAxis(ImAxis_Y1, app_state->display_properties[y_property_idx].label);
+                    }
+                    
+                    for (size_t s = 0; s < md_array_size(series); ++s) {
+                        const ScatterSeries& scatter = series[s];
+                        if (md_array_size(scatter.x_data) > 0) {
+                            ImPlot::PushStyleColor(ImPlotCol_MarkerFill, scatter.color);
+                            ImPlot::PlotScatter(scatter.name, 
+                                scatter.x_data, scatter.y_data, 
+                                (int)md_array_size(scatter.x_data));
+                            ImPlot::PopStyleColor();
+                            
+                            // Check for hover/click on points
+                            if (ImPlot::IsPlotHovered()) {
+                                // Find closest point in screen space
+                                float min_dist_sq = FLT_MAX;
+                                int closest_point = -1;
                                 
-                                // Check for hover/click on points
-                                if (ImPlot::IsPlotHovered()) {
-                                    // Find closest point in screen space
-                                    float min_dist_sq = FLT_MAX;
-                                    int closest_point = -1;
+                                for (size_t p = 0; p < md_array_size(scatter.x_data); ++p) {
+                                    // Convert plot coordinates to screen space for distance calculation
+                                    ImVec2 screen_pos = ImPlot::PlotToPixels(scatter.x_data[p], scatter.y_data[p]);
+                                    ImPlotPoint mouse_plot = ImPlot::GetPlotMousePos();
+                                    ImVec2 mouse_pixel = ImPlot::PlotToPixels(mouse_plot.x, mouse_plot.y);
                                     
-                                    for (size_t p = 0; p < md_array_size(scatter.x_data); ++p) {
-                                        // Convert plot coordinates to screen space for distance calculation
-                                        ImVec2 screen_pos = ImPlot::PlotToPixels(scatter.x_data[p], scatter.y_data[p]);
-                                        ImPlotPoint mouse_plot = ImPlot::GetPlotMousePos();
-                                        ImVec2 mouse_pixel = ImPlot::PlotToPixels(mouse_plot.x, mouse_plot.y);
-                                        
-                                        float dx = screen_pos.x - mouse_pixel.x;
-                                        float dy = screen_pos.y - mouse_pixel.y;
-                                        float dist_sq = dx * dx + dy * dy;
-                                        
-                                        if (dist_sq < min_dist_sq) {
-                                            min_dist_sq = dist_sq;
-                                            closest_point = (int)p;
-                                        }
+                                    float dx = screen_pos.x - mouse_pixel.x;
+                                    float dy = screen_pos.y - mouse_pixel.y;
+                                    float dist_sq = dx * dx + dy * dy;
+                                    
+                                    if (dist_sq < min_dist_sq) {
+                                        min_dist_sq = dist_sq;
+                                        closest_point = (int)p;
                                     }
+                                }
+                                
+                                // Check if close enough to hover (within 10 pixels)
+                                if (closest_point >= 0 && min_dist_sq < 100.0f) {
+                                    hovered_point = closest_point;
                                     
-                                    // Check if close enough to hover (within 10 pixels)
-                                    if (closest_point >= 0 && min_dist_sq < 100.0f) {
-                                        hovered_point = closest_point;
-                                        
-                                        // Show tooltip
-                                        ImGui::BeginTooltip();
-                                        ImGui::Text("Frame: %d", scatter.frame_indices[closest_point]);
-                                        ImGui::Text("X: %.3f", scatter.x_data[closest_point]);
-                                        ImGui::Text("Y: %.3f", scatter.y_data[closest_point]);
-                                        ImGui::Text("Click to jump to this frame");
-                                        ImGui::EndTooltip();
-                                        
-                                        // Handle click to jump to frame
-                                        if (ImGui::IsMouseClicked(0)) {
-                                            clicked_frame = scatter.frame_indices[closest_point];
-                                            app_state->animation.frame = (double)clicked_frame;
-                                        }
+                                    // Show tooltip
+                                    ImGui::BeginTooltip();
+                                    ImGui::Text("Frame: %d", scatter.frame_indices[closest_point]);
+                                    ImGui::Text("X: %.3f", scatter.x_data[closest_point]);
+                                    ImGui::Text("Y: %.3f", scatter.y_data[closest_point]);
+                                    ImGui::Text("Click to jump to this frame");
+                                    ImGui::EndTooltip();
+                                    
+                                    // Handle click to jump to frame
+                                    if (ImGui::IsMouseClicked(0)) {
+                                        clicked_frame = scatter.frame_indices[closest_point];
+                                        app_state->animation.frame = (double)clicked_frame;
                                     }
                                 }
                             }
                         }
-                        
-                        ImPlot::EndPlot();
                     }
+                    
+                    ImPlot::EndPlot();
+                }
+            } else if (x_property_idx >= 0 || y_property_idx >= 0) {
+                // Show placeholder plot with instructions
+                if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
+                    ImPlot::SetupAxes("X Property", "Y Property");
+                    ImPlot::PlotText("Drag properties from the menu\nto both X and Y axes", 0.5, 0.5);
+                    ImPlot::EndPlot();
+                }
+            } else {
+                // Show empty plot with instructions
+                if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
+                    ImPlot::SetupAxes("X Property", "Y Property");
+                    ImPlot::PlotText("Drag temporal properties from the menu\nto X and Y axes to create correlation plot", 0.5, 0.5);
+                    ImPlot::EndPlot();
                 }
             }
             
