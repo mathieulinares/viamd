@@ -271,9 +271,9 @@ struct Correlation : viamd::EventHandler {
     float full_alpha = 0.85f;
     float filt_alpha = 0.85f;
     
-    // Enhanced iso-level configuration
+    // Enhanced iso-level configuration - adjusted for better correlation visualization
     int num_iso_levels = 3;
-    float iso_thresholds[8] = { 0.1f, 0.3f, 0.6f, 0.8f, 0.9f, 0.95f, 0.98f, 0.99f };
+    float iso_thresholds[8] = { 0.01f, 0.05f, 0.15f, 0.3f, 0.5f, 0.7f, 0.85f, 0.95f };
     bool preserve_series = true; // Whether to preserve individual series in advanced modes
     
     // Point style for current frame
@@ -1049,17 +1049,21 @@ struct Correlation : viamd::EventHandler {
                     if (should_render_full_advanced || should_render_filt_advanced) {
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
-                            // Normalize viewport coordinates to [0,1] range for shader (like Ramachandran)
+                            // Correct viewport mapping: map plot coordinates directly to texture [0,1] range
                             float data_range_x = corr_data_full.max_x - corr_data_full.min_x;
                             float data_range_y = corr_data_full.max_y - corr_data_full.min_y;
                             
+                            // Ensure ranges are not zero to avoid division by zero
+                            if (data_range_x < 1e-6f) data_range_x = 1.0f;
+                            if (data_range_y < 1e-6f) data_range_y = 1.0f;
+                            
+                            // Map plot limits to texture coordinates [0,1] - properly aligned with scatter data
                             vec4_t viewport = { 
-                                (float)plot_rect.X.Min / data_range_x, 
-                                (float)plot_rect.Y.Min / data_range_y, 
-                                (float)plot_rect.X.Max / data_range_x, 
-                                (float)plot_rect.Y.Max / data_range_y 
+                                (float)(plot_rect.X.Min - corr_data_full.min_x) / data_range_x, 
+                                (float)(plot_rect.Y.Min - corr_data_full.min_y) / data_range_y, 
+                                (float)(plot_rect.X.Max - corr_data_full.min_x) / data_range_x, 
+                                (float)(plot_rect.Y.Max - corr_data_full.min_y) / data_range_y 
                             };
-                            viewport = viewport * 0.5f + 0.5f; // Map to [0,1] range
                             
                             if (display_mode[0] == Colormap) {
                                 uint32_t colors[32] = {0};
@@ -1073,12 +1077,13 @@ struct Correlation : viamd::EventHandler {
                                     .colors = colors,
                                     .count = num_colors,
                                     .min_value = 0.0f,
-                                    .max_value = corr_data_full.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
+                                    .max_value = corr_data_full.den_sum * 0.5f  // Better scaling like Ramachandran
                                 };
                                 
                                 render_colormap(&corr_data_full, viewport.elem, corr_colormap);
                             } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
-                                const float density_scale = corr_data_full.den_sum / (density_tex_dim * density_tex_dim);
+                                // Better density scaling like Ramachandran - use raw density sum
+                                const float density_scale = corr_data_full.den_sum;
                                 float iso_values[8] = {0};
                                 
                                 for (int i = 0; i < num_iso_levels; ++i) {
@@ -1125,17 +1130,21 @@ struct Correlation : viamd::EventHandler {
                         }
                         
                         if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
-                            // Normalize viewport coordinates to [0,1] range for shader (like Ramachandran)
+                            // Correct viewport mapping: map plot coordinates directly to texture [0,1] range
                             float data_range_x = corr_data_filt.max_x - corr_data_filt.min_x;
                             float data_range_y = corr_data_filt.max_y - corr_data_filt.min_y;
                             
+                            // Ensure ranges are not zero to avoid division by zero
+                            if (data_range_x < 1e-6f) data_range_x = 1.0f;
+                            if (data_range_y < 1e-6f) data_range_y = 1.0f;
+                            
+                            // Map plot limits to texture coordinates [0,1] - properly aligned with scatter data
                             vec4_t viewport = { 
-                                (float)plot_rect.X.Min / data_range_x, 
-                                (float)plot_rect.Y.Min / data_range_y, 
-                                (float)plot_rect.X.Max / data_range_x, 
-                                (float)plot_rect.Y.Max / data_range_y 
+                                (float)(plot_rect.X.Min - corr_data_filt.min_x) / data_range_x, 
+                                (float)(plot_rect.Y.Min - corr_data_filt.min_y) / data_range_y, 
+                                (float)(plot_rect.X.Max - corr_data_filt.min_x) / data_range_x, 
+                                (float)(plot_rect.Y.Max - corr_data_filt.min_y) / data_range_y 
                             };
-                            viewport = viewport * 0.5f + 0.5f; // Map to [0,1] range
                             
                             if (display_mode[1] == Colormap) {
                                 uint32_t colors[32] = {0};
@@ -1149,12 +1158,13 @@ struct Correlation : viamd::EventHandler {
                                     .colors = colors,
                                     .count = num_colors,
                                     .min_value = 0.0f,
-                                    .max_value = corr_data_filt.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
+                                    .max_value = corr_data_filt.den_sum * 0.5f  // Better scaling like Ramachandran
                                 };
                                 
                                 render_colormap(&corr_data_filt, viewport.elem, corr_colormap);
                             } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
-                                const float density_scale = corr_data_filt.den_sum / (density_tex_dim * density_tex_dim);
+                                // Better density scaling like Ramachandran - use raw density sum
+                                const float density_scale = corr_data_filt.den_sum;
                                 float iso_values[8] = {0};
                                 
                                 for (int i = 0; i < num_iso_levels; ++i) {
