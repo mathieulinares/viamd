@@ -46,6 +46,7 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_VULKAN "Enable Vulkan graphics backend" ON)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
@@ -69,6 +70,7 @@ if (APPLE)
 endif()
 
 find_package(OpenGL REQUIRED)
+find_package(Vulkan REQUIRED)
 
 add_subdirectory(ext/mdlib)
 add_subdirectory(ext/glfw)
@@ -115,7 +117,51 @@ if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
 endif()
 
-set(SHADER_FILES 
+set(SHADER_FILES
+    src/shaders/compose_deferred.frag
+    src/shaders/fxaa.frag
+    src/shaders/highlight.frag
+    src/shaders/luma.frag
+    src/shaders/scale_hsv.frag
+    src/shaders/temporal.frag
+
+    src/shaders/cone_tracing/simple.frag
+    src/shaders/cone_tracing/cone_tracing.frag
+
+    src/shaders/culling/depth_bound.vert
+    src/shaders/culling/depth_bound.frag
+    src/shaders/culling/depth_bound_no_discard.frag
+
+    src/shaders/dof/coc.frag
+    src/shaders/dof/gather.frag
+
+    src/shaders/sdf/raycaster.frag
+
+    src/shaders/ssao/ssao.frag
+    src/shaders/ssao/blur.frag
+
+    src/shaders/tonemap/tonemap.frag
+    src/shaders/tonemap/histogram.frag
+
+    src/shaders/velocity/velocity.vert
+    src/shaders/velocity/velocity.frag
+
+    src/shaders/volume/entryexit.vert
+    src/shaders/volume/entryexit.frag
+    src/shaders/volume/raycaster.frag
+    src/shaders/volume/raycaster_iso_explicit_tf.frag
+    src/shaders/volume/map_vol_to_surf.frag
+    
+    # Vulkan-specific volume shaders
+    src/shaders/volume/raycaster.comp
+    src/shaders/volume/entry_exit.vert
+    src/shaders/volume/entry_exit.frag
+    
+    # Vulkan-specific post-processing shaders
+    src/shaders/postprocess/ssao.comp
+    src/shaders/postprocess/dof.comp
+    src/shaders/postprocess/fxaa.comp
+    
     src/shaders/highlight.frag
     src/shaders/scale_hsv.frag
     src/shaders/compose_deferred.frag
@@ -189,6 +235,10 @@ if (VIAMD_ENABLE_DEFAULT_DATASET)
     set(VIAMD_DEFINES ${VIAMD_DEFINES} VIAMD_DATASET_DIR=\"datasets\")
 endif()
 
+if (VIAMD_ENABLE_VULKAN)
+    set(VIAMD_DEFINES ${VIAMD_DEFINES} VIAMD_ENABLE_VULKAN)
+endif()
+
 target_compile_definitions(viamd PRIVATE
     ${VIAMD_DEFINES}
     VIAMD_NUM_WORKER_THREADS=${VIAMD_NUM_WORKER_THREADS}
@@ -209,6 +259,8 @@ target_include_directories(viamd
         gen
         ext/gl3w
         ext/enkiTS/src
+        ext/VulkanMemoryAllocator/include
+        ${Vulkan_INCLUDE_DIRS}
 )
 
 set_target_properties(viamd PROPERTIES
@@ -226,5 +278,6 @@ target_link_libraries(viamd
     implot
     atomic_queue
     imgui_notify
+    ${Vulkan_LIBRARIES}
     ${VIAMD_STDLIBS}
 )

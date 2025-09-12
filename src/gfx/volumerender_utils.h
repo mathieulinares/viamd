@@ -3,10 +3,29 @@
 #include <core/md_vec_math.h>
 #include <core/md_str.h>
 
+// Forward declaration for Vulkan support
 namespace volume {
+    class VulkanVolumeRenderer;
+}
+
+namespace volume {
+
+// Backend selection
+enum class RenderBackend {
+    OPENGL,
+    VULKAN
+};
 
 void initialize();
 void shutdown();
+
+// Backend management
+void set_render_backend(RenderBackend backend);
+RenderBackend get_render_backend();
+
+// Vulkan backend setup
+void set_vulkan_renderer(VulkanVolumeRenderer* renderer);
+VulkanVolumeRenderer* get_vulkan_renderer();
 
 mat4_t compute_model_to_world_matrix(vec3_t min_world_aabb, vec3_t max_world_aabb);
 mat4_t compute_world_to_model_matrix(vec3_t min_world_aabb, vec3_t max_world_aabb);
@@ -109,5 +128,8 @@ struct RenderDesc {
 
 void render_volume(const RenderDesc& desc);
 
+// Vulkan-compatible render descriptor conversion
+struct VulkanRenderDesc; // Forward declaration
+VulkanRenderDesc convert_to_vulkan_desc(const RenderDesc& desc);
 
 }  // namespace volume
