@@ -10,3 +10,6 @@
 [submodule "ext/mdlib"]
 	path = ext/mdlib
 	url = https://github.com/scanberg/mdlib
+[submodule "ext/VulkanMemoryAllocator"]
+	path = ext/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
