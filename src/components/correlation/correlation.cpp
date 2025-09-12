@@ -17,6 +17,12 @@
 #include <implot_widgets.h>
 #include <implot_internal.h>
 
+#include "gfx/gl.h"
+#include "gfx/gl_utils.h"
+#include "task_system.h"
+
+#include <core/md_vec_math.h>
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -25,13 +31,213 @@
 #define MEGABYTES(x) ((x) * 1024 * 1024)
 #endif
 
-// Property selection buttons instead of drag-drop
+static const uint32_t density_tex_dim = 512;
+static const uint32_t tex_dim = 1024;
+
+// Vertex shader for correlation rendering (adapted from Ramachandran)
+constexpr str_t v_fs_quad_src = STR_LIT(R"(
+#version 150 core
+
+void main() {
+	uint idx = uint(gl_VertexID) % 3U;
+	gl_Position = vec4(
+		(float( idx     &1U)) * 4.0 - 1.0,
+		(float((idx>>1U)&1U)) * 4.0 - 1.0,
+		0, 1.0);
+}
+)");
+
+// Fragment shader for colormap rendering
+constexpr str_t f_shader_map_src = STR_LIT(R"(
+#version 330 core
+
+layout(location = 0) out vec4 out_frag;
+
+uniform sampler2D u_tex_den;
+uniform vec4 u_viewport;
+uniform vec2 u_inv_res;
+uniform vec4 u_map_colors[64];
+uniform uint u_map_length;
+uniform vec2 u_map_range;
+
+vec4 map_density(float val) {
+    uint length = u_map_length;
+    vec2 range  = u_map_range;
+    
+    val = clamp((val - range.x) / (range.y - range.x), 0, 1);
+    float s = val * float(length);
+    float t = fract(s);
+    uint i0 = clamp(uint(s) + 0U, 0U, length - 1U);
+    uint i1 = clamp(uint(s) + 1U, 0U, length - 1U);
+    return mix(u_map_colors[i0], u_map_colors[i1], t);
+}
+
+void main() {
+    vec2 coords = vec2(gl_FragCoord.xy) * u_inv_res;
+    vec2 uv = u_viewport.xy + coords * u_viewport.zw;
+    float d = texture(u_tex_den, uv).r;
+    out_frag = map_density(d);
+}
+)");
+
+// Fragment shader for isolines/isolevels rendering
+constexpr str_t f_shader_iso_src = STR_LIT(R"(
+#version 330 core
+
+layout(location = 0) out vec4 out_frag;
+
+uniform sampler2D u_tex_den;
+uniform vec4 u_viewport;
+uniform vec2 u_inv_res;
+uniform float u_iso_values[32];
+uniform vec4  u_iso_level_colors[32];
+uniform vec4  u_iso_contour_colors[32];
+uniform uint  u_iso_length;
+uniform float u_iso_contour_line_scale;
+
+vec4 map_density(float val) {
+    vec4 base = vec4(0,0,0,0);
+    vec4 contour = vec4(0,0,0,0);
+    uint length = u_iso_length;
+
+    uint i = 0U;
+    for (; i < length - 1U; ++i) {
+        if (u_iso_values[i] <= val && val < u_iso_values[i + 1U]) break;
+    }
+
+    uint i0 = i;
+    uint i1 = min(i + 1U, length - 1U);
+
+    // We interpolate the colors between index i and i + 1
+    float v0 = u_iso_values[i0];
+    float v1 = u_iso_values[i1];
+
+    vec4 b0 = u_iso_level_colors[i0];
+    vec4 b1 = u_iso_level_colors[i1];
+
+    float dv = fwidth(val);
+    float band = dv * 2.0 * u_iso_contour_line_scale;
+    base = mix(b0, b1, smoothstep(v1 - band, v1 + band, val));
+
+    for (uint i = 0U; i < length; ++i) {
+        float  v = u_iso_values[i]; 
+        contour += u_iso_contour_colors[i] * smoothstep(v - band, v, val) * (1.0 - smoothstep(v, v + band, val));
+    }
+
+    return contour + base * (1.0 - contour.a);
+}
+
+void main() {
+    vec2 coords = vec2(gl_FragCoord.xy) * u_inv_res;
+    vec2 uv = u_viewport.xy + coords * u_viewport.zw;
+    float d = texture(u_tex_den, uv).r;
+    out_frag = map_density(d);
+}
+)");
+
+// Blur function for density smoothing
+static inline void blur_density_gaussian(float* data, int dim, float sigma) {
+    if (sigma <= 0.0f) return;
+    
+    const int kernel_radius = (int)(3.0f * sigma);
+    const int kernel_size = 2 * kernel_radius + 1;
+    const float inv_sigma_sq = 1.0f / (sigma * sigma);
+    
+    // Create Gaussian kernel
+    float* kernel = (float*)alloca(kernel_size * sizeof(float));
+    float kernel_sum = 0.0f;
+    for (int i = 0; i < kernel_size; ++i) {
+        int x = i - kernel_radius;
+        kernel[i] = expf(-0.5f * x * x * inv_sigma_sq);
+        kernel_sum += kernel[i];
+    }
+    
+    // Normalize kernel
+    for (int i = 0; i < kernel_size; ++i) {
+        kernel[i] /= kernel_sum;
+    }
+    
+    // Temporary buffer
+    float* temp = (float*)alloca(dim * dim * sizeof(float));
+    memcpy(temp, data, dim * dim * sizeof(float));
+    
+    // Horizontal pass
+    for (int y = 0; y < dim; ++y) {
+        for (int x = 0; x < dim; ++x) {
+            float sum = 0.0f;
+            for (int k = 0; k < kernel_size; ++k) {
+                int src_x = x + k - kernel_radius;
+                if (src_x < 0) src_x = 0;
+                if (src_x >= dim) src_x = dim - 1;
+                sum += temp[y * dim + src_x] * kernel[k];
+            }
+            data[y * dim + x] = sum;
+        }
+    }
+    
+    // Vertical pass
+    memcpy(temp, data, dim * dim * sizeof(float));
+    for (int y = 0; y < dim; ++y) {
+        for (int x = 0; x < dim; ++x) {
+            float sum = 0.0f;
+            for (int k = 0; k < kernel_size; ++k) {
+                int src_y = y + k - kernel_radius;
+                if (src_y < 0) src_y = 0;
+                if (src_y >= dim) src_y = dim - 1;
+                sum += temp[src_y * dim + x] * kernel[k];
+            }
+            data[y * dim + x] = sum;
+        }
+    }
+}
 
 enum CorrelationDisplayMode {
     Points,
     IsoLevels,
     IsoLines,
     Colormap,
+};
+
+// Correlation representation (similar to rama_rep_t)
+struct corr_rep_t {
+    uint32_t map_tex = 0;     // Colormap texture
+    uint32_t iso_tex = 0;     // Isolines/isolevels texture
+    float    den_sum = 0.0f;  // Density sum for normalization
+    uint32_t den_tex = 0;     // Density texture (single channel)
+    float    min_x = 0.0f;    // Data range for coordinate mapping
+    float    max_x = 0.0f;
+    float    min_y = 0.0f;
+    float    max_y = 0.0f;
+};
+
+struct corr_colormap_t {
+    const uint32_t* colors;
+    uint32_t count;
+    float min_value;
+    float max_value;
+};
+
+struct corr_isomap_t {
+    const float* values;
+    const uint32_t* level_colors;
+    const uint32_t* contour_colors;
+    uint32_t count;
+};
+
+// Shader program structures
+struct shader_program_t {
+    GLuint program = 0;
+    GLint uniform_loc_tex_den = -1;
+    GLint uniform_loc_viewport = -1;
+    GLint uniform_loc_inv_res = -1;
+    GLint uniform_loc_map_colors = -1;
+    GLint uniform_loc_map_length = -1;
+    GLint uniform_loc_map_range = -1;
+    GLint uniform_loc_iso_values = -1;
+    GLint uniform_loc_iso_level_colors = -1;
+    GLint uniform_loc_iso_contour_colors = -1;
+    GLint uniform_loc_iso_length = -1;
+    GLint uniform_loc_iso_contour_line_scale = -1;
 };
 
 struct ScatterSeries {
@@ -72,6 +278,21 @@ struct Correlation : viamd::EventHandler {
         float size = 5.0f;
     } current_style;
     
+    // Advanced rendering infrastructure
+    corr_rep_t corr_data_full;
+    corr_rep_t corr_data_filt;
+    shader_program_t map_shader;
+    shader_program_t iso_shader;
+    uint32_t fbo = 0;  // Framebuffer object
+    uint32_t vao = 0;  // Vertex array object
+    float blur_sigma = 1.5f;
+    
+    // Task system for async density computation
+    task_system::ID compute_density_full = 0;
+    task_system::ID compute_density_filt = 0;
+    uint64_t full_fingerprint = 0;
+    uint64_t filt_fingerprint = 0;
+    
     md_allocator_i* arena = 0;
     ApplicationState* app_state = 0;
 
@@ -85,12 +306,15 @@ struct Correlation : viamd::EventHandler {
             case viamd::EventType_ViamdInitialize: {
                 app_state = (ApplicationState*)e.payload;
                 arena = md_arena_allocator_create(app_state->allocator.persistent, MEGABYTES(1));
+                init_gl_resources();
                 break;
             }
             case viamd::EventType_ViamdShutdown:
+                cleanup_gl_resources();
                 md_arena_allocator_destroy(arena);
                 break;
             case viamd::EventType_ViamdFrameTick:
+                update();
                 draw_window();
                 break;
             case viamd::EventType_ViamdWindowDrawMenu:
@@ -143,6 +367,86 @@ struct Correlation : viamd::EventHandler {
                 break;
             }
         }
+    }
+    
+    void init_gl_resources() {
+        // Initialize density textures
+        gl::init_texture_2D(&corr_data_full.den_tex, density_tex_dim, density_tex_dim, GL_R32F);
+        gl::init_texture_2D(&corr_data_filt.den_tex, density_tex_dim, density_tex_dim, GL_R32F);
+        
+        // Initialize render target textures
+        gl::init_texture_2D(&corr_data_full.map_tex, tex_dim, tex_dim, GL_RGBA8);
+        gl::init_texture_2D(&corr_data_full.iso_tex, tex_dim, tex_dim, GL_RGBA8);
+        gl::init_texture_2D(&corr_data_filt.map_tex, tex_dim, tex_dim, GL_RGBA8);
+        gl::init_texture_2D(&corr_data_filt.iso_tex, tex_dim, tex_dim, GL_RGBA8);
+        
+        // Initialize shaders
+        GLuint vs = gl::compile_shader_from_source(v_fs_quad_src, GL_VERTEX_SHADER);
+        GLuint fs_map = gl::compile_shader_from_source(f_shader_map_src, GL_FRAGMENT_SHADER);
+        GLuint fs_iso = gl::compile_shader_from_source(f_shader_iso_src, GL_FRAGMENT_SHADER);
+        
+        if (vs && fs_map) {
+            map_shader.program = glCreateProgram();
+            GLuint shaders[] = {vs, fs_map};
+            if (gl::attach_link_detach(map_shader.program, shaders, 2)) {
+                map_shader.uniform_loc_tex_den = glGetUniformLocation(map_shader.program, "u_tex_den");
+                map_shader.uniform_loc_viewport = glGetUniformLocation(map_shader.program, "u_viewport");
+                map_shader.uniform_loc_inv_res = glGetUniformLocation(map_shader.program, "u_inv_res");
+                map_shader.uniform_loc_map_colors = glGetUniformLocation(map_shader.program, "u_map_colors");
+                map_shader.uniform_loc_map_length = glGetUniformLocation(map_shader.program, "u_map_length");
+                map_shader.uniform_loc_map_range = glGetUniformLocation(map_shader.program, "u_map_range");
+            }
+        }
+        
+        if (vs && fs_iso) {
+            iso_shader.program = glCreateProgram();
+            GLuint shaders[] = {vs, fs_iso};
+            if (gl::attach_link_detach(iso_shader.program, shaders, 2)) {
+                iso_shader.uniform_loc_tex_den = glGetUniformLocation(iso_shader.program, "u_tex_den");
+                iso_shader.uniform_loc_viewport = glGetUniformLocation(iso_shader.program, "u_viewport");
+                iso_shader.uniform_loc_inv_res = glGetUniformLocation(iso_shader.program, "u_inv_res");
+                iso_shader.uniform_loc_iso_values = glGetUniformLocation(iso_shader.program, "u_iso_values");
+                iso_shader.uniform_loc_iso_level_colors = glGetUniformLocation(iso_shader.program, "u_iso_level_colors");
+                iso_shader.uniform_loc_iso_contour_colors = glGetUniformLocation(iso_shader.program, "u_iso_contour_colors");
+                iso_shader.uniform_loc_iso_length = glGetUniformLocation(iso_shader.program, "u_iso_length");
+                iso_shader.uniform_loc_iso_contour_line_scale = glGetUniformLocation(iso_shader.program, "u_iso_contour_line_scale");
+            }
+        }
+        
+        // Cleanup temporary shaders
+        if (vs) glDeleteShader(vs);
+        if (fs_map) glDeleteShader(fs_map);
+        if (fs_iso) glDeleteShader(fs_iso);
+        
+        // Initialize framebuffer and vertex array
+        glGenFramebuffers(1, &fbo);
+        glGenVertexArrays(1, &vao);
+    }
+    
+    void cleanup_gl_resources() {
+        // Interrupt any running tasks
+        if (task_system::task_is_running(compute_density_full)) {
+            task_system::task_interrupt(compute_density_full);
+        }
+        if (task_system::task_is_running(compute_density_filt)) {
+            task_system::task_interrupt(compute_density_filt);
+        }
+        
+        // Clean up textures
+        gl::free_texture(&corr_data_full.den_tex);
+        gl::free_texture(&corr_data_full.map_tex);
+        gl::free_texture(&corr_data_full.iso_tex);
+        gl::free_texture(&corr_data_filt.den_tex);
+        gl::free_texture(&corr_data_filt.map_tex);
+        gl::free_texture(&corr_data_filt.iso_tex);
+        
+        // Clean up shaders
+        if (map_shader.program) glDeleteProgram(map_shader.program);
+        if (iso_shader.program) glDeleteProgram(iso_shader.program);
+        
+        // Clean up framebuffer and vertex array
+        if (fbo) glDeleteFramebuffers(1, &fbo);
+        if (vao) glDeleteVertexArrays(1, &vao);
     }
 
     void update_scatter_data() {
@@ -255,11 +559,282 @@ struct Correlation : viamd::EventHandler {
         }
     }
 
-    // Compute 2D density for correlation data (placeholder for advanced display modes)
-    void compute_density_map() {
-        // This function will compute 2D histograms/density maps for IsoLevels, IsoLines, and Colormap modes
-        // Implementation will use similar approach to Ramachandran density computation
-        // For now, this is a placeholder - will be expanded when implementing texture-based rendering
+    // Compute 2D density for correlation data
+    task_system::ID compute_density(corr_rep_t* rep, const ScatterSeries* series, size_t num_series, uint32_t frame_beg, uint32_t frame_end) {
+        struct UserData {
+            uint64_t alloc_size;
+            float* density_tex;
+            corr_rep_t* rep;
+            const ScatterSeries* series;
+            size_t num_series;
+            uint32_t frame_beg;
+            uint32_t frame_end;
+            float sigma;
+            md_allocator_i* alloc;
+            volatile int complete;
+        };
+
+        const size_t density_data_size = density_tex_dim * density_tex_dim * sizeof(float);
+        const size_t alloc_size = sizeof(UserData) + density_data_size;
+        
+        UserData* user_data = (UserData*)md_alloc(app_state->allocator.persistent, alloc_size);
+        user_data->density_tex = (float*)((char*)user_data + sizeof(UserData));
+        user_data->alloc_size = alloc_size;
+        user_data->rep = rep;
+        user_data->series = series;
+        user_data->num_series = num_series;
+        user_data->frame_beg = frame_beg;
+        user_data->frame_end = frame_end;
+        user_data->sigma = blur_sigma;
+        user_data->alloc = app_state->allocator.persistent;
+        user_data->complete = 0;
+
+        // Clear density texture
+        memset(user_data->density_tex, 0, density_data_size);
+
+        task_system::ID async_task = task_system::create_pool_task(STR_LIT("Correlation density"), [data = user_data]() {
+            // Find data ranges for coordinate mapping
+            float min_x = FLT_MAX, max_x = -FLT_MAX;
+            float min_y = FLT_MAX, max_y = -FLT_MAX;
+            
+            for (size_t s = 0; s < data->num_series; ++s) {
+                const ScatterSeries& series = data->series[s];
+                for (size_t i = 0; i < md_array_size(series.x_data); ++i) {
+                    if (series.frame_indices[i] >= (int)data->frame_beg && series.frame_indices[i] < (int)data->frame_end) {
+                        min_x = MIN(min_x, series.x_data[i]);
+                        max_x = MAX(max_x, series.x_data[i]);
+                        min_y = MIN(min_y, series.y_data[i]);
+                        max_y = MAX(max_y, series.y_data[i]);
+                    }
+                }
+            }
+            
+            // Store ranges for later use
+            data->rep->min_x = min_x;
+            data->rep->max_x = max_x;
+            data->rep->min_y = min_y;
+            data->rep->max_y = max_y;
+            
+            // Add small padding to avoid edge cases
+            float x_range = max_x - min_x;
+            float y_range = max_y - min_y;
+            if (x_range < 1e-6f) x_range = 1.0f;
+            if (y_range < 1e-6f) y_range = 1.0f;
+            
+            min_x -= x_range * 0.05f;
+            max_x += x_range * 0.05f;
+            min_y -= y_range * 0.05f;
+            max_y += y_range * 0.05f;
+            
+            x_range = max_x - min_x;
+            y_range = max_y - min_y;
+            
+            double sum = 0.0;
+            
+            // Populate density histogram
+            for (size_t s = 0; s < data->num_series; ++s) {
+                const ScatterSeries& series = data->series[s];
+                for (size_t i = 0; i < md_array_size(series.x_data); ++i) {
+                    if (series.frame_indices[i] >= (int)data->frame_beg && series.frame_indices[i] < (int)data->frame_end) {
+                        float x = series.x_data[i];
+                        float y = series.y_data[i];
+                        
+                        // Map to texture coordinates [0, 1]
+                        float u = (x - min_x) / x_range;
+                        float v = (y - min_y) / y_range;
+                        
+                        // Convert to pixel coordinates
+                        uint32_t px = (uint32_t)(u * density_tex_dim);
+                        uint32_t py = (uint32_t)(v * density_tex_dim);
+                        
+                        // Clamp to valid range
+                        px = MIN(px, density_tex_dim - 1);
+                        py = MIN(py, density_tex_dim - 1);
+                        
+                        data->density_tex[py * density_tex_dim + px] += 1.0f;
+                        sum += 1.0;
+                    }
+                }
+            }
+
+            // Apply Gaussian blur for smooth density
+            blur_density_gaussian(data->density_tex, density_tex_dim, data->sigma);
+
+            data->rep->den_sum = (float)sum;
+            data->complete = 1;
+        });
+
+        task_system::ID main_task = task_system::create_main_task(STR_LIT("##Update correlation texture"), [data = user_data]() {
+            if (data->complete) {
+                gl::set_texture_2D_data(data->rep->den_tex, data->density_tex, GL_R32F);
+            }
+            md_free(data->alloc, data, data->alloc_size);
+        });
+
+        task_system::set_task_dependency(main_task, async_task);
+        task_system::enqueue_task(async_task);
+
+        return async_task;
+    }
+    
+    // Update density computation when data changes
+    void update() {
+        if (show_window && md_array_size(series) > 0) {
+            const size_t num_frames = md_array_size(series[0].frame_indices);
+            if (num_frames > 0) {
+                // Compute fingerprint based on data state
+                uint64_t data_fingerprint = 0;
+                for (size_t s = 0; s < md_array_size(series); ++s) {
+                    data_fingerprint += md_array_size(series[s].x_data);
+                    data_fingerprint += md_array_size(series[s].y_data);
+                }
+                data_fingerprint += x_property_idx;
+                data_fingerprint += y_property_idx;
+                
+                if (full_fingerprint != data_fingerprint) {
+                    if (!task_system::task_is_running(compute_density_full)) {
+                        full_fingerprint = data_fingerprint;
+                        
+                        const uint32_t frame_beg = 0;
+                        const uint32_t frame_end = (uint32_t)num_frames;
+                        
+                        compute_density_full = compute_density(&corr_data_full, series, md_array_size(series), frame_beg, frame_end);
+                    } else {
+                        task_system::task_interrupt(compute_density_full);
+                    }
+                }
+                
+                // For filtered trajectory, use timeline filter if available
+                if (app_state && app_state->timeline.filter.fingerprint != filt_fingerprint) {
+                    if (!task_system::task_is_running(compute_density_filt)) {
+                        filt_fingerprint = app_state->timeline.filter.fingerprint;
+                        
+                        const uint32_t frame_beg = (uint32_t)app_state->timeline.filter.beg_frame;
+                        const uint32_t frame_end = (uint32_t)app_state->timeline.filter.end_frame + 1;
+                        
+                        compute_density_filt = compute_density(&corr_data_filt, series, md_array_size(series), frame_beg, frame_end);
+                    } else {
+                        task_system::task_interrupt(compute_density_filt);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Render correlation data as colormap
+    void render_colormap(corr_rep_t* rep, const float viewport[4], const corr_colormap_t& colormap) {
+        if (!map_shader.program) return;
+        
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_DEPTH_TEST);
+        
+        glViewport(0, 0, tex_dim, tex_dim);
+        
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glFramebufferTexture(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, rep->map_tex, 0);
+        
+        GLenum draw_buffers[] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers(1, draw_buffers);
+        
+        vec4_t vp = {viewport[0], viewport[1], viewport[2] - viewport[0], viewport[3] - viewport[1]};
+        vec4_t colors[64] = {0};
+        
+        for (uint32_t i = 0; i < colormap.count && i < 64; ++i) {
+            uint32_t color = colormap.colors[i];
+            colors[i] = vec4_t{
+                ((color >> 16) & 0xFF) / 255.0f,  // R
+                ((color >> 8) & 0xFF) / 255.0f,   // G
+                (color & 0xFF) / 255.0f,          // B
+                ((color >> 24) & 0xFF) / 255.0f   // A
+            };
+        }
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, rep->den_tex);
+        
+        glUseProgram(map_shader.program);
+        glUniform1i(map_shader.uniform_loc_tex_den, 0);
+        glUniform2f(map_shader.uniform_loc_inv_res, 1.0f / tex_dim, 1.0f / tex_dim);
+        glUniform4fv(map_shader.uniform_loc_viewport, 1, vp.elem);
+        glUniform4fv(map_shader.uniform_loc_map_colors, (int)colormap.count, colors[0].elem);
+        glUniform1ui(map_shader.uniform_loc_map_length, colormap.count);
+        glUniform2f(map_shader.uniform_loc_map_range, colormap.min_value, colormap.max_value);
+        
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        
+        glBindVertexArray(0);
+        glUseProgram(0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    }
+    
+    // Render correlation data as isolines/isolevels
+    void render_isolines(corr_rep_t* rep, const float viewport[4], const corr_isomap_t& isomap) {
+        if (!iso_shader.program) return;
+        
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_DEPTH_TEST);
+        
+        glViewport(0, 0, tex_dim, tex_dim);
+        
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        glFramebufferTexture(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, rep->iso_tex, 0);
+        
+        GLenum draw_buffers[] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers(1, draw_buffers);
+        
+        vec4_t vp = {viewport[0], viewport[1], viewport[2] - viewport[0], viewport[3] - viewport[1]};
+        
+        const uint32_t cap = 32;
+        vec4_t level_colors[cap] = {0};
+        vec4_t contour_colors[cap] = {0};
+        float values[cap] = {0};
+        
+        for (uint32_t i = 0; i < isomap.count && i < cap; ++i) {
+            if (isomap.level_colors) {
+                uint32_t color = isomap.level_colors[i];
+                level_colors[i] = vec4_t{
+                    ((color >> 16) & 0xFF) / 255.0f,
+                    ((color >> 8) & 0xFF) / 255.0f,
+                    (color & 0xFF) / 255.0f,
+                    ((color >> 24) & 0xFF) / 255.0f
+                };
+            }
+            if (isomap.contour_colors) {
+                uint32_t color = isomap.contour_colors[i];
+                contour_colors[i] = vec4_t{
+                    ((color >> 16) & 0xFF) / 255.0f,
+                    ((color >> 8) & 0xFF) / 255.0f,
+                    (color & 0xFF) / 255.0f,
+                    ((color >> 24) & 0xFF) / 255.0f
+                };
+            }
+            values[i] = isomap.values[i];
+        }
+        
+        float contour_line_scale = (float)tex_dim / 512.0f;
+        
+        glUseProgram(iso_shader.program);
+        glUniform1i(iso_shader.uniform_loc_tex_den, 0);
+        glUniform4fv(iso_shader.uniform_loc_viewport, 1, vp.elem);
+        glUniform2f(iso_shader.uniform_loc_inv_res, 1.0f / tex_dim, 1.0f / tex_dim);
+        glUniform1fv(iso_shader.uniform_loc_iso_values, (int)isomap.count, values);
+        glUniform4fv(iso_shader.uniform_loc_iso_level_colors, (int)isomap.count, level_colors[0].elem);
+        glUniform4fv(iso_shader.uniform_loc_iso_contour_colors, (int)isomap.count, contour_colors[0].elem);
+        glUniform1ui(iso_shader.uniform_loc_iso_length, isomap.count);
+        glUniform1f(iso_shader.uniform_loc_iso_contour_line_scale, contour_line_scale);
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, rep->den_tex);
+        
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        
+        glBindVertexArray(0);
+        glUseProgram(0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     }
 
     void draw_window() {
@@ -418,7 +993,13 @@ struct Correlation : viamd::EventHandler {
                     }
                     
                     // Plot layers based on layer settings
-                    // For now, implement Points mode for Full Trajectory layer
+                    ImPlotRect plot_rect = ImPlot::GetPlotLimits();
+                    float viewport[4] = {
+                        (float)plot_rect.X.Min, (float)plot_rect.Y.Min,
+                        (float)plot_rect.X.Max, (float)plot_rect.Y.Max
+                    };
+                    
+                    // Render advanced display modes using textures
                     if (show_layer[0]) { // Full Trajectory
                         if (display_mode[0] == Points) {
                             // Plot all points with trajectory transparency
@@ -434,14 +1015,76 @@ struct Correlation : viamd::EventHandler {
                                     ImPlot::PopStyleColor();
                                 }
                             }
-                        } else {
-                            // Placeholder for other display modes (IsoLevels, IsoLines, Colormap)
-                            // These will be implemented with density computation and texture rendering
-                            ImPlot::PlotText("Full Trajectory: Advanced display modes (IsoLevels, IsoLines, Colormap)\nwill be implemented with density computation", 0.5, 0.8);
+                        } else if (display_mode[0] == Colormap) {
+                            // Render colormap if density data is available
+                            if (corr_data_full.den_tex && corr_data_full.den_sum > 0) {
+                                uint32_t colors[32] = {0};
+                                uint32_t num_colors = ImPlot::GetColormapSize(colormap[0]);
+                                for (uint32_t j = 0; j < num_colors && j < 32; ++j) {
+                                    colors[j] = ImPlot::GetColormapColorU32(j, colormap[0]);
+                                }
+                                // Make first color transparent
+                                colors[0] = colors[0] & 0x00FFFFFFU;
+                                
+                                corr_colormap_t corr_colormap = {
+                                    .colors = colors,
+                                    .count = num_colors,
+                                    .min_value = 0.0f,
+                                    .max_value = corr_data_full.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
+                                };
+                                
+                                render_colormap(&corr_data_full, viewport, corr_colormap);
+                                
+                                // Display as image overlay
+                                ImPlot::PlotImage("Full Trajectory Heatmap", (void*)(intptr_t)corr_data_full.map_tex,
+                                    ImPlotPoint(corr_data_full.min_x, corr_data_full.min_y),
+                                    ImPlotPoint(corr_data_full.max_x, corr_data_full.max_y));
+                            }
+                        } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
+                            // Render isolines/isolevels if density data is available
+                            if (corr_data_full.den_tex && corr_data_full.den_sum > 0) {
+                                const float density_scale = corr_data_full.den_sum / (density_tex_dim * density_tex_dim);
+                                const float iso_values[3] = {
+                                    density_scale * 0.1f,
+                                    density_scale * 0.3f,
+                                    density_scale * 0.6f
+                                };
+                                
+                                uint32_t level_colors[3] = {0};
+                                uint32_t contour_colors[3] = {0};
+                                
+                                if (display_mode[0] == IsoLevels) {
+                                    level_colors[0] = 0x20FF0000; // Transparent red
+                                    level_colors[1] = 0x40FF4400; // Semi-transparent orange
+                                    level_colors[2] = 0x60FFFF00; // More opaque yellow
+                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
+                                } else {
+                                    // IsoLines - use line color
+                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
+                                    contour_colors[0] = line_color;
+                                    contour_colors[1] = line_color;
+                                    contour_colors[2] = line_color;
+                                }
+                                
+                                corr_isomap_t corr_isomap = {
+                                    .values = iso_values,
+                                    .level_colors = level_colors,
+                                    .contour_colors = contour_colors,
+                                    .count = 3
+                                };
+                                
+                                render_isolines(&corr_data_full, viewport, corr_isomap);
+                                
+                                // Display as image overlay
+                                const char* iso_name = display_mode[0] == IsoLevels ? "Full Trajectory IsoLevels" : "Full Trajectory IsoLines";
+                                ImPlot::PlotImage(iso_name, (void*)(intptr_t)corr_data_full.iso_tex,
+                                    ImPlotPoint(corr_data_full.min_x, corr_data_full.min_y),
+                                    ImPlotPoint(corr_data_full.max_x, corr_data_full.max_y));
+                            }
                         }
                     }
                     
-                    // Filtered Trajectory layer (placeholder for now)
+                    // Filtered Trajectory layer
                     if (show_layer[1]) { // Filtered Trajectory  
                         if (display_mode[1] == Points) {
                             // For now, show the same data but with different color/transparency
@@ -458,8 +1101,68 @@ struct Correlation : viamd::EventHandler {
                                     ImPlot::PopStyleColor();
                                 }
                             }
-                        } else {
-                            ImPlot::PlotText("Filtered Trajectory: Advanced display modes will be implemented", 0.5, 0.6);
+                        } else if (display_mode[1] == Colormap) {
+                            // Render filtered colormap
+                            if (corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
+                                uint32_t colors[32] = {0};
+                                uint32_t num_colors = ImPlot::GetColormapSize(colormap[1]);
+                                for (uint32_t j = 0; j < num_colors && j < 32; ++j) {
+                                    colors[j] = ImPlot::GetColormapColorU32(j, colormap[1]);
+                                }
+                                colors[0] = colors[0] & 0x00FFFFFFU;
+                                
+                                corr_colormap_t corr_colormap = {
+                                    .colors = colors,
+                                    .count = num_colors,
+                                    .min_value = 0.0f,
+                                    .max_value = corr_data_filt.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
+                                };
+                                
+                                render_colormap(&corr_data_filt, viewport, corr_colormap);
+                                
+                                ImPlot::PlotImage("Filtered Trajectory Heatmap", (void*)(intptr_t)corr_data_filt.map_tex,
+                                    ImPlotPoint(corr_data_filt.min_x, corr_data_filt.min_y),
+                                    ImPlotPoint(corr_data_filt.max_x, corr_data_filt.max_y));
+                            }
+                        } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
+                            // Render filtered isolines/isolevels
+                            if (corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
+                                const float density_scale = corr_data_filt.den_sum / (density_tex_dim * density_tex_dim);
+                                const float iso_values[3] = {
+                                    density_scale * 0.1f,
+                                    density_scale * 0.3f,
+                                    density_scale * 0.6f
+                                };
+                                
+                                uint32_t level_colors[3] = {0};
+                                uint32_t contour_colors[3] = {0};
+                                
+                                if (display_mode[1] == IsoLevels) {
+                                    level_colors[0] = 0x200000FF; // Transparent blue
+                                    level_colors[1] = 0x400044FF; // Semi-transparent blue
+                                    level_colors[2] = 0x6000FFFF; // More opaque cyan
+                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
+                                } else {
+                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
+                                    contour_colors[0] = line_color;
+                                    contour_colors[1] = line_color;
+                                    contour_colors[2] = line_color;
+                                }
+                                
+                                corr_isomap_t corr_isomap = {
+                                    .values = iso_values,
+                                    .level_colors = level_colors,
+                                    .contour_colors = contour_colors,
+                                    .count = 3
+                                };
+                                
+                                render_isolines(&corr_data_filt, viewport, corr_isomap);
+                                
+                                const char* iso_name = display_mode[1] == IsoLevels ? "Filtered Trajectory IsoLevels" : "Filtered Trajectory IsoLines";
+                                ImPlot::PlotImage(iso_name, (void*)(intptr_t)corr_data_filt.iso_tex,
+                                    ImPlotPoint(corr_data_filt.min_x, corr_data_filt.min_y),
+                                    ImPlotPoint(corr_data_filt.max_x, corr_data_filt.max_y));
+                            }
                         }
                     }
                     
