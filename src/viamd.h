@@ -144,6 +144,7 @@ enum DisplayPropertyType {
 };
 
 struct DisplayProperty;
+struct ApplicationState;
 
 // Helper functions to access DisplayProperty fields without full definition
 DisplayPropertyType get_display_property_type(const DisplayProperty* prop);
