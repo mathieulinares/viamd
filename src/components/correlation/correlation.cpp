@@ -276,6 +276,10 @@ struct Correlation : viamd::EventHandler {
     float iso_thresholds[8] = { 0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f }; // More reasonable thresholds
     bool preserve_series = true; // Whether to preserve individual series in advanced modes
     
+    // User-controllable scaling parameters
+    float density_scale_multiplier = 0.01f; // Base density scaling multiplier
+    float colormap_scale_multiplier = 0.1f; // Colormap max value multiplier
+    
     // Point style for current frame
     struct {
         ImVec4 outline = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -371,6 +375,10 @@ struct Correlation : viamd::EventHandler {
                             viamd::extract_flt(filtered_style.size, arg);
                         } else if (str_eq(ident, STR_LIT("filtered_style_color"))) {
                             viamd::extract_flt_vec(&filtered_style.color.x, 4, arg);
+                        } else if (str_eq(ident, STR_LIT("density_scale_multiplier"))) {
+                            viamd::extract_flt(density_scale_multiplier, arg);
+                        } else if (str_eq(ident, STR_LIT("colormap_scale_multiplier"))) {
+                            viamd::extract_flt(colormap_scale_multiplier, arg);
                         }
                     }
                 }
@@ -402,6 +410,10 @@ struct Correlation : viamd::EventHandler {
                 // Write filtered style properties
                 viamd::write_flt(state, STR_LIT("filtered_style_size"), filtered_style.size);
                 viamd::write_flt_vec(state, STR_LIT("filtered_style_color"), &filtered_style.color.x, 4);
+                
+                // Write user-controllable scaling parameters
+                viamd::write_flt(state, STR_LIT("density_scale_multiplier"), density_scale_multiplier);
+                viamd::write_flt(state, STR_LIT("colormap_scale_multiplier"), colormap_scale_multiplier);
                 break;
             }
             default:
@@ -650,12 +662,6 @@ struct Correlation : viamd::EventHandler {
                 }
             }
             
-            // Store ranges for later use
-            data->rep->min_x = min_x;
-            data->rep->max_x = max_x;
-            data->rep->min_y = min_y;
-            data->rep->max_y = max_y;
-            
             // Add small padding to avoid edge cases
             float x_range = max_x - min_x;
             float y_range = max_y - min_y;
@@ -669,6 +675,12 @@ struct Correlation : viamd::EventHandler {
             
             x_range = max_x - min_x;
             y_range = max_y - min_y;
+            
+            // Store the PADDED ranges that are actually used for density computation
+            data->rep->min_x = min_x;
+            data->rep->max_x = max_x;
+            data->rep->min_y = min_y;
+            data->rep->max_y = max_y;
             
             double sum = 0.0;
             
@@ -952,6 +964,20 @@ struct Correlation : viamd::EventHandler {
                         ImGui::TreePop();
                     }
                     
+                    ImGui::Separator();
+                    
+                    // User-controllable scaling parameters
+                    ImGui::Text("Density Scaling");
+                    ImGui::SliderFloat("ISO/Line Scale", &density_scale_multiplier, 0.001f, 0.1f, "%.3f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Controls the density threshold for isolines and isolevels");
+                    }
+                    
+                    ImGui::SliderFloat("Colormap Scale", &colormap_scale_multiplier, 0.01f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Controls the maximum density value for colormap scaling");
+                    }
+                    
                     ImGui::EndMenu();
                 }
                 ImGui::EndMenuBar();
@@ -1075,7 +1101,7 @@ struct Correlation : viamd::EventHandler {
                     if (should_render_full_advanced || should_render_filt_advanced) {
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
-                            // Correct viewport mapping: map plot coordinates directly to texture [0,1] range
+                            // Fixed viewport coordinate mapping - ensure perfect alignment with scatter data
                             float data_range_x = corr_data_full.max_x - corr_data_full.min_x;
                             float data_range_y = corr_data_full.max_y - corr_data_full.min_y;
                             
@@ -1083,13 +1109,35 @@ struct Correlation : viamd::EventHandler {
                             if (data_range_x < 1e-6f) data_range_x = 1.0f;
                             if (data_range_y < 1e-6f) data_range_y = 1.0f;
                             
-                            // Map plot limits to texture coordinates [0,1] - properly aligned with scatter data
+                            // Critical fix: Map the current plot limits to the data coordinate system
+                            // The texture was created using the data range [min_x, max_x] x [min_y, max_y]
+                            // We need to map the current plot view to texture coordinates [0,1] x [0,1]
                             vec4_t viewport = { 
                                 (float)(plot_rect.X.Min - corr_data_full.min_x) / data_range_x, 
                                 (float)(plot_rect.Y.Min - corr_data_full.min_y) / data_range_y, 
                                 (float)(plot_rect.X.Max - corr_data_full.min_x) / data_range_x, 
                                 (float)(plot_rect.Y.Max - corr_data_full.min_y) / data_range_y 
                             };
+                            
+                            // Clamp viewport to [0,1] range to avoid rendering outside texture bounds
+                            viewport.x = MAX(0.0f, MIN(1.0f, viewport.x));
+                            viewport.y = MAX(0.0f, MIN(1.0f, viewport.y));
+                            viewport.z = MAX(0.0f, MIN(1.0f, viewport.z));
+                            viewport.w = MAX(0.0f, MIN(1.0f, viewport.w));
+                            
+                            // If the viewport is outside reasonable bounds, use the full texture
+                            if (viewport.z <= viewport.x || viewport.w <= viewport.y) {
+                                viewport = vec4_t{0.0f, 0.0f, 1.0f, 1.0f};
+                            }
+                            
+                            // Debug information for coordinate mapping (only show when density is actually rendered)
+                            char debug_coord[512];
+                            snprintf(debug_coord, sizeof(debug_coord), 
+                                "Data: X[%.2f,%.2f] Y[%.2f,%.2f] | Plot: X[%.2f,%.2f] Y[%.2f,%.2f] | VP:[%.3f,%.3f,%.3f,%.3f] | den_sum:%.1f",
+                                corr_data_full.min_x, corr_data_full.max_x, corr_data_full.min_y, corr_data_full.max_y,
+                                plot_rect.X.Min, plot_rect.X.Max, plot_rect.Y.Min, plot_rect.Y.Max,
+                                viewport.x, viewport.y, viewport.z, viewport.w, corr_data_full.den_sum);
+                            ImPlot::PlotText(debug_coord, plot_rect.X.Min, plot_rect.Y.Max - (plot_rect.Y.Max - plot_rect.Y.Min) * 0.05f);
                             
                             if (display_mode[0] == Colormap) {
                                 uint32_t colors[32] = {0};
@@ -1103,13 +1151,13 @@ struct Correlation : viamd::EventHandler {
                                     .colors = colors,
                                     .count = num_colors,
                                     .min_value = 0.0f,
-                                    .max_value = corr_data_full.den_sum * 0.1f  // Less aggressive scaling for better visibility
+                                    .max_value = corr_data_full.den_sum * colormap_scale_multiplier
                                 };
                                 
                                 render_colormap(&corr_data_full, viewport.elem, corr_colormap);
                             } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
-                                // Improved density scaling for correlation data
-                                const float density_scale = corr_data_full.den_sum * 0.01f; // Much smaller base scale
+                                // User-controllable density scaling
+                                const float density_scale = corr_data_full.den_sum * density_scale_multiplier;
                                 float iso_values[8] = {0};
                                 
                                 for (int i = 0; i < num_iso_levels; ++i) {
@@ -1156,7 +1204,7 @@ struct Correlation : viamd::EventHandler {
                         }
                         
                         if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
-                            // Correct viewport mapping: map plot coordinates directly to texture [0,1] range
+                            // Fixed viewport coordinate mapping - ensure perfect alignment with scatter data
                             float data_range_x = corr_data_filt.max_x - corr_data_filt.min_x;
                             float data_range_y = corr_data_filt.max_y - corr_data_filt.min_y;
                             
@@ -1164,13 +1212,24 @@ struct Correlation : viamd::EventHandler {
                             if (data_range_x < 1e-6f) data_range_x = 1.0f;
                             if (data_range_y < 1e-6f) data_range_y = 1.0f;
                             
-                            // Map plot limits to texture coordinates [0,1] - properly aligned with scatter data
+                            // Critical fix: Map the current plot limits to the data coordinate system
                             vec4_t viewport = { 
                                 (float)(plot_rect.X.Min - corr_data_filt.min_x) / data_range_x, 
                                 (float)(plot_rect.Y.Min - corr_data_filt.min_y) / data_range_y, 
                                 (float)(plot_rect.X.Max - corr_data_filt.min_x) / data_range_x, 
                                 (float)(plot_rect.Y.Max - corr_data_filt.min_y) / data_range_y 
                             };
+                            
+                            // Clamp viewport to [0,1] range to avoid rendering outside texture bounds
+                            viewport.x = MAX(0.0f, MIN(1.0f, viewport.x));
+                            viewport.y = MAX(0.0f, MIN(1.0f, viewport.y));
+                            viewport.z = MAX(0.0f, MIN(1.0f, viewport.z));
+                            viewport.w = MAX(0.0f, MIN(1.0f, viewport.w));
+                            
+                            // If the viewport is outside reasonable bounds, use the full texture
+                            if (viewport.z <= viewport.x || viewport.w <= viewport.y) {
+                                viewport = vec4_t{0.0f, 0.0f, 1.0f, 1.0f};
+                            }
                             
                             if (display_mode[1] == Colormap) {
                                 uint32_t colors[32] = {0};
@@ -1184,13 +1243,13 @@ struct Correlation : viamd::EventHandler {
                                     .colors = colors,
                                     .count = num_colors,
                                     .min_value = 0.0f,
-                                    .max_value = corr_data_filt.den_sum * 0.1f  // Less aggressive scaling for better visibility
+                                    .max_value = corr_data_filt.den_sum * colormap_scale_multiplier
                                 };
                                 
                                 render_colormap(&corr_data_filt, viewport.elem, corr_colormap);
                             } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
-                                // Improved density scaling for correlation data  
-                                const float density_scale = corr_data_filt.den_sum * 0.01f; // Much smaller base scale
+                                // User-controllable density scaling 
+                                const float density_scale = corr_data_filt.den_sum * density_scale_multiplier;
                                 float iso_values[8] = {0};
                                 
                                 for (int i = 0; i < num_iso_levels; ++i) {
