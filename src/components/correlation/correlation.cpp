@@ -323,7 +323,7 @@ struct Correlation : viamd::EventHandler {
                 draw_window();
                 break;
             case viamd::EventType_ViamdWindowDrawMenu:
-                ImGui::Checkbox("Correlator 3000X™", &show_window);
+                ImGui::Checkbox("Correlator 3000X(TM)", &show_window);
                 break;
             case viamd::EventType_ViamdDeserialize: {
                 viamd::deserialization_state_t& state = *(viamd::deserialization_state_t*)e.payload;
@@ -731,8 +731,8 @@ struct Correlation : viamd::EventHandler {
                     }
                 }
                 
-                // For filtered trajectory, use timeline filter if available
-                if (app_state && app_state->timeline.filter.fingerprint != filt_fingerprint) {
+                // For filtered trajectory, use timeline filter if available and enabled
+                if (app_state && app_state->timeline.filter.enabled && app_state->timeline.filter.fingerprint != filt_fingerprint) {
                     if (!task_system::task_is_running(compute_density_filt)) {
                         filt_fingerprint = app_state->timeline.filter.fingerprint;
                         
@@ -869,7 +869,7 @@ struct Correlation : viamd::EventHandler {
         
         ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
         
-        if (ImGui::Begin("Correlator 3000X™", &show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
+        if (ImGui::Begin("Correlator 3000X(TM)", &show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
             if (!app_state) {
                 ImGui::Text("Application not initialized");
                 ImGui::End();
@@ -1147,20 +1147,40 @@ struct Correlation : viamd::EventHandler {
                     }
                     
                     // Filtered Trajectory layer
-                    if (show_layer[1]) { // Filtered Trajectory  
+                    if (show_layer[1] && app_state && app_state->timeline.filter.enabled) { // Filtered Trajectory  
                         if (display_mode[1] == Points) {
-                            // For now, show the same data but with different color/transparency
+                            // Show only data points within the timeline filter range
+                            const int filter_beg = (int)app_state->timeline.filter.beg_frame;
+                            const int filter_end = (int)app_state->timeline.filter.end_frame;
+                            
                             for (size_t s = 0; s < md_array_size(series); ++s) {
                                 const ScatterSeries& scatter = series[s];
                                 if (md_array_size(scatter.x_data) > 0) {
-                                    ImVec4 color = ImVec4(0.8f, 0.3f, 0.8f, filt_alpha); // Different color for filtered
-                                    ImPlot::PushStyleColor(ImPlotCol_MarkerFill, color);
-                                    char filtered_name[128];
-                                    snprintf(filtered_name, sizeof(filtered_name), "%s (Filtered)", scatter.name);
-                                    ImPlot::PlotScatter(filtered_name, 
-                                        scatter.x_data, scatter.y_data, 
-                                        (int)md_array_size(scatter.x_data));
-                                    ImPlot::PopStyleColor();
+                                    // Collect filtered points
+                                    static md_array(float) filtered_x = 0;
+                                    static md_array(float) filtered_y = 0;
+                                    
+                                    md_array_resize(filtered_x, 0, app_state->allocator.frame);
+                                    md_array_resize(filtered_y, 0, app_state->allocator.frame);
+                                    
+                                    for (size_t i = 0; i < md_array_size(scatter.x_data); ++i) {
+                                        int frame = scatter.frame_indices[i];
+                                        if (frame >= filter_beg && frame <= filter_end) {
+                                            md_array_push(filtered_x, scatter.x_data[i], app_state->allocator.frame);
+                                            md_array_push(filtered_y, scatter.y_data[i], app_state->allocator.frame);
+                                        }
+                                    }
+                                    
+                                    if (md_array_size(filtered_x) > 0) {
+                                        ImVec4 color = ImVec4(0.8f, 0.3f, 0.8f, filt_alpha); // Different color for filtered
+                                        ImPlot::PushStyleColor(ImPlotCol_MarkerFill, color);
+                                        char filtered_name[128];
+                                        snprintf(filtered_name, sizeof(filtered_name), "%s (Filtered)", scatter.name);
+                                        ImPlot::PlotScatter(filtered_name, 
+                                            filtered_x, filtered_y, 
+                                            (int)md_array_size(filtered_x));
+                                        ImPlot::PopStyleColor();
+                                    }
                                 }
                             }
                         } else if (display_mode[1] == Colormap) {
