@@ -136,7 +136,20 @@ enum MolBit_ {
     MolBit_ClearVelocity            = 0x20,
 };
 
+enum DisplayPropertyType {
+    DisplayPropertyType_Temporal,
+    DisplayPropertyType_Distribution,
+    DisplayPropertyType_Volume,
+    DisplayPropertyType_Count
+};
+
 struct DisplayProperty;
+
+// Helper functions to access DisplayProperty fields without full definition
+DisplayPropertyType get_display_property_type(const DisplayProperty* prop);
+const char* get_display_property_label(const DisplayProperty* prop);
+bool has_display_property_data(const DisplayProperty* prop);
+const struct md_script_property_data_t* get_display_property_data(const DisplayProperty* prop);
 
 struct LoadDatasetWindowState {
     char path_buf[1024] = "";

@@ -9573,3 +9573,24 @@ static void draw_representations_opaque_lean_and_mean(ApplicationState* data, ui
 
     md_gl_draw(&args);
 }
+
+// Helper functions for DisplayProperty access from other modules
+DisplayPropertyType get_display_property_type(const DisplayProperty* prop) {
+    if (!prop) return DisplayPropertyType_Count;
+    return (DisplayPropertyType)prop->type;
+}
+
+const char* get_display_property_label(const DisplayProperty* prop) {
+    if (!prop) return "";
+    return prop->label;
+}
+
+bool has_display_property_data(const DisplayProperty* prop) {
+    if (!prop) return false;
+    return prop->prop_data != nullptr;
+}
+
+const md_script_property_data_t* get_display_property_data(const DisplayProperty* prop) {
+    if (!prop) return nullptr;
+    return prop->prop_data;
+}
