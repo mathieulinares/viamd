@@ -249,14 +249,14 @@ struct Correlation : viamd::EventHandler {
             // Count temporal properties first
             int num_temp_props = 0;
             for (int i = 0; i < num_props; ++i) {
-                if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType::Type_Temporal) {
+                if (get_display_property_type_by_index(app_state, i) == DisplayPropertyType_Temporal) {
                     num_temp_props++;
                 }
             }
             
             if (num_temp_props) {
                 for (int i = 0; i < num_props; ++i) {
-                    if (get_display_property_type_by_index(app_state, i) != DisplayPropertyType::Type_Temporal) continue;
+                    if (get_display_property_type_by_index(app_state, i) != DisplayPropertyType_Temporal) continue;
                     
                     const char* label = get_display_property_label_by_index(app_state, i);
                     ImVec4 color = get_display_property_color_by_index(app_state, i);

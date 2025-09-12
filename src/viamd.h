@@ -17,6 +17,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// Include imgui.h for ImVec4 type used in helper functions
+#include <imgui.h>
+
 #define JITTER_SEQUENCE_SIZE 8  // Number of samples for temporal AA
 #define DEFAULT_COLORMAP 5      // This corresponds to plasma colormap (Do not want to include implot.h just for this)
 
