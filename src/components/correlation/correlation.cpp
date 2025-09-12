@@ -368,9 +368,9 @@ struct Correlation : viamd::EventHandler {
                                 if (*ptr == ',') ptr++;
                             }
                         } else if (str_eq(ident, STR_LIT("filtered_style_size"))) {
-                            viamd::extract_float(filtered_style.size, arg);
+                            viamd::extract_flt(filtered_style.size, arg);
                         } else if (str_eq(ident, STR_LIT("filtered_style_color"))) {
-                            viamd::extract_float4(filtered_style.color, arg);
+                            viamd::extract_flt_vec(&filtered_style.color.x, 4, arg);
                         }
                     }
                 }
@@ -400,8 +400,8 @@ struct Correlation : viamd::EventHandler {
                 viamd::write_str(state, STR_LIT("iso_thresholds"), str_t{threshold_str, (size_t)offset});
                 
                 // Write filtered style properties
-                viamd::write_float(state, STR_LIT("filtered_style_size"), filtered_style.size);
-                viamd::write_float4(state, STR_LIT("filtered_style_color"), filtered_style.color);
+                viamd::write_flt(state, STR_LIT("filtered_style_size"), filtered_style.size);
+                viamd::write_flt_vec(state, STR_LIT("filtered_style_color"), &filtered_style.color.x, 4);
                 break;
             }
             default:
