@@ -1037,14 +1037,188 @@ struct Correlation : viamd::EventHandler {
                         ImPlot::SetupAxis(ImAxis_Y1, y_axis_label);
                     }
                     
-                    // Plot layers based on layer settings
+                    // Plot layers based on layer settings - mimic Ramachandran rendering pattern
                     ImPlotRect plot_rect = ImPlot::GetPlotLimits();
-                    float viewport[4] = {
-                        (float)plot_rect.X.Min, (float)plot_rect.Y.Min,
-                        (float)plot_rect.X.Max, (float)plot_rect.Y.Max
-                    };
+                    ImVec2 plot_min = ImPlot::PlotToPixels(plot_rect.Min());
+                    ImVec2 plot_max = ImPlot::PlotToPixels(plot_rect.Max());
                     
-                    // Render advanced display modes using textures
+                    // Render advanced display modes using textures (similar to Ramachandran)
+                    bool should_render_full_advanced = show_layer[0] && display_mode[0] != Points;
+                    bool should_render_filt_advanced = show_layer[1] && display_mode[1] != Points && app_state && app_state->timeline.filter.enabled;
+                    
+                    if (should_render_full_advanced || should_render_filt_advanced) {
+                        
+                        if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
+                            // Normalize viewport coordinates to [0,1] range for shader (like Ramachandran)
+                            float data_range_x = corr_data_full.max_x - corr_data_full.min_x;
+                            float data_range_y = corr_data_full.max_y - corr_data_full.min_y;
+                            
+                            vec4_t viewport = { 
+                                (float)plot_rect.X.Min / data_range_x, 
+                                (float)plot_rect.Y.Min / data_range_y, 
+                                (float)plot_rect.X.Max / data_range_x, 
+                                (float)plot_rect.Y.Max / data_range_y 
+                            };
+                            viewport = viewport * 0.5f + 0.5f; // Map to [0,1] range
+                            
+                            if (display_mode[0] == Colormap) {
+                                uint32_t colors[32] = {0};
+                                uint32_t num_colors = ImPlot::GetColormapSize(colormap[0]);
+                                for (uint32_t j = 0; j < num_colors && j < 32; ++j) {
+                                    colors[j] = ImPlot::GetColormapColorU32(j, colormap[0]);
+                                }
+                                colors[0] = colors[0] & 0x00FFFFFFU; // Make first color transparent
+                                
+                                corr_colormap_t corr_colormap = {
+                                    .colors = colors,
+                                    .count = num_colors,
+                                    .min_value = 0.0f,
+                                    .max_value = corr_data_full.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
+                                };
+                                
+                                render_colormap(&corr_data_full, viewport.elem, corr_colormap);
+                            } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
+                                const float density_scale = corr_data_full.den_sum / (density_tex_dim * density_tex_dim);
+                                float iso_values[8] = {0};
+                                
+                                for (int i = 0; i < num_iso_levels; ++i) {
+                                    iso_values[i] = density_scale * iso_thresholds[i];
+                                }
+                                
+                                uint32_t level_colors[8] = {0};
+                                uint32_t contour_colors[8] = {0};
+                                
+                                if (display_mode[0] == IsoLevels) {
+                                    if (preserve_series && md_array_size(series) > 1) {
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            uint32_t series_idx = i % md_array_size(series);
+                                            ImVec4 series_color = series[series_idx].color;
+                                            level_colors[i] = IM_COL32(
+                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
+                                                (int)(series_color.z * 255), (int)(series_color.w * 128));
+                                        }
+                                    } else {
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            float t = (float)i / (float)MAX(1, num_iso_levels - 1);
+                                            level_colors[i] = IM_COL32(
+                                                (int)(255 * t), (int)(255 * (1-t)), (int)(255 * 0.5f), 
+                                                (int)(128 + 127 * t));
+                                        }
+                                    }
+                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
+                                } else {
+                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
+                                    for (int i = 0; i < num_iso_levels; ++i) {
+                                        contour_colors[i] = line_color;
+                                    }
+                                }
+                                
+                                corr_isomap_t corr_isomap = {
+                                    .values = iso_values,
+                                    .level_colors = level_colors,
+                                    .contour_colors = contour_colors,
+                                    .count = (uint32_t)num_iso_levels
+                                };
+                                
+                                render_isolines(&corr_data_full, viewport.elem, corr_isomap);
+                            }
+                        }
+                        
+                        if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
+                            // Normalize viewport coordinates to [0,1] range for shader (like Ramachandran)
+                            float data_range_x = corr_data_filt.max_x - corr_data_filt.min_x;
+                            float data_range_y = corr_data_filt.max_y - corr_data_filt.min_y;
+                            
+                            vec4_t viewport = { 
+                                (float)plot_rect.X.Min / data_range_x, 
+                                (float)plot_rect.Y.Min / data_range_y, 
+                                (float)plot_rect.X.Max / data_range_x, 
+                                (float)plot_rect.Y.Max / data_range_y 
+                            };
+                            viewport = viewport * 0.5f + 0.5f; // Map to [0,1] range
+                            
+                            if (display_mode[1] == Colormap) {
+                                uint32_t colors[32] = {0};
+                                uint32_t num_colors = ImPlot::GetColormapSize(colormap[1]);
+                                for (uint32_t j = 0; j < num_colors && j < 32; ++j) {
+                                    colors[j] = ImPlot::GetColormapColorU32(j, colormap[1]);
+                                }
+                                colors[0] = colors[0] & 0x00FFFFFFU;
+                                
+                                corr_colormap_t corr_colormap = {
+                                    .colors = colors,
+                                    .count = num_colors,
+                                    .min_value = 0.0f,
+                                    .max_value = corr_data_filt.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
+                                };
+                                
+                                render_colormap(&corr_data_filt, viewport.elem, corr_colormap);
+                            } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
+                                const float density_scale = corr_data_filt.den_sum / (density_tex_dim * density_tex_dim);
+                                float iso_values[8] = {0};
+                                
+                                for (int i = 0; i < num_iso_levels; ++i) {
+                                    iso_values[i] = density_scale * iso_thresholds[i];
+                                }
+                                
+                                uint32_t level_colors[8] = {0};
+                                uint32_t contour_colors[8] = {0};
+                                
+                                if (display_mode[1] == IsoLevels) {
+                                    if (preserve_series && md_array_size(series) > 1) {
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            uint32_t series_idx = i % md_array_size(series);
+                                            ImVec4 series_color = series[series_idx].color;
+                                            series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered bluer
+                                            level_colors[i] = IM_COL32(
+                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
+                                                (int)(series_color.z * 255), (int)(series_color.w * 128));
+                                        }
+                                    } else {
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            float t = (float)i / (float)MAX(1, num_iso_levels - 1);
+                                            level_colors[i] = IM_COL32(
+                                                0, (int)(255 * (1-t)), (int)(255 * t), 
+                                                (int)(128 + 127 * t));
+                                        }
+                                    }
+                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
+                                } else {
+                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
+                                    for (int i = 0; i < num_iso_levels; ++i) {
+                                        contour_colors[i] = line_color;
+                                    }
+                                }
+                                
+                                corr_isomap_t corr_isomap = {
+                                    .values = iso_values,
+                                    .level_colors = level_colors,
+                                    .contour_colors = contour_colors,
+                                    .count = (uint32_t)num_iso_levels
+                                };
+                                
+                                render_isolines(&corr_data_filt, viewport.elem, corr_isomap);
+                            }
+                        }
+                        
+                        // Now display the rendered textures using ImDrawList (like Ramachandran)
+                        ImPlot::PushPlotClipRect();
+                        ImDrawList* dl = ImPlot::GetPlotDrawList();
+                        
+                        if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
+                            uint32_t full_tex = display_mode[0] == Colormap ? corr_data_full.map_tex : corr_data_full.iso_tex;
+                            dl->AddImage((ImTextureID)(intptr_t)full_tex, plot_min, plot_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, full_alpha));
+                        }
+                        
+                        if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
+                            uint32_t filt_tex = display_mode[1] == Colormap ? corr_data_filt.map_tex : corr_data_filt.iso_tex;
+                            dl->AddImage((ImTextureID)(intptr_t)filt_tex, plot_min, plot_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
+                        }
+                        
+                        ImPlot::PopPlotClipRect();
+                    }
+                    
+                    // Plot point-based layers
                     if (show_layer[0]) { // Full Trajectory
                         if (display_mode[0] == Points) {
                             // Plot all points with trajectory transparency
@@ -1059,89 +1233,6 @@ struct Correlation : viamd::EventHandler {
                                         (int)md_array_size(scatter.x_data));
                                     ImPlot::PopStyleColor();
                                 }
-                            }
-                        } else if (display_mode[0] == Colormap) {
-                            // Render colormap if density data is available
-                            if (corr_data_full.den_tex && corr_data_full.den_sum > 0) {
-                                uint32_t colors[32] = {0};
-                                uint32_t num_colors = ImPlot::GetColormapSize(colormap[0]);
-                                for (uint32_t j = 0; j < num_colors && j < 32; ++j) {
-                                    colors[j] = ImPlot::GetColormapColorU32(j, colormap[0]);
-                                }
-                                // Make first color transparent
-                                colors[0] = colors[0] & 0x00FFFFFFU;
-                                
-                                corr_colormap_t corr_colormap = {
-                                    .colors = colors,
-                                    .count = num_colors,
-                                    .min_value = 0.0f,
-                                    .max_value = corr_data_full.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
-                                };
-                                
-                                render_colormap(&corr_data_full, viewport, corr_colormap);
-                                
-                                // Display as image overlay
-                                ImPlot::PlotImage("Full Trajectory Heatmap", (void*)(intptr_t)corr_data_full.map_tex,
-                                    ImPlotPoint(corr_data_full.min_x, corr_data_full.min_y),
-                                    ImPlotPoint(corr_data_full.max_x, corr_data_full.max_y));
-                            }
-                        } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
-                            // Render isolines/isolevels if density data is available
-                            if (corr_data_full.den_tex && corr_data_full.den_sum > 0) {
-                                const float density_scale = corr_data_full.den_sum / (density_tex_dim * density_tex_dim);
-                                float iso_values[8] = {0};
-                                
-                                // Use custom thresholds
-                                for (int i = 0; i < num_iso_levels; ++i) {
-                                    iso_values[i] = density_scale * iso_thresholds[i];
-                                }
-                                
-                                uint32_t level_colors[8] = {0};
-                                uint32_t contour_colors[8] = {0};
-                                
-                                if (display_mode[0] == IsoLevels) {
-                                    // Generate colors based on series or use default gradient
-                                    if (preserve_series && md_array_size(series) > 1) {
-                                        // Use series colors for iso levels
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            uint32_t series_idx = i % md_array_size(series);
-                                            ImVec4 series_color = series[series_idx].color;
-                                            level_colors[i] = IM_COL32(
-                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(series_color.w * 128));
-                                        }
-                                    } else {
-                                        // Use default gradient colors
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            float t = (float)i / (float)MAX(1, num_iso_levels - 1);
-                                            level_colors[i] = IM_COL32(
-                                                (int)(255 * t), (int)(255 * (1-t)), (int)(255 * 0.5f), 
-                                                (int)(128 + 127 * t)); // Increasing opacity
-                                        }
-                                    }
-                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
-                                } else {
-                                    // IsoLines - use line color for all levels
-                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
-                                    for (int i = 0; i < num_iso_levels; ++i) {
-                                        contour_colors[i] = line_color;
-                                    }
-                                }
-                                
-                                corr_isomap_t corr_isomap = {
-                                    .values = iso_values,
-                                    .level_colors = level_colors,
-                                    .contour_colors = contour_colors,
-                                    .count = (uint32_t)num_iso_levels
-                                };
-                                
-                                render_isolines(&corr_data_full, viewport, corr_isomap);
-                                
-                                // Display as image overlay
-                                const char* iso_name = display_mode[0] == IsoLevels ? "Full Trajectory IsoLevels" : "Full Trajectory IsoLines";
-                                ImPlot::PlotImage(iso_name, (void*)(intptr_t)corr_data_full.iso_tex,
-                                    ImPlotPoint(corr_data_full.min_x, corr_data_full.min_y),
-                                    ImPlotPoint(corr_data_full.max_x, corr_data_full.max_y));
                             }
                         }
                     }
@@ -1182,88 +1273,6 @@ struct Correlation : viamd::EventHandler {
                                         ImPlot::PopStyleColor();
                                     }
                                 }
-                            }
-                        } else if (display_mode[1] == Colormap) {
-                            // Render filtered colormap
-                            if (corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
-                                uint32_t colors[32] = {0};
-                                uint32_t num_colors = ImPlot::GetColormapSize(colormap[1]);
-                                for (uint32_t j = 0; j < num_colors && j < 32; ++j) {
-                                    colors[j] = ImPlot::GetColormapColorU32(j, colormap[1]);
-                                }
-                                colors[0] = colors[0] & 0x00FFFFFFU;
-                                
-                                corr_colormap_t corr_colormap = {
-                                    .colors = colors,
-                                    .count = num_colors,
-                                    .min_value = 0.0f,
-                                    .max_value = corr_data_filt.den_sum * 0.5f / (density_tex_dim * density_tex_dim)
-                                };
-                                
-                                render_colormap(&corr_data_filt, viewport, corr_colormap);
-                                
-                                ImPlot::PlotImage("Filtered Trajectory Heatmap", (void*)(intptr_t)corr_data_filt.map_tex,
-                                    ImPlotPoint(corr_data_filt.min_x, corr_data_filt.min_y),
-                                    ImPlotPoint(corr_data_filt.max_x, corr_data_filt.max_y));
-                            }
-                        } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
-                            // Render filtered isolines/isolevels
-                            if (corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
-                                const float density_scale = corr_data_filt.den_sum / (density_tex_dim * density_tex_dim);
-                                float iso_values[8] = {0};
-                                
-                                // Use custom thresholds
-                                for (int i = 0; i < num_iso_levels; ++i) {
-                                    iso_values[i] = density_scale * iso_thresholds[i];
-                                }
-                                
-                                uint32_t level_colors[8] = {0};
-                                uint32_t contour_colors[8] = {0};
-                                
-                                if (display_mode[1] == IsoLevels) {
-                                    // Generate colors based on series or use default gradient (different colors from full trajectory)
-                                    if (preserve_series && md_array_size(series) > 1) {
-                                        // Use series colors for iso levels
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            uint32_t series_idx = i % md_array_size(series);
-                                            ImVec4 series_color = series[series_idx].color;
-                                            // Make filtered trajectory slightly bluer
-                                            series_color.z = MIN(1.0f, series_color.z + 0.3f);
-                                            level_colors[i] = IM_COL32(
-                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(series_color.w * 128));
-                                        }
-                                    } else {
-                                        // Use blue gradient for filtered trajectory
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            float t = (float)i / (float)MAX(1, num_iso_levels - 1);
-                                            level_colors[i] = IM_COL32(
-                                                0, (int)(255 * (1-t)), (int)(255 * t), 
-                                                (int)(128 + 127 * t)); // Increasing opacity
-                                        }
-                                    }
-                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
-                                } else {
-                                    // IsoLines - use line color for all levels
-                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
-                                    for (int i = 0; i < num_iso_levels; ++i) {
-                                        contour_colors[i] = line_color;
-                                    }
-                                }
-                                
-                                corr_isomap_t corr_isomap = {
-                                    .values = iso_values,
-                                    .level_colors = level_colors,
-                                    .contour_colors = contour_colors,
-                                    .count = (uint32_t)num_iso_levels
-                                };
-                                
-                                render_isolines(&corr_data_filt, viewport, corr_isomap);
-                                
-                                const char* iso_name = display_mode[1] == IsoLevels ? "Filtered Trajectory IsoLevels" : "Filtered Trajectory IsoLines";
-                                ImPlot::PlotImage(iso_name, (void*)(intptr_t)corr_data_filt.iso_tex,
-                                    ImPlotPoint(corr_data_filt.min_x, corr_data_filt.min_y),
-                                    ImPlotPoint(corr_data_filt.max_x, corr_data_filt.max_y));
                             }
                         }
                     }
