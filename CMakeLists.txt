@@ -46,6 +46,7 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_PYTHON "Enable Python bindings for MDAnalysis/OpenMM integration" OFF)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
@@ -228,3 +229,8 @@ target_link_libraries(viamd
     imgui_notify
     ${VIAMD_STDLIBS}
 )
+
+# Add Python bindings if enabled
+if(VIAMD_ENABLE_PYTHON)
+    add_subdirectory(python)
+endif()
