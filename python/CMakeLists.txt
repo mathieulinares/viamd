@@ -14,6 +14,9 @@ pybind11_add_module(pyviamd
     src/openmm_bindings.cpp
     src/mdanalysis_bindings.cpp
     src/event_bindings_simple.cpp
+    src/analysis_bindings.cpp
+    src/visualization_bindings.cpp
+    src/ml_bindings.cpp
 )
 
 # Set properties for the Python module

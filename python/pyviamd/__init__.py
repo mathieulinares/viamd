@@ -12,9 +12,15 @@ Modules:
     openmm: OpenMM integration bindings (C++ level)
     mdanalysis: MDAnalysis integration bindings (C++ level)
     event: Event system integration for custom Python components
+    analysis: Advanced molecular analysis and statistical tools
+    visualization: Visualization and rendering utilities
+    ml: Machine learning integration and feature extraction
     integrations: High-level integration modules
         - openmm_integration: Advanced OpenMM integration workflows
         - mdanalysis_integration: Advanced MDAnalysis integration workflows
+        - analysis_integration: Comprehensive molecular analysis workflows
+        - visualization_integration: Advanced visualization and plotting tools
+        - ml_integration: Machine learning workflows for molecular data
 """
 
 __version__ = "0.1.0"
