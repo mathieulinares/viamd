@@ -13,6 +13,7 @@ pybind11_add_module(pyviamd
     src/trajectory_bindings.cpp
     src/openmm_bindings.cpp
     src/mdanalysis_bindings.cpp
+    src/event_bindings_simple.cpp
 )
 
 # Set properties for the Python module
@@ -31,9 +32,14 @@ set_target_properties(pyviamd PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# Link against VIAMD's libraries
+# Link against VIAMD's libraries and event system
 target_link_libraries(pyviamd PRIVATE
     mdlib
+)
+
+# Include the event system source directly for now
+target_sources(pyviamd PRIVATE
+    ../src/event.cpp
 )
 
 # Copy VIAMD compile definitions and flags

@@ -11,6 +11,7 @@ Modules:
     trajectory: Trajectory analysis and I/O
     openmm: OpenMM integration bindings (C++ level)
     mdanalysis: MDAnalysis integration bindings (C++ level)
+    event: Event system integration for custom Python components
     integrations: High-level integration modules
         - openmm_integration: Advanced OpenMM integration workflows
         - mdanalysis_integration: Advanced MDAnalysis integration workflows
