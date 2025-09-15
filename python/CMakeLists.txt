@@ -12,6 +12,7 @@ pybind11_add_module(pyviamd
     src/molecule_bindings.cpp
     src/trajectory_bindings.cpp
     src/openmm_bindings.cpp
+    src/mdanalysis_bindings.cpp
 )
 
 # Set properties for the Python module

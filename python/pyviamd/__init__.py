@@ -10,6 +10,7 @@ Modules:
     molecule: Molecular structure and data access
     trajectory: Trajectory analysis and I/O
     openmm: OpenMM integration bindings (C++ level)
+    mdanalysis: MDAnalysis integration bindings (C++ level)
     integrations: High-level integration modules
         - openmm_integration: Advanced OpenMM integration workflows
         - mdanalysis_integration: Advanced MDAnalysis integration workflows
