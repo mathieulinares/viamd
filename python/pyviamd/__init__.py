@@ -15,6 +15,7 @@ Modules:
     analysis: Advanced molecular analysis and statistical tools
     visualization: Visualization and rendering utilities
     ml: Machine learning integration and feature extraction
+    dynamics: High-level OpenMM dynamics interface for running MD simulations
     integrations: High-level integration modules
         - openmm_integration: Advanced OpenMM integration workflows
         - mdanalysis_integration: Advanced MDAnalysis integration workflows
