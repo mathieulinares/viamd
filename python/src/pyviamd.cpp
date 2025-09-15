@@ -15,6 +15,7 @@
 void bind_core(pybind11::module &m);
 void bind_molecule(pybind11::module &m);
 void bind_trajectory(pybind11::module &m);
+void bind_openmm(pybind11::module &m);
 
 PYBIND11_MODULE(pyviamd, m) {
     m.doc() = "Python bindings for VIAMD - Visual Interactive Analysis of Molecular Dynamics";
@@ -29,4 +30,7 @@ PYBIND11_MODULE(pyviamd, m) {
     
     // Bind trajectory functionality  
     bind_trajectory(m);
+    
+    // Bind OpenMM integration functionality
+    bind_openmm(m);
 }

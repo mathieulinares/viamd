@@ -11,6 +11,7 @@ pybind11_add_module(pyviamd
     src/core_bindings.cpp
     src/molecule_bindings.cpp
     src/trajectory_bindings.cpp
+    src/openmm_bindings.cpp
 )
 
 # Set properties for the Python module

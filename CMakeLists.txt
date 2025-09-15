@@ -53,6 +53,11 @@ set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decreas
 # MDLIB OPTIONS
 set(MD_LINK_STDLIB_STATIC ${VIAMD_LINK_STDLIB_STATIC} CACHE BOOL "" FORCE)
 
+# Enable Position Independent Code for Python bindings
+if(VIAMD_ENABLE_PYTHON)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if (VIAMD_ENABLE_VELOXCHEM)
     set(MD_ENABLE_VLX ON CACHE BOOL "" FORCE)
     set(MD_VLX_BASIS_FOLDER "basis")
