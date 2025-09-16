@@ -691,10 +691,14 @@ bool OpenMMDynamicsInterface::update_viamd_coordinates(ApplicationState& state) 
 bool initialize_global_python_interpreter() {
     if (!g_python_initialized) {
         try {
-            g_python_interpreter = new py::scoped_interpreter();
+            // Check if Python is already initialized by another module
+            if (!Py_IsInitialized()) {
+                g_python_interpreter = new py::scoped_interpreter();
+            }
             g_python_initialized = true;
             return true;
         } catch (const std::exception& e) {
+            g_python_initialized = false;
             return false;
         }
     }
