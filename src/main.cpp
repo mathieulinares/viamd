@@ -791,8 +791,16 @@ int main(int argc, char** argv) {
 
     // Initialize OpenMM dynamics interface if Python is enabled
 #ifdef VIAMD_ENABLE_PYTHON
-    LOG_DEBUG("Initializing OpenMM dynamics interface...");
+    LOG_DEBUG("Initializing Python interpreter for OpenMM dynamics...");
     try {
+        // Initialize Python interpreter safely
+        static pybind11::scoped_interpreter* python_interpreter = nullptr;
+        if (!python_interpreter) {
+            python_interpreter = new pybind11::scoped_interpreter();
+            LOG_DEBUG("Python interpreter initialized successfully");
+        }
+        
+        LOG_DEBUG("Creating OpenMM dynamics interface...");
         data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
         data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
         
@@ -806,10 +814,14 @@ int main(int argc, char** argv) {
         }
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to initialize OpenMM dynamics interface: %s", e.what());
-        delete static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
-        delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
-        data.openmm_dynamics.interface = nullptr;
-        data.openmm_dynamics.gui_state = nullptr;
+        if (data.openmm_dynamics.interface) {
+            delete static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+            data.openmm_dynamics.interface = nullptr;
+        }
+        if (data.openmm_dynamics.gui_state) {
+            delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
+            data.openmm_dynamics.gui_state = nullptr;
+        }
     }
 #else
     LOG_DEBUG("OpenMM dynamics interface disabled (Python support not enabled)");

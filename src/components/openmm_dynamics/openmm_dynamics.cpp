@@ -22,6 +22,10 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 namespace py = pybind11;
+
+// Global interpreter guard to prevent multiple initialization
+static py::scoped_interpreter* g_python_interpreter = nullptr;
+static bool g_python_initialized = false;
 #endif
 
 namespace OpenMMDynamics {
@@ -118,6 +122,13 @@ bool OpenMMDynamicsInterface::initialize(const ApplicationState& state) {
 bool OpenMMDynamicsInterface::initialize_python() {
 #ifdef VIAMD_ENABLE_PYTHON
     try {
+        // Check if Python interpreter is already initialized globally
+        if (!g_python_initialized) {
+            progress_.has_error = true;
+            progress_.error_message = "Python interpreter not initialized. This should be done at application startup.";
+            return false;
+        }
+        
         // Import pyviamd dynamics module
         py::module_ pyviamd = py::module_::import("pyviamd.dynamics");
         python_module_ = new py::module_(pyviamd);
@@ -674,3 +685,27 @@ bool OpenMMDynamicsInterface::update_viamd_coordinates(ApplicationState& state) 
 }
 
 } // namespace OpenMMDynamics
+
+// Global Python initialization functions
+#ifdef VIAMD_ENABLE_PYTHON
+bool initialize_global_python_interpreter() {
+    if (!g_python_initialized) {
+        try {
+            g_python_interpreter = new py::scoped_interpreter();
+            g_python_initialized = true;
+            return true;
+        } catch (const std::exception& e) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void cleanup_global_python_interpreter() {
+    if (g_python_initialized && g_python_interpreter) {
+        delete g_python_interpreter;
+        g_python_interpreter = nullptr;
+        g_python_initialized = false;
+    }
+}
+#endif
