@@ -92,9 +92,10 @@
 #define HIGHLIGHT_PULSE_TIME_SCALE  5.0
 #define HIGHLIGHT_PULSE_ALPHA_SCALE 0.1
 
-#define LOG_INFO  MD_LOG_INFO
-#define LOG_DEBUG MD_LOG_DEBUG
-#define LOG_ERROR MD_LOG_ERROR
+#define LOG_INFO    MD_LOG_INFO
+#define LOG_DEBUG   MD_LOG_DEBUG
+#define LOG_ERROR   MD_LOG_ERROR
+#define LOG_WARNING MD_LOG_INFO  // Map LOG_WARNING to MD_LOG_INFO since MD_LOG_WARNING doesn't exist
 #define LOG_SUCCESS(...) ImGui::InsertNotification(ImGuiToast(ImGuiToastType_Success, 6000, __VA_ARGS__))
 
 // Global data for application
