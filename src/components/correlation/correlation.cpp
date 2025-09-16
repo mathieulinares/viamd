@@ -276,8 +276,8 @@ struct Correlation : viamd::EventHandler {
     float iso_thresholds[8] = { 0.05f, 0.15f, 0.3f, 0.5f, 0.8f, 1.2f, 1.8f, 2.5f }; // Better separated thresholds
     bool preserve_series = true; // Whether to preserve individual series in advanced modes
     
-    // User-controllable scaling parameters - increased for better visibility
-    float density_scale_multiplier = 0.1f; // Increased from 0.01f for better ISO level separation
+    // User-controllable scaling parameters - adjusted per user feedback
+    float density_scale_multiplier = 0.0001f; // Set to 0.0001 as requested by user
     float colormap_scale_multiplier = 0.2f; // Increased from 0.1f for better colormap contrast
     
     // Point style for current frame
@@ -968,9 +968,9 @@ struct Correlation : viamd::EventHandler {
                     
                     // User-controllable scaling parameters
                     ImGui::Text("Density Scaling");
-                    ImGui::SliderFloat("ISO/Line Scale", &density_scale_multiplier, 0.01f, 1.0f, "%.3f");
+                    ImGui::SliderFloat("ISO/Line Scale", &density_scale_multiplier, 0.0001f, 0.01f, "%.4f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Controls the density threshold for isolines and isolevels\nHigher = more levels visible");
+                        ImGui::SetTooltip("Controls the density threshold for isolines and isolevels\nHigher = more levels visible\nDefault: 0.0001");
                     }
                     
                     ImGui::SliderFloat("Colormap Scale", &colormap_scale_multiplier, 0.05f, 2.0f, "%.2f");
@@ -1149,12 +1149,16 @@ struct Correlation : viamd::EventHandler {
                                 
                                 if (display_mode[0] == IsoLevels) {
                                     if (preserve_series && md_array_size(series) > 1) {
+                                        // Limit to 3 levels per series max
+                                        int levels_per_series = MIN(3, num_iso_levels);
                                         for (int i = 0; i < num_iso_levels; ++i) {
                                             uint32_t series_idx = i % md_array_size(series);
                                             ImVec4 series_color = series[series_idx].color;
+                                            // Vary opacity based on level (higher levels = more opaque)
+                                            float level_opacity = 0.3f + (0.7f * (float)i / (float)MAX(1, levels_per_series - 1));
                                             level_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(series_color.w * 200)); // More opaque
+                                                (int)(series_color.z * 255), (int)(level_opacity * 255));
                                         }
                                     } else {
                                         for (int i = 0; i < num_iso_levels; ++i) {
@@ -1169,9 +1173,21 @@ struct Correlation : viamd::EventHandler {
                                     }
                                     memcpy(contour_colors, level_colors, sizeof(level_colors));
                                 } else {
-                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
-                                    for (int i = 0; i < num_iso_levels; ++i) {
-                                        contour_colors[i] = line_color;
+                                    // IsoLines mode: use series colors by default when preserve_series is enabled
+                                    if (preserve_series && md_array_size(series) > 1) {
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            uint32_t series_idx = i % md_array_size(series);
+                                            ImVec4 series_color = series[series_idx].color;
+                                            contour_colors[i] = IM_COL32(
+                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
+                                                (int)(series_color.z * 255), 255); // Full opacity for lines
+                                        }
+                                    } else {
+                                        // Fallback to user-defined line color
+                                        uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            contour_colors[i] = line_color;
+                                        }
                                     }
                                 }
                                 
@@ -1221,13 +1237,17 @@ struct Correlation : viamd::EventHandler {
                                 
                                 if (display_mode[1] == IsoLevels) {
                                     if (preserve_series && md_array_size(series) > 1) {
+                                        // Limit to 3 levels per series max
+                                        int levels_per_series = MIN(3, num_iso_levels);
                                         for (int i = 0; i < num_iso_levels; ++i) {
                                             uint32_t series_idx = i % md_array_size(series);
                                             ImVec4 series_color = series[series_idx].color;
-                                            series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered bluer
+                                            series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered slightly bluer
+                                            // Vary opacity based on level (higher levels = more opaque)
+                                            float level_opacity = 0.2f + (0.6f * (float)i / (float)MAX(1, levels_per_series - 1));
                                             level_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(series_color.w * 128));
+                                                (int)(series_color.z * 255), (int)(level_opacity * 255));
                                         }
                                     } else {
                                         for (int i = 0; i < num_iso_levels; ++i) {
@@ -1239,9 +1259,22 @@ struct Correlation : viamd::EventHandler {
                                     }
                                     memcpy(contour_colors, level_colors, sizeof(level_colors));
                                 } else {
-                                    uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
-                                    for (int i = 0; i < num_iso_levels; ++i) {
-                                        contour_colors[i] = line_color;
+                                    // IsoLines mode: use series colors by default when preserve_series is enabled
+                                    if (preserve_series && md_array_size(series) > 1) {
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            uint32_t series_idx = i % md_array_size(series);
+                                            ImVec4 series_color = series[series_idx].color;
+                                            series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered slightly bluer
+                                            contour_colors[i] = IM_COL32(
+                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
+                                                (int)(series_color.z * 255), 255); // Full opacity for lines
+                                        }
+                                    } else {
+                                        // Fallback to user-defined line color
+                                        uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
+                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                            contour_colors[i] = line_color;
+                                        }
                                     }
                                 }
                                 
