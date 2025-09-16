@@ -273,12 +273,12 @@ struct Correlation : viamd::EventHandler {
     
     // Enhanced iso-level configuration - adjusted for better correlation visualization  
     int num_iso_levels = 3;
-    float iso_thresholds[8] = { 0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f }; // More reasonable thresholds
+    float iso_thresholds[8] = { 0.05f, 0.15f, 0.3f, 0.5f, 0.8f, 1.2f, 1.8f, 2.5f }; // Better separated thresholds
     bool preserve_series = true; // Whether to preserve individual series in advanced modes
     
-    // User-controllable scaling parameters
-    float density_scale_multiplier = 0.01f; // Base density scaling multiplier
-    float colormap_scale_multiplier = 0.1f; // Colormap max value multiplier
+    // User-controllable scaling parameters - increased for better visibility
+    float density_scale_multiplier = 0.1f; // Increased from 0.01f for better ISO level separation
+    float colormap_scale_multiplier = 0.2f; // Increased from 0.1f for better colormap contrast
     
     // Point style for current frame
     struct {
@@ -958,7 +958,7 @@ struct Correlation : viamd::EventHandler {
                     if (ImGui::TreeNode("Custom Thresholds")) {
                         for (int i = 0; i < num_iso_levels; ++i) {
                             ImGui::PushID(i);
-                            ImGui::SliderFloat("", &iso_thresholds[i], 0.1f, 5.0f, "%.1f"); // Better range for correlation data
+                            ImGui::SliderFloat("", &iso_thresholds[i], 0.01f, 3.0f, "%.2f"); // Better granularity for threshold tuning
                             ImGui::PopID();
                         }
                         ImGui::TreePop();
@@ -968,14 +968,14 @@ struct Correlation : viamd::EventHandler {
                     
                     // User-controllable scaling parameters
                     ImGui::Text("Density Scaling");
-                    ImGui::SliderFloat("ISO/Line Scale", &density_scale_multiplier, 0.001f, 0.1f, "%.3f");
+                    ImGui::SliderFloat("ISO/Line Scale", &density_scale_multiplier, 0.01f, 1.0f, "%.3f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Controls the density threshold for isolines and isolevels");
+                        ImGui::SetTooltip("Controls the density threshold for isolines and isolevels\nHigher = more levels visible");
                     }
                     
-                    ImGui::SliderFloat("Colormap Scale", &colormap_scale_multiplier, 0.01f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("Colormap Scale", &colormap_scale_multiplier, 0.05f, 2.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Controls the maximum density value for colormap scaling");
+                        ImGui::SetTooltip("Controls the maximum density value for colormap scaling\nLower = more contrast");
                     }
                     
                     ImGui::EndMenu();
@@ -1090,11 +1090,16 @@ struct Correlation : viamd::EventHandler {
                     bool should_render_full_advanced = show_layer[0] && display_mode[0] != Points;
                     bool should_render_filt_advanced = show_layer[1] && display_mode[1] != Points && app_state && app_state->timeline.filter.enabled;
                     
-                    // Debug: Display density computation status in plot area
+                    // Debug: Display density computation status and ISO values in plot area
                     if (should_render_full_advanced || should_render_filt_advanced) {
-                        char debug_text[256];
-                        snprintf(debug_text, sizeof(debug_text), "Full den_sum: %.1f | Filt den_sum: %.1f", 
-                                corr_data_full.den_sum, corr_data_filt.den_sum);
+                        char debug_text[512];
+                        float debug_density_scale = corr_data_full.den_sum * density_scale_multiplier;
+                        snprintf(debug_text, sizeof(debug_text), 
+                            "den_sum: %.1f | scale: %.3f | ISO[0]: %.2f, ISO[1]: %.2f, ISO[2]: %.2f", 
+                            corr_data_full.den_sum, density_scale_multiplier,
+                            debug_density_scale * iso_thresholds[0],
+                            debug_density_scale * iso_thresholds[1], 
+                            debug_density_scale * iso_thresholds[2]);
                         ImPlot::PlotText(debug_text, 0.0, 0.0);
                     }
                     
@@ -1154,9 +1159,12 @@ struct Correlation : viamd::EventHandler {
                                     } else {
                                         for (int i = 0; i < num_iso_levels; ++i) {
                                             float t = (float)i / (float)MAX(1, num_iso_levels - 1);
+                                            // Use blue-to-red gradient for better visibility and distinction
                                             level_colors[i] = IM_COL32(
-                                                (int)(255 * (1-t)), (int)(255 * t), (int)(100), // Avoid green dominance
-                                                (int)(160 + 95 * t)); // Better opacity range
+                                                (int)(255 * t),     // Red: 0 → 255
+                                                (int)(50),          // Green: minimal
+                                                (int)(255 * (1-t)), // Blue: 255 → 0
+                                                (int)(180 + 75 * t)); // Alpha: 180 → 255 for good opacity
                                         }
                                     }
                                     memcpy(contour_colors, level_colors, sizeof(level_colors));
