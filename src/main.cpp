@@ -73,6 +73,9 @@
 // Include OpenMM dynamics component if Python is enabled
 #ifdef VIAMD_ENABLE_PYTHON
 #include <components/openmm_dynamics/openmm_dynamics.h>
+#pragma message("OpenMM Dynamics component included - Python support enabled")
+#else
+#pragma message("OpenMM Dynamics component excluded - Python support disabled")
 #endif
 
 #define MAX_POPULATION_SIZE 256
@@ -784,8 +787,18 @@ int main(int argc, char** argv) {
 
     // Initialize OpenMM dynamics interface if Python is enabled
 #ifdef VIAMD_ENABLE_PYTHON
-    data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
-    data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
+    LOG_DEBUG("Initializing OpenMM dynamics interface...");
+    try {
+        data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
+        data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
+        LOG_DEBUG("OpenMM dynamics interface initialized successfully");
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to initialize OpenMM dynamics interface: %s", e.what());
+        data.openmm_dynamics.interface = nullptr;
+        data.openmm_dynamics.gui_state = nullptr;
+    }
+#else
+    LOG_DEBUG("OpenMM dynamics interface disabled (Python support not enabled)");
 #endif
 
 #if EXPERIMENTAL_GFX_API
@@ -2860,6 +2873,18 @@ static void draw_main_menu(ApplicationState* data) {
 #ifdef VIAMD_ENABLE_PYTHON
             ImGui::Separator();
             ImGui::Checkbox("OpenMM Dynamics", &data->openmm_dynamics.show_window);
+            
+            // Debug info for troubleshooting
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("OpenMM Dynamics Interface\nPython support: %s\nInterface: %s", 
+                                "Enabled", 
+                                data->openmm_dynamics.interface ? "Initialized" : "Not initialized");
+            }
+#else
+            ImGui::TextDisabled("OpenMM Dynamics (Python support disabled)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Rebuild with -DVIAMD_ENABLE_PYTHON=ON to enable");
+            }
 #endif
 
             viamd::event_system_broadcast_event(viamd::EventType_ViamdWindowDrawMenu);
