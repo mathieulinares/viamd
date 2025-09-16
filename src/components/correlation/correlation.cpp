@@ -1140,7 +1140,17 @@ struct Correlation : viamd::EventHandler {
                                 const float density_scale = corr_data_full.den_sum * density_scale_multiplier;
                                 float iso_values[8] = {0};
                                 
-                                for (int i = 0; i < num_iso_levels; ++i) {
+                                // Determine number of levels: use number of series when preserve_series is enabled
+                                int actual_iso_levels;
+                                if (preserve_series && md_array_size(series) > 1) {
+                                    // Use one isoline per series (n isolines for n series)
+                                    actual_iso_levels = MIN(8, (int)md_array_size(series)); // Cap at 8 for array safety
+                                } else {
+                                    // Use user-defined number of levels
+                                    actual_iso_levels = num_iso_levels;
+                                }
+                                
+                                for (int i = 0; i < actual_iso_levels; ++i) {
                                     iso_values[i] = density_scale * iso_thresholds[i];
                                 }
                                 
@@ -1149,20 +1159,18 @@ struct Correlation : viamd::EventHandler {
                                 
                                 if (display_mode[0] == IsoLevels) {
                                     if (preserve_series && md_array_size(series) > 1) {
-                                        // Limit to 3 levels per series max
-                                        int levels_per_series = MIN(3, num_iso_levels);
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            uint32_t series_idx = i % md_array_size(series);
-                                            ImVec4 series_color = series[series_idx].color;
-                                            // Vary opacity based on level (higher levels = more opaque)
-                                            float level_opacity = 0.3f + (0.7f * (float)i / (float)MAX(1, levels_per_series - 1));
+                                        // One level per series with series color
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
+                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets level i
+                                            // Use moderate opacity for levels
+                                            float level_opacity = 0.6f;
                                             level_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
                                                 (int)(series_color.z * 255), (int)(level_opacity * 255));
                                         }
                                     } else {
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            float t = (float)i / (float)MAX(1, num_iso_levels - 1);
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
+                                            float t = (float)i / (float)MAX(1, actual_iso_levels - 1);
                                             // Use blue-to-red gradient for better visibility and distinction
                                             level_colors[i] = IM_COL32(
                                                 (int)(255 * t),     // Red: 0 → 255
@@ -1175,9 +1183,9 @@ struct Correlation : viamd::EventHandler {
                                 } else {
                                     // IsoLines mode: use series colors by default when preserve_series is enabled
                                     if (preserve_series && md_array_size(series) > 1) {
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            uint32_t series_idx = i % md_array_size(series);
-                                            ImVec4 series_color = series[series_idx].color;
+                                        // One isoline per series with series color
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
+                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets isoline i
                                             contour_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
                                                 (int)(series_color.z * 255), 255); // Full opacity for lines
@@ -1185,7 +1193,7 @@ struct Correlation : viamd::EventHandler {
                                     } else {
                                         // Fallback to user-defined line color
                                         uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
-                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
                                             contour_colors[i] = line_color;
                                         }
                                     }
@@ -1195,7 +1203,7 @@ struct Correlation : viamd::EventHandler {
                                     .values = iso_values,
                                     .level_colors = level_colors,
                                     .contour_colors = contour_colors,
-                                    .count = (uint32_t)num_iso_levels
+                                    .count = (uint32_t)actual_iso_levels
                                 };
                                 
                                 render_isolines(&corr_data_full, viewport.elem, corr_isomap);
@@ -1228,7 +1236,17 @@ struct Correlation : viamd::EventHandler {
                                 const float density_scale = corr_data_filt.den_sum * density_scale_multiplier;
                                 float iso_values[8] = {0};
                                 
-                                for (int i = 0; i < num_iso_levels; ++i) {
+                                // Determine number of levels: use number of series when preserve_series is enabled
+                                int actual_iso_levels;
+                                if (preserve_series && md_array_size(series) > 1) {
+                                    // Use one isoline per series (n isolines for n series)
+                                    actual_iso_levels = MIN(8, (int)md_array_size(series)); // Cap at 8 for array safety
+                                } else {
+                                    // Use user-defined number of levels
+                                    actual_iso_levels = num_iso_levels;
+                                }
+                                
+                                for (int i = 0; i < actual_iso_levels; ++i) {
                                     iso_values[i] = density_scale * iso_thresholds[i];
                                 }
                                 
@@ -1237,21 +1255,19 @@ struct Correlation : viamd::EventHandler {
                                 
                                 if (display_mode[1] == IsoLevels) {
                                     if (preserve_series && md_array_size(series) > 1) {
-                                        // Limit to 3 levels per series max
-                                        int levels_per_series = MIN(3, num_iso_levels);
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            uint32_t series_idx = i % md_array_size(series);
-                                            ImVec4 series_color = series[series_idx].color;
+                                        // One level per series with series color (slightly bluer for filtered)
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
+                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets level i
                                             series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered slightly bluer
-                                            // Vary opacity based on level (higher levels = more opaque)
-                                            float level_opacity = 0.2f + (0.6f * (float)i / (float)MAX(1, levels_per_series - 1));
+                                            // Use moderate opacity for levels
+                                            float level_opacity = 0.5f;
                                             level_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
                                                 (int)(series_color.z * 255), (int)(level_opacity * 255));
                                         }
                                     } else {
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            float t = (float)i / (float)MAX(1, num_iso_levels - 1);
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
+                                            float t = (float)i / (float)MAX(1, actual_iso_levels - 1);
                                             level_colors[i] = IM_COL32(
                                                 0, (int)(255 * (1-t)), (int)(255 * t), 
                                                 (int)(128 + 127 * t));
@@ -1261,9 +1277,9 @@ struct Correlation : viamd::EventHandler {
                                 } else {
                                     // IsoLines mode: use series colors by default when preserve_series is enabled
                                     if (preserve_series && md_array_size(series) > 1) {
-                                        for (int i = 0; i < num_iso_levels; ++i) {
-                                            uint32_t series_idx = i % md_array_size(series);
-                                            ImVec4 series_color = series[series_idx].color;
+                                        // One isoline per series with series color (slightly bluer for filtered)
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
+                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets isoline i
                                             series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered slightly bluer
                                             contour_colors[i] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
@@ -1272,7 +1288,7 @@ struct Correlation : viamd::EventHandler {
                                     } else {
                                         // Fallback to user-defined line color
                                         uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
-                                        for (int i = 0; i < num_iso_levels; ++i) {
+                                        for (int i = 0; i < actual_iso_levels; ++i) {
                                             contour_colors[i] = line_color;
                                         }
                                     }
@@ -1282,7 +1298,7 @@ struct Correlation : viamd::EventHandler {
                                     .values = iso_values,
                                     .level_colors = level_colors,
                                     .contour_colors = contour_colors,
-                                    .count = (uint32_t)num_iso_levels
+                                    .count = (uint32_t)actual_iso_levels
                                 };
                                 
                                 render_isolines(&corr_data_filt, viewport.elem, corr_isomap);
