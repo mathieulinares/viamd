@@ -273,7 +273,7 @@ struct Correlation : viamd::EventHandler {
     
     // Enhanced iso-level configuration - adjusted for better correlation visualization  
     int num_iso_levels = 3;
-    float iso_thresholds[8] = { 0.05f, 0.15f, 0.3f, 0.5f, 0.8f, 1.2f, 1.8f, 2.5f }; // Better separated thresholds
+    float iso_thresholds[8] = { 0.001f, 0.005f, 0.01f, 0.02f, 0.05f, 0.1f, 0.2f, 0.5f }; // Much lower thresholds as requested
     bool preserve_series = true; // Whether to preserve individual series in advanced modes
     
     // User-controllable scaling parameters - adjusted per user feedback
@@ -958,7 +958,7 @@ struct Correlation : viamd::EventHandler {
                     if (ImGui::TreeNode("Custom Thresholds")) {
                         for (int i = 0; i < num_iso_levels; ++i) {
                             ImGui::PushID(i);
-                            ImGui::SliderFloat("", &iso_thresholds[i], 0.01f, 3.0f, "%.2f"); // Better granularity for threshold tuning
+                            ImGui::SliderFloat("", &iso_thresholds[i], 0.0001f, 1.0f, "%.4f"); // Much lower range with higher precision
                             ImGui::PopID();
                         }
                         ImGui::TreePop();
