@@ -296,6 +296,19 @@ struct Correlation : viamd::EventHandler {
     // Advanced rendering infrastructure
     corr_rep_t corr_data_full;
     corr_rep_t corr_data_filt;
+    
+    // Per-series density data for series-based isolines
+    struct series_density_t {
+        uint32_t den_tex = 0;
+        uint32_t map_tex = 0;
+        uint32_t iso_tex = 0;
+        float den_sum = 0.0f;
+        float min_x = 0.0f, max_x = 0.0f;
+        float min_y = 0.0f, max_y = 0.0f;
+    };
+    md_array(series_density_t) series_densities_full = {0};
+    md_array(series_density_t) series_densities_filt = {0};
+    
     shader_program_t map_shader;
     shader_program_t iso_shader;
     uint32_t fbo = 0;  // Framebuffer object
@@ -485,13 +498,25 @@ struct Correlation : viamd::EventHandler {
             task_system::task_interrupt(compute_density_filt);
         }
         
-        // Clean up textures
+        // Clean up main textures
         gl::free_texture(&corr_data_full.den_tex);
         gl::free_texture(&corr_data_full.map_tex);
         gl::free_texture(&corr_data_full.iso_tex);
         gl::free_texture(&corr_data_filt.den_tex);
         gl::free_texture(&corr_data_filt.map_tex);
         gl::free_texture(&corr_data_filt.iso_tex);
+        
+        // Clean up per-series density textures
+        for (size_t i = 0; i < md_array_size(series_densities_full); ++i) {
+            gl::free_texture(&series_densities_full[i].den_tex);
+            gl::free_texture(&series_densities_full[i].map_tex);
+            gl::free_texture(&series_densities_full[i].iso_tex);
+        }
+        for (size_t i = 0; i < md_array_size(series_densities_filt); ++i) {
+            gl::free_texture(&series_densities_filt[i].den_tex);
+            gl::free_texture(&series_densities_filt[i].map_tex);
+            gl::free_texture(&series_densities_filt[i].iso_tex);
+        }
         
         // Clean up shaders
         if (map_shader.program) glDeleteProgram(map_shader.program);
@@ -730,6 +755,118 @@ struct Correlation : viamd::EventHandler {
         return async_task;
     }
     
+    // Compute density for each series individually for series-based isolines
+    void compute_per_series_densities(bool is_filtered, uint32_t frame_beg, uint32_t frame_end) {
+        if (!preserve_series || md_array_size(series) <= 1) {
+            return; // No need for per-series densities
+        }
+        
+        auto& series_densities = is_filtered ? series_densities_filt : series_densities_full;
+        size_t num_series = md_array_size(series);
+        
+        // Resize series density array if needed
+        if (md_array_size(series_densities) != num_series) {
+            // Clean up old textures
+            for (size_t i = 0; i < md_array_size(series_densities); ++i) {
+                gl::free_texture(&series_densities[i].den_tex);
+                gl::free_texture(&series_densities[i].map_tex);
+                gl::free_texture(&series_densities[i].iso_tex);
+            }
+            
+            md_array_resize(series_densities, num_series, arena);
+            
+            // Initialize new textures
+            for (size_t i = 0; i < num_series; ++i) {
+                gl::init_texture_2D(&series_densities[i].den_tex, density_tex_dim, density_tex_dim, GL_R32F);
+                gl::init_texture_2D(&series_densities[i].map_tex, tex_dim, tex_dim, GL_RGBA8);
+                gl::init_texture_2D(&series_densities[i].iso_tex, tex_dim, tex_dim, GL_RGBA8);
+            }
+        }
+        
+        // Compute density for each series individually
+        for (size_t s = 0; s < num_series; ++s) {
+            const ScatterSeries& current_series = series[s];
+            
+            // Find data range for this series only
+            float min_x = FLT_MAX, max_x = -FLT_MAX;
+            float min_y = FLT_MAX, max_y = -FLT_MAX;
+            
+            for (size_t i = 0; i < md_array_size(current_series.x_data); ++i) {
+                if (current_series.frame_indices[i] >= (int)frame_beg && current_series.frame_indices[i] < (int)frame_end) {
+                    min_x = MIN(min_x, current_series.x_data[i]);
+                    max_x = MAX(max_x, current_series.x_data[i]);
+                    min_y = MIN(min_y, current_series.y_data[i]);
+                    max_y = MAX(max_y, current_series.y_data[i]);
+                }
+            }
+            
+            // Use overall data range for consistent scaling
+            const auto& overall_data = is_filtered ? corr_data_filt : corr_data_full;
+            min_x = overall_data.min_x;
+            max_x = overall_data.max_x;
+            min_y = overall_data.min_y;
+            max_y = overall_data.max_y;
+            
+            series_densities[s].min_x = min_x;
+            series_densities[s].max_x = max_x;
+            series_densities[s].min_y = min_y;
+            series_densities[s].max_y = max_y;
+            
+            // Add padding for density computation
+            float x_range = max_x - min_x;
+            float y_range = max_y - min_y;
+            if (x_range < 1e-6f) x_range = 1.0f;
+            if (y_range < 1e-6f) y_range = 1.0f;
+            
+            float padded_min_x = min_x - x_range * 0.05f;
+            float padded_max_x = max_x + x_range * 0.05f;
+            float padded_min_y = min_y - y_range * 0.05f;
+            float padded_max_y = max_y + y_range * 0.05f;
+            
+            float padded_x_range = padded_max_x - padded_min_x;
+            float padded_y_range = padded_max_y - padded_min_y;
+            
+            // Create density texture for this series
+            float* density_tex = (float*)md_alloc(arena, density_tex_dim * density_tex_dim * sizeof(float));
+            memset(density_tex, 0, density_tex_dim * density_tex_dim * sizeof(float));
+            
+            double sum = 0.0;
+            
+            // Populate density histogram for this series only
+            for (size_t i = 0; i < md_array_size(current_series.x_data); ++i) {
+                if (current_series.frame_indices[i] >= (int)frame_beg && current_series.frame_indices[i] < (int)frame_end) {
+                    float x = current_series.x_data[i];
+                    float y = current_series.y_data[i];
+                    
+                    // Map to texture coordinates [0, 1] using padded range
+                    float u = (x - padded_min_x) / padded_x_range;
+                    float v = (y - padded_min_y) / padded_y_range;
+                    
+                    // Convert to pixel coordinates
+                    uint32_t px = (uint32_t)(u * density_tex_dim);
+                    uint32_t py = (uint32_t)(v * density_tex_dim);
+                    
+                    // Clamp to valid range
+                    px = MIN(px, density_tex_dim - 1);
+                    py = MIN(py, density_tex_dim - 1);
+                    
+                    density_tex[py * density_tex_dim + px] += 1.0f;
+                    sum += 1.0;
+                }
+            }
+            
+            // Apply Gaussian blur for smooth density
+            blur_density_gaussian(density_tex, density_tex_dim, blur_sigma);
+            
+            series_densities[s].den_sum = (float)sum;
+            
+            // Upload texture data
+            gl::set_texture_2D_data(series_densities[s].den_tex, density_tex, GL_R32F);
+            
+            md_free(arena, density_tex, density_tex_dim * density_tex_dim * sizeof(float));
+        }
+    }
+    
     // Update density computation when data changes
     void update() {
         if (show_window && md_array_size(series) > 0) {
@@ -752,6 +889,11 @@ struct Correlation : viamd::EventHandler {
                         const uint32_t frame_end = (uint32_t)num_frames;
                         
                         compute_density_full = compute_density(&corr_data_full, series, md_array_size(series), frame_beg, frame_end);
+                        
+                        // Also compute per-series densities when preserve_series is enabled
+                        if (preserve_series && md_array_size(series) > 1) {
+                            compute_per_series_densities(false, frame_beg, frame_end);
+                        }
                     } else {
                         task_system::task_interrupt(compute_density_full);
                     }
@@ -766,6 +908,11 @@ struct Correlation : viamd::EventHandler {
                         const uint32_t frame_end = (uint32_t)app_state->timeline.filter.end_frame + 1;
                         
                         compute_density_filt = compute_density(&corr_data_filt, series, md_array_size(series), frame_beg, frame_end);
+                        
+                        // Also compute per-series densities when preserve_series is enabled
+                        if (preserve_series && md_array_size(series) > 1) {
+                            compute_per_series_densities(true, frame_beg, frame_end);
+                        }
                     } else {
                         task_system::task_interrupt(compute_density_filt);
                     }
@@ -1136,39 +1283,69 @@ struct Correlation : viamd::EventHandler {
                                 
                                 render_colormap(&corr_data_full, viewport.elem, corr_colormap);
                             } else if (display_mode[0] == IsoLevels || display_mode[0] == IsoLines) {
-                                // User-controllable density scaling
-                                const float density_scale = corr_data_full.den_sum * density_scale_multiplier;
-                                float iso_values[8] = {0};
-                                
-                                // Determine number of levels: use number of series when preserve_series is enabled
-                                int actual_iso_levels;
-                                if (preserve_series && md_array_size(series) > 1) {
-                                    // Use one isoline per series (n isolines for n series)
-                                    actual_iso_levels = MIN(8, (int)md_array_size(series)); // Cap at 8 for array safety
-                                } else {
-                                    // Use user-defined number of levels
-                                    actual_iso_levels = num_iso_levels;
-                                }
-                                
-                                for (int i = 0; i < actual_iso_levels; ++i) {
-                                    iso_values[i] = density_scale * iso_thresholds[i];
-                                }
-                                
-                                uint32_t level_colors[8] = {0};
-                                uint32_t contour_colors[8] = {0};
-                                
-                                if (display_mode[0] == IsoLevels) {
-                                    if (preserve_series && md_array_size(series) > 1) {
-                                        // One level per series with series color
-                                        for (int i = 0; i < actual_iso_levels; ++i) {
-                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets level i
-                                            // Use moderate opacity for levels
-                                            float level_opacity = 0.6f;
-                                            level_colors[i] = IM_COL32(
+                                // Check if we should use per-series rendering
+                                if (preserve_series && md_array_size(series) > 1 && 
+                                    md_array_size(series_densities_full) == md_array_size(series)) {
+                                    
+                                    // Render individual series isolines/isolevels
+                                    for (size_t s = 0; s < md_array_size(series_densities_full); ++s) {
+                                        const auto& series_density = series_densities_full[s];
+                                        if (series_density.den_tex == 0 || series_density.den_sum <= 0) continue;
+                                        
+                                        // Use single isoline/isolevel per series with series color
+                                        const float density_scale = series_density.den_sum * density_scale_multiplier;
+                                        float iso_values[1] = { density_scale * iso_thresholds[0] }; // Use first threshold
+                                        
+                                        // Get series color
+                                        ImVec4 series_color = series[s].color;
+                                        
+                                        uint32_t level_colors[1] = {0};
+                                        uint32_t contour_colors[1] = {0};
+                                        
+                                        if (display_mode[0] == IsoLevels) {
+                                            // Use series color with moderate opacity for levels
+                                            level_colors[0] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(level_opacity * 255));
+                                                (int)(series_color.z * 255), (int)(0.6f * 255));
+                                            contour_colors[0] = level_colors[0];
+                                        } else {
+                                            // Use series color with full opacity for lines
+                                            contour_colors[0] = IM_COL32(
+                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
+                                                (int)(series_color.z * 255), 255);
+                                            level_colors[0] = contour_colors[0];
                                         }
-                                    } else {
+                                        
+                                        corr_isomap_t corr_isomap = {
+                                            .values = iso_values,
+                                            .level_colors = level_colors,
+                                            .contour_colors = contour_colors,
+                                            .count = 1
+                                        };
+                                        
+                                        // Create a temporary rep structure for this series
+                                        corr_rep_t series_rep = series_density;
+                                        series_rep.den_tex = series_density.den_tex;
+                                        series_rep.iso_tex = series_density.iso_tex;
+                                        
+                                        render_isolines(&series_rep, viewport.elem, corr_isomap);
+                                    }
+                                } else {
+                                    // Use combined density texture (original behavior)
+                                    const float density_scale = corr_data_full.den_sum * density_scale_multiplier;
+                                    float iso_values[8] = {0};
+                                    
+                                    // Use user-defined number of levels for combined rendering
+                                    int actual_iso_levels = num_iso_levels;
+                                    
+                                    for (int i = 0; i < actual_iso_levels; ++i) {
+                                        iso_values[i] = density_scale * iso_thresholds[i];
+                                    }
+                                    
+                                    uint32_t level_colors[8] = {0};
+                                    uint32_t contour_colors[8] = {0};
+                                    
+                                    if (display_mode[0] == IsoLevels) {
                                         for (int i = 0; i < actual_iso_levels; ++i) {
                                             float t = (float)i / (float)MAX(1, actual_iso_levels - 1);
                                             // Use blue-to-red gradient for better visibility and distinction
@@ -1178,18 +1355,7 @@ struct Correlation : viamd::EventHandler {
                                                 (int)(255 * (1-t)), // Blue: 255 → 0
                                                 (int)(180 + 75 * t)); // Alpha: 180 → 255 for good opacity
                                         }
-                                    }
-                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
-                                } else {
-                                    // IsoLines mode: use series colors by default when preserve_series is enabled
-                                    if (preserve_series && md_array_size(series) > 1) {
-                                        // One isoline per series with series color
-                                        for (int i = 0; i < actual_iso_levels; ++i) {
-                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets isoline i
-                                            contour_colors[i] = IM_COL32(
-                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), 255); // Full opacity for lines
-                                        }
+                                        memcpy(contour_colors, level_colors, sizeof(level_colors));
                                     } else {
                                         // Fallback to user-defined line color
                                         uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[0]);
@@ -1197,16 +1363,16 @@ struct Correlation : viamd::EventHandler {
                                             contour_colors[i] = line_color;
                                         }
                                     }
+                                    
+                                    corr_isomap_t corr_isomap = {
+                                        .values = iso_values,
+                                        .level_colors = level_colors,
+                                        .contour_colors = contour_colors,
+                                        .count = (uint32_t)actual_iso_levels
+                                    };
+                                    
+                                    render_isolines(&corr_data_full, viewport.elem, corr_isomap);
                                 }
-                                
-                                corr_isomap_t corr_isomap = {
-                                    .values = iso_values,
-                                    .level_colors = level_colors,
-                                    .contour_colors = contour_colors,
-                                    .count = (uint32_t)actual_iso_levels
-                                };
-                                
-                                render_isolines(&corr_data_full, viewport.elem, corr_isomap);
                             }
                         }
                         
@@ -1232,59 +1398,77 @@ struct Correlation : viamd::EventHandler {
                                 
                                 render_colormap(&corr_data_filt, viewport.elem, corr_colormap);
                             } else if (display_mode[1] == IsoLevels || display_mode[1] == IsoLines) {
-                                // User-controllable density scaling 
-                                const float density_scale = corr_data_filt.den_sum * density_scale_multiplier;
-                                float iso_values[8] = {0};
-                                
-                                // Determine number of levels: use number of series when preserve_series is enabled
-                                int actual_iso_levels;
-                                if (preserve_series && md_array_size(series) > 1) {
-                                    // Use one isoline per series (n isolines for n series)
-                                    actual_iso_levels = MIN(8, (int)md_array_size(series)); // Cap at 8 for array safety
-                                } else {
-                                    // Use user-defined number of levels
-                                    actual_iso_levels = num_iso_levels;
-                                }
-                                
-                                for (int i = 0; i < actual_iso_levels; ++i) {
-                                    iso_values[i] = density_scale * iso_thresholds[i];
-                                }
-                                
-                                uint32_t level_colors[8] = {0};
-                                uint32_t contour_colors[8] = {0};
-                                
-                                if (display_mode[1] == IsoLevels) {
-                                    if (preserve_series && md_array_size(series) > 1) {
-                                        // One level per series with series color (slightly bluer for filtered)
-                                        for (int i = 0; i < actual_iso_levels; ++i) {
-                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets level i
-                                            series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered slightly bluer
-                                            // Use moderate opacity for levels
-                                            float level_opacity = 0.5f;
-                                            level_colors[i] = IM_COL32(
+                                // Check if we should use per-series rendering
+                                if (preserve_series && md_array_size(series) > 1 && 
+                                    md_array_size(series_densities_filt) == md_array_size(series)) {
+                                    
+                                    // Render individual series isolines/isolevels for filtered data
+                                    for (size_t s = 0; s < md_array_size(series_densities_filt); ++s) {
+                                        const auto& series_density = series_densities_filt[s];
+                                        if (series_density.den_tex == 0 || series_density.den_sum <= 0) continue;
+                                        
+                                        // Use single isoline/isolevel per series with series color
+                                        const float density_scale = series_density.den_sum * density_scale_multiplier;
+                                        float iso_values[1] = { density_scale * iso_thresholds[0] }; // Use first threshold
+                                        
+                                        // Get series color (slightly bluer for filtered)
+                                        ImVec4 series_color = series[s].color;
+                                        series_color.z = MIN(1.0f, series_color.z + 0.3f);
+                                        
+                                        uint32_t level_colors[1] = {0};
+                                        uint32_t contour_colors[1] = {0};
+                                        
+                                        if (display_mode[1] == IsoLevels) {
+                                            // Use series color with moderate opacity for levels
+                                            level_colors[0] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(level_opacity * 255));
+                                                (int)(series_color.z * 255), (int)(0.5f * 255));
+                                            contour_colors[0] = level_colors[0];
+                                        } else {
+                                            // Use series color with full opacity for lines
+                                            contour_colors[0] = IM_COL32(
+                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
+                                                (int)(series_color.z * 255), 255);
+                                            level_colors[0] = contour_colors[0];
                                         }
-                                    } else {
+                                        
+                                        corr_isomap_t corr_isomap = {
+                                            .values = iso_values,
+                                            .level_colors = level_colors,
+                                            .contour_colors = contour_colors,
+                                            .count = 1
+                                        };
+                                        
+                                        // Create a temporary rep structure for this series
+                                        corr_rep_t series_rep = series_density;
+                                        series_rep.den_tex = series_density.den_tex;
+                                        series_rep.iso_tex = series_density.iso_tex;
+                                        
+                                        render_isolines(&series_rep, viewport.elem, corr_isomap);
+                                    }
+                                } else {
+                                    // Use combined density texture (original behavior)
+                                    const float density_scale = corr_data_filt.den_sum * density_scale_multiplier;
+                                    float iso_values[8] = {0};
+                                    
+                                    // Use user-defined number of levels for combined rendering
+                                    int actual_iso_levels = num_iso_levels;
+                                    
+                                    for (int i = 0; i < actual_iso_levels; ++i) {
+                                        iso_values[i] = density_scale * iso_thresholds[i];
+                                    }
+                                    
+                                    uint32_t level_colors[8] = {0};
+                                    uint32_t contour_colors[8] = {0};
+                                    
+                                    if (display_mode[1] == IsoLevels) {
                                         for (int i = 0; i < actual_iso_levels; ++i) {
                                             float t = (float)i / (float)MAX(1, actual_iso_levels - 1);
                                             level_colors[i] = IM_COL32(
                                                 0, (int)(255 * (1-t)), (int)(255 * t), 
                                                 (int)(128 + 127 * t));
                                         }
-                                    }
-                                    memcpy(contour_colors, level_colors, sizeof(level_colors));
-                                } else {
-                                    // IsoLines mode: use series colors by default when preserve_series is enabled
-                                    if (preserve_series && md_array_size(series) > 1) {
-                                        // One isoline per series with series color (slightly bluer for filtered)
-                                        for (int i = 0; i < actual_iso_levels; ++i) {
-                                            ImVec4 series_color = series[i].color; // Direct mapping: series i gets isoline i
-                                            series_color.z = MIN(1.0f, series_color.z + 0.3f); // Make filtered slightly bluer
-                                            contour_colors[i] = IM_COL32(
-                                                (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), 255); // Full opacity for lines
-                                        }
+                                        memcpy(contour_colors, level_colors, sizeof(level_colors));
                                     } else {
                                         // Fallback to user-defined line color
                                         uint32_t line_color = ImGui::ColorConvertFloat4ToU32(isoline_colors[1]);
@@ -1292,16 +1476,16 @@ struct Correlation : viamd::EventHandler {
                                             contour_colors[i] = line_color;
                                         }
                                     }
+                                    
+                                    corr_isomap_t corr_isomap = {
+                                        .values = iso_values,
+                                        .level_colors = level_colors,
+                                        .contour_colors = contour_colors,
+                                        .count = (uint32_t)actual_iso_levels
+                                    };
+                                    
+                                    render_isolines(&corr_data_filt, viewport.elem, corr_isomap);
                                 }
-                                
-                                corr_isomap_t corr_isomap = {
-                                    .values = iso_values,
-                                    .level_colors = level_colors,
-                                    .contour_colors = contour_colors,
-                                    .count = (uint32_t)actual_iso_levels
-                                };
-                                
-                                render_isolines(&corr_data_filt, viewport.elem, corr_isomap);
                             }
                         }
                         
@@ -1310,38 +1494,92 @@ struct Correlation : viamd::EventHandler {
                         ImDrawList* dl = ImPlot::GetPlotDrawList();
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
-                            uint32_t full_tex = display_mode[0] == Colormap ? corr_data_full.map_tex : corr_data_full.iso_tex;
-                            
-                            // Use simple coordinate mapping like Ramachandran
-                            // The stored min/max now match the actual data range (unpadded)
-                            ImVec2 data_min = ImPlot::PlotToPixels(corr_data_full.min_x, corr_data_full.min_y);
-                            ImVec2 data_max = ImPlot::PlotToPixels(corr_data_full.max_x, corr_data_full.max_y);
-                            
-                            // But the texture includes padding, so map UV coordinates to account for this
-                            float padding_ratio = 0.05f / 1.1f; // 5% padding in 110% total range
-                            float uv_offset = padding_ratio;
-                            float uv_scale = 1.0f - 2.0f * padding_ratio;
-                            
-                            dl->AddImage((ImTextureID)(intptr_t)full_tex, data_min, data_max, 
-                                        {uv_offset, uv_offset}, {uv_offset + uv_scale, uv_offset + uv_scale}, 
-                                        ImColor(1.0f, 1.0f, 1.0f, full_alpha));
+                            // Check if we should use per-series densities for isolines
+                            if (preserve_series && md_array_size(series) > 1 && display_mode[0] != Colormap && 
+                                md_array_size(series_densities_full) == md_array_size(series)) {
+                                
+                                // Render individual series isolines/isolevels
+                                for (size_t s = 0; s < md_array_size(series_densities_full); ++s) {
+                                    const auto& series_density = series_densities_full[s];
+                                    if (series_density.den_tex == 0 || series_density.den_sum <= 0) continue;
+                                    
+                                    uint32_t series_tex = series_density.iso_tex;
+                                    
+                                    // Use simple coordinate mapping like Ramachandran
+                                    ImVec2 data_min = ImPlot::PlotToPixels(series_density.min_x, series_density.min_y);
+                                    ImVec2 data_max = ImPlot::PlotToPixels(series_density.max_x, series_density.max_y);
+                                    
+                                    // Account for padding in texture UV coordinates
+                                    float padding_ratio = 0.05f / 1.1f; // 5% padding in 110% total range
+                                    float uv_offset = padding_ratio;
+                                    float uv_scale = 1.0f - 2.0f * padding_ratio;
+                                    
+                                    dl->AddImage((ImTextureID)(intptr_t)series_tex, data_min, data_max, 
+                                                {uv_offset, uv_offset}, {uv_offset + uv_scale, uv_offset + uv_scale}, 
+                                                ImColor(1.0f, 1.0f, 1.0f, full_alpha));
+                                }
+                            } else {
+                                // Use combined density texture (original behavior)
+                                uint32_t full_tex = display_mode[0] == Colormap ? corr_data_full.map_tex : corr_data_full.iso_tex;
+                                
+                                // Use simple coordinate mapping like Ramachandran
+                                // The stored min/max now match the actual data range (unpadded)
+                                ImVec2 data_min = ImPlot::PlotToPixels(corr_data_full.min_x, corr_data_full.min_y);
+                                ImVec2 data_max = ImPlot::PlotToPixels(corr_data_full.max_x, corr_data_full.max_y);
+                                
+                                // But the texture includes padding, so map UV coordinates to account for this
+                                float padding_ratio = 0.05f / 1.1f; // 5% padding in 110% total range
+                                float uv_offset = padding_ratio;
+                                float uv_scale = 1.0f - 2.0f * padding_ratio;
+                                
+                                dl->AddImage((ImTextureID)(intptr_t)full_tex, data_min, data_max, 
+                                            {uv_offset, uv_offset}, {uv_offset + uv_scale, uv_offset + uv_scale}, 
+                                            ImColor(1.0f, 1.0f, 1.0f, full_alpha));
+                            }
                         }
                         
                         if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
-                            uint32_t filt_tex = display_mode[1] == Colormap ? corr_data_filt.map_tex : corr_data_filt.iso_tex;
-                            
-                            // Use simple coordinate mapping like Ramachandran
-                            ImVec2 data_min = ImPlot::PlotToPixels(corr_data_filt.min_x, corr_data_filt.min_y);
-                            ImVec2 data_max = ImPlot::PlotToPixels(corr_data_filt.max_x, corr_data_filt.max_y);
-                            
-                            // Account for padding in texture UV coordinates
-                            float padding_ratio = 0.05f / 1.1f; // 5% padding in 110% total range
-                            float uv_offset = padding_ratio;
-                            float uv_scale = 1.0f - 2.0f * padding_ratio;
-                            
-                            dl->AddImage((ImTextureID)(intptr_t)filt_tex, data_min, data_max,
-                                        {uv_offset, uv_offset}, {uv_offset + uv_scale, uv_offset + uv_scale},
-                                        ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
+                            // Check if we should use per-series densities for isolines
+                            if (preserve_series && md_array_size(series) > 1 && display_mode[1] != Colormap && 
+                                md_array_size(series_densities_filt) == md_array_size(series)) {
+                                
+                                // Render individual series isolines/isolevels for filtered data
+                                for (size_t s = 0; s < md_array_size(series_densities_filt); ++s) {
+                                    const auto& series_density = series_densities_filt[s];
+                                    if (series_density.den_tex == 0 || series_density.den_sum <= 0) continue;
+                                    
+                                    uint32_t series_tex = series_density.iso_tex;
+                                    
+                                    // Use simple coordinate mapping like Ramachandran
+                                    ImVec2 data_min = ImPlot::PlotToPixels(series_density.min_x, series_density.min_y);
+                                    ImVec2 data_max = ImPlot::PlotToPixels(series_density.max_x, series_density.max_y);
+                                    
+                                    // Account for padding in texture UV coordinates
+                                    float padding_ratio = 0.05f / 1.1f; // 5% padding in 110% total range
+                                    float uv_offset = padding_ratio;
+                                    float uv_scale = 1.0f - 2.0f * padding_ratio;
+                                    
+                                    dl->AddImage((ImTextureID)(intptr_t)series_tex, data_min, data_max,
+                                                {uv_offset, uv_offset}, {uv_offset + uv_scale, uv_offset + uv_scale},
+                                                ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
+                                }
+                            } else {
+                                // Use combined density texture (original behavior)
+                                uint32_t filt_tex = display_mode[1] == Colormap ? corr_data_filt.map_tex : corr_data_filt.iso_tex;
+                                
+                                // Use simple coordinate mapping like Ramachandran
+                                ImVec2 data_min = ImPlot::PlotToPixels(corr_data_filt.min_x, corr_data_filt.min_y);
+                                ImVec2 data_max = ImPlot::PlotToPixels(corr_data_filt.max_x, corr_data_filt.max_y);
+                                
+                                // Account for padding in texture UV coordinates
+                                float padding_ratio = 0.05f / 1.1f; // 5% padding in 110% total range
+                                float uv_offset = padding_ratio;
+                                float uv_scale = 1.0f - 2.0f * padding_ratio;
+                                
+                                dl->AddImage((ImTextureID)(intptr_t)filt_tex, data_min, data_max,
+                                            {uv_offset, uv_offset}, {uv_offset + uv_scale, uv_offset + uv_scale},
+                                            ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
+                            }
                         }
                         
                         ImPlot::PopPlotClipRect();
