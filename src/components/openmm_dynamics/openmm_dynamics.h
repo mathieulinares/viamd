@@ -193,9 +193,8 @@ namespace OpenMMDynamics {
     const char* get_simulation_state_name(SimulationState state);
 
     // Python interpreter management
-#ifdef VIAMD_ENABLE_PYTHON
-    bool initialize_global_python_interpreter();
+    void initialize_global_python_interpreter();
     void cleanup_global_python_interpreter();
-#endif
+    bool is_python_initialized();
 
 } // namespace OpenMMDynamics

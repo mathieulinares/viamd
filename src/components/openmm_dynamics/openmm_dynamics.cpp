@@ -30,6 +30,36 @@ static bool g_python_initialized = false;
 
 namespace OpenMMDynamics {
 
+// Global Python interpreter management functions
+void initialize_global_python_interpreter() {
+#ifdef VIAMD_ENABLE_PYTHON
+    if (!g_python_initialized) {
+        if (!g_python_interpreter) {
+            g_python_interpreter = new py::scoped_interpreter{};
+        }
+        g_python_initialized = true;
+    }
+#endif
+}
+
+void cleanup_global_python_interpreter() {
+#ifdef VIAMD_ENABLE_PYTHON
+    if (g_python_interpreter) {
+        delete g_python_interpreter;
+        g_python_interpreter = nullptr;
+    }
+    g_python_initialized = false;
+#endif
+}
+
+bool is_python_initialized() {
+#ifdef VIAMD_ENABLE_PYTHON
+    return g_python_initialized;
+#else
+    return false;
+#endif
+}
+
 static const char* force_field_names[(int)ForceField::Count] = {
     "AMBER14",
     "AMBER99SB", 
