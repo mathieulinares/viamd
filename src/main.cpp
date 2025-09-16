@@ -622,6 +622,9 @@ static void interrupt_async_tasks(ApplicationState* data);
 
 static bool load_dataset_from_file(ApplicationState* data, const LoadParam& param);
 
+// Try to initialize OpenMM dynamics interface after molecular data is loaded
+static void try_initialize_openmm_interface(ApplicationState* data);
+
 static void load_workspace(ApplicationState* data, str_t file);
 static void save_workspace(ApplicationState* data, str_t file);
 
@@ -791,9 +794,19 @@ int main(int argc, char** argv) {
     try {
         data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
         data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
-        LOG_DEBUG("OpenMM dynamics interface initialized successfully");
+        
+        // Initialize the interface (this will set up Python modules)
+        OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+            static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+        if (interface->initialize(data)) {
+            LOG_DEBUG("OpenMM dynamics interface initialized successfully");
+        } else {
+            LOG_WARNING("OpenMM dynamics interface created but initialization failed - will retry when molecular data is loaded");
+        }
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to initialize OpenMM dynamics interface: %s", e.what());
+        delete static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+        delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
         data.openmm_dynamics.interface = nullptr;
         data.openmm_dynamics.gui_state = nullptr;
     }
@@ -7880,6 +7893,9 @@ static bool load_dataset_from_file(ApplicationState* data, const LoadParam& para
             md_util_postprocess_flags_t flags = param.coarse_grained ? MD_UTIL_POSTPROCESS_COARSE_GRAINED : MD_UTIL_POSTPROCESS_ALL;
             md_util_molecule_postprocess(&data->mold.mol, data->mold.mol_alloc, flags);
             init_molecule_data(data);
+            
+            // Try to initialize OpenMM interface now that we have molecular data
+            try_initialize_openmm_interface(data);
 
             // @NOTE: Some files contain both atomic coordinates and trajectory
             if (param.traj_loader) {
@@ -8787,6 +8803,25 @@ static void remove_selection(ApplicationState* state, int idx) {
     
     state->selection.stored_selections[idx] = *md_array_last(state->selection.stored_selections);
     md_array_pop(state->selection.stored_selections);
+}
+
+// Try to initialize OpenMM dynamics interface after molecular data is loaded
+static void try_initialize_openmm_interface(ApplicationState* data) {
+#ifdef VIAMD_ENABLE_PYTHON
+    if (data->openmm_dynamics.interface && data->mold.mol.atom.count > 0) {
+        OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+            static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data->openmm_dynamics.interface);
+        
+        // Check if already initialized
+        if (interface->get_state() == OpenMMDynamics::SimulationState::NotInitialized) {
+            if (interface->initialize(*data)) {
+                LOG_DEBUG("OpenMM dynamics interface successfully initialized after molecule loading");
+            } else {
+                LOG_WARNING("OpenMM dynamics interface initialization failed after molecule loading");
+            }
+        }
+    }
+#endif
 }
 
 // #camera-control
