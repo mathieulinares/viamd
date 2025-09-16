@@ -19,9 +19,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-
-#include "trajectory.h"
-#include "molecule.h"
+#include <iomanip>
 
 namespace py = pybind11;
 
@@ -362,7 +360,7 @@ public:
         size_t n_values = buf.size;
         double* val_ptr = static_cast<double*>(buf.ptr);
         
-        auto result = py::array_t<double>({n_values, 3});
+        auto result = py::array_t<double>(std::vector<py::ssize_t>{static_cast<py::ssize_t>(n_values), 3});
         auto res_buf = result.request();
         double* res_ptr = static_cast<double*>(res_buf.ptr);
         
@@ -418,7 +416,7 @@ public:
             {"Zn", {0.5, 0.5, 0.5}}    // Gray
         };
         
-        auto result = py::array_t<double>({element_symbols.size(), 3});
+        auto result = py::array_t<double>(std::vector<py::ssize_t>{static_cast<py::ssize_t>(element_symbols.size()), 3});
         auto buf = result.request();
         double* ptr = static_cast<double*>(buf.ptr);
         

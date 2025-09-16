@@ -3,6 +3,21 @@ cmake_minimum_required(VERSION 3.20)
 
 # Find Python and pybind11
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+
+# Try to use pip-installed pybind11 first (for Python 3.12+ compatibility)
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
+    OUTPUT_VARIABLE pybind11_DIR_PIP
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+if(pybind11_DIR_PIP)
+    # Use pip-installed pybind11
+    set(pybind11_DIR "${pybind11_DIR_PIP}")
+    message(STATUS "Using pip-installed pybind11 from: ${pybind11_DIR}")
+endif()
+
 find_package(pybind11 REQUIRED)
 
 # Create the Python module

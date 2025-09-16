@@ -23,9 +23,6 @@
 #include <numeric>
 #include <cmath>
 
-#include "trajectory.h"
-#include "molecule.h"
-
 namespace py = pybind11;
 
 namespace viamd {
@@ -387,7 +384,7 @@ public:
         // Store in buffers
         for (auto& item : frame_data) {
             std::string key = py::str(item.first);
-            data_buffers_[key] = item.second;
+            data_buffers_[key] = py::reinterpret_borrow<py::object>(item.second);
         }
         
         // Call all callbacks
