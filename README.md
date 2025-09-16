@@ -25,21 +25,24 @@ To [build](https://github.com/scanberg/viamd/wiki/0.-Building) VIAMD on your mac
 
 VIAMD includes several optional components that enhance functionality:
 
-### Molecule Builder (RDKit Integration)
-Build molecules from SMILES strings with 3D coordinate generation and geometry optimization.
+### Molecule Builder (Lightweight Implementation)
+Build molecules from SMILES strings with 3D coordinate generation.
 
-**Installation requirements:**
-```bash
-# Ubuntu/Debian
-sudo apt install librdkit-dev librdkit1 libboost-dev
-
-# Build with molecule builder support (enabled by default)
-cmake .. -DVIAMD_ENABLE_BUILDER=ON -DVIAMD_ENABLE_RDKIT=ON
-```
+**Features:**
+- Parse common SMILES strings (water, methane, ethanol, benzene, etc.)
+- Automatic hydrogen addition based on valence rules
+- Simple 3D coordinate generation using standard bond lengths and angles
+- No external dependencies (RDKit no longer required)
 
 **Usage:** Navigate to `Builder → Molecule Builder` in the main menu.
 
-**Documentation:** See [BUILDER_INTEGRATION.md](BUILDER_INTEGRATION.md) for detailed installation and usage instructions.
+**Supported SMILES examples:**
+- Water: `O`
+- Methane: `C` 
+- Ethanol: `CCO`
+- Benzene: `c1ccccc1`
+
+**Documentation:** See [BUILDER_INTEGRATION.md](BUILDER_INTEGRATION.md) for detailed usage instructions.
 
 ### OpenMM Integration
 Real-time molecular dynamics simulation capabilities with force field support.

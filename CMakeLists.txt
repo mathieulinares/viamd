@@ -89,52 +89,8 @@ if(VIAMD_ENABLE_OPENMM)
     endif()
 endif()
 
-# RDKIT OPTIONS (for Builder module)
-option(VIAMD_ENABLE_RDKIT "Enable RDKit for molecule building" ON)
-
-if(VIAMD_ENABLE_BUILDER AND VIAMD_ENABLE_RDKIT)
-    # Try to find RDKit
-    find_library(RDKIT_LIBRARIES NAMES RDKitGraphMol PATHS /usr/lib/x86_64-linux-gnu)
-    find_path(RDKIT_INCLUDE_DIR NAMES GraphMol/GraphMol.h PATHS /usr/include/rdkit)
-    
-    if(RDKIT_LIBRARIES AND RDKIT_INCLUDE_DIR)
-        # Check for Boost dependency (required by RDKit)
-        find_path(BOOST_INCLUDE_DIR NAMES boost/config.hpp PATHS /usr/include /usr/local/include)
-        if(NOT BOOST_INCLUDE_DIR)
-            message(WARNING "RDKit found but Boost headers are missing. Install libboost-dev to enable RDKit support.")
-            set(VIAMD_ENABLE_RDKIT OFF)
-            set(VIAMD_RDKIT_FOUND FALSE)
-        else()
-            set(VIAMD_RDKIT_FOUND TRUE)
-            message(STATUS "RDKit found: ${RDKIT_LIBRARIES}")
-            message(STATUS "Boost headers found: ${BOOST_INCLUDE_DIR}")
-        endif()
-        
-        # Find additional RDKit libraries
-        find_library(RDKIT_RDGENERAL_LIB NAMES RDKitRDGeneral PATHS /usr/lib/x86_64-linux-gnu)
-        find_library(RDKIT_SMILES_PARSE_LIB NAMES RDKitSmilesParse PATHS /usr/lib/x86_64-linux-gnu)
-        find_library(RDKIT_DISTGEOM_LIB NAMES RDKitDistGeomHelpers PATHS /usr/lib/x86_64-linux-gnu)
-        find_library(RDKIT_UFF_LIB NAMES RDKitForceFieldHelpers PATHS /usr/lib/x86_64-linux-gnu)
-        find_library(RDKIT_FORCEFIELD_LIB NAMES RDKitForceField PATHS /usr/lib/x86_64-linux-gnu)
-        find_library(RDKIT_DESCRIPTORS_LIB NAMES RDKitDescriptors PATHS /usr/lib/x86_64-linux-gnu)
-        find_library(RDKIT_MOLOPS_LIB NAMES RDKitGraphMol PATHS /usr/lib/x86_64-linux-gnu)
-        
-        set(RDKIT_ALL_LIBRARIES 
-            ${RDKIT_LIBRARIES}
-            ${RDKIT_RDGENERAL_LIB}
-            ${RDKIT_SMILES_PARSE_LIB}
-            ${RDKIT_DISTGEOM_LIB}
-            ${RDKIT_UFF_LIB}
-            ${RDKIT_FORCEFIELD_LIB}
-            ${RDKIT_DESCRIPTORS_LIB}
-        )
-        
-    else()
-        message(WARNING "RDKit not found, disabling RDKit support")
-        set(VIAMD_ENABLE_RDKIT OFF)
-        set(VIAMD_RDKIT_FOUND FALSE)
-    endif()
-endif()
+# RDKIT OPTIONS (for Builder module) - REMOVED
+# The builder now uses a lightweight implementation without RDKit dependencies
 
 # Apply mdlib patches before building
 configure_file(
@@ -194,7 +150,10 @@ if (VIAMD_ENABLE_OPENMM)
 endif()
 
 if (VIAMD_ENABLE_BUILDER)
-    set(COMP_FILES ${COMP_FILES} src/components/builder/builder.cpp)
+    set(COMP_FILES ${COMP_FILES} 
+        src/components/builder/builder.cpp
+        src/components/builder/lightweight_mol_builder.cpp
+    )
 endif()
 
 set(SHADER_FILES 
@@ -279,10 +238,6 @@ if (VIAMD_ENABLE_BUILDER)
     set(VIAMD_DEFINES ${VIAMD_DEFINES} VIAMD_ENABLE_BUILDER=1)
 endif()
 
-if (VIAMD_ENABLE_RDKIT)
-    set(VIAMD_DEFINES ${VIAMD_DEFINES} VIAMD_ENABLE_RDKIT=1)
-endif()
-
 target_compile_definitions(viamd PRIVATE
     ${VIAMD_DEFINES}
     VIAMD_NUM_WORKER_THREADS=${VIAMD_NUM_WORKER_THREADS}
@@ -304,7 +259,6 @@ target_include_directories(viamd
         ext/gl3w
         ext/enkiTS/src
         $<$<BOOL:${VIAMD_ENABLE_OPENMM}>:${OpenMM_INCLUDE_DIR}>
-        $<$<BOOL:${VIAMD_ENABLE_RDKIT}>:${RDKIT_INCLUDE_DIR}>
 )
 
 set_target_properties(viamd PROPERTIES
@@ -324,5 +278,5 @@ target_link_libraries(viamd
     imgui_notify
     ${VIAMD_STDLIBS}
     $<$<BOOL:${VIAMD_ENABLE_OPENMM}>:${OpenMM_LIBRARY}>
-    $<$<BOOL:${VIAMD_ENABLE_RDKIT}>:${RDKIT_ALL_LIBRARIES}>
+
 )
