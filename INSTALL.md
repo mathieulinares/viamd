@@ -73,7 +73,7 @@ sudo apt-get install -y \
     git \
     pkg-config
 
-# Install development libraries
+# Install development libraries (REQUIRED for Python support)
 sudo apt-get install -y \
     python3-dev \
     python3-pip \
@@ -85,8 +85,8 @@ sudo apt-get install -y \
     libxcursor-dev \
     libxi-dev
 
-# Install Python dependencies
-pip3 install numpy pybind11
+# Install Python dependencies (REQUIRED for OpenMM dynamics)
+pip3 install numpy pybind11>=3.0.0
 ```
 
 #### macOS
@@ -474,6 +474,12 @@ brew install pybind11              # macOS
 #### Compilation Errors
 
 ```bash
+# Problem: "fatal error: Python.h: No such file or directory"  
+# Solution: Install Python development headers
+sudo apt-get install python3-dev  # Ubuntu/Debian
+brew install python               # macOS
+dnf install python3-devel        # Fedora/RHEL
+
 # Problem: Missing OpenGL libraries (Linux)
 sudo apt-get install libgl1-mesa-dev libglu1-mesa-dev libglfw3-dev
 

@@ -59,6 +59,19 @@ echo "🔍 Checking Python dependencies..."
 python3 -c "import numpy; print('✅ numpy available')" 2>/dev/null || echo "⚠️  numpy not found (pip install numpy)"
 python3 -c "import pybind11; print('✅ pybind11 available')" 2>/dev/null || echo "⚠️  pybind11 not found (pip install pybind11)"
 
+# Check if Python development headers are available
+echo
+echo "🔍 Checking Python development headers..."
+if [ -f "/usr/include/python3.12/Python.h" ] || [ -f "/usr/include/python$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/Python.h" ]; then
+    echo "✅ Python development headers found"
+else
+    echo "❌ Python development headers not found"
+    echo "   Install with: sudo apt-get install python3-dev  # Ubuntu/Debian"
+    echo "   Or: brew install python  # macOS"
+    echo "   Or: dnf install python3-devel  # Fedora/RHEL"
+    exit 1
+fi
+
 # Check if binary has Python symbols
 echo
 echo "🔍 Checking if VIAMD binary includes Python support..."

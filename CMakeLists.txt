@@ -87,6 +87,26 @@ add_subdirectory(ext/implot)
 add_subdirectory(ext/atomic_queue)
 add_subdirectory(ext/imgui_notify)
 
+# Find Python dependencies when Python support is enabled
+if(VIAMD_ENABLE_PYTHON)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    
+    # Try to use pip-installed pybind11 first (for Python 3.12+ compatibility)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
+        OUTPUT_VARIABLE pybind11_DIR_PIP
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    
+    if(pybind11_DIR_PIP)
+        set(pybind11_DIR "${pybind11_DIR_PIP}")
+        message(STATUS "Using pip-installed pybind11 from: ${pybind11_DIR}")
+    endif()
+    
+    find_package(pybind11 REQUIRED)
+endif()
+
 # Copy many of the fields from mdlib
 set(VIAMD_STDLIBS)
 set(VIAMD_FLAGS ${MD_FLAGS})
@@ -220,6 +240,8 @@ target_include_directories(viamd
         gen
         ext/gl3w
         ext/enkiTS/src
+        $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:${Python3_INCLUDE_DIRS}>
+        $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:${pybind11_INCLUDE_DIRS}>
 )
 
 set_target_properties(viamd PROPERTIES
@@ -238,6 +260,8 @@ target_link_libraries(viamd
     atomic_queue
     imgui_notify
     ${VIAMD_STDLIBS}
+    $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:${Python3_LIBRARIES}>
+    $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:pybind11::embed>
 )
 
 # Add Python bindings if enabled
