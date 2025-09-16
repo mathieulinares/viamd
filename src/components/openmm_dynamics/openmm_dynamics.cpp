@@ -211,10 +211,17 @@ bool OpenMMDynamicsInterface::run_protocol(ProtocolType protocol, const Protocol
         
         // Create ProtocolParameters object
         py::object ProtocolParameters = mod.attr("ProtocolParameters");
+        // Create pressure parameter - handle NPT vs NVT protocols
+        py::object pressure_param;
+        if (protocol == ProtocolType::NPT_Equilibration || protocol == ProtocolType::Production_NPT) {
+            pressure_param = py::cast(params.pressure);
+        } else {
+            pressure_param = py::none();
+        }
+        
         py::object py_params = ProtocolParameters(
             py::arg("temperature") = params.temperature,
-            py::arg("pressure") = (protocol == ProtocolType::NPT_Equilibration || 
-                                 protocol == ProtocolType::Production_NPT) ? params.pressure : py::none(),
+            py::arg("pressure") = pressure_param,
             py::arg("time_step") = params.time_step,
             py::arg("n_steps") = params.n_steps,
             py::arg("report_interval") = params.report_interval,
