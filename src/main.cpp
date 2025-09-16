@@ -793,24 +793,24 @@ int main(int argc, char** argv) {
 #ifdef VIAMD_ENABLE_PYTHON
     LOG_DEBUG("Initializing Python interpreter for OpenMM dynamics...");
     try {
-        // Initialize Python interpreter safely
-        static pybind11::scoped_interpreter* python_interpreter = nullptr;
-        if (!python_interpreter) {
-            python_interpreter = new pybind11::scoped_interpreter();
+        // Initialize Python interpreter using the proper global function
+        if (OpenMMDynamics::initialize_global_python_interpreter()) {
             LOG_DEBUG("Python interpreter initialized successfully");
-        }
-        
-        LOG_DEBUG("Creating OpenMM dynamics interface...");
-        data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
-        data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
-        
-        // Initialize the interface (this will set up Python modules)
-        OpenMMDynamics::OpenMMDynamicsInterface* interface = 
-            static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
-        if (interface->initialize(data)) {
-            LOG_DEBUG("OpenMM dynamics interface initialized successfully");
+            
+            LOG_DEBUG("Creating OpenMM dynamics interface...");
+            data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
+            data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
+            
+            // Initialize the interface (this will set up Python modules)
+            OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+                static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+            if (interface->initialize(data)) {
+                LOG_DEBUG("OpenMM dynamics interface initialized successfully");
+            } else {
+                LOG_WARNING("OpenMM dynamics interface created but initialization failed - will retry when molecular data is loaded");
+            }
         } else {
-            LOG_WARNING("OpenMM dynamics interface created but initialization failed - will retry when molecular data is loaded");
+            LOG_ERROR("Failed to initialize Python interpreter");
         }
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to initialize OpenMM dynamics interface: %s", e.what());
@@ -1588,6 +1588,8 @@ int main(int argc, char** argv) {
         delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
         data.openmm_dynamics.gui_state = nullptr;
     }
+    // Cleanup global Python interpreter
+    OpenMMDynamics::cleanup_global_python_interpreter();
 #endif
 
     application::shutdown(&data.app);
