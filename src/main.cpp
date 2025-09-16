@@ -70,6 +70,11 @@
 #include <viamd.h>
 #include <serialization_utils.h>
 
+// Include OpenMM dynamics component if Python is enabled
+#ifdef VIAMD_ENABLE_PYTHON
+#include <components/openmm_dynamics/openmm_dynamics.h>
+#endif
+
 #define MAX_POPULATION_SIZE 256
 #define MAX_TEMPORAL_SUBPLOTS 10
 #define MAX_DISTRIBUTION_SUBPLOTS 10
@@ -777,6 +782,12 @@ int main(int argc, char** argv) {
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdInitialize, viamd::EventPayloadType_ApplicationState, &data);
 
+    // Initialize OpenMM dynamics interface if Python is enabled
+#ifdef VIAMD_ENABLE_PYTHON
+    data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
+    data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
+#endif
+
 #if EXPERIMENTAL_GFX_API
     md_gfx_initialize(data.gbuffer.width, data.gbuffer.height, 0);
 #endif
@@ -922,6 +933,17 @@ int main(int argc, char** argv) {
         if (data.dataset.show_window) draw_dataset_window(&data);
         if (data.selection.query.show_window) draw_selection_query_window(&data);
         if (data.selection.grow.show_window) draw_selection_grow_window(&data);
+
+#ifdef VIAMD_ENABLE_PYTHON
+        // Draw OpenMM dynamics window
+        if (data.openmm_dynamics.show_window && data.openmm_dynamics.interface && data.openmm_dynamics.gui_state) {
+            OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+                static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+            OpenMMDynamics::GUIState* gui_state = 
+                static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
+            OpenMMDynamics::draw_openmm_dynamics_window(data, *interface, *gui_state);
+        }
+#endif
         if (data.show_property_export_window) draw_property_export_window(&data);
         if (data.show_debug_window) draw_debug_window(&data);
 
@@ -1516,6 +1538,19 @@ int main(int argc, char** argv) {
     task_system::shutdown();
 
     destroy_gbuffer(&data.gbuffer);
+
+    // Cleanup OpenMM dynamics interface
+#ifdef VIAMD_ENABLE_PYTHON
+    if (data.openmm_dynamics.interface) {
+        delete static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+        data.openmm_dynamics.interface = nullptr;
+    }
+    if (data.openmm_dynamics.gui_state) {
+        delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
+        data.openmm_dynamics.gui_state = nullptr;
+    }
+#endif
+
     application::shutdown(&data.app);
 
     return 0;
@@ -2821,6 +2856,11 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Checkbox("Distributions", &data->distributions.show_window);
             ImGui::Checkbox("Density Volumes", &data->density_volume.show_window);
             ImGui::Checkbox("Dataset", &data->dataset.show_window);
+
+#ifdef VIAMD_ENABLE_PYTHON
+            ImGui::Separator();
+            ImGui::Checkbox("OpenMM Dynamics", &data->openmm_dynamics.show_window);
+#endif
 
             viamd::event_system_broadcast_event(viamd::EventType_ViamdWindowDrawMenu);
 

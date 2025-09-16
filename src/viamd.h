@@ -802,6 +802,15 @@ struct ApplicationState {
         uint64_t ir_fingerprint = 0;
     } script;
 
+    // --- OPENMM DYNAMICS ---
+#ifdef VIAMD_ENABLE_PYTHON
+    struct {
+        bool show_window = false;
+        void* interface = nullptr;  // OpenMMDynamicsInterface*
+        void* gui_state = nullptr;  // OpenMMDynamics::GUIState*
+    } openmm_dynamics;
+#endif
+
     bool show_script_window = true;
     bool show_debug_window = false;
     bool show_property_export_window = false;
