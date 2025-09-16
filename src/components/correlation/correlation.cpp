@@ -1253,18 +1253,54 @@ struct Correlation : viamd::EventHandler {
                         
                         if (should_render_full_advanced && corr_data_full.den_tex && corr_data_full.den_sum > 0) {
                             uint32_t full_tex = display_mode[0] == Colormap ? corr_data_full.map_tex : corr_data_full.iso_tex;
-                            // Map texture to exact data coordinates used during density computation
-                            ImVec2 data_min = ImPlot::PlotToPixels(corr_data_full.min_x, corr_data_full.min_y);
-                            ImVec2 data_max = ImPlot::PlotToPixels(corr_data_full.max_x, corr_data_full.max_y);
-                            dl->AddImage((ImTextureID)(intptr_t)full_tex, data_min, data_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, full_alpha));
+                            
+                            // Calculate UV coordinates to account for padding in density computation
+                            // The density texture covers [min_x, max_x] x [min_y, max_y] (padded ranges)
+                            // But we want to display it over the actual plot view limits
+                            float plot_min_x = plot_rect.X.Min;
+                            float plot_max_x = plot_rect.X.Max;
+                            float plot_min_y = plot_rect.Y.Min;
+                            float plot_max_y = plot_rect.Y.Max;
+                            
+                            // Map plot coordinates to texture UV coordinates
+                            float u_min = (plot_min_x - corr_data_full.min_x) / (corr_data_full.max_x - corr_data_full.min_x);
+                            float u_max = (plot_max_x - corr_data_full.min_x) / (corr_data_full.max_x - corr_data_full.min_x);
+                            float v_min = (plot_min_y - corr_data_full.min_y) / (corr_data_full.max_y - corr_data_full.min_y);
+                            float v_max = (plot_max_y - corr_data_full.min_y) / (corr_data_full.max_y - corr_data_full.min_y);
+                            
+                            // Clamp to valid UV range [0, 1]
+                            u_min = MAX(0.0f, MIN(1.0f, u_min));
+                            u_max = MAX(0.0f, MIN(1.0f, u_max));
+                            v_min = MAX(0.0f, MIN(1.0f, v_min));
+                            v_max = MAX(0.0f, MIN(1.0f, v_max));
+                            
+                            dl->AddImage((ImTextureID)(intptr_t)full_tex, plot_min, plot_max, 
+                                        {u_min, v_min}, {u_max, v_max}, ImColor(1.0f, 1.0f, 1.0f, full_alpha));
                         }
                         
                         if (should_render_filt_advanced && corr_data_filt.den_tex && corr_data_filt.den_sum > 0) {
                             uint32_t filt_tex = display_mode[1] == Colormap ? corr_data_filt.map_tex : corr_data_filt.iso_tex;
-                            // Map texture to exact data coordinates used during density computation  
-                            ImVec2 data_min = ImPlot::PlotToPixels(corr_data_filt.min_x, corr_data_filt.min_y);
-                            ImVec2 data_max = ImPlot::PlotToPixels(corr_data_filt.max_x, corr_data_filt.max_y);
-                            dl->AddImage((ImTextureID)(intptr_t)filt_tex, data_min, data_max, {0,0}, {1,1}, ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
+                            
+                            // Calculate UV coordinates to account for padding in density computation
+                            float plot_min_x = plot_rect.X.Min;
+                            float plot_max_x = plot_rect.X.Max;
+                            float plot_min_y = plot_rect.Y.Min;
+                            float plot_max_y = plot_rect.Y.Max;
+                            
+                            // Map plot coordinates to texture UV coordinates
+                            float u_min = (plot_min_x - corr_data_filt.min_x) / (corr_data_filt.max_x - corr_data_filt.min_x);
+                            float u_max = (plot_max_x - corr_data_filt.min_x) / (corr_data_filt.max_x - corr_data_filt.min_x);
+                            float v_min = (plot_min_y - corr_data_filt.min_y) / (corr_data_filt.max_y - corr_data_filt.min_y);
+                            float v_max = (plot_max_y - corr_data_filt.min_y) / (corr_data_filt.max_y - corr_data_filt.min_y);
+                            
+                            // Clamp to valid UV range [0, 1]
+                            u_min = MAX(0.0f, MIN(1.0f, u_min));
+                            u_max = MAX(0.0f, MIN(1.0f, u_max));
+                            v_min = MAX(0.0f, MIN(1.0f, v_min));
+                            v_max = MAX(0.0f, MIN(1.0f, v_max));
+                            
+                            dl->AddImage((ImTextureID)(intptr_t)filt_tex, plot_min, plot_max,
+                                        {u_min, v_min}, {u_max, v_max}, ImColor(1.0f, 1.0f, 1.0f, filt_alpha));
                         }
                         
                         ImPlot::PopPlotClipRect();
