@@ -1324,9 +1324,16 @@ struct Correlation : viamd::EventHandler {
                                         };
                                         
                                         // Create a temporary rep structure for this series
-                                        corr_rep_t series_rep = series_density;
-                                        series_rep.den_tex = series_density.den_tex;
-                                        series_rep.iso_tex = series_density.iso_tex;
+                                        corr_rep_t series_rep = {
+                                            .map_tex = series_density.map_tex,
+                                            .iso_tex = series_density.iso_tex,
+                                            .den_sum = series_density.den_sum,
+                                            .den_tex = series_density.den_tex,
+                                            .min_x = series_density.min_x,
+                                            .max_x = series_density.max_x,
+                                            .min_y = series_density.min_y,
+                                            .max_y = series_density.max_y
+                                        };
                                         
                                         render_isolines(&series_rep, viewport.elem, corr_isomap);
                                     }
@@ -1440,9 +1447,16 @@ struct Correlation : viamd::EventHandler {
                                         };
                                         
                                         // Create a temporary rep structure for this series
-                                        corr_rep_t series_rep = series_density;
-                                        series_rep.den_tex = series_density.den_tex;
-                                        series_rep.iso_tex = series_density.iso_tex;
+                                        corr_rep_t series_rep = {
+                                            .map_tex = series_density.map_tex,
+                                            .iso_tex = series_density.iso_tex,
+                                            .den_sum = series_density.den_sum,
+                                            .den_tex = series_density.den_tex,
+                                            .min_x = series_density.min_x,
+                                            .max_x = series_density.max_x,
+                                            .min_y = series_density.min_y,
+                                            .max_y = series_density.max_y
+                                        };
                                         
                                         render_isolines(&series_rep, viewport.elem, corr_isomap);
                                     }
