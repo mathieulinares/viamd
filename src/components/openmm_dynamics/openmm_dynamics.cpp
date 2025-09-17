@@ -31,7 +31,7 @@ static bool g_python_initialized = false;
 namespace OpenMMDynamics {
 
 // Global Python interpreter management functions
-void initialize_global_python_interpreter() {
+bool initialize_global_python_interpreter() {
 #ifdef VIAMD_ENABLE_PYTHON
     if (!g_python_initialized) {
         if (!g_python_interpreter) {
@@ -39,6 +39,9 @@ void initialize_global_python_interpreter() {
         }
         g_python_initialized = true;
     }
+    return g_python_initialized;
+#else
+    return false;
 #endif
 }
 
@@ -718,7 +721,7 @@ bool OpenMMDynamicsInterface::update_viamd_coordinates(ApplicationState& state) 
 
 // Global Python initialization functions
 #ifdef VIAMD_ENABLE_PYTHON
-bool initialize_global_python_interpreter() {
+bool OpenMMDynamics::initialize_global_python_interpreter() {
     if (!g_python_initialized) {
         try {
             // Check if Python is already initialized by another module
@@ -735,7 +738,7 @@ bool initialize_global_python_interpreter() {
     return true;
 }
 
-void cleanup_global_python_interpreter() {
+void OpenMMDynamics::cleanup_global_python_interpreter() {
     if (g_python_initialized && g_python_interpreter) {
         delete g_python_interpreter;
         g_python_interpreter = nullptr;

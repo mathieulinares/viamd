@@ -193,7 +193,7 @@ namespace OpenMMDynamics {
     const char* get_simulation_state_name(SimulationState state);
 
     // Python interpreter management
-    void initialize_global_python_interpreter();
+    bool initialize_global_python_interpreter();
     void cleanup_global_python_interpreter();
     bool is_python_initialized();
 
