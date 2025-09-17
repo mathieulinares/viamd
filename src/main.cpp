@@ -70,6 +70,14 @@
 #include <viamd.h>
 #include <serialization_utils.h>
 
+// Include OpenMM dynamics component if Python is enabled
+#ifdef VIAMD_ENABLE_PYTHON
+#include <components/openmm_dynamics/openmm_dynamics.h>
+#pragma message("OpenMM Dynamics component included - Python support enabled")
+#else
+#pragma message("OpenMM Dynamics component excluded - Python support disabled")
+#endif
+
 #define MAX_POPULATION_SIZE 256
 #define MAX_TEMPORAL_SUBPLOTS 10
 #define MAX_DISTRIBUTION_SUBPLOTS 10
@@ -84,9 +92,10 @@
 #define HIGHLIGHT_PULSE_TIME_SCALE  5.0
 #define HIGHLIGHT_PULSE_ALPHA_SCALE 0.1
 
-#define LOG_INFO  MD_LOG_INFO
-#define LOG_DEBUG MD_LOG_DEBUG
-#define LOG_ERROR MD_LOG_ERROR
+#define LOG_INFO    MD_LOG_INFO
+#define LOG_DEBUG   MD_LOG_DEBUG
+#define LOG_ERROR   MD_LOG_ERROR
+#define LOG_WARNING MD_LOG_INFO  // Map LOG_WARNING to MD_LOG_INFO since MD_LOG_WARNING doesn't exist
 #define LOG_SUCCESS(...) ImGui::InsertNotification(ImGuiToast(ImGuiToastType_Success, 6000, __VA_ARGS__))
 
 // Global data for application
@@ -614,6 +623,9 @@ static void interrupt_async_tasks(ApplicationState* data);
 
 static bool load_dataset_from_file(ApplicationState* data, const LoadParam& param);
 
+// Try to initialize OpenMM dynamics interface after molecular data is loaded
+static void try_initialize_openmm_interface(ApplicationState* data);
+
 static void load_workspace(ApplicationState* data, str_t file);
 static void save_workspace(ApplicationState* data, str_t file);
 
@@ -777,6 +789,44 @@ int main(int argc, char** argv) {
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdInitialize, viamd::EventPayloadType_ApplicationState, &data);
 
+    // Initialize OpenMM dynamics interface if Python is enabled
+#ifdef VIAMD_ENABLE_PYTHON
+    LOG_DEBUG("Initializing Python interpreter for OpenMM dynamics...");
+    try {
+        // Initialize Python interpreter using the proper global function
+        if (OpenMMDynamics::initialize_global_python_interpreter()) {
+            LOG_DEBUG("Python interpreter initialized successfully");
+            
+            LOG_DEBUG("Creating OpenMM dynamics interface...");
+            data.openmm_dynamics.interface = new OpenMMDynamics::OpenMMDynamicsInterface();
+            data.openmm_dynamics.gui_state = new OpenMMDynamics::GUIState();
+            
+            // Initialize the interface (this will set up Python modules)
+            OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+                static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+            if (interface->initialize(data)) {
+                LOG_DEBUG("OpenMM dynamics interface initialized successfully");
+            } else {
+                LOG_WARNING("OpenMM dynamics interface created but initialization failed - will retry when molecular data is loaded");
+            }
+        } else {
+            LOG_ERROR("Failed to initialize Python interpreter");
+        }
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to initialize OpenMM dynamics interface: %s", e.what());
+        if (data.openmm_dynamics.interface) {
+            delete static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+            data.openmm_dynamics.interface = nullptr;
+        }
+        if (data.openmm_dynamics.gui_state) {
+            delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
+            data.openmm_dynamics.gui_state = nullptr;
+        }
+    }
+#else
+    LOG_DEBUG("OpenMM dynamics interface disabled (Python support not enabled)");
+#endif
+
 #if EXPERIMENTAL_GFX_API
     md_gfx_initialize(data.gbuffer.width, data.gbuffer.height, 0);
 #endif
@@ -922,6 +972,17 @@ int main(int argc, char** argv) {
         if (data.dataset.show_window) draw_dataset_window(&data);
         if (data.selection.query.show_window) draw_selection_query_window(&data);
         if (data.selection.grow.show_window) draw_selection_grow_window(&data);
+
+#ifdef VIAMD_ENABLE_PYTHON
+        // Draw OpenMM dynamics window
+        if (data.openmm_dynamics.show_window && data.openmm_dynamics.interface && data.openmm_dynamics.gui_state) {
+            OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+                static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+            OpenMMDynamics::GUIState* gui_state = 
+                static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
+            OpenMMDynamics::draw_openmm_dynamics_window(data, *interface, *gui_state);
+        }
+#endif
         if (data.show_property_export_window) draw_property_export_window(&data);
         if (data.show_debug_window) draw_debug_window(&data);
 
@@ -1516,6 +1577,21 @@ int main(int argc, char** argv) {
     task_system::shutdown();
 
     destroy_gbuffer(&data.gbuffer);
+
+    // Cleanup OpenMM dynamics interface
+#ifdef VIAMD_ENABLE_PYTHON
+    if (data.openmm_dynamics.interface) {
+        delete static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data.openmm_dynamics.interface);
+        data.openmm_dynamics.interface = nullptr;
+    }
+    if (data.openmm_dynamics.gui_state) {
+        delete static_cast<OpenMMDynamics::GUIState*>(data.openmm_dynamics.gui_state);
+        data.openmm_dynamics.gui_state = nullptr;
+    }
+    // Cleanup global Python interpreter
+    OpenMMDynamics::cleanup_global_python_interpreter();
+#endif
+
     application::shutdown(&data.app);
 
     return 0;
@@ -2821,6 +2897,23 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Checkbox("Distributions", &data->distributions.show_window);
             ImGui::Checkbox("Density Volumes", &data->density_volume.show_window);
             ImGui::Checkbox("Dataset", &data->dataset.show_window);
+
+#ifdef VIAMD_ENABLE_PYTHON
+            ImGui::Separator();
+            ImGui::Checkbox("OpenMM Dynamics", &data->openmm_dynamics.show_window);
+            
+            // Debug info for troubleshooting
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("OpenMM Dynamics Interface\nPython support: %s\nInterface: %s", 
+                                "Enabled", 
+                                data->openmm_dynamics.interface ? "Initialized" : "Not initialized");
+            }
+#else
+            ImGui::TextDisabled("OpenMM Dynamics (Python support disabled)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Rebuild with -DVIAMD_ENABLE_PYTHON=ON to enable");
+            }
+#endif
 
             viamd::event_system_broadcast_event(viamd::EventType_ViamdWindowDrawMenu);
 
@@ -7815,6 +7908,9 @@ static bool load_dataset_from_file(ApplicationState* data, const LoadParam& para
             md_util_postprocess_flags_t flags = param.coarse_grained ? MD_UTIL_POSTPROCESS_COARSE_GRAINED : MD_UTIL_POSTPROCESS_ALL;
             md_util_molecule_postprocess(&data->mold.mol, data->mold.mol_alloc, flags);
             init_molecule_data(data);
+            
+            // Try to initialize OpenMM interface now that we have molecular data
+            try_initialize_openmm_interface(data);
 
             // @NOTE: Some files contain both atomic coordinates and trajectory
             if (param.traj_loader) {
@@ -8722,6 +8818,25 @@ static void remove_selection(ApplicationState* state, int idx) {
     
     state->selection.stored_selections[idx] = *md_array_last(state->selection.stored_selections);
     md_array_pop(state->selection.stored_selections);
+}
+
+// Try to initialize OpenMM dynamics interface after molecular data is loaded
+static void try_initialize_openmm_interface(ApplicationState* data) {
+#ifdef VIAMD_ENABLE_PYTHON
+    if (data->openmm_dynamics.interface && data->mold.mol.atom.count > 0) {
+        OpenMMDynamics::OpenMMDynamicsInterface* interface = 
+            static_cast<OpenMMDynamics::OpenMMDynamicsInterface*>(data->openmm_dynamics.interface);
+        
+        // Check if already initialized
+        if (interface->get_state() == OpenMMDynamics::SimulationState::NotInitialized) {
+            if (interface->initialize(*data)) {
+                LOG_DEBUG("OpenMM dynamics interface successfully initialized after molecule loading");
+            } else {
+                LOG_WARNING("OpenMM dynamics interface initialization failed after molecule loading");
+            }
+        }
+    }
+#endif
 }
 
 // #camera-control

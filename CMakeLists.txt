@@ -46,11 +46,17 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_PYTHON "Enable Python bindings for MDAnalysis/OpenMM integration" OFF)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
 # MDLIB OPTIONS
 set(MD_LINK_STDLIB_STATIC ${VIAMD_LINK_STDLIB_STATIC} CACHE BOOL "" FORCE)
+
+# Enable Position Independent Code for Python bindings
+if(VIAMD_ENABLE_PYTHON)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if (VIAMD_ENABLE_VELOXCHEM)
     set(MD_ENABLE_VLX ON CACHE BOOL "" FORCE)
@@ -80,6 +86,26 @@ add_subdirectory(ext/ImGuiColorTextEdit)
 add_subdirectory(ext/implot)
 add_subdirectory(ext/atomic_queue)
 add_subdirectory(ext/imgui_notify)
+
+# Find Python dependencies when Python support is enabled
+if(VIAMD_ENABLE_PYTHON)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    
+    # Try to use pip-installed pybind11 first (for Python 3.12+ compatibility)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
+        OUTPUT_VARIABLE pybind11_DIR_PIP
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    
+    if(pybind11_DIR_PIP)
+        set(pybind11_DIR "${pybind11_DIR_PIP}")
+        message(STATUS "Using pip-installed pybind11 from: ${pybind11_DIR}")
+    endif()
+    
+    find_package(pybind11 REQUIRED)
+endif()
 
 # Copy many of the fields from mdlib
 set(VIAMD_STDLIBS)
@@ -113,6 +139,10 @@ set(COMP_FILES
 
 if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
+endif()
+
+if (VIAMD_ENABLE_PYTHON)
+    set(COMP_FILES ${COMP_FILES} src/components/openmm_dynamics/openmm_dynamics.cpp)
 endif()
 
 set(SHADER_FILES 
@@ -195,6 +225,7 @@ target_compile_definitions(viamd PRIVATE
     VIAMD_FRAME_CACHE_SIZE=${VIAMD_FRAME_CACHE_SIZE_MB}
     VIAMD_IMGUI_ENABLE_VIEWPORTS=$<BOOL:${VIAMD_IMGUI_ENABLE_VIEWPORTS}>
     VIAMD_IMGUI_ENABLE_DOCKSPACE=$<BOOL:${VIAMD_IMGUI_ENABLE_DOCKSPACE}>
+    VIAMD_ENABLE_PYTHON=$<BOOL:${VIAMD_ENABLE_PYTHON}>
     ${MD_DEFINES}
 )
 
@@ -209,6 +240,8 @@ target_include_directories(viamd
         gen
         ext/gl3w
         ext/enkiTS/src
+        $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:${Python3_INCLUDE_DIRS}>
+        $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:${pybind11_INCLUDE_DIRS}>
 )
 
 set_target_properties(viamd PROPERTIES
@@ -227,4 +260,11 @@ target_link_libraries(viamd
     atomic_queue
     imgui_notify
     ${VIAMD_STDLIBS}
+    $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:${Python3_LIBRARIES}>
+    $<$<BOOL:${VIAMD_ENABLE_PYTHON}>:pybind11::embed>
 )
+
+# Add Python bindings if enabled
+if(VIAMD_ENABLE_PYTHON)
+    add_subdirectory(python)
+endif()
