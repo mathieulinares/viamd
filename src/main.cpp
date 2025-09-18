@@ -9573,3 +9573,70 @@ static void draw_representations_opaque_lean_and_mean(ApplicationState* data, ui
 
     md_gl_draw(&args);
 }
+
+// Helper functions for DisplayProperty access from other modules
+DisplayPropertyType get_display_property_type(const DisplayProperty* prop) {
+    if (!prop) return DisplayPropertyType_Count;
+    return (DisplayPropertyType)prop->type;
+}
+
+const char* get_display_property_label(const DisplayProperty* prop) {
+    if (!prop) return "";
+    return prop->label;
+}
+
+bool has_display_property_data(const DisplayProperty* prop) {
+    if (!prop) return false;
+    return prop->prop_data != nullptr;
+}
+
+const md_script_property_data_t* get_display_property_data(const DisplayProperty* prop) {
+    if (!prop) return nullptr;
+    return prop->prop_data;
+}
+
+// Index-based helper functions to avoid direct DisplayProperty pointer access
+DisplayPropertyType get_display_property_type_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return DisplayPropertyType_Count;
+    }
+    return (DisplayPropertyType)app_state->display_properties[index].type;
+}
+
+const char* get_display_property_label_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return "";
+    }
+    return app_state->display_properties[index].label;
+}
+
+bool has_display_property_data_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return false;
+    }
+    return app_state->display_properties[index].prop_data != nullptr;
+}
+
+const md_script_property_data_t* get_display_property_data_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return nullptr;
+    }
+    return app_state->display_properties[index].prop_data;
+}
+
+const char* get_display_property_unit_by_index(ApplicationState* app_state, int index, int unit_index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return "";
+    }
+    if (unit_index < 0 || unit_index >= 2) {
+        return "";
+    }
+    return app_state->display_properties[index].unit_str[unit_index];
+}
+
+ImVec4 get_display_property_color_by_index(ApplicationState* app_state, int index) {
+    if (!app_state || index < 0 || index >= (int)md_array_size(app_state->display_properties)) {
+        return ImVec4(1.0f, 1.0f, 1.0f, 1.0f); // Default white color
+    }
+    return app_state->display_properties[index].color;
+}
