@@ -800,12 +800,13 @@ struct Correlation : viamd::EventHandler {
                 }
             }
             
-            // Use overall data range for consistent scaling
-            const auto& overall_data = is_filtered ? corr_data_filt : corr_data_full;
-            min_x = overall_data.min_x;
-            max_x = overall_data.max_x;
-            min_y = overall_data.min_y;
-            max_y = overall_data.max_y;
+            // Use individual series data range for true per-series density computation
+            // Each series should have its own density distribution, not mixed with others
+            if (min_x == FLT_MAX || max_x == -FLT_MAX || min_y == FLT_MAX || max_y == -FLT_MAX) {
+                // If no data points in this series for this frame range, skip
+                series_densities[s].den_sum = 0.0f;
+                continue;
+            }
             
             series_densities[s].min_x = min_x;
             series_densities[s].max_x = max_x;
@@ -1202,6 +1203,11 @@ struct Correlation : viamd::EventHandler {
             if (x_property_idx >= 0 && y_property_idx >= 0 && md_array_size(series) > 0) {
                 if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
                     
+                    // Setup legend to be visible when we have multiple series
+                    if (md_array_size(series) > 1) {
+                        ImPlot::SetupLegend(ImPlotLocation_NorthEast, ImPlotLegendFlags_Outside);
+                    }
+                    
                     // Set axis labels with units
                     if (x_property_idx >= 0 && x_property_idx < num_props) {
                         const char* x_unit = get_display_property_unit_by_index(app_state, x_property_idx, 0);
@@ -1237,16 +1243,27 @@ struct Correlation : viamd::EventHandler {
                     bool should_render_full_advanced = show_layer[0] && display_mode[0] != Points;
                     bool should_render_filt_advanced = show_layer[1] && display_mode[1] != Points && app_state && app_state->timeline.filter.enabled;
                     
-                    // Debug: Display density computation status and ISO values in plot area
+                    // Debug: Display density computation status and per-series ISO values in plot area
                     if (should_render_full_advanced || should_render_filt_advanced) {
                         char debug_text[512];
-                        float debug_density_scale = corr_data_full.den_sum * density_scale_multiplier;
-                        snprintf(debug_text, sizeof(debug_text), 
-                            "den_sum: %.1f | scale: %.3f | ISO[0]: %.2f, ISO[1]: %.2f, ISO[2]: %.2f", 
-                            corr_data_full.den_sum, density_scale_multiplier,
-                            debug_density_scale * iso_thresholds[0],
-                            debug_density_scale * iso_thresholds[1], 
-                            debug_density_scale * iso_thresholds[2]);
+                        if (preserve_series && md_array_size(series_densities_full) > 1) {
+                            // Show per-series density information
+                            snprintf(debug_text, sizeof(debug_text), 
+                                "Per-series densities: S0=%.1f S1=%.1f | scale: %.4f | ISO base: %.4f", 
+                                md_array_size(series_densities_full) > 0 ? series_densities_full[0].den_sum : 0.0f,
+                                md_array_size(series_densities_full) > 1 ? series_densities_full[1].den_sum : 0.0f,
+                                density_scale_multiplier,
+                                density_scale_multiplier * iso_thresholds[0]);
+                        } else {
+                            // Show combined density information
+                            float debug_density_scale = corr_data_full.den_sum * density_scale_multiplier;
+                            snprintf(debug_text, sizeof(debug_text), 
+                                "Combined den_sum: %.1f | scale: %.4f | ISO[0]: %.4f, ISO[1]: %.4f, ISO[2]: %.4f", 
+                                corr_data_full.den_sum, density_scale_multiplier,
+                                debug_density_scale * iso_thresholds[0],
+                                debug_density_scale * iso_thresholds[1], 
+                                debug_density_scale * iso_thresholds[2]);
+                        }
                         ImPlot::PlotText(debug_text, 0.0, 0.0);
                     }
                     
@@ -1259,11 +1276,25 @@ struct Correlation : viamd::EventHandler {
                             
                             // Debug information for coordinate mapping
                             char debug_coord[512];
-                            snprintf(debug_coord, sizeof(debug_coord), 
-                                "Data range: X[%.2f,%.2f] Y[%.2f,%.2f] | Plot view: X[%.2f,%.2f] Y[%.2f,%.2f] | den_sum:%.1f",
-                                corr_data_full.min_x, corr_data_full.max_x, corr_data_full.min_y, corr_data_full.max_y,
-                                plot_rect.X.Min, plot_rect.X.Max, plot_rect.Y.Min, plot_rect.Y.Max,
-                                corr_data_full.den_sum);
+                            if (preserve_series && md_array_size(series_densities_full) > 1) {
+                                snprintf(debug_coord, sizeof(debug_coord), 
+                                    "Per-series ranges: S0[%.2f,%.2f]x[%.2f,%.2f] S1[%.2f,%.2f]x[%.2f,%.2f] | Plot[%.2f,%.2f]x[%.2f,%.2f]",
+                                    md_array_size(series_densities_full) > 0 ? series_densities_full[0].min_x : 0.0f,
+                                    md_array_size(series_densities_full) > 0 ? series_densities_full[0].max_x : 0.0f,
+                                    md_array_size(series_densities_full) > 0 ? series_densities_full[0].min_y : 0.0f,
+                                    md_array_size(series_densities_full) > 0 ? series_densities_full[0].max_y : 0.0f,
+                                    md_array_size(series_densities_full) > 1 ? series_densities_full[1].min_x : 0.0f,
+                                    md_array_size(series_densities_full) > 1 ? series_densities_full[1].max_x : 0.0f,
+                                    md_array_size(series_densities_full) > 1 ? series_densities_full[1].min_y : 0.0f,
+                                    md_array_size(series_densities_full) > 1 ? series_densities_full[1].max_y : 0.0f,
+                                    plot_rect.X.Min, plot_rect.X.Max, plot_rect.Y.Min, plot_rect.Y.Max);
+                            } else {
+                                snprintf(debug_coord, sizeof(debug_coord), 
+                                    "Combined range: X[%.2f,%.2f] Y[%.2f,%.2f] | Plot view: X[%.2f,%.2f] Y[%.2f,%.2f] | den_sum:%.1f",
+                                    corr_data_full.min_x, corr_data_full.max_x, corr_data_full.min_y, corr_data_full.max_y,
+                                    plot_rect.X.Min, plot_rect.X.Max, plot_rect.Y.Min, plot_rect.Y.Max,
+                                    corr_data_full.den_sum);
+                            }
                             ImPlot::PlotText(debug_coord, plot_rect.X.Min, plot_rect.Y.Max - (plot_rect.Y.Max - plot_rect.Y.Min) * 0.05f);
                             
                             if (display_mode[0] == Colormap) {
