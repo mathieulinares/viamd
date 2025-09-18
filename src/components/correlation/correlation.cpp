@@ -1204,7 +1204,12 @@ struct Correlation : viamd::EventHandler {
                 if (ImPlot::BeginPlot("Property Correlation", ImVec2(-1, -1))) {
                     
                     // Setup legend to be visible when we have multiple series
-                    if (md_array_size(series) > 1) {
+                    // For isolines/isolevels, we need to ensure legend is visible
+                    bool has_multiple_series = md_array_size(series) > 1;
+                    bool showing_advanced_modes = (show_layer[0] && (display_mode[0] == IsoLevels || display_mode[0] == IsoLines)) ||
+                                                 (show_layer[1] && (display_mode[1] == IsoLevels || display_mode[1] == IsoLines));
+                    
+                    if (has_multiple_series || (showing_advanced_modes && preserve_series)) {
                         ImPlot::SetupLegend(ImPlotLocation_NorthEast, ImPlotLegendFlags_Outside);
                     }
                     
@@ -1324,7 +1329,10 @@ struct Correlation : viamd::EventHandler {
                                         if (series_density.den_tex == 0 || series_density.den_sum <= 0) continue;
                                         
                                         // Use single isoline/isolevel per series with series color
-                                        const float density_scale = series_density.den_sum * density_scale_multiplier;
+                                        // Normalize density scale by area to make it consistent between per-series and combined modes
+                                        const float density_area_factor = (series_density.max_x - series_density.min_x) * (series_density.max_y - series_density.min_y);
+                                        const float normalized_density = series_density.den_sum / (density_area_factor + 1e-8f);
+                                        const float density_scale = normalized_density * density_scale_multiplier * 1000.0f; // Boost for per-series
                                         float iso_values[1] = { density_scale * iso_thresholds[0] }; // Use first threshold
                                         
                                         // Get series color
@@ -1334,10 +1342,10 @@ struct Correlation : viamd::EventHandler {
                                         uint32_t contour_colors[1] = {0};
                                         
                                         if (display_mode[0] == IsoLevels) {
-                                            // Use series color with moderate opacity for levels
+                                            // Use series color with lower opacity to reduce background bleeding
                                             level_colors[0] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(0.6f * 255));
+                                                (int)(series_color.z * 255), (int)(0.3f * 255)); // Reduced from 0.6f to 0.3f
                                             contour_colors[0] = level_colors[0];
                                         } else {
                                             // Use series color with full opacity for lines
@@ -1370,7 +1378,10 @@ struct Correlation : viamd::EventHandler {
                                     }
                                 } else {
                                     // Use combined density texture (original behavior)
-                                    const float density_scale = corr_data_full.den_sum * density_scale_multiplier;
+                                    // Apply same normalization as per-series for consistency
+                                    const float density_area_factor = (corr_data_full.max_x - corr_data_full.min_x) * (corr_data_full.max_y - corr_data_full.min_y);
+                                    const float normalized_density = corr_data_full.den_sum / (density_area_factor + 1e-8f);
+                                    const float density_scale = normalized_density * density_scale_multiplier;
                                     float iso_values[8] = {0};
                                     
                                     // Use user-defined number of levels for combined rendering
@@ -1446,7 +1457,10 @@ struct Correlation : viamd::EventHandler {
                                         if (series_density.den_tex == 0 || series_density.den_sum <= 0) continue;
                                         
                                         // Use single isoline/isolevel per series with series color
-                                        const float density_scale = series_density.den_sum * density_scale_multiplier;
+                                        // Normalize density scale by area to make it consistent between per-series and combined modes
+                                        const float density_area_factor = (series_density.max_x - series_density.min_x) * (series_density.max_y - series_density.min_y);
+                                        const float normalized_density = series_density.den_sum / (density_area_factor + 1e-8f);
+                                        const float density_scale = normalized_density * density_scale_multiplier * 1000.0f; // Boost for per-series
                                         float iso_values[1] = { density_scale * iso_thresholds[0] }; // Use first threshold
                                         
                                         // Get series color (slightly bluer for filtered)
@@ -1457,10 +1471,10 @@ struct Correlation : viamd::EventHandler {
                                         uint32_t contour_colors[1] = {0};
                                         
                                         if (display_mode[1] == IsoLevels) {
-                                            // Use series color with moderate opacity for levels
+                                            // Use series color with lower opacity to reduce background bleeding
                                             level_colors[0] = IM_COL32(
                                                 (int)(series_color.x * 255), (int)(series_color.y * 255), 
-                                                (int)(series_color.z * 255), (int)(0.5f * 255));
+                                                (int)(series_color.z * 255), (int)(0.25f * 255)); // Reduced from 0.5f to 0.25f
                                             contour_colors[0] = level_colors[0];
                                         } else {
                                             // Use series color with full opacity for lines
@@ -1493,7 +1507,10 @@ struct Correlation : viamd::EventHandler {
                                     }
                                 } else {
                                     // Use combined density texture (original behavior)
-                                    const float density_scale = corr_data_filt.den_sum * density_scale_multiplier;
+                                    // Apply same normalization as per-series for consistency
+                                    const float density_area_factor = (corr_data_filt.max_x - corr_data_filt.min_x) * (corr_data_filt.max_y - corr_data_filt.min_y);
+                                    const float normalized_density = corr_data_filt.den_sum / (density_area_factor + 1e-8f);
+                                    const float density_scale = normalized_density * density_scale_multiplier;
                                     float iso_values[8] = {0};
                                     
                                     // Use user-defined number of levels for combined rendering
@@ -1645,6 +1662,30 @@ struct Correlation : viamd::EventHandler {
                                         (int)md_array_size(scatter.x_data));
                                     ImPlot::PopStyleColor();
                                 }
+                            }
+                        }
+                    }
+                    
+                    // Add legend entries for isolines/isolevels when preserve_series is enabled
+                    // This ensures series names appear in legend for advanced display modes
+                    if (preserve_series && md_array_size(series) > 1) {
+                        bool has_isolines_full = show_layer[0] && (display_mode[0] == IsoLevels || display_mode[0] == IsoLines);
+                        bool has_isolines_filt = show_layer[1] && (display_mode[1] == IsoLevels || display_mode[1] == IsoLines);
+                        
+                        if (has_isolines_full || has_isolines_filt) {
+                            // Plot invisible points to register series in legend
+                            for (size_t s = 0; s < md_array_size(series); ++s) {
+                                const ScatterSeries& scatter = series[s];
+                                ImVec4 color = scatter.color;
+                                color.w = 0.0f; // Make invisible
+                                ImPlot::PushStyleColor(ImPlotCol_Line, color);
+                                ImPlot::PushStyleColor(ImPlotCol_MarkerFill, color);
+                                
+                                // Plot a single invisible point to register series name in legend
+                                float invisible_x = 0.0f, invisible_y = 0.0f;
+                                ImPlot::PlotLine(scatter.name, &invisible_x, &invisible_y, 1);
+                                
+                                ImPlot::PopStyleColor(2);
                             }
                         }
                     }
