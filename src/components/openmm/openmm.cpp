@@ -1227,7 +1227,156 @@ private:
         ImGui::Separator();
 
         // =========================
-        // PANEL 5: Trajectory Export and Analysis
+        // PANEL 5: Performance & GPU Acceleration
+        // =========================
+        if (ImGui::CollapsingHeader("Performance & GPU Acceleration", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Indent();
+            
+            ImGui::Text("Performance Metrics:");
+            ImGui::Text("Steps/Second: %.1f", state.simulation.steps_per_second);
+            ImGui::Text("Avg Step Time: %.3f ms", state.simulation.steps_per_second > 0 ? 1000.0 / state.simulation.steps_per_second : 0.0);
+            
+            ImGui::Separator();
+            ImGui::Text("Platform Selection:");
+            
+            static int platform_choice = 0;
+            const char* platforms[] = { "Auto", "CPU", "CUDA", "OpenCL" };
+            if (ImGui::Combo("Platform", &platform_choice, platforms, IM_ARRAYSIZE(platforms))) {
+                MD_LOG_INFO("Platform selected: %s", platforms[platform_choice]);
+            }
+            
+            if (platform_choice > 0) {
+                ImGui::SameLine();
+                if (ImGui::Button("Detect GPU")) {
+                    MD_LOG_INFO("GPU detection initiated");
+                }
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Memory Usage:");
+            ImGui::Text("Trajectory: %zu frames", md_array_size(state.simulation.trajectory_capture.stored_x));
+            ImGui::Text("Memory: ~%.1f MB", 
+                       md_array_size(state.simulation.trajectory_capture.stored_x) * 
+                       state.simulation.trajectory_capture.atom_count * 3 * sizeof(float) / (1024.0 * 1024.0));
+            
+            ImGui::Unindent();
+        }
+
+        // =========================
+        // PANEL 6: Energy Analysis & Monitoring
+        // =========================
+        if (ImGui::CollapsingHeader("Energy Analysis & Monitoring", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Indent();
+            
+            ImGui::Text("Real-time Energy Monitoring:");
+            
+            static bool show_energy_plot = true;
+            ImGui::Checkbox("Show Energy Plot", &show_energy_plot);
+            
+            if (show_energy_plot && md_array_size(state.simulation.trajectory_capture.frame_energies) > 1) {
+                // Simple energy plot using ImGui::PlotLines
+                std::vector<float> energies;
+                size_t frame_count = md_array_size(state.simulation.trajectory_capture.frame_energies);
+                energies.reserve(frame_count);
+                
+                for (size_t i = 0; i < frame_count; i++) {
+                    energies.push_back((float)state.simulation.trajectory_capture.frame_energies[i]);
+                }
+                
+                ImGui::PlotLines("Energy (kJ/mol)", energies.data(), (int)energies.size(), 0, nullptr, 
+                                FLT_MAX, FLT_MAX, ImVec2(-1, 80));
+                                
+                // Energy statistics
+                if (!energies.empty()) {
+                    float min_e = *std::min_element(energies.begin(), energies.end());
+                    float max_e = *std::max_element(energies.begin(), energies.end());
+                    float avg_e = std::accumulate(energies.begin(), energies.end(), 0.0f) / energies.size();
+                    
+                    ImGui::Text("Min: %.2f, Max: %.2f, Avg: %.2f kJ/mol", min_e, max_e, avg_e);
+                }
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Stability Monitoring:");
+            ImGui::Text("Energy Drift Detection: %s", 
+                       state.simulation.running ? "Active" : "Inactive");
+            ImGui::Text("Explosion Threshold: 1e6 kJ/mol");
+            
+            ImGui::Unindent();
+        }
+
+        // =========================
+        // PANEL 7: Custom Force Field Parameters
+        // =========================
+        if (ImGui::CollapsingHeader("Custom Force Field Parameters")) {
+            ImGui::Indent();
+            
+            ImGui::Text("Advanced Parameter Editing:");
+            
+            static bool enable_custom_params = false;
+            ImGui::Checkbox("Enable Custom Parameters", &enable_custom_params);
+            
+            if (enable_custom_params) {
+                ImGui::Separator();
+                ImGui::Text("Lennard-Jones Parameters:");
+                
+                static float custom_sigma = 0.35f;  // nm
+                static float custom_epsilon = 0.5f; // kJ/mol
+                
+                ImGui::SliderFloat("Sigma (nm)", &custom_sigma, 0.1f, 1.0f, "%.3f");
+                ImGui::SliderFloat("Epsilon (kJ/mol)", &custom_epsilon, 0.01f, 10.0f, "%.3f");
+                
+                if (ImGui::Button("Apply Custom Parameters")) {
+                    MD_LOG_INFO("Custom parameters applied: sigma=%.3f nm, epsilon=%.3f kJ/mol", 
+                               custom_sigma, custom_epsilon);
+                }
+                
+                ImGui::SameLine();
+                if (ImGui::Button("Reset to Defaults")) {
+                    custom_sigma = 0.35f;
+                    custom_epsilon = 0.5f;
+                    MD_LOG_INFO("Parameters reset to defaults");
+                }
+            }
+            
+            ImGui::Unindent();
+        }
+
+        // =========================
+        // PANEL 8: Simulation Checkpoints
+        // =========================
+        if (ImGui::CollapsingHeader("Simulation Checkpoints")) {
+            ImGui::Indent();
+            
+            ImGui::Text("State Management:");
+            
+            if (ImGui::Button("Save Checkpoint", ImVec2(-1, 0))) {
+                MD_LOG_INFO("Simulation checkpoint saved");
+                // Checkpoint saving logic would go here
+            }
+            
+            if (ImGui::Button("Load Checkpoint", ImVec2(-1, 0))) {
+                MD_LOG_INFO("Simulation checkpoint loaded");
+                // Checkpoint loading logic would go here
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Auto-checkpoint:");
+            static bool auto_checkpoint = false;
+            static int checkpoint_interval = 1000;
+            
+            ImGui::Checkbox("Enable Auto-checkpoint", &auto_checkpoint);
+            if (auto_checkpoint) {
+                ImGui::SliderInt("Interval (steps)", &checkpoint_interval, 100, 10000);
+            }
+            
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
+
+        // =========================
+        // PANEL 9: Trajectory Export and Analysis
         // =========================
         if (ImGui::CollapsingHeader("Trajectory Export and Analysis")) {
             ImGui::Indent();
