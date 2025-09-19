@@ -46,6 +46,7 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_OPENMM "Enable OpenMM Integration" OFF)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
@@ -56,6 +57,18 @@ if (VIAMD_ENABLE_VELOXCHEM)
     set(MD_ENABLE_VLX ON CACHE BOOL "" FORCE)
     set(MD_VLX_BASIS_FOLDER "basis")
 endif ()
+
+# OpenMM configuration
+if (VIAMD_ENABLE_OPENMM)
+    find_package(OpenMM QUIET)
+    if (OpenMM_FOUND)
+        message(STATUS "Found OpenMM: ${OpenMM_DIR}")
+        add_definitions(-DVIAMD_ENABLE_OPENMM)
+    else()
+        message(WARNING "OpenMM not found. OpenMM integration will be disabled.")
+        set(VIAMD_ENABLE_OPENMM OFF CACHE BOOL "Enable OpenMM Integration" FORCE)
+    endif()
+endif()
 
 if (APPLE)
     # Remove once we have proper support for Apple Silicon?
@@ -113,6 +126,10 @@ set(COMP_FILES
 
 if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
+endif()
+
+if (VIAMD_ENABLE_OPENMM)
+    set(COMP_FILES ${COMP_FILES} src/components/openmm/openmm.cpp)
 endif()
 
 set(SHADER_FILES 
@@ -228,3 +245,9 @@ target_link_libraries(viamd
     imgui_notify
     ${VIAMD_STDLIBS}
 )
+
+# Add OpenMM libraries if enabled
+if (VIAMD_ENABLE_OPENMM AND OpenMM_FOUND)
+    target_link_libraries(viamd ${OpenMM_LIBRARIES})
+    target_include_directories(viamd PRIVATE ${OpenMM_INCLUDE_DIRS})
+endif()
