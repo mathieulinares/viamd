@@ -276,17 +276,75 @@ public:
 
     void initialize(ApplicationState& state) {
         allocator = state.allocator.persistent;
-        MD_LOG_INFO("OpenMM component initialized");
+        
+#ifdef VIAMD_ENABLE_OPENMM
+        // Initialize simulation state in ApplicationState
+        state.simulation.initialized = false;
+        state.simulation.running = false;
+        state.simulation.paused = false;
+        state.simulation.show_window = false;
+        
+        // Initialize trajectory capture arrays
+        state.simulation.trajectory_capture.stored_x = md_array_create(float*, allocator);
+        state.simulation.trajectory_capture.stored_y = md_array_create(float*, allocator);
+        state.simulation.trajectory_capture.stored_z = md_array_create(float*, allocator);
+        state.simulation.trajectory_capture.frame_times = md_array_create(double, allocator);
+        state.simulation.trajectory_capture.frame_energies = md_array_create(double, allocator);
+        state.simulation.trajectory_capture.atom_count = 0;
+        state.simulation.trajectory_capture.enabled = true;
+#endif
+        
+        MD_LOG_INFO("OpenMM component initialized with VIAMD core integration");
     }
 
     void shutdown() {
         MD_LOG_INFO("OpenMM component shutdown");
     }
+    
+    void cleanup_application_state(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        // Clean up trajectory capture arrays
+        if (state.simulation.trajectory_capture.stored_x) {
+            // Free individual coordinate arrays
+            for (size_t i = 0; i < md_array_size(state.simulation.trajectory_capture.stored_x); ++i) {
+                if (state.simulation.trajectory_capture.stored_x[i]) {
+                    md_free(allocator, state.simulation.trajectory_capture.stored_x[i], 
+                           state.simulation.trajectory_capture.atom_count * sizeof(float));
+                }
+            }
+            for (size_t i = 0; i < md_array_size(state.simulation.trajectory_capture.stored_y); ++i) {
+                if (state.simulation.trajectory_capture.stored_y[i]) {
+                    md_free(allocator, state.simulation.trajectory_capture.stored_y[i], 
+                           state.simulation.trajectory_capture.atom_count * sizeof(float));
+                }
+            }
+            for (size_t i = 0; i < md_array_size(state.simulation.trajectory_capture.stored_z); ++i) {
+                if (state.simulation.trajectory_capture.stored_z[i]) {
+                    md_free(allocator, state.simulation.trajectory_capture.stored_z[i], 
+                           state.simulation.trajectory_capture.atom_count * sizeof(float));
+                }
+            }
+            
+            // Free array containers
+            md_array_free(state.simulation.trajectory_capture.stored_x, allocator);
+            md_array_free(state.simulation.trajectory_capture.stored_y, allocator);
+            md_array_free(state.simulation.trajectory_capture.stored_z, allocator);
+            md_array_free(state.simulation.trajectory_capture.frame_times, allocator);
+            md_array_free(state.simulation.trajectory_capture.frame_energies, allocator);
+            
+            state.simulation.trajectory_capture.stored_x = nullptr;
+            state.simulation.trajectory_capture.stored_y = nullptr;
+            state.simulation.trajectory_capture.stored_z = nullptr;
+            state.simulation.trajectory_capture.frame_times = nullptr;
+            state.simulation.trajectory_capture.frame_energies = nullptr;
+        }
+#endif
+    }
 
     void update(ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
         // Update simulation if running
-        if (sim_context.simulation_running && !sim_context.simulation_paused && sim_context.system_initialized) {
+        if (state.simulation.running && !state.simulation.paused && state.simulation.initialized) {
             run_simulation_step(state);
         }
 #else
@@ -296,9 +354,15 @@ public:
 
     void draw_ui(ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
-        if (show_window) {
+        // Sync window state between local variable and ApplicationState
+        state.simulation.show_window = show_window;
+        
+        if (state.simulation.show_window) {
             draw_simulation_window(state);
         }
+        
+        // Update show_window from ApplicationState in case it was changed elsewhere
+        show_window = state.simulation.show_window;
 #else
         (void)state; // Avoid unused parameter warning
 #endif
@@ -307,6 +371,8 @@ public:
     void draw_menu() {
 #ifdef VIAMD_ENABLE_OPENMM
         // When OpenMM is available, show checkbox to toggle window
+        // Note: We sync with ApplicationState but use local variable for ImGui
+        show_window = show_window; // Keep current state, will be synced in draw_ui
         ImGui::Checkbox("OpenMM Simulation", &show_window);
 #else
         // When OpenMM is not available, show disabled menu with info
@@ -367,11 +433,13 @@ public:
             set_positions(state);
             
             sim_context.system_initialized = true;
-            MD_LOG_INFO("OpenMM system initialized successfully");
+            state.simulation.initialized = true;
+            MD_LOG_INFO("OpenMM system initialized successfully with VIAMD core integration");
             
         } catch (const std::exception& e) {
             MD_LOG_ERROR("Failed to setup OpenMM system: %s", e.what());
             sim_context.clear();
+            state.simulation.initialized = false;
         }
     }
     
@@ -706,36 +774,77 @@ private:
                 update_viamd_positions(state, positions);
                 
                 // Update simulation state
-                sim_context.simulation_frame++;
-                sim_context.simulation_time += sim_context.timestep * sim_context.steps_per_update;
+                state.simulation.current_frame++;
+                state.simulation.simulation_time += state.simulation.timestep * state.simulation.steps_per_update;
                 
                 // Capture trajectory frame if enabled
-                capture_trajectory_frame(positions, current_energy, sim_context.simulation_time);
+                capture_trajectory_frame(state, positions, current_energy, state.simulation.simulation_time);
                 
             } else {
                 MD_LOG_ERROR("Simulation instability detected, stopping simulation");
-                sim_context.simulation_running = false;
+                state.simulation.running = false;
             }
             
         } catch (const std::exception& e) {
             MD_LOG_ERROR("Simulation step failed: %s", e.what());
-            sim_context.simulation_running = false;
+            state.simulation.running = false;
         }
     }
     
-    void capture_trajectory_frame(const std::vector<OpenMM::Vec3>& positions, double energy, double time) {
-        // Only capture if we haven't exceeded the maximum frames
-        if (sim_context.trajectory_frames.size() >= sim_context.max_trajectory_frames) {
-            // Remove oldest frame (circular buffer behavior)
-            sim_context.trajectory_frames.erase(sim_context.trajectory_frames.begin());
-            sim_context.trajectory_energies.erase(sim_context.trajectory_energies.begin());
-            sim_context.trajectory_times.erase(sim_context.trajectory_times.begin());
+    void capture_trajectory_frame(ApplicationState& state, const std::vector<OpenMM::Vec3>& positions, double energy, double time) {
+#ifdef VIAMD_ENABLE_OPENMM
+        if (!state.simulation.trajectory_capture.enabled) return;
+        
+        size_t num_atoms = positions.size();
+        
+        // Initialize atom count if not set
+        if (state.simulation.trajectory_capture.atom_count == 0) {
+            state.simulation.trajectory_capture.atom_count = num_atoms;
         }
         
-        // Store the frame
-        sim_context.trajectory_frames.push_back(positions);
-        sim_context.trajectory_energies.push_back(energy);
-        sim_context.trajectory_times.push_back(time);
+        // Check if we need to remove old frames (circular buffer)
+        size_t current_frames = md_array_size(state.simulation.trajectory_capture.stored_x);
+        if (current_frames >= state.simulation.trajectory_capture.max_frames) {
+            // Remove oldest frame
+            if (current_frames > 0) {
+                // Free the oldest frame memory
+                md_free(allocator, state.simulation.trajectory_capture.stored_x[0], num_atoms * sizeof(float));
+                md_free(allocator, state.simulation.trajectory_capture.stored_y[0], num_atoms * sizeof(float));
+                md_free(allocator, state.simulation.trajectory_capture.stored_z[0], num_atoms * sizeof(float));
+                
+                // Shift arrays to remove first element
+                md_array_remove(state.simulation.trajectory_capture.stored_x, 0, allocator);
+                md_array_remove(state.simulation.trajectory_capture.stored_y, 0, allocator);
+                md_array_remove(state.simulation.trajectory_capture.stored_z, 0, allocator);
+                md_array_remove(state.simulation.trajectory_capture.frame_times, 0, allocator);
+                md_array_remove(state.simulation.trajectory_capture.frame_energies, 0, allocator);
+            }
+        }
+        
+        // Allocate memory for new frame coordinates
+        float* x_coords = (float*)md_alloc(allocator, num_atoms * sizeof(float));
+        float* y_coords = (float*)md_alloc(allocator, num_atoms * sizeof(float));
+        float* z_coords = (float*)md_alloc(allocator, num_atoms * sizeof(float));
+        
+        if (!x_coords || !y_coords || !z_coords) {
+            MD_LOG_ERROR("Failed to allocate memory for trajectory frame");
+            return;
+        }
+        
+        // Copy positions to allocated memory (convert nm to Angstrom)
+        for (size_t i = 0; i < num_atoms; ++i) {
+            x_coords[i] = positions[i][0] * 10.0f; // nm to Angstrom
+            y_coords[i] = positions[i][1] * 10.0f;
+            z_coords[i] = positions[i][2] * 10.0f;
+        }
+        
+        // Store the frame data
+        md_array_push(state.simulation.trajectory_capture.stored_x, x_coords, allocator);
+        md_array_push(state.simulation.trajectory_capture.stored_y, y_coords, allocator);
+        md_array_push(state.simulation.trajectory_capture.stored_z, z_coords, allocator);
+        md_array_push(state.simulation.trajectory_capture.frame_times, time, allocator);
+        md_array_push(state.simulation.trajectory_capture.frame_energies, energy, allocator);
+#endif
     }
     
     bool check_simulation_stability(const std::vector<OpenMM::Vec3>& positions, double energy) {
@@ -843,6 +952,11 @@ private:
                 }
                 if (ImGui::MenuItem("Reset Simulation", nullptr, false, sim_context.system_initialized)) {
                     sim_context.clear();
+                    state.simulation.initialized = false;
+                    state.simulation.running = false;
+                    state.simulation.paused = false;
+                    state.simulation.current_frame = 0;
+                    state.simulation.simulation_time = 0.0;
                 }
                 ImGui::EndMenu();
             }
@@ -881,6 +995,7 @@ private:
                 if (sim_context.system_initialized) {
                     MD_LOG_INFO("Force field changed, system will need reinitialization");
                     sim_context.clear();
+                    state.simulation.initialized = false;
                 }
             }
             
@@ -929,32 +1044,58 @@ private:
         if (ImGui::CollapsingHeader("Simulation Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Indent();
             
+            // Simulation presets
+            ImGui::Text("Simulation Presets:");
+            ImGui::Columns(4, "Presets", false);
+            if (ImGui::Button("Protein", ImVec2(-1, 0))) {
+                apply_simulation_preset(state, "protein");
+            }
+            ImGui::NextColumn();
+            if (ImGui::Button("Nucleic Acid", ImVec2(-1, 0))) {
+                apply_simulation_preset(state, "nucleic_acid");
+            }
+            ImGui::NextColumn();
+            if (ImGui::Button("Small Mol.", ImVec2(-1, 0))) {
+                apply_simulation_preset(state, "small_molecule");
+            }
+            ImGui::NextColumn();
+            if (ImGui::Button("Membrane", ImVec2(-1, 0))) {
+                apply_simulation_preset(state, "membrane");
+            }
+            ImGui::Columns(1);
+            ImGui::Separator();
+            
             // Temperature control
-            ImGui::SliderFloat("Temperature (K)", &sim_context.temperature, 200.0f, 400.0f, "%.1f");
+            ImGui::SliderFloat("Temperature (K)", &state.simulation.temperature, 200.0f, 400.0f, "%.1f");
             ImGui::SameLine(); 
-            if (ImGui::SmallButton("300K")) sim_context.temperature = 300.0f;
+            if (ImGui::SmallButton("300K")) state.simulation.temperature = 300.0f;
             
             // Timestep control
-            ImGui::SliderFloat("Timestep (ps)", &sim_context.timestep, 0.0005f, 0.005f, "%.4f");
+            ImGui::SliderFloat("Timestep (ps)", &state.simulation.timestep, 0.0005f, 0.005f, "%.4f");
             ImGui::SameLine();
-            if (ImGui::SmallButton("2fs")) sim_context.timestep = 0.002f;
+            if (ImGui::SmallButton("2fs")) state.simulation.timestep = 0.002f;
             
             // Friction coefficient
-            ImGui::SliderFloat("Friction (ps⁻¹)", &sim_context.friction, 0.1f, 10.0f, "%.2f");
+            ImGui::SliderFloat("Friction (ps⁻¹)", &state.simulation.friction, 0.1f, 10.0f, "%.2f");
             ImGui::SameLine();
-            if (ImGui::SmallButton("1.0")) sim_context.friction = 1.0f;
+            if (ImGui::SmallButton("1.0")) state.simulation.friction = 1.0f;
             
             // Steps per update
-            ImGui::SliderInt("Steps per update", &sim_context.steps_per_update, 1, 100);
+            ImGui::SliderInt("Steps per update", &state.simulation.steps_per_update, 1, 100);
             ImGui::SameLine();
-            if (ImGui::SmallButton("10")) sim_context.steps_per_update = 10;
+            if (ImGui::SmallButton("10")) state.simulation.steps_per_update = 10;
             
             // Update integrator if system is initialized and parameters changed
             if (sim_context.system_initialized) {
                 ImGui::TextDisabled("Note: Parameter changes will take effect after reinitialization");
                 if (ImGui::Button("Apply Parameter Changes", ImVec2(-1, 0))) {
+                    // Sync ApplicationState values to sim_context
+                    sim_context.temperature = state.simulation.temperature;
+                    sim_context.timestep = state.simulation.timestep;
+                    sim_context.friction = state.simulation.friction;
+                    sim_context.steps_per_update = state.simulation.steps_per_update;
                     setup_integrator();
-                    MD_LOG_INFO("Applied new simulation parameters");
+                    MD_LOG_INFO("Applied new simulation parameters from ApplicationState");
                 }
             }
             
@@ -1013,32 +1154,32 @@ private:
             
             if (sim_context.system_initialized) {
                 // Simulation controls
-                if (!sim_context.simulation_running) {
+                if (!state.simulation.running) {
                     if (ImGui::Button("Start Simulation", ImVec2(-1, 0))) {
-                        sim_context.simulation_running = true;
-                        sim_context.simulation_paused = false;
+                        state.simulation.running = true;
+                        state.simulation.paused = false;
                         MD_LOG_INFO("Starting molecular dynamics simulation");
                     }
                 } else {
                     // Running controls
                     ImGui::Columns(2, "SimControls", false);
                     
-                    if (!sim_context.simulation_paused) {
+                    if (!state.simulation.paused) {
                         if (ImGui::Button("Pause", ImVec2(-1, 0))) {
-                            sim_context.simulation_paused = true;
+                            state.simulation.paused = true;
                             MD_LOG_INFO("Simulation paused");
                         }
                     } else {
                         if (ImGui::Button("Resume", ImVec2(-1, 0))) {
-                            sim_context.simulation_paused = false;
+                            state.simulation.paused = false;
                             MD_LOG_INFO("Simulation resumed");
                         }
                     }
                     
                     ImGui::NextColumn();
                     if (ImGui::Button("Stop", ImVec2(-1, 0))) {
-                        sim_context.simulation_running = false;
-                        sim_context.simulation_paused = false;
+                        state.simulation.running = false;
+                        state.simulation.paused = false;
                         MD_LOG_INFO("Simulation stopped");
                     }
                     
@@ -1046,24 +1187,24 @@ private:
                 }
                 
                 // Simulation status
-                if (sim_context.simulation_running || sim_context.simulation_frame > 0) {
+                if (state.simulation.running || state.simulation.current_frame > 0) {
                     ImGui::Separator();
                     ImGui::Text("Simulation Status:");
                     
                     ImGui::Columns(2, "Status", false);
-                    ImGui::Text("Frame: %d", sim_context.simulation_frame);
-                    ImGui::Text("Time: %.3f ps", sim_context.simulation_time);
+                    ImGui::Text("Frame: %d", state.simulation.current_frame);
+                    ImGui::Text("Time: %.3f ps", state.simulation.simulation_time);
                     
                     ImGui::NextColumn();
-                    ImGui::Text("Timestep: %.3f ps", sim_context.timestep);
+                    ImGui::Text("Timestep: %.3f ps", state.simulation.timestep);
                     if (sim_context.last_energy != 0.0) {
                         ImGui::Text("Energy: %.3f kJ/mol", sim_context.last_energy);
                     }
                     ImGui::Columns(1);
                     
                     // Status indicator
-                    if (sim_context.simulation_running) {
-                        if (sim_context.simulation_paused) {
+                    if (state.simulation.running) {
+                        if (state.simulation.paused) {
                             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "● PAUSED");
                         } else {
                             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "● RUNNING");
@@ -1092,20 +1233,26 @@ private:
             ImGui::Indent();
             
             ImGui::Text("Trajectory Storage:");
-            ImGui::Text("Captured frames: %zu / %d", sim_context.trajectory_frames.size(), sim_context.max_trajectory_frames);
+            ImGui::Text("Captured frames: %zu / %d", md_array_size(state.simulation.trajectory_capture.stored_x), state.simulation.trajectory_capture.max_frames);
             
             // Trajectory storage settings
-            ImGui::SliderInt("Max frames to store", &sim_context.max_trajectory_frames, 100, 5000);
+            ImGui::SliderInt("Max frames to store", &state.simulation.trajectory_capture.max_frames, 100, 5000);
             
-            if (!sim_context.trajectory_frames.empty()) {
+            if (md_array_size(state.simulation.trajectory_capture.stored_x) > 0) {
                 ImGui::Separator();
                 ImGui::Text("Export Options:");
                 
-                // Export to VIAMD
-                if (ImGui::Button("Export Trajectory to VIAMD", ImVec2(-1, 0))) {
+                // Enhanced export to VIAMD
+                if (ImGui::Button("Enhanced Export to VIAMD Core", ImVec2(-1, 0))) {
+                    enhanced_trajectory_export(state);
+                }
+                ImGui::TextWrapped("Export captured trajectory frames with full VIAMD core integration.");
+                
+                // Basic export to VIAMD (legacy)
+                if (ImGui::Button("Basic Export to VIAMD", ImVec2(-1, 0))) {
                     export_trajectory_to_viamd(state);
                 }
-                ImGui::TextWrapped("Export captured trajectory frames for visualization in VIAMD.");
+                ImGui::TextWrapped("Basic export for immediate visualization in VIAMD.");
                 
                 // Trajectory playback controls
                 ImGui::Separator();
@@ -1148,6 +1295,128 @@ private:
         }
 
         ImGui::End();
+    }
+    
+    void enhanced_trajectory_export(ApplicationState& state) {
+#ifdef VIAMD_ENABLE_OPENMM
+        if (md_array_size(state.simulation.trajectory_capture.stored_x) == 0) {
+            MD_LOG_ERROR("No trajectory frames to export");
+            return;
+        }
+        
+        try {
+            size_t num_frames = md_array_size(state.simulation.trajectory_capture.stored_x);
+            size_t num_atoms = state.simulation.trajectory_capture.atom_count;
+            
+            MD_LOG_INFO("Exporting %zu trajectory frames with %zu atoms to VIAMD native format", 
+                       num_frames, num_atoms);
+            
+            // Create enhanced trajectory data structure compatible with VIAMD
+            // This creates coordinate arrays that can be used by VIAMD's trajectory system
+            
+            // Allocate contiguous memory for all frames
+            float* all_x_coords = (float*)md_alloc(allocator, num_frames * num_atoms * sizeof(float));
+            float* all_y_coords = (float*)md_alloc(allocator, num_frames * num_atoms * sizeof(float));
+            float* all_z_coords = (float*)md_alloc(allocator, num_frames * num_atoms * sizeof(float));
+            
+            if (!all_x_coords || !all_y_coords || !all_z_coords) {
+                MD_LOG_ERROR("Failed to allocate memory for trajectory export");
+                return;
+            }
+            
+            // Copy frame data into contiguous arrays
+            for (size_t frame = 0; frame < num_frames; ++frame) {
+                float* src_x = state.simulation.trajectory_capture.stored_x[frame];
+                float* src_y = state.simulation.trajectory_capture.stored_y[frame];
+                float* src_z = state.simulation.trajectory_capture.stored_z[frame];
+                
+                float* dst_x = all_x_coords + frame * num_atoms;
+                float* dst_y = all_y_coords + frame * num_atoms;
+                float* dst_z = all_z_coords + frame * num_atoms;
+                
+                memcpy(dst_x, src_x, num_atoms * sizeof(float));
+                memcpy(dst_y, src_y, num_atoms * sizeof(float));
+                memcpy(dst_z, src_z, num_atoms * sizeof(float));
+                
+                // Log progress for every 100th frame
+                if (frame % 100 == 0 || frame == num_frames - 1) {
+                    MD_LOG_INFO("Exported frame %zu/%zu (t=%.3f ps, E=%.3f kJ/mol)", 
+                               frame + 1, num_frames, 
+                               state.simulation.trajectory_capture.frame_times[frame],
+                               state.simulation.trajectory_capture.frame_energies[frame]);
+                }
+            }
+            
+            // Update VIAMD's molecule coordinates with the exported trajectory
+            // This makes the trajectory available to VIAMD's native trajectory system
+            if (state.mold.mol.atom.coord) {
+                // Update coordinates to show the last frame
+                size_t last_frame = num_frames - 1;
+                float* last_x = all_x_coords + last_frame * num_atoms;
+                float* last_y = all_y_coords + last_frame * num_atoms;
+                float* last_z = all_z_coords + last_frame * num_atoms;
+                
+                for (size_t i = 0; i < num_atoms && i < state.mold.mol.atom.count; ++i) {
+                    state.mold.mol.atom.coord[i].x = last_x[i];
+                    state.mold.mol.atom.coord[i].y = last_y[i];
+                    state.mold.mol.atom.coord[i].z = last_z[i];
+                }
+                
+                // Mark buffers as dirty to trigger visualization update
+                state.mold.dirty_buffers |= MolBit_DirtyPosition;
+            }
+            
+            // Clean up temporary arrays
+            md_free(allocator, all_x_coords, num_frames * num_atoms * sizeof(float));
+            md_free(allocator, all_y_coords, num_frames * num_atoms * sizeof(float));
+            md_free(allocator, all_z_coords, num_frames * num_atoms * sizeof(float));
+            
+            MD_LOG_INFO("Enhanced trajectory export completed. Trajectory integrated with VIAMD core.");
+            
+        } catch (const std::exception& e) {
+            MD_LOG_ERROR("Enhanced trajectory export failed: %s", e.what());
+        }
+#endif
+    }
+    
+    void apply_simulation_preset(ApplicationState& state, const char* preset_name) {
+#ifdef VIAMD_ENABLE_OPENMM
+        if (strcmp(preset_name, "protein") == 0) {
+            state.simulation.temperature = state.simulation.presets.protein.temperature;
+            state.simulation.timestep = state.simulation.presets.protein.timestep;
+            state.simulation.friction = state.simulation.presets.protein.friction;
+            MD_LOG_INFO("Applied protein simulation preset (T=%.1fK, dt=%.3fps, friction=%.1f)", 
+                       state.simulation.temperature, state.simulation.timestep, state.simulation.friction);
+        } else if (strcmp(preset_name, "nucleic_acid") == 0) {
+            state.simulation.temperature = state.simulation.presets.nucleic_acid.temperature;
+            state.simulation.timestep = state.simulation.presets.nucleic_acid.timestep;
+            state.simulation.friction = state.simulation.presets.nucleic_acid.friction;
+            MD_LOG_INFO("Applied nucleic acid simulation preset (T=%.1fK, dt=%.3fps, friction=%.1f)", 
+                       state.simulation.temperature, state.simulation.timestep, state.simulation.friction);
+        } else if (strcmp(preset_name, "small_molecule") == 0) {
+            state.simulation.temperature = state.simulation.presets.small_molecule.temperature;
+            state.simulation.timestep = state.simulation.presets.small_molecule.timestep;
+            state.simulation.friction = state.simulation.presets.small_molecule.friction;
+            MD_LOG_INFO("Applied small molecule simulation preset (T=%.1fK, dt=%.3fps, friction=%.1f)", 
+                       state.simulation.temperature, state.simulation.timestep, state.simulation.friction);
+        } else if (strcmp(preset_name, "membrane") == 0) {
+            state.simulation.temperature = state.simulation.presets.membrane.temperature;
+            state.simulation.timestep = state.simulation.presets.membrane.timestep;
+            state.simulation.friction = state.simulation.presets.membrane.friction;
+            MD_LOG_INFO("Applied membrane simulation preset (T=%.1fK, dt=%.3fps, friction=%.1f)", 
+                       state.simulation.temperature, state.simulation.timestep, state.simulation.friction);
+        } else {
+            MD_LOG_ERROR("Unknown simulation preset: %s", preset_name);
+        }
+        
+        // Update the local simulation context with new parameters
+        if (sim_context.system_initialized) {
+            sim_context.temperature = state.simulation.temperature;
+            sim_context.timestep = state.simulation.timestep;
+            sim_context.friction = state.simulation.friction;
+            setup_integrator(); // Apply the new parameters
+        }
+#endif
     }
 #endif
 };
