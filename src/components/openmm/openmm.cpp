@@ -15,6 +15,7 @@
 #include <OpenMM.h>
 #include <memory>
 #include <string>
+#include <cmath>
 #endif
 
 namespace openmm {
@@ -182,6 +183,13 @@ struct SimulationContext {
     size_t num_atoms = 0;
     double last_energy = 0.0;
     
+    // Simulation state
+    bool simulation_running = false;
+    bool simulation_paused = false;
+    int simulation_frame = 0;
+    double simulation_time = 0.0; // ps
+    double timestep = 0.002; // ps, conservative default
+    
     void clear() {
         system.reset();
         context.reset();
@@ -191,6 +199,10 @@ struct SimulationContext {
         system_initialized = false;
         num_atoms = 0;
         last_energy = 0.0;
+        simulation_running = false;
+        simulation_paused = false;
+        simulation_frame = 0;
+        simulation_time = 0.0;
     }
 };
 #endif
@@ -256,7 +268,9 @@ public:
     void update(ApplicationState& state) {
 #ifdef VIAMD_ENABLE_OPENMM
         // Update simulation if running
-        (void)state; // Avoid unused parameter warning
+        if (sim_context.simulation_running && !sim_context.simulation_paused && sim_context.system_initialized) {
+            run_simulation_step(state);
+        }
 #else
         (void)state; // Avoid unused parameter warning
 #endif
@@ -569,7 +583,7 @@ private:
         // Langevin integrator for NVT ensemble
         double temperature = 300.0; // K
         double friction = 1.0;       // ps^-1  
-        double timestep = 0.002;     // ps
+        double timestep = sim_context.timestep; // Use context timestep
         
         sim_context.integrator = std::make_unique<OpenMM::LangevinIntegrator>(temperature, friction, timestep);
         MD_LOG_INFO("Set up Langevin integrator: T=%.1f K, friction=%.1f ps^-1, dt=%.3f ps", 
@@ -590,6 +604,131 @@ private:
         
         sim_context.context->setPositions(positions);
         MD_LOG_INFO("Set positions for %zu atoms", positions.size());
+    }
+    
+    void minimize_energy(ApplicationState& state) {
+        if (!sim_context.system_initialized || !sim_context.context) {
+            MD_LOG_ERROR("Cannot minimize energy: system not initialized");
+            return;
+        }
+        
+        try {
+            MD_LOG_INFO("Starting energy minimization...");
+            
+            // L-BFGS minimization with reasonable parameters
+            double tolerance = 1e-6; // kJ/mol
+            int max_iterations = 5000;
+            
+            sim_context.integrator->step(0); // Initialize context
+            
+            // Get initial energy
+            OpenMM::State initial_state = sim_context.context->getState(OpenMM::State::Energy);
+            double initial_energy = initial_state.getPotentialEnergy();
+            
+            MD_LOG_INFO("Initial energy: %.3f kJ/mol", initial_energy);
+            
+            // Perform minimization
+            OpenMM::LocalEnergyMinimizer::minimize(*sim_context.context, tolerance, max_iterations);
+            
+            // Get final energy
+            OpenMM::State final_state = sim_context.context->getState(OpenMM::State::Energy | OpenMM::State::Positions);
+            double final_energy = final_state.getPotentialEnergy();
+            sim_context.last_energy = final_energy;
+            
+            MD_LOG_INFO("Energy minimization completed: %.3f → %.3f kJ/mol (Δ = %.3f kJ/mol)", 
+                       initial_energy, final_energy, final_energy - initial_energy);
+            
+            // Update positions in VIAMD
+            update_viamd_positions(state, final_state.getPositions());
+            
+        } catch (const std::exception& e) {
+            MD_LOG_ERROR("Energy minimization failed: %s", e.what());
+        }
+    }
+    
+    void update_viamd_positions(ApplicationState& state, const std::vector<OpenMM::Vec3>& positions) {
+        if (positions.size() != state.mold.mol.atom.count) {
+            MD_LOG_ERROR("Position count mismatch: OpenMM=%zu, VIAMD=%zu", positions.size(), state.mold.mol.atom.count);
+            return;
+        }
+        
+        // Update VIAMD molecule coordinates (convert nm to Angstrom)
+        for (size_t i = 0; i < state.mold.mol.atom.count; ++i) {
+            state.mold.mol.atom.x[i] = positions[i][0] * 10.0f; // nm to Å
+            state.mold.mol.atom.y[i] = positions[i][1] * 10.0f;
+            state.mold.mol.atom.z[i] = positions[i][2] * 10.0f;
+        }
+        
+        // Mark buffers dirty for re-rendering
+        state.mold.dirty_buffers |= MolBit_DirtyPosition;
+        
+        MD_LOG_INFO("Updated VIAMD positions from OpenMM");
+    }
+    
+    void run_simulation_step(ApplicationState& state) {
+        if (!sim_context.system_initialized || !sim_context.context) {
+            return;
+        }
+        
+        try {
+            // Run simulation steps
+            int steps_per_update = 10; // Will be configurable in Phase 4
+            sim_context.integrator->step(steps_per_update);
+            
+            // Get updated positions and energy for stability check
+            OpenMM::State current_state = sim_context.context->getState(OpenMM::State::Positions | OpenMM::State::Energy);
+            
+            double current_energy = current_state.getPotentialEnergy();
+            const std::vector<OpenMM::Vec3>& positions = current_state.getPositions();
+            
+            // Check for simulation explosion
+            if (check_simulation_stability(positions, current_energy)) {
+                sim_context.last_energy = current_energy;
+                
+                // Update VIAMD positions for real-time visualization
+                update_viamd_positions(state, positions);
+                
+                // Update simulation state (will be expanded in Phase 4)
+                sim_context.simulation_frame++;
+                sim_context.simulation_time += sim_context.timestep * steps_per_update;
+                
+            } else {
+                MD_LOG_ERROR("Simulation instability detected, stopping simulation");
+                sim_context.simulation_running = false;
+            }
+            
+        } catch (const std::exception& e) {
+            MD_LOG_ERROR("Simulation step failed: %s", e.what());
+            sim_context.simulation_running = false;
+        }
+    }
+    
+    bool check_simulation_stability(const std::vector<OpenMM::Vec3>& positions, double energy) {
+        // Check for NaN or infinite energy
+        if (!std::isfinite(energy)) {
+            MD_LOG_ERROR("Non-finite energy detected: %f", energy);
+            return false;
+        }
+        
+        // Check for excessive energy (likely explosion)
+        const double energy_threshold = 1e6; // kJ/mol
+        if (energy > energy_threshold) {
+            MD_LOG_ERROR("Energy explosion detected: %f kJ/mol > %f kJ/mol", energy, energy_threshold);
+            return false;
+        }
+        
+        // Check for excessive coordinates (simulation box explosion)
+        const double coord_threshold = 100.0; // nm (very large but reasonable)
+        for (const auto& pos : positions) {
+            for (int i = 0; i < 3; ++i) {
+                if (!std::isfinite(pos[i]) || std::abs(pos[i]) > coord_threshold) {
+                    MD_LOG_ERROR("Coordinate explosion detected: coordinate = %f nm", pos[i]);
+                    return false;
+                }
+            }
+        }
+        
+        return true;
     }
 #endif
 
@@ -666,11 +805,66 @@ private:
                 
                 ImGui::Separator();
                 
-                // Simulation controls would go here in Phase 3
-                ImGui::TextDisabled("Simulation controls will be added in Phase 3");
-                ImGui::BulletText("Energy minimization");
-                ImGui::BulletText("Molecular dynamics simulation");
-                ImGui::BulletText("Trajectory analysis");
+                // Energy minimization section
+                ImGui::Text("Energy Minimization");
+                if (ImGui::Button("Minimize Energy", ImVec2(-1, 0))) {
+                    minimize_energy(state);
+                }
+                ImGui::TextWrapped("L-BFGS minimization with tolerance 1e-6 kJ/mol");
+                
+                ImGui::Separator();
+                
+                // Simulation controls
+                ImGui::Text("Molecular Dynamics Simulation");
+                
+                if (!sim_context.simulation_running) {
+                    if (ImGui::Button("Start Simulation", ImVec2(-1, 0))) {
+                        sim_context.simulation_running = true;
+                        sim_context.simulation_paused = false;
+                        MD_LOG_INFO("Starting molecular dynamics simulation");
+                    }
+                } else {
+                    if (!sim_context.simulation_paused) {
+                        if (ImGui::Button("Pause Simulation", ImVec2(-1, 0))) {
+                            sim_context.simulation_paused = true;
+                            MD_LOG_INFO("Simulation paused");
+                        }
+                    } else {
+                        if (ImGui::Button("Resume Simulation", ImVec2(-1, 0))) {
+                            sim_context.simulation_paused = false;
+                            MD_LOG_INFO("Simulation resumed");
+                        }
+                    }
+                    
+                    ImGui::SameLine();
+                    if (ImGui::Button("Stop Simulation")) {
+                        sim_context.simulation_running = false;
+                        sim_context.simulation_paused = false;
+                        MD_LOG_INFO("Simulation stopped");
+                    }
+                }
+                
+                // Simulation status
+                if (sim_context.simulation_running || sim_context.simulation_frame > 0) {
+                    ImGui::Separator();
+                    ImGui::Text("Simulation Status");
+                    ImGui::Text("Frame: %d", sim_context.simulation_frame);
+                    ImGui::Text("Time: %.3f ps", sim_context.simulation_time);
+                    ImGui::Text("Timestep: %.3f ps", sim_context.timestep);
+                    if (sim_context.last_energy != 0.0) {
+                        ImGui::Text("Energy: %.3f kJ/mol", sim_context.last_energy);
+                    }
+                    
+                    if (sim_context.simulation_running) {
+                        if (sim_context.simulation_paused) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Status: PAUSED");
+                        } else {
+                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Status: RUNNING");
+                        }
+                    } else {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Status: STOPPED");
+                    }
+                }
             }
             
         } else {
