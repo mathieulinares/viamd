@@ -190,6 +190,21 @@ struct SimulationContext {
     double simulation_time = 0.0; // ps
     double timestep = 0.002; // ps, conservative default
     
+    // Configurable simulation parameters
+    double temperature = 300.0; // K
+    double friction = 1.0; // ps^-1
+    int steps_per_update = 10;
+    
+    // Minimization parameters
+    double minimization_tolerance = 1e-6; // kJ/mol
+    int minimization_max_iterations = 5000;
+    
+    // Trajectory storage
+    std::vector<std::vector<OpenMM::Vec3>> trajectory_frames;
+    std::vector<double> trajectory_energies;
+    std::vector<double> trajectory_times;
+    int max_trajectory_frames = 1000;
+    
     void clear() {
         system.reset();
         context.reset();
@@ -203,6 +218,9 @@ struct SimulationContext {
         simulation_paused = false;
         simulation_frame = 0;
         simulation_time = 0.0;
+        trajectory_frames.clear();
+        trajectory_energies.clear();
+        trajectory_times.clear();
     }
 };
 #endif
@@ -580,14 +598,11 @@ private:
     }
     
     void setup_integrator() {
-        // Langevin integrator for NVT ensemble
-        double temperature = 300.0; // K
-        double friction = 1.0;       // ps^-1  
-        double timestep = sim_context.timestep; // Use context timestep
-        
-        sim_context.integrator = std::make_unique<OpenMM::LangevinIntegrator>(temperature, friction, timestep);
+        // Use configurable parameters from context
+        sim_context.integrator = std::make_unique<OpenMM::LangevinIntegrator>(
+            sim_context.temperature, sim_context.friction, sim_context.timestep);
         MD_LOG_INFO("Set up Langevin integrator: T=%.1f K, friction=%.1f ps^-1, dt=%.3f ps", 
-                   temperature, friction, timestep);
+                   sim_context.temperature, sim_context.friction, sim_context.timestep);
     }
     
     void set_positions(ApplicationState& state) {
@@ -615,9 +630,9 @@ private:
         try {
             MD_LOG_INFO("Starting energy minimization...");
             
-            // L-BFGS minimization with reasonable parameters
-            double tolerance = 1e-6; // kJ/mol
-            int max_iterations = 5000;
+            // Use configurable parameters
+            double tolerance = sim_context.minimization_tolerance;
+            int max_iterations = sim_context.minimization_max_iterations;
             
             sim_context.integrator->step(0); // Initialize context
             
@@ -671,9 +686,8 @@ private:
         }
         
         try {
-            // Run simulation steps
-            int steps_per_update = 10; // Will be configurable in Phase 4
-            sim_context.integrator->step(steps_per_update);
+            // Use configurable steps per update
+            sim_context.integrator->step(sim_context.steps_per_update);
             
             // Get updated positions and energy for stability check
             OpenMM::State current_state = sim_context.context->getState(OpenMM::State::Positions | OpenMM::State::Energy);
@@ -688,9 +702,12 @@ private:
                 // Update VIAMD positions for real-time visualization
                 update_viamd_positions(state, positions);
                 
-                // Update simulation state (will be expanded in Phase 4)
+                // Update simulation state
                 sim_context.simulation_frame++;
-                sim_context.simulation_time += sim_context.timestep * steps_per_update;
+                sim_context.simulation_time += sim_context.timestep * sim_context.steps_per_update;
+                
+                // Capture trajectory frame if enabled
+                capture_trajectory_frame(positions, current_energy, sim_context.simulation_time);
                 
             } else {
                 MD_LOG_ERROR("Simulation instability detected, stopping simulation");
@@ -701,6 +718,21 @@ private:
             MD_LOG_ERROR("Simulation step failed: %s", e.what());
             sim_context.simulation_running = false;
         }
+    }
+    
+    void capture_trajectory_frame(const std::vector<OpenMM::Vec3>& positions, double energy, double time) {
+        // Only capture if we haven't exceeded the maximum frames
+        if (sim_context.trajectory_frames.size() >= sim_context.max_trajectory_frames) {
+            // Remove oldest frame (circular buffer behavior)
+            sim_context.trajectory_frames.erase(sim_context.trajectory_frames.begin());
+            sim_context.trajectory_energies.erase(sim_context.trajectory_energies.begin());
+            sim_context.trajectory_times.erase(sim_context.trajectory_times.begin());
+        }
+        
+        // Store the frame
+        sim_context.trajectory_frames.push_back(positions);
+        sim_context.trajectory_energies.push_back(energy);
+        sim_context.trajectory_times.push_back(time);
     }
     
     bool check_simulation_stability(const std::vector<OpenMM::Vec3>& positions, double energy) {
@@ -730,93 +762,254 @@ private:
         
         return true;
     }
+    
+    void export_trajectory_to_viamd(ApplicationState& state) {
+        if (sim_context.trajectory_frames.empty()) {
+            MD_LOG_ERROR("No trajectory frames to export");
+            return;
+        }
+        
+        try {
+            // Create a simple trajectory structure that VIAMD can understand
+            // This creates multiple coordinate sets that can be played back
+            
+            size_t num_frames = sim_context.trajectory_frames.size();
+            size_t num_atoms = state.mold.mol.atom.count;
+            
+            MD_LOG_INFO("Exporting %zu trajectory frames with %zu atoms each", num_frames, num_atoms);
+            
+            // Store current frame index for restoration
+            int original_frame = 0; // Will be enhanced in later phases
+            
+            // Create a simple trajectory export by updating coordinates frame by frame
+            // This is a basic implementation - more sophisticated trajectory handling 
+            // would be added in Phase 5 with ApplicationState integration
+            
+            for (size_t frame = 0; frame < num_frames; ++frame) {
+                const auto& positions = sim_context.trajectory_frames[frame];
+                update_viamd_positions(state, positions);
+                
+                // Log progress for every 100th frame
+                if (frame % 100 == 0 || frame == num_frames - 1) {
+                    MD_LOG_INFO("Exported frame %zu/%zu (t=%.3f ps, E=%.3f kJ/mol)", 
+                               frame + 1, num_frames, 
+                               sim_context.trajectory_times[frame],
+                               sim_context.trajectory_energies[frame]);
+                }
+            }
+            
+            MD_LOG_INFO("Trajectory export completed. Final frame displayed in VIAMD.");
+            
+        } catch (const std::exception& e) {
+            MD_LOG_ERROR("Trajectory export failed: %s", e.what());
+        }
+    }
+    
+    void load_trajectory_frame(ApplicationState& state, size_t frame_index) {
+        if (frame_index >= sim_context.trajectory_frames.size()) {
+            MD_LOG_ERROR("Invalid frame index: %zu (max: %zu)", frame_index, sim_context.trajectory_frames.size());
+            return;
+        }
+        
+        const auto& positions = sim_context.trajectory_frames[frame_index];
+        update_viamd_positions(state, positions);
+        
+        MD_LOG_INFO("Loaded trajectory frame %zu (t=%.3f ps, E=%.3f kJ/mol)", 
+                   frame_index, 
+                   sim_context.trajectory_times[frame_index],
+                   sim_context.trajectory_energies[frame_index]);
+    }
 #endif
 
 #ifdef VIAMD_ENABLE_OPENMM
 private:
     void draw_simulation_window(ApplicationState& state) {
-        if (!ImGui::Begin("OpenMM Simulation", &show_window)) {
+        if (!ImGui::Begin("OpenMM Simulation", &show_window, ImGuiWindowFlags_MenuBar)) {
             ImGui::End();
             return;
+        }
+
+        // Menu bar for quick actions
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("Actions")) {
+                if (ImGui::MenuItem("Initialize System", nullptr, false, state.mold.mol.atom.count > 0 && !sim_context.system_initialized)) {
+                    setup_system(state);
+                }
+                if (ImGui::MenuItem("Minimize Energy", nullptr, false, sim_context.system_initialized)) {
+                    minimize_energy(state);
+                }
+                if (ImGui::MenuItem("Reset Simulation", nullptr, false, sim_context.system_initialized)) {
+                    sim_context.clear();
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
         }
 
         ImGui::Text("OpenMM Molecular Dynamics Simulation");
         ImGui::Separator();
         
-        // Force field selection
-        ImGui::Text("Force Field Configuration");
-        const char* force_field_items[] = { "AMBER14", "UFF", "GAFF-2", "OPLS-AA" };
-        int current_ff = static_cast<int>(sim_context.force_field_type);
-        
-        if (ImGui::Combo("Force Field", &current_ff, force_field_items, IM_ARRAYSIZE(force_field_items))) {
-            sim_context.force_field_type = static_cast<ForceFieldType>(current_ff);
-            sim_context.force_field_name = force_field_names[current_ff];
-            
-            // Clear system if it was already initialized with different force field
-            if (sim_context.system_initialized) {
-                MD_LOG_INFO("Force field changed, system will need reinitialization");
-                sim_context.clear();
-            }
+        // Check if molecule is loaded
+        if (state.mold.mol.atom.count == 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Load a molecular structure first");
+            ImGui::TextDisabled("Use File → Open to load a PDB, XYZ, or other molecular file");
+            ImGui::End();
+            return;
         }
-        
+
+        ImGui::Text("Loaded molecule: %zu atoms", state.mold.mol.atom.count);
         ImGui::Separator();
-        
-        // Molecule and system status
-        if (state.mold.mol.atom.count > 0) {
-            ImGui::Text("Loaded molecule: %zu atoms", state.mold.mol.atom.count);
+
+        // =========================
+        // PANEL 1: Force Field Configuration
+        // =========================
+        if (ImGui::CollapsingHeader("Force Field Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Indent();
+            
+            // Force field selection
+            const char* force_field_items[] = { "AMBER14", "UFF", "GAFF-2", "OPLS-AA" };
+            int current_ff = static_cast<int>(sim_context.force_field_type);
+            
+            if (ImGui::Combo("Force Field", &current_ff, force_field_items, IM_ARRAYSIZE(force_field_items))) {
+                sim_context.force_field_type = static_cast<ForceFieldType>(current_ff);
+                sim_context.force_field_name = force_field_names[current_ff];
+                
+                // Clear system if it was already initialized with different force field
+                if (sim_context.system_initialized) {
+                    MD_LOG_INFO("Force field changed, system will need reinitialization");
+                    sim_context.clear();
+                }
+            }
+            
+            ImGui::Text("Selected: %s", sim_context.force_field_name.c_str());
             
             // Show atom type detection info
             if (!sim_context.atom_types.empty()) {
                 ImGui::Text("Atom types assigned: %zu/%zu", sim_context.atom_types.size(), state.mold.mol.atom.count);
                 
                 if (ImGui::TreeNode("Atom Type Details")) {
-                    // Show first 20 atom types as preview
-                    size_t show_count = std::min(size_t(20), sim_context.atom_types.size());
-                    for (size_t i = 0; i < show_count; ++i) {
+                    ImGui::BeginChild("AtomTypeScroll", ImVec2(0, 150), true);
+                    for (size_t i = 0; i < std::min(size_t(50), sim_context.atom_types.size()); ++i) {
                         md_element_t element = state.mold.mol.atom.element ? state.mold.mol.atom.element[i] : 0;
                         ImGui::Text("Atom %zu: element=%d → %s", i, element, sim_context.atom_types[i].c_str());
                     }
-                    if (sim_context.atom_types.size() > 20) {
-                        ImGui::Text("... and %zu more", sim_context.atom_types.size() - 20);
+                    if (sim_context.atom_types.size() > 50) {
+                        ImGui::Text("... and %zu more", sim_context.atom_types.size() - 50);
                     }
+                    ImGui::EndChild();
                     ImGui::TreePop();
                 }
             }
             
-            ImGui::Separator();
-            
-            // System setup controls
+            // System initialization
             if (!sim_context.system_initialized) {
-                if (ImGui::Button("Initialize System", ImVec2(-1, 0))) {
+                if (ImGui::Button("Initialize OpenMM System", ImVec2(-1, 0))) {
                     setup_system(state);
                 }
-                
-                ImGui::Text("Click 'Initialize System' to set up OpenMM simulation");
-                ImGui::BulletText("Detects atom types for %s", sim_context.force_field_name.c_str());
-                ImGui::BulletText("Creates force field parameters");
-                ImGui::BulletText("Sets up molecular dynamics integrator");
+                ImGui::TextWrapped("Initialize the system to set up force field parameters and prepare for simulation.");
             } else {
-                ImGui::Text("✓ System initialized with %zu atoms", sim_context.num_atoms);
-                ImGui::Text("Force field: %s", sim_context.force_field_name.c_str());
-                
-                if (ImGui::Button("Reinitialize System", ImVec2(-1, 0))) {
+                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ System initialized with %zu atoms", sim_context.num_atoms);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Reinitialize")) {
                     setup_system(state);
                 }
-                
-                ImGui::Separator();
-                
-                // Energy minimization section
-                ImGui::Text("Energy Minimization");
+            }
+            
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
+
+        // =========================
+        // PANEL 2: Simulation Parameters
+        // =========================
+        if (ImGui::CollapsingHeader("Simulation Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Indent();
+            
+            // Temperature control
+            ImGui::SliderFloat("Temperature (K)", &sim_context.temperature, 200.0f, 400.0f, "%.1f");
+            ImGui::SameLine(); 
+            if (ImGui::SmallButton("300K")) sim_context.temperature = 300.0f;
+            
+            // Timestep control
+            ImGui::SliderFloat("Timestep (ps)", &sim_context.timestep, 0.0005f, 0.005f, "%.4f");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("2fs")) sim_context.timestep = 0.002f;
+            
+            // Friction coefficient
+            ImGui::SliderFloat("Friction (ps⁻¹)", &sim_context.friction, 0.1f, 10.0f, "%.2f");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("1.0")) sim_context.friction = 1.0f;
+            
+            // Steps per update
+            ImGui::SliderInt("Steps per update", &sim_context.steps_per_update, 1, 100);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("10")) sim_context.steps_per_update = 10;
+            
+            // Update integrator if system is initialized and parameters changed
+            if (sim_context.system_initialized) {
+                ImGui::TextDisabled("Note: Parameter changes will take effect after reinitialization");
+                if (ImGui::Button("Apply Parameter Changes", ImVec2(-1, 0))) {
+                    setup_integrator();
+                    MD_LOG_INFO("Applied new simulation parameters");
+                }
+            }
+            
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
+
+        // =========================
+        // PANEL 3: Energy Minimization
+        // =========================
+        if (ImGui::CollapsingHeader("Energy Minimization", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Indent();
+            
+            // Minimization parameters
+            ImGui::Text("Minimization Parameters:");
+            
+            // Tolerance control
+            float tolerance_log = std::log10(sim_context.minimization_tolerance);
+            if (ImGui::SliderFloat("Tolerance (log₁₀)", &tolerance_log, -8.0f, -3.0f, "%.1f")) {
+                sim_context.minimization_tolerance = std::pow(10.0, tolerance_log);
+            }
+            ImGui::Text("Current tolerance: %.1e kJ/mol", sim_context.minimization_tolerance);
+            
+            // Max iterations
+            ImGui::SliderInt("Max iterations", &sim_context.minimization_max_iterations, 100, 10000);
+            
+            // Minimization button
+            ImGui::Separator();
+            if (sim_context.system_initialized) {
                 if (ImGui::Button("Minimize Energy", ImVec2(-1, 0))) {
                     minimize_energy(state);
                 }
-                ImGui::TextWrapped("L-BFGS minimization with tolerance 1e-6 kJ/mol");
-                
-                ImGui::Separator();
-                
+                ImGui::TextWrapped("Perform L-BFGS energy minimization to optimize molecular structure.");
+            } else {
+                ImGui::BeginDisabled();
+                ImGui::Button("Minimize Energy (Initialize system first)", ImVec2(-1, 0));
+                ImGui::EndDisabled();
+            }
+            
+            // Show last energy if available
+            if (sim_context.last_energy != 0.0) {
+                ImGui::Text("Last computed energy: %.3f kJ/mol", sim_context.last_energy);
+            }
+            
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
+
+        // =========================
+        // PANEL 4: Molecular Dynamics Simulation
+        // =========================
+        if (ImGui::CollapsingHeader("Molecular Dynamics Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Indent();
+            
+            if (sim_context.system_initialized) {
                 // Simulation controls
-                ImGui::Text("Molecular Dynamics Simulation");
-                
                 if (!sim_context.simulation_running) {
                     if (ImGui::Button("Start Simulation", ImVec2(-1, 0))) {
                         sim_context.simulation_running = true;
@@ -824,52 +1017,131 @@ private:
                         MD_LOG_INFO("Starting molecular dynamics simulation");
                     }
                 } else {
+                    // Running controls
+                    ImGui::Columns(2, "SimControls", false);
+                    
                     if (!sim_context.simulation_paused) {
-                        if (ImGui::Button("Pause Simulation", ImVec2(-1, 0))) {
+                        if (ImGui::Button("Pause", ImVec2(-1, 0))) {
                             sim_context.simulation_paused = true;
                             MD_LOG_INFO("Simulation paused");
                         }
                     } else {
-                        if (ImGui::Button("Resume Simulation", ImVec2(-1, 0))) {
+                        if (ImGui::Button("Resume", ImVec2(-1, 0))) {
                             sim_context.simulation_paused = false;
                             MD_LOG_INFO("Simulation resumed");
                         }
                     }
                     
-                    ImGui::SameLine();
-                    if (ImGui::Button("Stop Simulation")) {
+                    ImGui::NextColumn();
+                    if (ImGui::Button("Stop", ImVec2(-1, 0))) {
                         sim_context.simulation_running = false;
                         sim_context.simulation_paused = false;
                         MD_LOG_INFO("Simulation stopped");
                     }
+                    
+                    ImGui::Columns(1);
                 }
                 
                 // Simulation status
                 if (sim_context.simulation_running || sim_context.simulation_frame > 0) {
                     ImGui::Separator();
-                    ImGui::Text("Simulation Status");
+                    ImGui::Text("Simulation Status:");
+                    
+                    ImGui::Columns(2, "Status", false);
                     ImGui::Text("Frame: %d", sim_context.simulation_frame);
                     ImGui::Text("Time: %.3f ps", sim_context.simulation_time);
+                    
+                    ImGui::NextColumn();
                     ImGui::Text("Timestep: %.3f ps", sim_context.timestep);
                     if (sim_context.last_energy != 0.0) {
                         ImGui::Text("Energy: %.3f kJ/mol", sim_context.last_energy);
                     }
+                    ImGui::Columns(1);
                     
+                    // Status indicator
                     if (sim_context.simulation_running) {
                         if (sim_context.simulation_paused) {
-                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Status: PAUSED");
+                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "● PAUSED");
                         } else {
-                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Status: RUNNING");
+                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "● RUNNING");
                         }
                     } else {
-                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Status: STOPPED");
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "● STOPPED");
                     }
                 }
+                
+            } else {
+                ImGui::BeginDisabled();
+                ImGui::Button("Start Simulation (Initialize system first)", ImVec2(-1, 0));
+                ImGui::EndDisabled();
+                ImGui::TextWrapped("Initialize the OpenMM system first before running simulations.");
             }
             
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Load a molecular structure first");
-            ImGui::TextDisabled("Use File → Open to load a PDB, XYZ, or other molecular file");
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
+
+        // =========================
+        // PANEL 5: Trajectory Export and Analysis
+        // =========================
+        if (ImGui::CollapsingHeader("Trajectory Export and Analysis")) {
+            ImGui::Indent();
+            
+            ImGui::Text("Trajectory Storage:");
+            ImGui::Text("Captured frames: %zu / %d", sim_context.trajectory_frames.size(), sim_context.max_trajectory_frames);
+            
+            // Trajectory storage settings
+            ImGui::SliderInt("Max frames to store", &sim_context.max_trajectory_frames, 100, 5000);
+            
+            if (!sim_context.trajectory_frames.empty()) {
+                ImGui::Separator();
+                ImGui::Text("Export Options:");
+                
+                // Export to VIAMD
+                if (ImGui::Button("Export Trajectory to VIAMD", ImVec2(-1, 0))) {
+                    export_trajectory_to_viamd(state);
+                }
+                ImGui::TextWrapped("Export captured trajectory frames for visualization in VIAMD.");
+                
+                // Trajectory playback controls
+                ImGui::Separator();
+                ImGui::Text("Trajectory Playback:");
+                
+                static int current_frame = 0;
+                if (ImGui::SliderInt("Frame", &current_frame, 0, (int)sim_context.trajectory_frames.size() - 1)) {
+                    load_trajectory_frame(state, current_frame);
+                }
+                
+                ImGui::Columns(3, "PlaybackControls", false);
+                if (ImGui::Button("First", ImVec2(-1, 0))) {
+                    current_frame = 0;
+                    load_trajectory_frame(state, current_frame);
+                }
+                ImGui::NextColumn();
+                if (ImGui::Button("Previous", ImVec2(-1, 0)) && current_frame > 0) {
+                    current_frame--;
+                    load_trajectory_frame(state, current_frame);
+                }
+                ImGui::NextColumn();
+                if (ImGui::Button("Next", ImVec2(-1, 0)) && current_frame < (int)sim_context.trajectory_frames.size() - 1) {
+                    current_frame++;
+                    load_trajectory_frame(state, current_frame);
+                }
+                ImGui::Columns(1);
+                
+                if (current_frame < sim_context.trajectory_times.size()) {
+                    ImGui::Text("Frame %d: t=%.3f ps, E=%.3f kJ/mol", 
+                               current_frame, 
+                               sim_context.trajectory_times[current_frame],
+                               sim_context.trajectory_energies[current_frame]);
+                }
+                
+            } else {
+                ImGui::TextDisabled("Run a simulation to capture trajectory frames.");
+            }
+            
+            ImGui::Unindent();
         }
 
         ImGui::End();
