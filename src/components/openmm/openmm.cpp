@@ -306,11 +306,14 @@ public:
 
     void draw_menu() {
 #ifdef VIAMD_ENABLE_OPENMM
+        // When OpenMM is available, show checkbox to toggle window
         ImGui::Checkbox("OpenMM Simulation", &show_window);
 #else
+        // When OpenMM is not available, show disabled menu with info
         if (ImGui::BeginMenu("OpenMM Simulation")) {
             ImGui::TextDisabled("OpenMM not available");
             ImGui::TextDisabled("Rebuild with VIAMD_ENABLE_OPENMM=ON");
+            ImGui::TextDisabled("and OpenMM libraries installed");
             ImGui::EndMenu();
         }
 #endif

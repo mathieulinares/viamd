@@ -128,9 +128,8 @@ if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
 endif()
 
-if (VIAMD_ENABLE_OPENMM)
-    set(COMP_FILES ${COMP_FILES} src/components/openmm/openmm.cpp)
-endif()
+# Always include OpenMM component - it handles both enabled and disabled states
+set(COMP_FILES ${COMP_FILES} src/components/openmm/openmm.cpp)
 
 set(SHADER_FILES 
     src/shaders/highlight.frag
