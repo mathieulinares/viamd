@@ -802,6 +802,78 @@ struct ApplicationState {
         uint64_t ir_fingerprint = 0;
     } script;
 
+#ifdef VIAMD_ENABLE_OPENMM
+    // OpenMM Simulation State
+    struct {
+        bool initialized = false;
+        bool running = false;
+        bool paused = false;
+        bool show_window = false;
+        
+        // Simulation parameters  
+        double timestep = 0.002; // ps - conservative for stability
+        double temperature = 300.0; // K
+        double friction = 1.0; // ps^-1
+        int steps_per_update = 10;
+        
+        // Current simulation state
+        int current_frame = 0;
+        double simulation_time = 0.0; // ps
+        
+        // Performance metrics
+        double steps_per_second = 0.0;
+        double last_update_time = 0.0;
+        
+        // Trajectory frame storage for real-time analysis
+        struct {
+            md_array(float*) stored_x = nullptr;  // Array of x coordinate arrays for each frame
+            md_array(float*) stored_y = nullptr;  // Array of y coordinate arrays for each frame  
+            md_array(float*) stored_z = nullptr;  // Array of z coordinate arrays for each frame
+            md_array(double) frame_times = nullptr;  // Time for each stored frame
+            md_array(double) frame_energies = nullptr;  // Energy for each stored frame
+            size_t atom_count = 0;  // Number of atoms per frame
+            int max_frames = 1000;  // Maximum frames to store
+            bool enabled = true;    // Whether to capture frames
+        } trajectory_capture;
+        
+        // Simulation presets for different molecule types
+        struct {
+            struct {
+                double temperature = 310.0; // K - body temperature
+                double timestep = 0.002; // ps
+                double friction = 1.0; // ps^-1
+            } protein;
+            
+            struct {
+                double temperature = 300.0; // K
+                double timestep = 0.001; // ps - smaller for nucleic acids
+                double friction = 5.0; // ps^-1 - higher friction
+            } nucleic_acid;
+            
+            struct {
+                double temperature = 300.0; // K
+                double timestep = 0.002; // ps
+                double friction = 1.0; // ps^-1
+            } small_molecule;
+            
+            struct {
+                double temperature = 400.0; // K - higher for membrane dynamics
+                double timestep = 0.002; // ps
+                double friction = 1.0; // ps^-1
+            } membrane;
+        } presets;
+        
+        // Export settings
+        struct {
+            bool export_velocities = false;
+            bool export_forces = false;
+            bool export_energies = true;
+            int frame_stride = 1; // Export every N frames
+            char output_format[32] = "XTC"; // XTC, DCD, PDB
+        } export_settings;
+    } simulation;
+#endif
+
     bool show_script_window = true;
     bool show_debug_window = false;
     bool show_property_export_window = false;

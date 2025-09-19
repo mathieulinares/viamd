@@ -46,6 +46,7 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_OPENMM "Enable OpenMM Integration" OFF)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
@@ -56,6 +57,66 @@ if (VIAMD_ENABLE_VELOXCHEM)
     set(MD_ENABLE_VLX ON CACHE BOOL "" FORCE)
     set(MD_VLX_BASIS_FOLDER "basis")
 endif ()
+
+# OpenMM configuration with enhanced detection
+if (VIAMD_ENABLE_OPENMM)
+    # Try standard CMake find_package first
+    find_package(OpenMM QUIET)
+    
+    # If not found, try enhanced detection methods
+    if (NOT OpenMM_FOUND)
+        # Check environment variable
+        if (DEFINED ENV{OPENMM_ROOT_DIR})
+            set(OpenMM_ROOT_DIR $ENV{OPENMM_ROOT_DIR})
+            find_package(OpenMM QUIET PATHS ${OpenMM_ROOT_DIR})
+        endif()
+        
+        # Try common conda installation paths
+        if (NOT OpenMM_FOUND)
+            execute_process(
+                COMMAND python -c "import openmm; print(openmm.__path__[0])"
+                OUTPUT_VARIABLE PYTHON_OPENMM_PATH
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if (PYTHON_OPENMM_PATH)
+                # Convert Python path to potential CMake config path
+                get_filename_component(CONDA_PREFIX "${PYTHON_OPENMM_PATH}" DIRECTORY)
+                get_filename_component(CONDA_PREFIX "${CONDA_PREFIX}" DIRECTORY)
+                set(POTENTIAL_OPENMM_DIRS
+                    "${CONDA_PREFIX}/lib/cmake/openmm"
+                    "${CONDA_PREFIX}/share/openmm/cmake"
+                    "${CONDA_PREFIX}/cmake"
+                )
+                find_package(OpenMM QUIET PATHS ${POTENTIAL_OPENMM_DIRS})
+            endif()
+        endif()
+        
+        # Try system paths as last resort
+        if (NOT OpenMM_FOUND)
+            set(SYSTEM_OPENMM_DIRS
+                "/usr/local/lib/cmake/openmm"
+                "/usr/lib/cmake/openmm"
+                "/opt/local/lib/cmake/openmm"
+                "/usr/local/share/openmm/cmake"
+                "/usr/share/openmm/cmake"
+            )
+            find_package(OpenMM QUIET PATHS ${SYSTEM_OPENMM_DIRS})
+        endif()
+    endif()
+    
+    if (OpenMM_FOUND)
+        message(STATUS "Found OpenMM: ${OpenMM_DIR}")
+        add_definitions(-DVIAMD_ENABLE_OPENMM)
+    else()
+        message(WARNING "OpenMM not found. OpenMM integration will be disabled.")
+        message(STATUS "To install OpenMM:")
+        message(STATUS "  conda install -c conda-forge openmm")
+        message(STATUS "  or pip install openmm")
+        message(STATUS "  or set OpenMM_DIR manually: cmake -DOpenMM_DIR=/path/to/openmm/cmake ..")
+        set(VIAMD_ENABLE_OPENMM OFF CACHE BOOL "Enable OpenMM Integration" FORCE)
+    endif()
+endif()
 
 if (APPLE)
     # Remove once we have proper support for Apple Silicon?
@@ -114,6 +175,9 @@ set(COMP_FILES
 if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
 endif()
+
+# Always include OpenMM component - it handles both enabled and disabled states
+set(COMP_FILES ${COMP_FILES} src/components/openmm/openmm.cpp)
 
 set(SHADER_FILES 
     src/shaders/highlight.frag
@@ -228,3 +292,9 @@ target_link_libraries(viamd
     imgui_notify
     ${VIAMD_STDLIBS}
 )
+
+# Add OpenMM libraries if enabled
+if (VIAMD_ENABLE_OPENMM AND OpenMM_FOUND)
+    target_link_libraries(viamd ${OpenMM_LIBRARIES})
+    target_include_directories(viamd PRIVATE ${OpenMM_INCLUDE_DIRS})
+endif()
