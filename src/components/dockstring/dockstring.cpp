@@ -285,9 +285,7 @@ struct DockstringComponent : viamd::EventHandler {
         error_message[0] = '\0';
         
         if (use_loaded_protein) {
-            strcpy(info_message, "Starting docking against loaded protein... (using DRD2 target for now)");
-            // TODO: Implement custom target from loaded protein
-            // For now, we'll use a default target but note that we're using the loaded protein
+            strcpy(info_message, "Starting docking calculation... Note: Using DRD2 target (loaded protein support in development)");
         } else {
             strcpy(info_message, "Starting docking calculation...");
         }
@@ -343,7 +341,16 @@ struct DockstringComponent : viamd::EventHandler {
         fprintf(f, "import sys\n");
         fprintf(f, "try:\n");
         fprintf(f, "    from dockstring import load_target\n");
-        fprintf(f, "    target = load_target('%s')\n", target_protein);
+        
+        // Determine which target to use
+        const char* actual_target = target_protein;
+        if (use_loaded_protein) {
+            // For now, we use a default target when loaded protein is selected
+            // TODO: Implement proper custom target creation from loaded protein
+            actual_target = "DRD2";  // Default fallback
+        }
+        
+        fprintf(f, "    target = load_target('%s')\n", actual_target);
         fprintf(f, "    score, result_data = target.dock('%s')\n", smiles_input);
         fprintf(f, "    with open('%s', 'w') as out:\n", output_path);
         fprintf(f, "        out.write(f'SCORE:{score}\\n')\n");
@@ -372,36 +379,41 @@ struct DockstringComponent : viamd::EventHandler {
 
         char line[1024];
         bool score_found = false;
+        bool reading_pdb = false;
+        
+        // Reset arena for PDB data
+        md_arena_allocator_reset(arena);
+        size_t pdb_size = 0;
+        char* pdb_data = nullptr;
         
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "SCORE:", 6) == 0) {
                 docking_result.score = atof(line + 6);
                 score_found = true;
             } else if (strncmp(line, "PDB_DATA:", 9) == 0) {
-                // Read PDB data
-                md_arena_allocator_reset(arena);
+                reading_pdb = true;
+                // Continue to next line to start reading PDB data
+            } else if (reading_pdb) {
+                // Accumulate PDB data
+                size_t line_len = strlen(line);
+                char* new_pdb_data = (char*)md_arena_allocator_push(arena, pdb_size + line_len + 1);
                 
-                size_t pdb_size = 0;
-                char* pdb_data = nullptr;
-                
-                // Read remaining file content
-                fseek(f, 0, SEEK_END);
-                long file_size = ftell(f);
-                fseek(f, ftell(f) - (file_size - ftell(f)), SEEK_SET);
-                
-                while (fgets(line, sizeof(line), f)) {
-                    size_t line_len = strlen(line);
-                    pdb_data = (char*)md_arena_allocator_push(arena, pdb_size + line_len + 1);
-                    if (pdb_size > 0) {
-                        memcpy(pdb_data, docking_result.ligand_pdb_data.ptr, pdb_size);
-                    }
-                    memcpy(pdb_data + pdb_size, line, line_len);
-                    pdb_size += line_len;
-                    pdb_data[pdb_size] = '\0';
-                    
-                    docking_result.ligand_pdb_data = {pdb_data, pdb_size};
+                if (pdb_size > 0 && pdb_data) {
+                    memcpy(new_pdb_data, pdb_data, pdb_size);
                 }
+                memcpy(new_pdb_data + pdb_size, line, line_len);
+                pdb_size += line_len;
+                new_pdb_data[pdb_size] = '\0';
+                
+                pdb_data = new_pdb_data;
             }
+        }
+        
+        // Store the accumulated PDB data
+        if (reading_pdb && pdb_data && pdb_size > 0) {
+            docking_result.ligand_pdb_data = {pdb_data, pdb_size};
+        } else {
+            docking_result.ligand_pdb_data = {nullptr, 0};
         }
         
         fclose(f);
