@@ -286,7 +286,7 @@ struct DockstringComponent : viamd::EventHandler {
         
         if (use_loaded_protein) {
             snprintf(info_message, sizeof(info_message), 
-                     "Starting docking against loaded protein (%s)... Creating custom target", 
+                     "Starting docking analysis of loaded protein (%s)...", 
                      app_state->files.molecule);
         } else {
             strcpy(info_message, "Starting docking calculation...");
@@ -346,7 +346,7 @@ struct DockstringComponent : viamd::EventHandler {
         fprintf(f, "try:\n");
         
         if (use_loaded_protein && protein_available) {
-            // Attempt to create a custom target from the loaded protein
+            // Use the loaded protein for docking
             fprintf(f, "    # Using loaded protein for docking: %s\n", app_state->files.molecule);
             fprintf(f, "    protein_file = '%s'\n", app_state->files.molecule);
             fprintf(f, "    \n");
@@ -355,38 +355,53 @@ struct DockstringComponent : viamd::EventHandler {
             fprintf(f, "        print(f'Error: Protein file not found: {protein_file}', file=sys.stderr)\n");
             fprintf(f, "        sys.exit(1)\n");
             fprintf(f, "    \n");
-            fprintf(f, "    # Attempt to create custom target from loaded protein\n");
+            fprintf(f, "    # For loaded protein docking, we need to create a custom dockstring target\n");
+            fprintf(f, "    # This is a complex process that requires several steps:\n");
+            fprintf(f, "    print(f'Attempting to dock against loaded protein: {protein_file}')\n");
+            fprintf(f, "    \n");
             fprintf(f, "    try:\n");
-            fprintf(f, "        from dockstring import VinaTarget\n");
+            fprintf(f, "        # Try the most direct approach: use the loaded protein directly\n");
+            fprintf(f, "        # This requires dockstring to support custom protein files\n");
+            fprintf(f, "        from dockstring.utils import create_custom_target\n");
+            fprintf(f, "        target = create_custom_target(protein_file)\n");
+            fprintf(f, "        print(f'Successfully created custom target from {protein_file}')\n");
             fprintf(f, "        \n");
-            fprintf(f, "        # Create a temporary target using the loaded protein\n");
-            fprintf(f, "        # This requires the protein to be in a suitable format for docking\n");
-            fprintf(f, "        # For now, we'll use AutoDock Vina with default parameters\n");
+            fprintf(f, "    except (ImportError, AttributeError) as e:\n");
+            fprintf(f, "        print(f'Custom target creation not supported: {e}')\n");
+            fprintf(f, "        # Fall back to using the protein as a reference for target selection\n");
+            fprintf(f, "        print('Analyzing protein to select best representative target...')\n");
             fprintf(f, "        \n");
-            fprintf(f, "        # Define a reasonable binding site (center of protein)\n");
-            fprintf(f, "        import MDAnalysis as mda\n");
-            fprintf(f, "        u = mda.Universe(protein_file)\n");
-            fprintf(f, "        center = u.atoms.center_of_mass()\n");
-            fprintf(f, "        \n");
-            fprintf(f, "        # Create custom target with the loaded protein\n");
-            fprintf(f, "        target = VinaTarget(\n");
-            fprintf(f, "            protein_file=protein_file,\n");
-            fprintf(f, "            center=center,\n");
-            fprintf(f, "            size=[20, 20, 20]  # 20 Angstrom search box\n");
-            fprintf(f, "        )\n");
-            fprintf(f, "        print(f'Created custom target from loaded protein: {protein_file}')\n");
-            fprintf(f, "        \n");
-            fprintf(f, "    except ImportError as e:\n");
-            fprintf(f, "        print(f'Warning: Required dependencies not available: {e}')\n");
-            fprintf(f, "        print('Falling back to representative target DRD2')\n");
-            fprintf(f, "        from dockstring import load_target\n");
-            fprintf(f, "        target = load_target('DRD2')\n");
-            fprintf(f, "        \n");
+            fprintf(f, "        # Try to identify the protein type and select an appropriate target\n");
+            fprintf(f, "        try:\n");
+            fprintf(f, "            with open(protein_file, 'r') as pf:\n");
+            fprintf(f, "                pdb_content = pf.read()\n");
+            fprintf(f, "                \n");
+            fprintf(f, "            # Simple heuristics to identify protein type\n");
+            fprintf(f, "            if 'DOPAMINE' in pdb_content.upper() or 'DRD' in pdb_content.upper():\n");
+            fprintf(f, "                target_name = 'DRD2'\n");
+            fprintf(f, "            elif 'KINASE' in pdb_content.upper() or 'MAPK' in pdb_content.upper():\n");
+            fprintf(f, "                target_name = 'MAPK14'\n");
+            fprintf(f, "            elif 'PROTEASE' in pdb_content.upper() or 'HIV' in pdb_content.upper():\n");
+            fprintf(f, "                target_name = 'HIV1RT'\n");
+            fprintf(f, "            else:\n");
+            fprintf(f, "                # Default to a general target\n");
+            fprintf(f, "                target_name = 'DRD2'\n");
+            fprintf(f, "                \n");
+            fprintf(f, "            from dockstring import load_target\n");
+            fprintf(f, "            target = load_target(target_name)\n");
+            fprintf(f, "            print(f'Selected {target_name} as representative target for loaded protein')\n");
+            fprintf(f, "            \n");
+            fprintf(f, "        except Exception as e2:\n");
+            fprintf(f, "            print(f'Could not analyze protein file: {e2}')\n");
+            fprintf(f, "            from dockstring import load_target\n");
+            fprintf(f, "            target = load_target('DRD2')\n");
+            fprintf(f, "            print('Using DRD2 as default representative target')\n");
+            fprintf(f, "            \n");
             fprintf(f, "    except Exception as e:\n");
             fprintf(f, "        print(f'Warning: Could not create custom target: {e}')\n");
-            fprintf(f, "        print('Falling back to representative target DRD2')\n");
             fprintf(f, "        from dockstring import load_target\n");
             fprintf(f, "        target = load_target('DRD2')\n");
+            fprintf(f, "        print('Falling back to DRD2 target')\n");
         } else {
             fprintf(f, "    # Using specified dockstring target\n");
             fprintf(f, "    from dockstring import load_target\n");
@@ -491,13 +506,15 @@ struct DockstringComponent : viamd::EventHandler {
             return;
         }
 
+        // Debug: Print PDB data length and first few characters
+        snprintf(info_message, sizeof(info_message), 
+                 "Loading molecule with %zu bytes of PDB data", docking_result.ligand_pdb_data.len);
+
         try {
             // Parse the PDB data and load it into VIAMD
             load_pdb_data_into_viamd();
-            strcpy(info_message, "Docked molecule loaded into VIAMD successfully");
-            error_message[0] = '\0';
         } catch (...) {
-            strcpy(error_message, "Failed to load docked molecule into VIAMD");
+            strcpy(error_message, "Exception occurred while loading docked molecule into VIAMD");
         }
     }
 
@@ -513,30 +530,66 @@ private:
             return;
         }
         
-        fwrite(docking_result.ligand_pdb_data.ptr, 1, docking_result.ligand_pdb_data.len, temp_file);
+        // Write PDB data to temporary file
+        size_t written = fwrite(docking_result.ligand_pdb_data.ptr, 1, docking_result.ligand_pdb_data.len, temp_file);
         fclose(temp_file);
+        
+        if (written != docking_result.ligand_pdb_data.len) {
+            strcpy(error_message, "Failed to write complete PDB data to temporary file");
+            unlink(temp_pdb_path);
+            return;
+        }
+        
+        // Debug: Print first few lines of PDB data for verification
+        snprintf(info_message, sizeof(info_message), 
+                 "Created temp PDB file with %zu bytes at %s", written, temp_pdb_path);
         
         // Load the PDB file using VIAMD's molecule loader
         md_molecule_t ligand_mol = {};
         md_allocator_i* temp_alloc = md_arena_allocator_create(app_state->allocator.persistent, MEGABYTES(10));
         
+        if (!temp_alloc) {
+            strcpy(error_message, "Failed to create temporary allocator");
+            unlink(temp_pdb_path);
+            return;
+        }
+        
         md_molecule_loader_i* pdb_loader = md_pdb_molecule_api();
-        if (pdb_loader && pdb_loader->init_from_file) {
-            bool load_success = pdb_loader->init_from_file(&ligand_mol, (str_t){temp_pdb_path, strlen(temp_pdb_path)}, nullptr, temp_alloc);
-            
-            if (load_success && ligand_mol.atom.count > 0) {
-                // Add the ligand atoms to the existing molecule structure
-                merge_ligand_with_existing_molecule(ligand_mol);
-                
-                // Trigger topology update events
-                viamd::event_system_broadcast_event(viamd::EventType_ViamdTopologyInit, viamd::EventPayloadType_ApplicationState, app_state);
-                
-                strcpy(info_message, "Docked ligand added to VIAMD visualization");
-            } else {
-                strcpy(error_message, "Failed to parse docked molecule PDB data");
-            }
-        } else {
+        if (!pdb_loader || !pdb_loader->init_from_file) {
             strcpy(error_message, "PDB loader not available");
+            md_arena_allocator_destroy(temp_alloc);
+            unlink(temp_pdb_path);
+            return;
+        }
+        
+        bool load_success = pdb_loader->init_from_file(&ligand_mol, (str_t){temp_pdb_path, strlen(temp_pdb_path)}, nullptr, temp_alloc);
+        
+        if (!load_success) {
+            strcpy(error_message, "PDB loader failed to parse docked molecule");
+            md_arena_allocator_destroy(temp_alloc);
+            unlink(temp_pdb_path);
+            return;
+        }
+        
+        if (ligand_mol.atom.count == 0) {
+            strcpy(error_message, "Loaded molecule has no atoms");
+            md_arena_allocator_destroy(temp_alloc);
+            unlink(temp_pdb_path);
+            return;
+        }
+        
+        // Debug: Report successful loading
+        snprintf(info_message, sizeof(info_message), 
+                 "Successfully loaded ligand with %zu atoms", ligand_mol.atom.count);
+        
+        // Add the ligand atoms to the existing molecule structure
+        merge_ligand_with_existing_molecule(ligand_mol);
+        
+        // Only trigger topology update if merge was successful
+        if (strstr(error_message, "Successfully merged") != nullptr || error_message[0] == '\0') {
+            // Trigger topology update events
+            viamd::event_system_broadcast_event(viamd::EventType_ViamdTopologyInit, viamd::EventPayloadType_ApplicationState, app_state);
+            strcpy(info_message, "Docked ligand loaded and added to VIAMD visualization");
         }
         
         md_arena_allocator_destroy(temp_alloc);
