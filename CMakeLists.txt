@@ -46,6 +46,7 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_DOCKSTRING "Enable Dockstring Integration" ON)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
@@ -113,6 +114,10 @@ set(COMP_FILES
 
 if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
+endif()
+
+if (VIAMD_ENABLE_DOCKSTRING)
+    set(COMP_FILES ${COMP_FILES} src/components/dockstring/dockstring.cpp)
 endif()
 
 set(SHADER_FILES 
@@ -187,6 +192,10 @@ if (VIAMD_ENABLE_DEFAULT_DATASET)
     create_copy_resource_dir_target(viamd_copy_datasets "${CMAKE_CURRENT_SOURCE_DIR}/datasets"      "${VIAMD_BIN_DIR}/datasets")
     add_dependencies(viamd viamd_copy_datasets)
     set(VIAMD_DEFINES ${VIAMD_DEFINES} VIAMD_DATASET_DIR=\"datasets\")
+endif()
+
+if (VIAMD_ENABLE_DOCKSTRING)
+    set(VIAMD_DEFINES ${VIAMD_DEFINES} VIAMD_ENABLE_DOCKSTRING)
 endif()
 
 target_compile_definitions(viamd PRIVATE
