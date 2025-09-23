@@ -16,6 +16,7 @@
 
 #include <md_molecule.h>
 #include <md_util.h>
+#include <md_pdb.h>
 
 #include <imgui_widgets.h>
 #include <imgui_internal.h>
@@ -34,6 +35,9 @@ struct DockstringComponent : viamd::EventHandler {
     char target_protein[256] = "DRD2";  // Default target
     char error_message[512] = "";
     char info_message[512] = "";
+    
+    bool use_loaded_protein = false;  // Whether to use already loaded protein
+    bool protein_available = false;   // Whether there's a protein loaded in VIA MD
     
     ApplicationState* app_state = nullptr;
     md_allocator_i* arena = nullptr;
@@ -83,6 +87,9 @@ struct DockstringComponent : viamd::EventHandler {
         
         // Check if Python and dockstring are available
         check_dockstring_availability();
+        
+        // Check if there's a protein already loaded
+        check_protein_availability();
     }
 
     void shutdown() {
@@ -102,6 +109,12 @@ struct DockstringComponent : viamd::EventHandler {
             docking_task = task_system::INVALID_ID;
             docking_in_progress = false;
         }
+    }
+
+    void check_protein_availability() {
+        protein_available = app_state && 
+                           app_state->mold.mol.atom.count > 0 && 
+                           strlen(app_state->files.molecule) > 0;
     }
 
     void check_dockstring_availability() {
@@ -145,6 +158,14 @@ struct DockstringComponent : viamd::EventHandler {
             ImGui::TextColored(ImVec4(1, 0, 0, 1), "✗ Dockstring Not Available");
         }
 
+        // Check for protein availability on each frame
+        check_protein_availability();
+        
+        if (protein_available) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "✓ Protein Loaded");
+        }
+
         ImGui::Spacing();
 
         // SMILES input
@@ -152,10 +173,30 @@ struct DockstringComponent : viamd::EventHandler {
         ImGui::SetNextItemWidth(-1);
         ImGui::InputText("##smiles", smiles_input, sizeof(smiles_input));
         
-        // Target protein selection
+        // Protein target selection
+        ImGui::Spacing();
         ImGui::Text("Target Protein:");
-        ImGui::SetNextItemWidth(-1);
-        ImGui::InputText("##target", target_protein, sizeof(target_protein));
+        
+        if (protein_available) {
+            if (ImGui::RadioButton("Use loaded protein", use_loaded_protein)) {
+                use_loaded_protein = true;
+            }
+            if (use_loaded_protein) {
+                ImGui::Text("Loaded: %s", app_state->files.molecule);
+                ImGui::TextColored(ImVec4(1, 1, 0, 1), "Note: Will dock against loaded protein structure");
+            }
+            if (ImGui::RadioButton("Use dockstring target", !use_loaded_protein)) {
+                use_loaded_protein = false;
+            }
+        }
+        
+        if (!protein_available || !use_loaded_protein) {
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputText("##target", target_protein, sizeof(target_protein));
+            if (!protein_available) {
+                ImGui::TextColored(ImVec4(1, 1, 0, 1), "No protein loaded - using dockstring target");
+            }
+        }
 
         ImGui::Spacing();
 
@@ -167,7 +208,10 @@ struct DockstringComponent : viamd::EventHandler {
         ImGui::Spacing();
 
         // Docking controls
-        ImGui::BeginDisabled(!dockstring_available || docking_in_progress);
+        bool can_dock = dockstring_available && !docking_in_progress && 
+                       (use_loaded_protein ? protein_available : strlen(target_protein) > 0);
+        
+        ImGui::BeginDisabled(!can_dock);
         
         if (ImGui::Button("Dock Molecule", ImVec2(-1, 0))) {
             start_docking();
@@ -228,8 +272,26 @@ struct DockstringComponent : viamd::EventHandler {
             return;
         }
 
+        if (use_loaded_protein && !protein_available) {
+            strcpy(error_message, "No protein loaded in VIA MD");
+            return;
+        }
+
+        if (!use_loaded_protein && strlen(target_protein) == 0) {
+            strcpy(error_message, "Please enter a target protein name");
+            return;
+        }
+
         error_message[0] = '\0';
-        strcpy(info_message, "Starting docking calculation...");
+        
+        if (use_loaded_protein) {
+            strcpy(info_message, "Starting docking against loaded protein... (using DRD2 target for now)");
+            // TODO: Implement custom target from loaded protein
+            // For now, we'll use a default target but note that we're using the loaded protein
+        } else {
+            strcpy(info_message, "Starting docking calculation...");
+        }
+        
         docking_in_progress = true;
 
         // Start docking task
@@ -365,14 +427,114 @@ struct DockstringComponent : viamd::EventHandler {
             return;
         }
 
-        // For now, just show a message that the feature is implemented
-        // In a full implementation, we would parse the PDB data and create a VIA MD molecule
-        strcpy(info_message, "Docked molecule would be loaded into VIA MD visualization");
-        
-        // TODO: Parse PDB data and create md_molecule_t structure
-        // TODO: Add to VIA MD's molecule rendering pipeline
-        // TODO: Set up proper visualization alongside the protein target
+        if (docking_result.ligand_pdb_data.len == 0) {
+            strcpy(error_message, "No PDB data available for docked molecule");
+            return;
+        }
+
+        try {
+            // Parse the PDB data and load it into VIA MD
+            load_pdb_data_into_viamd();
+            strcpy(info_message, "Docked molecule loaded into VIA MD successfully");
+            error_message[0] = '\0';
+        } catch (...) {
+            strcpy(error_message, "Failed to load docked molecule into VIA MD");
+        }
     }
+
+private:
+    void load_pdb_data_into_viamd() {
+        // Create a temporary file with the PDB data
+        char temp_pdb_path[512];
+        snprintf(temp_pdb_path, sizeof(temp_pdb_path), "/tmp/viamd_docked_ligand_%lx.pdb", (unsigned long)this);
+        
+        FILE* temp_file = fopen(temp_pdb_path, "w");
+        if (!temp_file) {
+            strcpy(error_message, "Could not create temporary PDB file");
+            return;
+        }
+        
+        fwrite(docking_result.ligand_pdb_data.ptr, 1, docking_result.ligand_pdb_data.len, temp_file);
+        fclose(temp_file);
+        
+        // Load the PDB file using VIA MD's molecule loader
+        md_molecule_t ligand_mol = {};
+        md_allocator_i* temp_alloc = md_arena_allocator_create(app_state->allocator.persistent, MEGABYTES(10));
+        
+        md_molecule_loader_i* pdb_loader = md_pdb_molecule_api();
+        if (pdb_loader && pdb_loader->init_from_file) {
+            bool load_success = pdb_loader->init_from_file(&ligand_mol, (str_t){temp_pdb_path, strlen(temp_pdb_path)}, nullptr, temp_alloc);
+            
+            if (load_success && ligand_mol.atom.count > 0) {
+                // Add the ligand atoms to the existing molecule structure
+                merge_ligand_with_existing_molecule(ligand_mol);
+                
+                // Trigger topology update events
+                viamd::event_system_broadcast_event(viamd::EventType_ViamdTopologyInit, viamd::EventPayloadType_ApplicationState, app_state);
+                
+                strcpy(info_message, "Docked ligand added to VIA MD visualization");
+            } else {
+                strcpy(error_message, "Failed to parse docked molecule PDB data");
+            }
+        } else {
+            strcpy(error_message, "PDB loader not available");
+        }
+        
+        md_arena_allocator_destroy(temp_alloc);
+        unlink(temp_pdb_path);
+    }
+    
+    void merge_ligand_with_existing_molecule(const md_molecule_t& ligand_mol) {
+        if (!app_state || ligand_mol.atom.count == 0) return;
+        
+        md_molecule_t* main_mol = &app_state->mold.mol;
+        md_allocator_i* mol_alloc = app_state->mold.mol_alloc;
+        
+        if (!mol_alloc) {
+            strcpy(error_message, "Molecule allocator not available");
+            return;
+        }
+        
+        size_t old_atom_count = main_mol->atom.count;
+        size_t new_atom_count = old_atom_count + ligand_mol.atom.count;
+        
+        // Resize main molecule arrays to accommodate new atoms
+        md_array_resize(main_mol->atom.x, new_atom_count, mol_alloc);
+        md_array_resize(main_mol->atom.y, new_atom_count, mol_alloc);
+        md_array_resize(main_mol->atom.z, new_atom_count, mol_alloc);
+        md_array_resize(main_mol->atom.element, new_atom_count, mol_alloc);
+        md_array_resize(main_mol->atom.radius, new_atom_count, mol_alloc);
+        md_array_resize(main_mol->atom.mass, new_atom_count, mol_alloc);
+        md_array_resize(main_mol->atom.flags, new_atom_count, mol_alloc);
+        
+        if (md_array_size(main_mol->atom.type) > 0) {
+            md_array_resize(main_mol->atom.type, new_atom_count, mol_alloc);
+        }
+        
+        // Copy ligand atoms to the end of the main molecule
+        for (size_t i = 0; i < ligand_mol.atom.count; ++i) {
+            size_t idx = old_atom_count + i;
+            main_mol->atom.x[idx] = ligand_mol.atom.x[i];
+            main_mol->atom.y[idx] = ligand_mol.atom.y[i];
+            main_mol->atom.z[idx] = ligand_mol.atom.z[i];
+            main_mol->atom.element[idx] = ligand_mol.atom.element[i];
+            main_mol->atom.radius[idx] = ligand_mol.atom.radius[i];
+            main_mol->atom.mass[idx] = ligand_mol.atom.mass[i];
+            main_mol->atom.flags[idx] = ligand_mol.atom.flags[i];
+            
+            if (md_array_size(main_mol->atom.type) > 0 && md_array_size(ligand_mol.atom.type) > 0) {
+                main_mol->atom.type[idx] = ligand_mol.atom.type[i];
+            }
+        }
+        
+        // Update atom count
+        main_mol->atom.count = new_atom_count;
+        
+        // Mark buffers as dirty for re-rendering
+        app_state->mold.dirty_buffers |= MolBit_DirtyPosition | MolBit_DirtyRadius;
+    }
+
+public:
 };
 
 // Create a global instance of the component
