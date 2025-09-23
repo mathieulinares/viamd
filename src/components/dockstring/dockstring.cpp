@@ -286,7 +286,7 @@ struct DockstringComponent : viamd::EventHandler {
         
         if (use_loaded_protein) {
             snprintf(info_message, sizeof(info_message), 
-                     "Starting docking against loaded protein (%s)... Using representative target for calculation", 
+                     "Starting docking against loaded protein (%s)... Creating custom target", 
                      app_state->files.molecule);
         } else {
             strcpy(info_message, "Starting docking calculation...");
@@ -342,25 +342,54 @@ struct DockstringComponent : viamd::EventHandler {
         fprintf(f, "#!/usr/bin/env python3\n");
         fprintf(f, "import sys\n");
         fprintf(f, "import os\n");
+        fprintf(f, "import tempfile\n");
         fprintf(f, "try:\n");
-        fprintf(f, "    from dockstring import load_target\n");
         
         if (use_loaded_protein && protein_available) {
-            fprintf(f, "    # Attempting to use loaded protein: %s\n", app_state->files.molecule);
-            fprintf(f, "    loaded_protein = '%s'\n", app_state->files.molecule);
-            fprintf(f, "    print(f'Note: Loaded protein detected: {loaded_protein}')\n");
+            // Attempt to create a custom target from the loaded protein
+            fprintf(f, "    # Using loaded protein for docking: %s\n", app_state->files.molecule);
+            fprintf(f, "    protein_file = '%s'\n", app_state->files.molecule);
             fprintf(f, "    \n");
-            fprintf(f, "    # TODO: Full custom target support would require:\n");
-            fprintf(f, "    # 1. Converting PDB to PDBQT format\n");
-            fprintf(f, "    # 2. Defining binding site/search box\n");
-            fprintf(f, "    # 3. Creating custom dockstring target\n");
-            fprintf(f, "    # For now, using representative target\n");
+            fprintf(f, "    # Check if protein file exists\n");
+            fprintf(f, "    if not os.path.exists(protein_file):\n");
+            fprintf(f, "        print(f'Error: Protein file not found: {protein_file}', file=sys.stderr)\n");
+            fprintf(f, "        sys.exit(1)\n");
             fprintf(f, "    \n");
-            fprintf(f, "    # Use a representative target for now\n");
-            fprintf(f, "    target = load_target('DRD2')\n");
-            fprintf(f, "    print('Using DRD2 as representative target for loaded protein')\n");
+            fprintf(f, "    # Attempt to create custom target from loaded protein\n");
+            fprintf(f, "    try:\n");
+            fprintf(f, "        from dockstring import VinaTarget\n");
+            fprintf(f, "        \n");
+            fprintf(f, "        # Create a temporary target using the loaded protein\n");
+            fprintf(f, "        # This requires the protein to be in a suitable format for docking\n");
+            fprintf(f, "        # For now, we'll use AutoDock Vina with default parameters\n");
+            fprintf(f, "        \n");
+            fprintf(f, "        # Define a reasonable binding site (center of protein)\n");
+            fprintf(f, "        import MDAnalysis as mda\n");
+            fprintf(f, "        u = mda.Universe(protein_file)\n");
+            fprintf(f, "        center = u.atoms.center_of_mass()\n");
+            fprintf(f, "        \n");
+            fprintf(f, "        # Create custom target with the loaded protein\n");
+            fprintf(f, "        target = VinaTarget(\n");
+            fprintf(f, "            protein_file=protein_file,\n");
+            fprintf(f, "            center=center,\n");
+            fprintf(f, "            size=[20, 20, 20]  # 20 Angstrom search box\n");
+            fprintf(f, "        )\n");
+            fprintf(f, "        print(f'Created custom target from loaded protein: {protein_file}')\n");
+            fprintf(f, "        \n");
+            fprintf(f, "    except ImportError as e:\n");
+            fprintf(f, "        print(f'Warning: Required dependencies not available: {e}')\n");
+            fprintf(f, "        print('Falling back to representative target DRD2')\n");
+            fprintf(f, "        from dockstring import load_target\n");
+            fprintf(f, "        target = load_target('DRD2')\n");
+            fprintf(f, "        \n");
+            fprintf(f, "    except Exception as e:\n");
+            fprintf(f, "        print(f'Warning: Could not create custom target: {e}')\n");
+            fprintf(f, "        print('Falling back to representative target DRD2')\n");
+            fprintf(f, "        from dockstring import load_target\n");
+            fprintf(f, "        target = load_target('DRD2')\n");
         } else {
             fprintf(f, "    # Using specified dockstring target\n");
+            fprintf(f, "    from dockstring import load_target\n");
             fprintf(f, "    target = load_target('%s')\n", target_protein);
             fprintf(f, "    print(f'Using dockstring target: %s')\n", target_protein);
         }
@@ -528,19 +557,50 @@ private:
             return;
         }
         
-        // Basic validation of molecule structures
-        if (!main_mol->atom.x || !main_mol->atom.y || !main_mol->atom.z) {
-            strcpy(error_message, "Main molecule structure is invalid");
+        // Check if main molecule has any atoms at all
+        if (main_mol->atom.count == 0) {
+            strcpy(error_message, "No existing molecule to merge with - please load a protein first");
             return;
         }
         
-        if (!ligand_mol.atom.x || !ligand_mol.atom.y || !ligand_mol.atom.z) {
-            strcpy(error_message, "Ligand molecule structure is invalid");
+        // Basic validation of molecule structures
+        if (!main_mol->atom.x || !main_mol->atom.y || !main_mol->atom.z ||
+            !main_mol->atom.element || !main_mol->atom.radius || 
+            !main_mol->atom.mass || !main_mol->atom.flags) {
+            strcpy(error_message, "Main molecule structure is incomplete");
+            return;
+        }
+        
+        if (!ligand_mol.atom.x || !ligand_mol.atom.y || !ligand_mol.atom.z ||
+            !ligand_mol.atom.element || !ligand_mol.atom.radius || 
+            !ligand_mol.atom.mass || !ligand_mol.atom.flags) {
+            strcpy(error_message, "Ligand molecule structure is incomplete");
+            return;
+        }
+        
+        // Validate current array sizes match atom count
+        if (md_array_size(main_mol->atom.x) < main_mol->atom.count ||
+            md_array_size(main_mol->atom.y) < main_mol->atom.count ||
+            md_array_size(main_mol->atom.z) < main_mol->atom.count) {
+            strcpy(error_message, "Main molecule array sizes are inconsistent");
+            return;
+        }
+        
+        if (md_array_size(ligand_mol.atom.x) < ligand_mol.atom.count ||
+            md_array_size(ligand_mol.atom.y) < ligand_mol.atom.count ||
+            md_array_size(ligand_mol.atom.z) < ligand_mol.atom.count) {
+            strcpy(error_message, "Ligand molecule array sizes are inconsistent");
             return;
         }
         
         size_t old_atom_count = main_mol->atom.count;
         size_t new_atom_count = old_atom_count + ligand_mol.atom.count;
+        
+        // Sanity check: Don't allow merging if it would create a huge molecule
+        if (new_atom_count > 1000000) {  // 1 million atoms limit
+            strcpy(error_message, "Resulting molecule would be too large");
+            return;
+        }
         
         // Resize main molecule arrays to accommodate new atoms
         md_array_resize(main_mol->atom.x, new_atom_count, mol_alloc);
@@ -551,26 +611,38 @@ private:
         md_array_resize(main_mol->atom.mass, new_atom_count, mol_alloc);
         md_array_resize(main_mol->atom.flags, new_atom_count, mol_alloc);
         
-        if (md_array_size(main_mol->atom.type) > 0) {
-            md_array_resize(main_mol->atom.type, new_atom_count, mol_alloc);
-        }
-        
-        // Verify that arrays were resized correctly before copying
-        if (md_array_size(main_mol->atom.x) < new_atom_count) {
-            strcpy(error_message, "Failed to resize molecule arrays");
+        // Verify that arrays were resized correctly before continuing
+        if (md_array_size(main_mol->atom.x) < new_atom_count ||
+            md_array_size(main_mol->atom.y) < new_atom_count ||
+            md_array_size(main_mol->atom.z) < new_atom_count) {
+            strcpy(error_message, "Failed to resize molecule arrays - insufficient memory");
             return;
         }
         
-        // Copy ligand atoms to the end of the main molecule
+        // Handle optional atom type array
+        bool has_main_types = md_array_size(main_mol->atom.type) > 0;
+        bool has_ligand_types = md_array_size(ligand_mol.atom.type) > 0;
+        
+        if (has_main_types) {
+            md_array_resize(main_mol->atom.type, new_atom_count, mol_alloc);
+            if (md_array_size(main_mol->atom.type) < new_atom_count) {
+                strcpy(error_message, "Failed to resize atom type array");
+                return;
+            }
+        }
+        
+        // Copy ligand atoms to the end of the main molecule with careful bounds checking
         for (size_t i = 0; i < ligand_mol.atom.count; ++i) {
             size_t idx = old_atom_count + i;
             
-            // Basic bounds checking
-            if (idx >= new_atom_count) {
+            // Triple-check bounds
+            if (idx >= new_atom_count || idx >= md_array_size(main_mol->atom.x) || 
+                i >= ligand_mol.atom.count || i >= md_array_size(ligand_mol.atom.x)) {
                 strcpy(error_message, "Index out of bounds during atom copy");
                 return;
             }
             
+            // Copy atomic data
             main_mol->atom.x[idx] = ligand_mol.atom.x[i];
             main_mol->atom.y[idx] = ligand_mol.atom.y[i];
             main_mol->atom.z[idx] = ligand_mol.atom.z[i];
@@ -579,16 +651,21 @@ private:
             main_mol->atom.mass[idx] = ligand_mol.atom.mass[i];
             main_mol->atom.flags[idx] = ligand_mol.atom.flags[i];
             
-            if (md_array_size(main_mol->atom.type) > 0 && md_array_size(ligand_mol.atom.type) > 0) {
+            // Copy atom type if both molecules have it
+            if (has_main_types && has_ligand_types && 
+                idx < md_array_size(main_mol->atom.type) && 
+                i < md_array_size(ligand_mol.atom.type)) {
                 main_mol->atom.type[idx] = ligand_mol.atom.type[i];
             }
         }
         
-        // Update atom count
+        // Update atom count only after successful copying
         main_mol->atom.count = new_atom_count;
         
         // Mark buffers as dirty for re-rendering
         app_state->mold.dirty_buffers |= MolBit_DirtyPosition | MolBit_DirtyRadius;
+        
+        strcpy(info_message, "Successfully merged ligand with existing molecule");
     }
 
 public:
