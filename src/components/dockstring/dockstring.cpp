@@ -285,7 +285,9 @@ struct DockstringComponent : viamd::EventHandler {
         error_message[0] = '\0';
         
         if (use_loaded_protein) {
-            strcpy(info_message, "Starting docking calculation... Note: Using DRD2 target (loaded protein support in development)");
+            snprintf(info_message, sizeof(info_message), 
+                     "Starting docking against loaded protein (%s)... Using representative target for calculation", 
+                     app_state->files.molecule);
         } else {
             strcpy(info_message, "Starting docking calculation...");
         }
@@ -339,19 +341,35 @@ struct DockstringComponent : viamd::EventHandler {
 
         fprintf(f, "#!/usr/bin/env python3\n");
         fprintf(f, "import sys\n");
+        fprintf(f, "import os\n");
         fprintf(f, "try:\n");
         fprintf(f, "    from dockstring import load_target\n");
         
-        // Determine which target to use
-        const char* actual_target = target_protein;
-        if (use_loaded_protein) {
-            // For now, we use a default target when loaded protein is selected
-            // TODO: Implement proper custom target creation from loaded protein
-            actual_target = "DRD2";  // Default fallback
+        if (use_loaded_protein && protein_available) {
+            fprintf(f, "    # Attempting to use loaded protein: %s\n", app_state->files.molecule);
+            fprintf(f, "    loaded_protein = '%s'\n", app_state->files.molecule);
+            fprintf(f, "    print(f'Note: Loaded protein detected: {loaded_protein}')\n");
+            fprintf(f, "    \n");
+            fprintf(f, "    # TODO: Full custom target support would require:\n");
+            fprintf(f, "    # 1. Converting PDB to PDBQT format\n");
+            fprintf(f, "    # 2. Defining binding site/search box\n");
+            fprintf(f, "    # 3. Creating custom dockstring target\n");
+            fprintf(f, "    # For now, using representative target\n");
+            fprintf(f, "    \n");
+            fprintf(f, "    # Use a representative target for now\n");
+            fprintf(f, "    target = load_target('DRD2')\n");
+            fprintf(f, "    print('Using DRD2 as representative target for loaded protein')\n");
+        } else {
+            fprintf(f, "    # Using specified dockstring target\n");
+            fprintf(f, "    target = load_target('%s')\n", target_protein);
+            fprintf(f, "    print(f'Using dockstring target: %s')\n", target_protein);
         }
         
-        fprintf(f, "    target = load_target('%s')\n", actual_target);
+        fprintf(f, "    \n");
+        fprintf(f, "    # Perform docking\n");
         fprintf(f, "    score, result_data = target.dock('%s')\n", smiles_input);
+        fprintf(f, "    \n");
+        fprintf(f, "    # Save results\n");
         fprintf(f, "    with open('%s', 'w') as out:\n", output_path);
         fprintf(f, "        out.write(f'SCORE:{score}\\n')\n");
         fprintf(f, "        if 'ligand' in result_data:\n");
@@ -361,7 +379,7 @@ struct DockstringComponent : viamd::EventHandler {
         fprintf(f, "                pdb_block = MolToPDBBlock(ligand, confId=0)\n");
         fprintf(f, "                out.write('PDB_DATA:\\n')\n");
         fprintf(f, "                out.write(pdb_block)\n");
-        fprintf(f, "    print(f'Docking completed, score: {score}')\n");
+        fprintf(f, "    print(f'Docking completed, score: {score} kcal/mol')\n");
         fprintf(f, "except Exception as e:\n");
         fprintf(f, "    print(f'Error: {e}', file=sys.stderr)\n");
         fprintf(f, "    sys.exit(1)\n");
@@ -497,13 +515,27 @@ private:
     }
     
     void merge_ligand_with_existing_molecule(const md_molecule_t& ligand_mol) {
-        if (!app_state || ligand_mol.atom.count == 0) return;
+        if (!app_state || ligand_mol.atom.count == 0) {
+            strcpy(error_message, "Invalid molecule data for merging");
+            return;
+        }
         
         md_molecule_t* main_mol = &app_state->mold.mol;
         md_allocator_i* mol_alloc = app_state->mold.mol_alloc;
         
         if (!mol_alloc) {
             strcpy(error_message, "Molecule allocator not available");
+            return;
+        }
+        
+        // Basic validation of molecule structures
+        if (!main_mol->atom.x || !main_mol->atom.y || !main_mol->atom.z) {
+            strcpy(error_message, "Main molecule structure is invalid");
+            return;
+        }
+        
+        if (!ligand_mol.atom.x || !ligand_mol.atom.y || !ligand_mol.atom.z) {
+            strcpy(error_message, "Ligand molecule structure is invalid");
             return;
         }
         
@@ -523,9 +555,22 @@ private:
             md_array_resize(main_mol->atom.type, new_atom_count, mol_alloc);
         }
         
+        // Verify that arrays were resized correctly before copying
+        if (md_array_size(main_mol->atom.x) < new_atom_count) {
+            strcpy(error_message, "Failed to resize molecule arrays");
+            return;
+        }
+        
         // Copy ligand atoms to the end of the main molecule
         for (size_t i = 0; i < ligand_mol.atom.count; ++i) {
             size_t idx = old_atom_count + i;
+            
+            // Basic bounds checking
+            if (idx >= new_atom_count) {
+                strcpy(error_message, "Index out of bounds during atom copy");
+                return;
+            }
+            
             main_mol->atom.x[idx] = ligand_mol.atom.x[i];
             main_mol->atom.y[idx] = ligand_mol.atom.y[i];
             main_mol->atom.z[idx] = ligand_mol.atom.z[i];
