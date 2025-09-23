@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script to validate that dockstring integration can properly load molecules into VIA MD.
+Test script to validate that dockstring integration can properly load molecules into VIAMD.
 This script demonstrates the enhanced functionality that addresses @mathieulinares feedback.
 """
 
@@ -14,9 +14,9 @@ def test_enhanced_dockstring_integration():
         from dockstring import load_target
         from rdkit.Chem import MolToPDBBlock
         
-        print("=== Enhanced VIA MD Dockstring Integration Test ===\n")
+        print("=== Enhanced VIAMD Dockstring Integration Test ===\n")
         
-        # Test 1: Basic docking with PDB generation (simulates what VIA MD does)
+        # Test 1: Basic docking with PDB generation (simulates what VIAMD does)
         print("1. Testing dockstring integration with PDB data generation...")
         target = load_target("DRD2")
         score, result_data = target.dock("CCO")  # Ethanol
@@ -30,7 +30,7 @@ def test_enhanced_dockstring_integration():
                 print(f"   ✓ Generated PDB data: {len(pdb_block)} characters")
                 print(f"   ✓ Ligand has {ligand.GetNumAtoms()} atoms, {ligand.GetNumConformers()} conformers")
                 
-                # Save PDB data to demonstrate what VIA MD would receive
+                # Save PDB data to demonstrate what VIAMD would receive
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as f:
                     f.write(pdb_block)
                     temp_pdb = f.name
@@ -58,7 +58,7 @@ def test_enhanced_dockstring_integration():
         # Test 3: Demonstrate availability check (simulates loaded protein detection)
         print("\n3. Testing protein availability simulation...")
         
-        # This simulates what the VIA MD component does to check for loaded proteins
+        # This simulates what the VIAMD component does to check for loaded proteins
         mock_app_state = {
             'files': {'molecule': '/path/to/protein.pdb'},
             'mol': {'atom': {'count': 1500}}  # Simulated protein with 1500 atoms
@@ -73,10 +73,10 @@ def test_enhanced_dockstring_integration():
         
         print("\n=== Enhanced Integration Features Validated ===")
         print("✓ Dockstring docking calculations working")
-        print("✓ PDB data generation for VIA MD loading")
+        print("✓ PDB data generation for VIAMD loading")
         print("✓ Protein availability detection logic")
         print("✓ Complex molecule support (aspirin)")
-        print("✓ Ready for VIA MD molecule merging")
+        print("✓ Ready for VIAMD molecule merging")
         
         return True
         
@@ -89,8 +89,8 @@ def main():
     success = test_enhanced_dockstring_integration()
     
     if success:
-        print("\n🎉 Enhanced VIA MD dockstring integration ready!")
-        print("   → Docked molecules will now be loaded into VIA MD")
+        print("\n🎉 Enhanced VIAMD dockstring integration ready!")
+        print("   → Docked molecules will now be loaded into VIAMD")
         print("   → Supports using already loaded proteins")
         print("   → Addresses all feedback from @mathieulinares")
         return 0

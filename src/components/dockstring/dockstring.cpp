@@ -37,7 +37,7 @@ struct DockstringComponent : viamd::EventHandler {
     char info_message[512] = "";
     
     bool use_loaded_protein = false;  // Whether to use already loaded protein
-    bool protein_available = false;   // Whether there's a protein loaded in VIA MD
+    bool protein_available = false;   // Whether there's a protein loaded in VIAMD
     
     ApplicationState* app_state = nullptr;
     md_allocator_i* arena = nullptr;
@@ -231,7 +231,7 @@ struct DockstringComponent : viamd::EventHandler {
             ImGui::Text("Docking Results:");
             ImGui::Text("Score: %.3f kcal/mol", docking_result.score);
             
-            if (ImGui::Button("Load into VIA MD", ImVec2(-1, 0))) {
+            if (ImGui::Button("Load into VIAMD", ImVec2(-1, 0))) {
                 load_docked_molecule_into_viamd();
             }
         }
@@ -273,7 +273,7 @@ struct DockstringComponent : viamd::EventHandler {
         }
 
         if (use_loaded_protein && !protein_available) {
-            strcpy(error_message, "No protein loaded in VIA MD");
+            strcpy(error_message, "No protein loaded in VIAMD");
             return;
         }
 
@@ -433,12 +433,12 @@ struct DockstringComponent : viamd::EventHandler {
         }
 
         try {
-            // Parse the PDB data and load it into VIA MD
+            // Parse the PDB data and load it into VIAMD
             load_pdb_data_into_viamd();
-            strcpy(info_message, "Docked molecule loaded into VIA MD successfully");
+            strcpy(info_message, "Docked molecule loaded into VIAMD successfully");
             error_message[0] = '\0';
         } catch (...) {
-            strcpy(error_message, "Failed to load docked molecule into VIA MD");
+            strcpy(error_message, "Failed to load docked molecule into VIAMD");
         }
     }
 
@@ -457,7 +457,7 @@ private:
         fwrite(docking_result.ligand_pdb_data.ptr, 1, docking_result.ligand_pdb_data.len, temp_file);
         fclose(temp_file);
         
-        // Load the PDB file using VIA MD's molecule loader
+        // Load the PDB file using VIAMD's molecule loader
         md_molecule_t ligand_mol = {};
         md_allocator_i* temp_alloc = md_arena_allocator_create(app_state->allocator.persistent, MEGABYTES(10));
         
@@ -472,7 +472,7 @@ private:
                 // Trigger topology update events
                 viamd::event_system_broadcast_event(viamd::EventType_ViamdTopologyInit, viamd::EventPayloadType_ApplicationState, app_state);
                 
-                strcpy(info_message, "Docked ligand added to VIA MD visualization");
+                strcpy(info_message, "Docked ligand added to VIAMD visualization");
             } else {
                 strcpy(error_message, "Failed to parse docked molecule PDB data");
             }

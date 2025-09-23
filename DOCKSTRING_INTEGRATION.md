@@ -1,10 +1,10 @@
-# Dockstring Integration in VIA MD
+# Dockstring Integration in VIAMD
 
-This document describes the integration of dockstring molecular docking capabilities into VIA MD.
+This document describes the integration of dockstring molecular docking capabilities into VIAMD.
 
 ## Overview
 
-The dockstring integration allows users to perform molecular docking calculations directly within VIA MD. Users can input SMILES strings, select target proteins, and visualize docking results alongside their existing molecular dynamics data.
+The dockstring integration allows users to perform molecular docking calculations directly within VIAMD. Users can input SMILES strings, select target proteins, and visualize docking results alongside their existing molecular dynamics data.
 
 ## Features
 
@@ -17,7 +17,7 @@ The dockstring integration allows users to perform molecular docking calculation
 
 ### User Interface
 - **Menu Access**: Available via "Docking → Dockstring" in the main menu
-- **Dark Theme**: Consistent with VIA MD's visual design
+- **Dark Theme**: Consistent with VIAMD's visual design
 - **Real-time Feedback**: Error messages and status updates
 - **Example Library**: Pre-configured molecules for testing
 
@@ -37,18 +37,18 @@ The dockstring integration allows users to perform molecular docking calculation
 - Progress is shown in real-time
 - Results display the docking score in kcal/mol
 
-### 4. Load Results into VIA MD
-- Click **"Load into VIA MD"** to visualize the docked pose
+### 4. Load Results into VIAMD
+- Click **"Load into VIAMD"** to visualize the docked pose
 - The molecule appears in the main visualization window
-- Full VIA MD functionality is available for analysis
+- Full VIAMD functionality is available for analysis
 
 ## Technical Implementation
 
 ### Component Architecture
-The dockstring integration follows VIA MD's component pattern:
+The dockstring integration follows VIAMD's component pattern:
 - **Location**: `src/components/dockstring/dockstring.cpp`
-- **Event Integration**: Uses VIA MD's event system
-- **Memory Management**: VIA MD allocator compatibility
+- **Event Integration**: Uses VIAMD's event system
+- **Memory Management**: VIAMD allocator compatibility
 - **Task System**: Asynchronous background processing
 
 ### Dependencies
@@ -77,7 +77,7 @@ make
    conda install -c conda-forge dockstring
    ```
 
-2. **Build VIA MD with Dockstring Support**:
+2. **Build VIAMD with Dockstring Support**:
    ```bash
    cd build
    cmake .. -DVIAMD_ENABLE_DOCKSTRING=ON
@@ -93,13 +93,13 @@ python3 -c "import dockstring; print('Dockstring available')"
 
 ## Workflow Example
 
-1. **Load Target Protein**: Open a PDB file in VIA MD
+1. **Load Target Protein**: Open a PDB file in VIAMD
 2. **Open Dockstring**: Access via Docking → Dockstring menu
 3. **Enter SMILES**: Input molecule (e.g., "CCO" for ethanol)
 4. **Set Target**: Specify protein target (e.g., "DRD2")
 5. **Run Docking**: Click "Dock Molecule" and wait for results
-6. **Analyze Results**: View docking score and load pose into VIA MD
-7. **Visualize**: Examine protein-ligand complex in VIA MD
+6. **Analyze Results**: View docking score and load pose into VIAMD
+7. **Visualize**: Examine protein-ligand complex in VIAMD
 
 ## API Integration
 
@@ -111,7 +111,7 @@ The component responds to:
 - `ViamdShutdown`: Cleanup and resource deallocation
 
 ### Task System
-Docking calculations use VIA MD's task system:
+Docking calculations use VIAMD's task system:
 ```cpp
 // Create background task
 docking_task = task_system::create_pool_task(
@@ -127,7 +127,7 @@ Communication with dockstring via generated Python scripts:
 from dockstring import load_target
 target = load_target('DRD2')
 score, result = target.dock('CCO')
-# Save results for VIA MD processing
+# Save results for VIAMD processing
 ```
 
 ## Limitations and Future Enhancements
@@ -138,7 +138,7 @@ score, result = target.dock('CCO')
 - Python dependency required at runtime
 
 ### Future Enhancements
-- **Direct Visualization**: Integrate docked poses into VIA MD's rendering
+- **Direct Visualization**: Integrate docked poses into VIAMD's rendering
 - **Custom Targets**: Support for user-provided protein targets
 - **Batch Docking**: Multiple molecules against multiple targets
 - **Result Analysis**: Integrated scoring and comparison tools
@@ -153,7 +153,7 @@ score, result = target.dock('CCO')
 4. **Performance issues**: Consider using fewer CPU cores for docking
 
 ### Debugging
-Enable verbose logging in VIA MD to see dockstring communication details.
+Enable verbose logging in VIAMD to see dockstring communication details.
 
 ## Contributing
 
@@ -165,4 +165,4 @@ To extend the dockstring integration:
 
 ## License
 
-The dockstring integration follows VIA MD's licensing terms. The dockstring package itself is subject to its own license terms.
+The dockstring integration follows VIAMD's licensing terms. The dockstring package itself is subject to its own license terms.
