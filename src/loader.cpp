@@ -314,6 +314,25 @@ static const table_entry_t table = {
         NULL,
         NULL,
 #endif
+    },
+    {
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_REQUIRES_DIALOGUE,  // LAMMPS requires dialogue
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+        FLAG_NONE,
+#if MD_VLX
+        FLAG_NONE,
+        FLAG_NONE,
+#endif
     }
 };
 
