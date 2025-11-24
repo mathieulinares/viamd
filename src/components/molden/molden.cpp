@@ -38,7 +38,7 @@
  * - Simpler data structure (atoms + coordinates + bonds)
  * - No quantum chemistry calculations
  * 
- * API functions expected from md_molden (to be implemented in mdlib):
+ * API functions expected from md_molden (implemented in mdlib):
  * - md_molden_t* md_molden_create(md_allocator_i* alloc)
  * - bool md_molden_parse_file(md_molden_t* mol, str_t filename)
  * - void md_molden_destroy(md_molden_t* mol)
@@ -46,7 +46,7 @@
  * - size_t md_molden_number_of_atoms(const md_molden_t* mol)
  * - const dvec3_t* md_molden_atom_coordinates(const md_molden_t* mol)
  * - const uint8_t* md_molden_atomic_numbers(const md_molden_t* mol)
- * - void md_molden_system_init(md_system_t* sys, const md_molden_t* mol, md_allocator_i* alloc)
+ * - bool md_molden_system_init(md_system_t* sys, const md_molden_t* mol, md_allocator_i* alloc)
  */
 
 struct Molden : viamd::EventHandler {
