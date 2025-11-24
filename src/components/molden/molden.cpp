@@ -5,8 +5,10 @@
 #include <task_system.h>
 #include <color_utils.h>
 
-// @TODO: Include md_molden.h when mdlib molden branch is integrated
-// #include <md_molden.h>
+// md_molden.h is now available in mdlib molden branch
+#if MD_MOLDEN
+#include <md_molden.h>
+#endif
 #include <md_util.h>
 #include <core/md_vec_math.h>
 #include <core/md_log.h>
@@ -50,9 +52,12 @@
 struct Molden : viamd::EventHandler {
     Molden() { viamd::event_system_register_handler(*this); }
     
-    // @TODO: Replace with actual md_molden_t when available
-    // md_molden_t* molden = nullptr;
-    void* molden = nullptr;  // Placeholder
+    // Molden data structure
+#if MD_MOLDEN
+    md_molden_t* molden = nullptr;
+#else
+    void* molden = nullptr;  // Placeholder when Molden not enabled
+#endif
     
     // GL representation for molecule rendering
     md_gl_rep_t gl_rep = {};
@@ -131,8 +136,9 @@ struct Molden : viamd::EventHandler {
         md_gl_rep_destroy(gl_rep);
         gl_rep = {};
         
-        // @TODO: When md_molden is available:
-        // md_molden_destroy(molden);
+#if MD_MOLDEN
+        md_molden_destroy(molden);
+#endif
         molden = nullptr;
         
         md_arena_allocator_reset(arena);
@@ -149,12 +155,11 @@ struct Molden : viamd::EventHandler {
         str_t ext;
         if (extract_ext(&ext, filename)) {
             // Check for .molden extension (following VLX pattern which checks .out and .h5)
-            if (str_eq_ignore_case(ext, STR_LIT("molden"))) {
+            if (str_eq_ignore_case(ext, STR_LIT("molden")) || str_eq_ignore_case(ext, STR_LIT("mold"))) {
                 MD_LOG_INFO("Attempting to load Molden data from file '" STR_FMT "'", STR_ARG(filename));
                 
-                // @TODO: Replace with actual md_molden API calls
-                // This follows the exact pattern from VeloxChem
-                /*
+#if MD_MOLDEN
+                // Create or reset Molden context (following VeloxChem pattern)
                 if (!molden) {
                     molden = md_molden_create(arena);
                 } else {
@@ -162,36 +167,35 @@ struct Molden : viamd::EventHandler {
                 }
                 
                 if (md_molden_parse_file(molden, filename)) {
-                */
-                
-                // Placeholder: Simulate successful load for structure setup
-                bool load_success = false;  // Will be true when backend is integrated
-                
-                if (load_success) {
                     MD_LOG_INFO("Successfully loaded Molden data");
                     
                     // Extract molecular data from Molden file
                     // Following VeloxChem pattern lines 944-957
-                    /*
                     size_t num_atoms = md_molden_number_of_atoms(molden);
                     const dvec3_t* coords = md_molden_atom_coordinates(molden);
                     const uint8_t* atomic_numbers = md_molden_atomic_numbers(molden);
-                    */
                     
-                    size_t num_atoms = 0;  // Placeholder
+                    if (!coords || !atomic_numbers || num_atoms == 0) {
+                        MD_LOG_ERROR("Invalid Molden data - missing coordinates or atomic numbers");
+                        reset_data();
+                        return;
+                    }
                     
                     // Prepare coordinate data for processing
                     // Following VeloxChem pattern lines 953-957
                     vec4_t* xyzw = (vec4_t*)md_vm_arena_push(state.allocator.frame, sizeof(vec4_t) * num_atoms);
                     for (size_t i = 0; i < num_atoms; ++i) {
-                        // @TODO: Use actual coordinates from molden
-                        // xyzw[i] = vec4_set((float)coords[i].x, (float)coords[i].y, (float)coords[i].z, 1.0f);
+                        xyzw[i] = vec4_set((float)coords[i].x, (float)coords[i].y, (float)coords[i].z, 1.0f);
                     }
                     
                     // Initialize molecule system from Molden data
                     // Following VeloxChem pattern lines 959-961
                     md_system_t mol = { 0 };
-                    // @TODO: md_molden_system_init(&mol, molden, state.allocator.frame);
+                    if (!md_molden_system_init(&mol, molden, state.allocator.frame)) {
+                        MD_LOG_ERROR("Failed to initialize molecule system from Molden data");
+                        reset_data();
+                        return;
+                    }
                     
                     // Postprocess molecule: infer bonds, assign stereochemistry, compute secondary structure
                     // This is a key step that matches VeloxChem workflow
@@ -209,11 +213,14 @@ struct Molden : viamd::EventHandler {
                     gl_rep = md_gl_rep_create(state.mold.gl_mol);
                     md_gl_rep_set_color(gl_rep, 0, (uint32_t)mol.atom.count, colors, 0);
                     
-                    MD_LOG_INFO("Molden molecule visualization initialized");
+                    MD_LOG_INFO("Molden molecule visualization initialized with %zu atoms", num_atoms);
                 } else {
-                    MD_LOG_ERROR("Failed to load Molden data from file '" STR_FMT "'", STR_ARG(filename));
+                    MD_LOG_ERROR("Failed to parse Molden file '" STR_FMT "'", STR_ARG(filename));
                     reset_data();
                 }
+#else
+                MD_LOG_ERROR("Molden support not compiled in - rebuild with MD_ENABLE_MOLDEN=ON");
+#endif
             }
         }
     }

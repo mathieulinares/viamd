@@ -22,8 +22,7 @@
 #include <md_vlx.h>
 #endif
 #if MD_MOLDEN
-// @TODO: Uncomment when mdlib molden branch is integrated
-// #include <md_molden.h>
+#include <md_molden.h>
 #endif
 
 #include <string.h>
@@ -87,7 +86,7 @@ static md_system_loader_i* sys_loader[] = {
     md_vlx_system_loader(),
 #endif
 #if MD_MOLDEN
-    NULL,  // @TODO: md_molden_system_loader() when backend is available
+    md_molden_system_loader(),
 #endif
 };
 
