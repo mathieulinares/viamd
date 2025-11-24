@@ -108,7 +108,7 @@ H      3    1    0.9265    0.0000   -0.2399
 1. Only the `[Atoms]` section is currently parsed
 2. `[GTO]` (Gaussian basis sets) and `[MO]` (molecular orbitals) sections are ignored
 3. No trajectory support (only single structure)
-4. Units must be Angstroms (default)
+4. Units must be Angstrom (default)
 
 ## Future Enhancements
 - Parse `[FREQ]` section for vibrational modes
