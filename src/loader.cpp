@@ -21,6 +21,9 @@
 #if MD_VLX
 #include <md_vlx.h>
 #endif
+#if MD_MOLDEN
+#include <md_molden.h>
+#endif
 
 #include <string.h>
 
@@ -36,6 +39,9 @@ enum sys_loader_t {
 #if MD_VLX
     SYS_LOADER_VELOXCHEM,
 #endif
+#if MD_MOLDEN
+    SYS_LOADER_MOLDEN,
+#endif
     SYS_LOADER_COUNT
 };
 
@@ -49,6 +55,9 @@ static const str_t sys_loader_name[] {
 #if MD_VLX
     STR_LIT("VeloxChem"),
 #endif
+#if MD_MOLDEN
+    STR_LIT("Molden"),
+#endif
 };
 
 static const str_t sys_loader_ext[] {
@@ -61,6 +70,9 @@ static const str_t sys_loader_ext[] {
 #if MD_VLX
     STR_LIT("out;h5"),
 #endif
+#if MD_MOLDEN
+    STR_LIT("molden;mold"),
+#endif
 };
 
 static md_system_loader_i* sys_loader[] = {
@@ -72,6 +84,9 @@ static md_system_loader_i* sys_loader[] = {
     md_lammps_system_loader(),
 #if MD_VLX
     md_vlx_system_loader(),
+#endif
+#if MD_MOLDEN
+    md_molden_system_loader(),
 #endif
 };
 

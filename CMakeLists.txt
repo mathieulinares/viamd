@@ -46,6 +46,7 @@ option(VIAMD_IMGUI_ENABLE_DOCKSPACE "Enable ImGui Dockspace in main window" OFF)
 option(VIAMD_CREATE_MACOSX_BUNDLE "Build a macosx bundle instead of just an executable" OFF)
 option(VIAMD_LINK_STDLIB_STATIC "Link against stdlib statically" ON)
 option(VIAMD_ENABLE_VELOXCHEM "Enable Veloxchem Module" OFF)
+option(VIAMD_ENABLE_MOLDEN "Enable Molden Module" ON)
 set(VIAMD_FRAME_CACHE_SIZE_MB "2048" CACHE STRING "Reserved frame cache size in Megabytes")
 set(VIAMD_NUM_WORKER_THREADS "8" CACHE STRING "Number of worker threads (Decrease if you run out of memory during evaluation)")
 
@@ -55,6 +56,10 @@ set(MD_LINK_STDLIB_STATIC ${VIAMD_LINK_STDLIB_STATIC} CACHE BOOL "" FORCE)
 if (VIAMD_ENABLE_VELOXCHEM)
     set(MD_ENABLE_VLX ON CACHE BOOL "" FORCE)
     set(MD_VLX_BASIS_FOLDER "basis")
+endif ()
+
+if (VIAMD_ENABLE_MOLDEN)
+    set(MD_ENABLE_MOLDEN ON CACHE BOOL "" FORCE)
 endif ()
 
 if (APPLE)
@@ -114,6 +119,10 @@ set(COMP_FILES
 
 if (VIAMD_ENABLE_VELOXCHEM)
     set(COMP_FILES ${COMP_FILES} src/components/veloxchem/veloxchem.cpp)
+endif()
+
+if (VIAMD_ENABLE_MOLDEN)
+    set(COMP_FILES ${COMP_FILES} src/components/molden/molden.cpp)
 endif()
 
 set(SHADER_FILES 
