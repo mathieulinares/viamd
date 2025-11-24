@@ -14,6 +14,7 @@
 #include <md_xyz.h>
 #include <md_mmcif.h>
 #include <md_lammps.h>
+#include <md_molden.h>
 //#include <md_dcd.h>
 #include <md_trajectory.h>
 #include <md_frame_cache.h>
@@ -33,6 +34,7 @@ enum mol_loader_t {
     MOL_LOADER_XYZ,
     MOL_LOADER_CIF,
     MOL_LOADER_LAMMPS,
+    MOL_LOADER_MOLDEN,
 #if MD_VLX
     MOL_LOADER_VELOXCHEM,
 #endif
@@ -46,6 +48,7 @@ static const str_t mol_loader_name[] {
     STR_LIT("XYZ"),
     STR_LIT("PDBx/mmCIF (cif)"),
     STR_LIT("LAMMPS (data)"),
+    STR_LIT("Molden"),
 #if MD_VLX
     STR_LIT("VeloxChem"),
 #endif
@@ -58,6 +61,7 @@ static const str_t mol_loader_ext[] {
     STR_LIT("xyz;xmol;arc"),
     STR_LIT("cif"),
     STR_LIT("data"),
+    STR_LIT("molden;mol;mold"),
 #if MD_VLX
     STR_LIT("out;h5"),
 #endif
@@ -70,6 +74,7 @@ static md_molecule_loader_i* mol_loader_api[] = {
     md_xyz_molecule_api(),
     md_mmcif_molecule_api(),
     md_lammps_molecule_api(),
+    md_molden_molecule_api(),
 #if MD_VLX
     md_vlx_molecule_api(),
 #endif
@@ -215,7 +220,7 @@ static void traj_loader_preload_check(load::LoaderState*, traj_loader_t, str_t, 
 
 namespace load {
 
-#define NUM_ENTRIES 12
+#define NUM_ENTRIES 15
 struct table_entry_t {
     str_t name[NUM_ENTRIES];
     str_t ext[NUM_ENTRIES];
@@ -241,6 +246,9 @@ static const table_entry_t table = {
         STR_LIT("PDBx/mmCIF (cif)"),
         STR_LIT("LAMMPS (data)"),
         STR_LIT("LAMMPS Trajectory (lammpstrj)"),
+        STR_LIT("Molden (molden)"),
+        STR_LIT("Molden (mol)"),
+        STR_LIT("Molden (mold)"),
         //STR_LIT("DCD Trajectory (dcd)"),
 #if MD_VLX
         STR_LIT("VeloxChem (out)"),
@@ -258,6 +266,9 @@ static const table_entry_t table = {
         STR_LIT("cif"),
         STR_LIT("data"),
         STR_LIT("lammpstrj"),
+        STR_LIT("molden"),
+        STR_LIT("mol"),
+        STR_LIT("mold"),
         //STR_LIT("dcd"),
 #if MD_VLX
         STR_LIT("out"),
@@ -275,6 +286,9 @@ static const table_entry_t table = {
         md_mmcif_molecule_api(),
         md_lammps_molecule_api(),
         NULL,
+        md_molden_molecule_api(),
+        md_molden_molecule_api(),
+        md_molden_molecule_api(),
         //NULL,
 #if MD_VLX
         md_vlx_molecule_api(),
@@ -292,8 +306,12 @@ static const table_entry_t table = {
     	NULL,
         NULL,
         md_lammps_trajectory_loader(),
+        NULL,
+        NULL,
+        NULL,
         //md_dcd_trajectory_loader(),
 #if MD_VLX
+        NULL,
         NULL,
 #endif
     }
