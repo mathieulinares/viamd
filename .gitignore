@@ -53,3 +53,5 @@ test_integration
 test_openmm_segfault_fix
 test_openmm_memory_fix
 **/test_*
+_codeql_build_dir/
+build/
