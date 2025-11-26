@@ -10,28 +10,29 @@ This implementation adds full support for loading Molden format molecular struct
 
 ## Changes Made
 
-### 1. mdlib Submodule (Backend Library)
+### 1. Local Molden Parser (src/mdlib_patches/)
+
+Since the upstream mdlib submodule does not include Molden support, we have added a local implementation in the `src/mdlib_patches/` directory. This follows the same pattern used for other local patches to mdlib.
 
 #### New Files
-- **`ext/mdlib/src/md_molden.h`** - Header file defining Molden data structures and API
+- **`src/mdlib_patches/md_molden.h`** - Header file defining Molden data structures and API
   - `md_molden_atom_t` structure for atom data
   - `md_molden_data_t` structure for parsed Molden file
   - Parse, free, and molecule initialization functions
   
-- **`ext/mdlib/src/md_molden.c`** - Implementation of Molden file parser
+- **`src/mdlib_patches/md_molden.cpp`** - Implementation of Molden file parser
   - Parses `[Molden Format]` header (optional)
   - Reads `[Atoms]` section with format: `Element Atom_Number Atomic_Number X Y Z`
   - Converts parsed data to VIAMD molecule structure
   - Implements `md_molecule_loader_i` interface for integration
 
-#### Modified Files
-- **`ext/mdlib/CMakeLists.txt`** - Added md_molden.c and md_molden.h to build
-
 ### 2. VIAMD Application (Frontend)
 
 #### Modified Files
+- **`CMakeLists.txt`** - Added MDLIB_PATCH_FILES glob to include mdlib_patches in build
+  
 - **`src/loader.cpp`** - Registered Molden loader in all required locations:
-  1. Added `#include <md_molden.h>`
+  1. Added `#include "mdlib_patches/md_molden.h"`
   2. Added `MOL_LOADER_MOLDEN` to `mol_loader_t` enum
   3. Added "Molden" to `mol_loader_name[]` array
   4. Added "molden;mol;mold" to `mol_loader_ext[]` array
@@ -117,23 +118,11 @@ H      3    1    0.9265    0.0000   -0.2399
 - Multiple geometry support (optimization trajectories)
 - Unit conversion (Bohr to Angstrom)
 
-## Coordination with Backend Team
-As per the requirements, the mdlib submodule contains the core Molden parser implementation. The changes have been committed to the mdlib submodule with commit hash `61110a8` and the parent viamd repository has been updated to reference this new commit.
-
-If mdlib is maintained by a separate team, they should be notified to:
-1. Review the md_molden.c and md_molden.h implementation
-2. Consider pushing these changes to their main repository
-3. Create a proper "Molden" branch if long-term maintenance is needed
-
-## Commits
-1. **mdlib submodule**:
-   - `e457cdb` - Add Molden file format support
-   - `61110a8` - Fix compilation errors in md_molden.c
-
-2. **viamd repository**:
-   - `a48a163` - Add Molden file loader implementation and integration
-   - `5b962a0` - Update mdlib submodule to include Molden support
-   - `bf1086b` - Update mdlib submodule with compilation fixes for Molden
+## Notes
+The Molden parser is implemented as a local patch in `src/mdlib_patches/` rather than modifying the mdlib submodule. This approach:
+- Avoids issues with submodule commit references
+- Keeps local changes separate from upstream
+- Follows the same pattern as other mdlib patches in the repository
 
 ## Conclusion
 Molden file loading is now fully integrated into VIAMD. Users can load Molden files through either the file dialog or drag-and-drop, with the same workflow as other supported molecular formats. The implementation follows the established patterns used for PDB, GRO, XYZ, and VeloxChem files.

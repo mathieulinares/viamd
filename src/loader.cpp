@@ -14,7 +14,7 @@
 #include <md_xyz.h>
 #include <md_mmcif.h>
 #include <md_lammps.h>
-#include <md_molden.h>
+#include "mdlib_patches/md_molden.h"
 //#include <md_dcd.h>
 #include <md_trajectory.h>
 #include <md_frame_cache.h>

@@ -178,6 +178,7 @@ endif()
 file(GLOB SRC_FILES src/*.h src/*.cpp src/*.inl)
 file(GLOB APP_FILES src/app/*.cpp src/app/*.h)
 file(GLOB GFX_FILES src/gfx/*.cpp src/gfx/*.h)
+file(GLOB MDLIB_PATCH_FILES src/mdlib_patches/*.cpp src/mdlib_patches/*.h)
 
 set(COMP_FILES
     src/components/ramachandran/ramachandran.cpp
@@ -227,10 +228,11 @@ create_resources("${SHADER_FILES}" "gen/shaders.inl")
 source_group("src" FILES ${SRC_FILES})
 source_group("src/app" FILES ${APP_FILES})
 source_group("src/gfx" FILES ${GFX_FILES})
+source_group("src/mdlib_patches" FILES ${MDLIB_PATCH_FILES})
 source_group("shaders" FILES ${SHADER_FILES})
 source_group("src/component" FILES ${COMP_FILES})
 
-add_executable(viamd ${OSX_BUNDLE} ${MACOSX_ICON} ${SRC_FILES} ${APP_FILES} ${GFX_FILES} ${SHADER_FILES} ${COMP_FILES})
+add_executable(viamd ${OSX_BUNDLE} ${MACOSX_ICON} ${SRC_FILES} ${APP_FILES} ${GFX_FILES} ${MDLIB_PATCH_FILES} ${SHADER_FILES} ${COMP_FILES})
 
 install(TARGETS viamd DESTINATION bin)
 
