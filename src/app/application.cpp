@@ -493,7 +493,11 @@ bool file_dialog(char* str_buf, size_t str_cap, FileDialogFlag flags, str_t filt
     nfdwindowhandle_t win_handle{};
     NFD_GetNativeWindowFromGLFWWindow((GLFWwindow*)data.internal_ctx.window.ptr, &win_handle);
 
-    if (flags & FileDialogFlag_Open) {
+    if (flags & FileDialogFlag_Dir) {
+        nfdpickfolderu8args_t args{};
+        args.parentWindow = win_handle;
+        result = NFD_PickFolderU8_With(&out_path, &args);
+    } else if (flags & FileDialogFlag_Open) {
         nfdopendialogu8args_t args{};
         args.filterList = filter_list;
         args.filterCount = filter_count;
