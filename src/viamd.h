@@ -346,6 +346,14 @@ inline const char* screenshot_resolution_str[(int)ScreenshotResolution::Count] =
     "Custom",
 };
 
+// Movie recording captures the trajectory playing as a sequence of numbered image files
+// (one per output frame). The resulting sequence is intended to be encoded into an actual
+// video file by an external tool such as ffmpeg.
+enum class MovieRecordingState {
+    Idle,
+    Recording,
+};
+
 enum class BondColorMode {
     NearestAtom,
 	SmoothAtom,
@@ -1040,6 +1048,33 @@ struct ApplicationState {
         int   sample_target = 0;
         str_t path_to_file = {};
     } screenshot;
+
+    // --- MOVIE RECORDING ---
+    struct {
+        MovieRecordingState state = MovieRecordingState::Idle;
+
+        ScreenshotResolution resolution = ScreenshotResolution::Window;
+        int    res_x = 1920;
+        int    res_y = 1080;
+
+        float  fps         = 24.0f;  // Output frames per second for the image sequence
+        double start_frame = 0.0;    // First trajectory frame to capture (inclusive)
+        double end_frame   = 0.0;    // Last trajectory frame to capture (inclusive)
+
+        // Derived at the start of a recording: how much the trajectory frame advances per
+        // output frame. Computed from the animation playback fps and the output fps so that
+        // the recorded movie plays back the trajectory at the same relative speed as the
+        // on-screen playback would.
+        double frame_step  = 1.0;
+        double cur_frame   = 0.0;    // Trajectory frame currently being captured
+        int    frame_index = 0;      // Output file index, used to number frame_%05d.png
+
+        str_t  output_dir = {};
+        char   filename_prefix[64] = "frame";
+
+        PlaybackMode prev_playback_mode = PlaybackMode::Stopped;  // Restored once recording finishes
+        bool prev_screenshot_hide_gui   = true;                   // Restored once recording finishes
+    } movie;
 
     struct {
         md_gl_shaders_t shaders = {};

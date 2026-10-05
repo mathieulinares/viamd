@@ -208,6 +208,10 @@ static bool export_csv(const float* column_data[], const char* column_labels[], 
 
 static void create_screenshot(str_t path);
 
+static void movie_recording_start(ApplicationState* state);
+static void movie_recording_stop(ApplicationState* state);
+static void update_movie_recording(ApplicationState* state);
+
 // The sizes offered in the Settings menu. The stored setting is the size itself, not an
 // index into this table, so the table can change without invalidating anyone's .ini.
 static const float font_sizes[] = { 10.0f, 12.0f, 14.0f, 16.0f, 18.0f, 20.0f, 24.0f, 30.0f, 36.0f, 48.0f, 64.0f, 72.0f };
@@ -696,6 +700,10 @@ int main(int argc, char** argv) {
                 state.animation.frame = 0;
             }
         }
+
+        // Must run before the time_changed check below so a frame set here is interpolated
+        // and uploaded to the GPU within this same loop iteration, before render() is called.
+        update_movie_recording(&state);
 
         {
             static auto prev_frame = state.animation.frame;
@@ -1572,6 +1580,101 @@ static void draw_main_menu(ApplicationState* data) {
                 }
                 ImGui::GetCurrentWindow()->Hidden = true;
             }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Record Movie")) {
+            const bool recording = data->movie.state == MovieRecordingState::Recording;
+
+            ImGui::BeginDisabled(recording);
+
+            if (ImGui::Button("Select Output Folder...")) {
+                if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Dir)) {
+                    size_t path_len = strnlen(path_buf, sizeof(path_buf));
+                    str_free(data->movie.output_dir, persistent_alloc);
+                    data->movie.output_dir = str_copy({path_buf, path_len}, persistent_alloc);
+                }
+            }
+            if (!str_empty(data->movie.output_dir)) {
+                ImGui::TextWrapped(STR_FMT, STR_ARG(data->movie.output_dir));
+            } else {
+                ImGui::TextDisabled("No output folder selected");
+            }
+
+            ImGui::InputText("Filename Prefix", data->movie.filename_prefix, sizeof(data->movie.filename_prefix));
+
+            data->movie.resolution = (ScreenshotResolution)MIN((int)data->movie.resolution, (int)ScreenshotResolution::Count - 1);
+            if (ImGui::BeginCombo("Resolution", screenshot_resolution_str[(int)data->movie.resolution])) {
+                for (int i = 0; i < (int)ScreenshotResolution::Count; ++i) {
+                    if (ImGui::Selectable(screenshot_resolution_str[i], (i == (int)data->movie.resolution))) {
+                        data->movie.resolution = (ScreenshotResolution)i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            switch (data->movie.resolution) {
+            case ScreenshotResolution::Window:
+                data->movie.res_x = data->gbuffer.width;
+                data->movie.res_y = data->gbuffer.height;
+                break;
+            case ScreenshotResolution::FHD:
+                data->movie.res_x = 1920;
+                data->movie.res_y = 1080;
+                break;
+            case ScreenshotResolution::QHD:
+                data->movie.res_x = 2560;
+                data->movie.res_y = 1440;
+                break;
+            case ScreenshotResolution::UHD_4K:
+                data->movie.res_x = 3840;
+                data->movie.res_y = 2160;
+                break;
+            case ScreenshotResolution::UHD_8K:
+                data->movie.res_x = 7680;
+                data->movie.res_y = 4320;
+                break;
+            case ScreenshotResolution::Custom:
+                ImGui::InputInt("Res X", &data->movie.res_x);
+                ImGui::InputInt("Res Y", &data->movie.res_y);
+                data->movie.res_x = CLAMP(data->movie.res_x, 640, 16384);
+                data->movie.res_y = CLAMP(data->movie.res_y, 480, 16384);
+                break;
+            default:
+                ASSERT(false);
+            }
+
+            ImGui::InputFloat("Output FPS", &data->movie.fps, 1.0f, 5.0f, "%.1f");
+            data->movie.fps = CLAMP(data->movie.fps, 1.0f, 240.0f);
+
+            const double max_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
+            if (data->movie.end_frame <= 0.0) {
+                data->movie.end_frame = max_frame;
+            }
+            double frame_range[2] = { data->movie.start_frame, data->movie.end_frame };
+            const double min_frame = 0.0;
+            if (ImGui::SliderScalarN("Frame Range", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
+                data->movie.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
+                data->movie.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
+            }
+
+            ImGui::EndDisabled();
+
+            if (!recording) {
+                if (ImGui::Button("Start Recording")) {
+                    movie_recording_start(data);
+                }
+            } else {
+                ImGui::Text("Recording frame %d (trajectory frame %.1f / %.1f)",
+                    data->movie.frame_index, data->movie.cur_frame, data->movie.end_frame);
+                if (ImGui::Button("Stop Recording")) {
+                    movie_recording_stop(data);
+                }
+            }
+
+            ImGui::Separator();
+            ImGui::TextWrapped("Writes a numbered PNG sequence ('%s_00000.png', ...). "
+                "Encode it into a video with e.g. ffmpeg -framerate <fps> -i %s_%%05d.png movie.mp4",
+                data->movie.filename_prefix, data->movie.filename_prefix);
+
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Operations")) {
@@ -6130,6 +6233,114 @@ void create_screenshot(str_t path) {
     }
 
     VIAMD_LOG_SUCCESS("Screenshot saved to: '" STR_FMT "'", STR_ARG(path));
+}
+
+// Begins a movie recording: the trajectory is stepped deterministically (independent of real
+// render speed) from movie.start_frame to movie.end_frame, capturing one numbered image per
+// output frame by driving the existing screenshot capture path. The resulting image sequence
+// is meant to be encoded into a video file with an external tool, e.g.:
+//   ffmpeg -framerate <fps> -i <prefix>_%05d.png movie.mp4
+static void movie_recording_start(ApplicationState* state) {
+    ASSERT(state);
+
+    if (state->movie.state == MovieRecordingState::Recording) {
+        return;
+    }
+
+    if (str_empty(state->movie.output_dir)) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: no output directory selected");
+        return;
+    }
+
+    const double max_frame = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
+    state->movie.start_frame = CLAMP(state->movie.start_frame, 0.0, max_frame);
+    state->movie.end_frame   = CLAMP(state->movie.end_frame,   0.0, max_frame);
+    if (state->movie.end_frame <= state->movie.start_frame) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: end frame must be greater than start frame");
+        return;
+    }
+
+    // Trajectory frames advanced per output (video) frame, so the recording plays the
+    // trajectory back at the same relative speed as the Animation panel's fps setting.
+    state->movie.frame_step = (state->animation.fps != 0.0f) ? (double)fabsf(state->animation.fps) / (double)state->movie.fps : 1.0;
+    state->movie.frame_step = MAX(state->movie.frame_step, 1.0e-6);
+
+    state->movie.cur_frame   = state->movie.start_frame;
+    state->movie.frame_index = 0;
+
+    state->movie.prev_playback_mode = state->animation.mode;
+    state->animation.mode = PlaybackMode::Stopped;
+
+    state->movie.prev_screenshot_hide_gui = state->screenshot.hide_gui;
+
+    state->movie.state = MovieRecordingState::Recording;
+
+    VIAMD_LOG_INFO("Recording movie frames %.1f-%.1f to '" STR_FMT "'", state->movie.start_frame, state->movie.end_frame, STR_ARG(state->movie.output_dir));
+}
+
+static void movie_recording_stop(ApplicationState* state) {
+    ASSERT(state);
+
+    if (state->movie.state != MovieRecordingState::Recording) {
+        return;
+    }
+
+    state->movie.state = MovieRecordingState::Idle;
+    state->animation.mode = state->movie.prev_playback_mode;
+    state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
+
+    // Cancel any in-flight screenshot capture belonging to this recording
+    if (!str_empty(state->screenshot.path_to_file)) {
+        str_free(state->screenshot.path_to_file, state->allocator.persistent);
+        state->screenshot.path_to_file = {};
+        state->screenshot.sample_count  = 0;
+        state->screenshot.sample_target = 0;
+    }
+
+    VIAMD_LOG_INFO("Movie recording stopped after %d frame(s)", state->movie.frame_index);
+}
+
+// Drives the movie recording state machine. Called once per application loop iteration,
+// before render(), so it can queue up the next frame capture (reusing the screenshot
+// capture path) once the previous one has finished writing to disk.
+static void update_movie_recording(ApplicationState* state) {
+    ASSERT(state);
+
+    if (state->movie.state != MovieRecordingState::Recording) {
+        return;
+    }
+
+    // A capture is still in flight (possibly accumulating multiple samples for TAA); wait for it.
+    if (!str_empty(state->screenshot.path_to_file)) {
+        return;
+    }
+
+    if (state->movie.cur_frame > state->movie.end_frame + 1.0e-6) {
+        VIAMD_LOG_SUCCESS("Movie recording complete: %d frame(s) written to '" STR_FMT "'. "
+            "Encode with e.g. ffmpeg -framerate %.3f -i '" STR_FMT "/%s_%%05d.png' movie.mp4",
+            state->movie.frame_index, STR_ARG(state->movie.output_dir), state->movie.fps,
+            STR_ARG(state->movie.output_dir), state->movie.filename_prefix);
+
+        state->movie.state = MovieRecordingState::Idle;
+        state->animation.mode = state->movie.prev_playback_mode;
+        state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
+        return;
+    }
+
+    state->animation.frame = state->movie.cur_frame;
+
+    char path_buf[1024];
+    int len = snprintf(path_buf, sizeof(path_buf), STR_FMT "/%s_%05d.png",
+        STR_ARG(state->movie.output_dir), state->movie.filename_prefix, state->movie.frame_index);
+    state->screenshot.path_to_file = str_copy({path_buf, (size_t)len}, state->allocator.persistent);
+    state->screenshot.hide_gui = true;
+    state->screenshot.res_x = state->movie.res_x;
+    state->screenshot.res_y = state->movie.res_y;
+    state->screenshot.sample_count  = 0;
+    state->screenshot.sample_target = state->visuals.temporal_aa.enabled ? JITTER_SEQUENCE_SIZE : 1;
+
+    state->movie.frame_index += 1;
+    state->movie.cur_frame   += state->movie.frame_step;
 }
 
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current) {
