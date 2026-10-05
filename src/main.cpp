@@ -61,6 +61,7 @@
 #include <stdio.h>
 #include <cmath>
 #include <string>
+#include <algorithm>
 
 #include <viamd.h>
 #include <script_reference.h>
@@ -211,6 +212,7 @@ static void create_screenshot(str_t path);
 static void movie_recording_start(ApplicationState* state);
 static void movie_recording_stop(ApplicationState* state);
 static void update_movie_recording(ApplicationState* state);
+static void movie_restore_state(ApplicationState* state);
 
 // The sizes offered in the Settings menu. The stored setting is the size itself, not an
 // index into this table, so the table can change without invalidating anyone's .ini.
@@ -1654,6 +1656,44 @@ static void draw_main_menu(ApplicationState* data) {
             if (ImGui::SliderScalarN("Frame Range", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
                 data->movie.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
                 data->movie.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
+            }
+
+            ImGui::SeparatorText("Camera Keyframes");
+            ImGui::Checkbox("Animate camera", &data->movie.animate_camera);
+            if (ImGui::Button("Add Keyframe (current view)")) {
+                CameraKeyframe key = { data->view.target, CLAMP(data->animation.frame, 0.0, max_frame) };
+                md_array_push(data->movie.keyframes, key, persistent_alloc);
+                std::stable_sort(data->movie.keyframes, data->movie.keyframes + md_array_size(data->movie.keyframes),
+                    [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.frame < b.frame; });
+            }
+            {
+                bool resort = false;
+                int  remove_idx = -1;
+                for (int i = 0; i < (int)md_array_size(data->movie.keyframes); ++i) {
+                    CameraKeyframe& key = data->movie.keyframes[i];
+                    ImGui::PushID(i);
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+                    double f = key.frame;
+                    if (ImGui::InputDouble("##frame", &f, 0.0, 0.0, "%.1f")) {
+                        key.frame = CLAMP(f, 0.0, max_frame);
+                    }
+                    resort |= ImGui::IsItemDeactivatedAfterEdit();
+                    ImGui::SameLine();
+                    if (ImGui::Button("Go To"))   data->view.target = key.transform;
+                    ImGui::SameLine();
+                    if (ImGui::Button("Update"))  key.transform = data->view.target;
+                    ImGui::SameLine();
+                    if (ImGui::Button("Remove"))  remove_idx = i;
+                    ImGui::PopID();
+                }
+                if (remove_idx >= 0) {
+                    md_array_swap_back_and_pop(data->movie.keyframes, remove_idx);
+                    resort = true;
+                }
+                if (resort) {
+                    std::stable_sort(data->movie.keyframes, data->movie.keyframes + md_array_size(data->movie.keyframes),
+                        [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.frame < b.frame; });
+                }
             }
 
             ImGui::EndDisabled();
@@ -6235,6 +6275,47 @@ void create_screenshot(str_t path) {
     VIAMD_LOG_SUCCESS("Screenshot saved to: '" STR_FMT "'", STR_ARG(path));
 }
 
+// Camera pose at a trajectory frame: holds the first/last keyframe outside their range and eases
+// (smoothstep) between neighbouring keyframes inside it. keys must be sorted by frame and count > 0.
+static ViewTransform camera_keyframes_evaluate(const CameraKeyframe* keys, size_t count, double frame) {
+    ASSERT(count > 0);
+    if (frame <= keys[0].frame)         return keys[0].transform;
+    if (frame >= keys[count - 1].frame) return keys[count - 1].transform;
+
+    size_t i = 0;
+    while (i + 2 < count && frame >= keys[i + 1].frame) ++i;
+
+    const CameraKeyframe& a = keys[i];
+    const CameraKeyframe& b = keys[i + 1];
+
+    const double span = b.frame - a.frame;
+    double t = span > 0.0 ? (frame - a.frame) / span : 1.0;
+    t = t * t * (3.0 - 2.0 * t);
+
+    // Take the shorter rotation arc; camera_interpolate_look_at expects non-negative dot.
+    quat_t qb = b.transform.orientation;
+    if (quat_dot(a.transform.orientation, qb) < 0.0f) {
+        qb = quat_t{-qb.x, -qb.y, -qb.z, -qb.w};
+    }
+
+    vec3_t pos[2]  = {a.transform.position, b.transform.position};
+    quat_t ori[2]  = {a.transform.orientation, qb};
+    float  dist[2] = {a.transform.distance, b.transform.distance};
+
+    ViewTransform out = {};
+    camera_interpolate_look_at(&out.position, &out.orientation, &out.distance, pos, ori, dist, t);
+    return out;
+}
+
+static void movie_restore_state(ApplicationState* state) {
+    state->animation.mode = state->movie.prev_playback_mode;
+    state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
+    if (state->movie.camera_was_animated) {
+        state->view.target = state->movie.prev_view_target;
+        state->movie.camera_was_animated = false;
+    }
+}
+
 // Begins a movie recording: the trajectory is stepped deterministically (independent of real
 // render speed) from movie.start_frame to movie.end_frame, capturing one numbered image per
 // output frame by driving the existing screenshot capture path. The resulting image sequence
@@ -6273,6 +6354,9 @@ static void movie_recording_start(ApplicationState* state) {
 
     state->movie.prev_screenshot_hide_gui = state->screenshot.hide_gui;
 
+    state->movie.camera_was_animated = state->movie.animate_camera && md_array_size(state->movie.keyframes) > 0;
+    state->movie.prev_view_target = state->view.target;
+
     state->movie.state = MovieRecordingState::Recording;
 
     VIAMD_LOG_INFO("Recording movie frames %.1f-%.1f to '" STR_FMT "'", state->movie.start_frame, state->movie.end_frame, STR_ARG(state->movie.output_dir));
@@ -6286,8 +6370,7 @@ static void movie_recording_stop(ApplicationState* state) {
     }
 
     state->movie.state = MovieRecordingState::Idle;
-    state->animation.mode = state->movie.prev_playback_mode;
-    state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
+    movie_restore_state(state);
 
     // Cancel any in-flight screenshot capture belonging to this recording
     if (!str_empty(state->screenshot.path_to_file)) {
@@ -6322,12 +6405,18 @@ static void update_movie_recording(ApplicationState* state) {
             STR_ARG(state->movie.output_dir), state->movie.filename_prefix);
 
         state->movie.state = MovieRecordingState::Idle;
-        state->animation.mode = state->movie.prev_playback_mode;
-        state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
+        movie_restore_state(state);
         return;
     }
 
     state->animation.frame = state->movie.cur_frame;
+
+    if (state->movie.camera_was_animated) {
+        // Set both so the exponential smoothing in camera_animate does not lag behind the keyframes
+        const ViewTransform vt = camera_keyframes_evaluate(state->movie.keyframes, md_array_size(state->movie.keyframes), state->movie.cur_frame);
+        state->view.target = vt;
+        state->view.camera = vt;
+    }
 
     char path_buf[1024];
     int len = snprintf(path_buf, sizeof(path_buf), STR_FMT "/%s_%05d.png",

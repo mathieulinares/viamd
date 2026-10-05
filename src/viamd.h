@@ -354,6 +354,12 @@ enum class MovieRecordingState {
     Recording,
 };
 
+// A camera pose that the movie camera passes through when the trajectory reaches 'frame'.
+struct CameraKeyframe {
+    ViewTransform transform = {};
+    double frame = 0.0;
+};
+
 enum class BondColorMode {
     NearestAtom,
 	SmoothAtom,
@@ -1072,8 +1078,15 @@ struct ApplicationState {
         str_t  output_dir = {};
         char   filename_prefix[64] = "frame";
 
+        // Kept sorted by frame. While recording with animate_camera set, the camera follows
+        // these (interpolated between neighbours) instead of staying where the user left it.
+        md_array(CameraKeyframe) keyframes = 0;
+        bool animate_camera = false;
+
         PlaybackMode prev_playback_mode = PlaybackMode::Stopped;  // Restored once recording finishes
         bool prev_screenshot_hide_gui   = true;                   // Restored once recording finishes
+        bool camera_was_animated        = false;                  // Whether prev_view_target must be restored
+        ViewTransform prev_view_target  = {};
     } movie;
 
     struct {
