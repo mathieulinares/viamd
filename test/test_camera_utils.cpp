@@ -508,25 +508,40 @@ UTEST(viamd_camera, a_slow_then_fast_frame_curve_is_forward_only_and_hits_its_ke
     EXPECT_LT(a1 - a0, 0.5 * (b1 - b0));
 }
 
-UTEST(viamd_camera, equal_frames_hold_and_a_frame_behind_is_a_hold) {
+UTEST(viamd_camera, a_frame_behind_the_previous_plays_backward_and_hits_its_keys) {
     CameraKeyframe k[4];
     kf_frame(k[0], 0.0, 0.0);
     kf_frame(k[1], 2.0, 100.0);
-    kf_frame(k[2], 4.0, 40.0);     /* behind the previous: held at 100 */
+    kf_frame(k[2], 4.0, 40.0);     /* backward from 100 */
     kf_frame(k[3], 6.0, 200.0);
     double f = 0.0;
-    camera_keyframes_evaluate_frame(&f, k, 4, 3.0);
-    EXPECT_NEAR(100.0, f, 1.0e-9);
-    camera_keyframes_evaluate_frame(&f, k, 4, 4.0);
-    EXPECT_NEAR(100.0, f, 1.0e-9);
-    camera_keyframes_evaluate_frame(&f, k, 4, 6.0);
-    EXPECT_NEAR(200.0, f, 1.0e-9);
+    for (int i = 0; i < 4; ++i) {
+        camera_keyframes_evaluate_frame(&f, k, 4, k[i].time);
+        EXPECT_NEAR(k[i].frame, f, 1.0e-9);
+    }
 
-    /* The held stretch is flat, it does not creep */
+    /* Going down between 2 and 4, never leaving the range of its two keys */
     double prev = 100.0;
     for (double t = 2.0; t <= 4.0; t += 0.05) {
         camera_keyframes_evaluate_frame(&f, k, 4, t);
-        EXPECT_NEAR(prev, f, 1.0e-9);
+        EXPECT_LE(f, prev + 1.0e-9);
+        EXPECT_GE(f, 40.0 - 1.0e-9);
+        prev = f;
+    }
+    camera_keyframes_evaluate_frame(&f, k, 4, 3.0);
+    EXPECT_LT(f, 100.0);
+    EXPECT_GT(f, 40.0);
+}
+
+UTEST(viamd_camera, equal_frames_hold) {
+    CameraKeyframe k[3];
+    kf_frame(k[0], 0.0, 0.0);
+    kf_frame(k[1], 2.0, 100.0);
+    kf_frame(k[2], 4.0, 100.0);
+    double f = 0.0;
+    for (double t = 2.0; t <= 4.0; t += 0.05) {
+        camera_keyframes_evaluate_frame(&f, k, 3, t);
+        EXPECT_NEAR(100.0, f, 1.0e-9);
     }
 }
 

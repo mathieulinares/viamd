@@ -382,13 +382,13 @@ bool camera_keyframes_evaluate_frame(double* out_frame, const CameraKeyframe* ke
     if (all.empty()) return false;
     std::stable_sort(all.begin(), all.end(), [](const Point& a, const Point& b) { return a.t < b.t; });
 
-    // Keys on the same time are one key, and a frame behind the previous one is a hold
+    // Keys on the same time are one key
     std::vector<double> times, frames;
     std::vector<KeyEase> eases;
     for (const Point& q : all) {
         if (!times.empty() && q.t <= times.back()) continue;
         times.push_back(q.t);
-        frames.push_back(frames.empty() ? q.f : MAX(q.f, frames.back()));
+        frames.push_back(q.f);
         eases.push_back(q.e);
     }
 

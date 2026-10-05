@@ -7486,17 +7486,15 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             }
             ImGui::SetItemTooltip("Key the trajectory frame shown at this time. With two or more, the trajectory plays\nfrom one to the next, so the speed can change between them.");
             if (key.use_frame) {
-                const bool behind = key.frame < prev_frame - 0.5;
+                const bool backward = i > 0 && prev_frame >= 0.0 && key.frame < prev_frame - 0.5;
                 const double zero = 0.0;
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(-FLT_MIN);
-                if (behind) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
                 ImGui::DragScalar("##frame", ImGuiDataType_Double, &key.frame, 0.5f, &zero, &last_frame, "%.0f");
-                if (behind) {
-                    ImGui::PopStyleColor();
-                    ImGui::SetItemTooltip("Behind the previous frame. The trajectory only plays forward, so it is held at that frame.");
+                if (backward) {
+                    ImGui::SetItemTooltip("Behind the previous frame: the trajectory plays backward to here.");
                 }
-                prev_frame = MAX(prev_frame, key.frame);
+                prev_frame = key.frame;
             }
 
             ImGui::TableNextColumn();

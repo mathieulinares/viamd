@@ -112,9 +112,9 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
 double keyed_curve_evaluate(const double* times, const double* values, const KeyEase* eases, size_t n, double time);
 
 // The trajectory frame at 'time', given by the keyframes that have one (use_frame). Returns false if
-// none do. The keys need not be sorted. The frame only moves forward: one that is behind the previous
-// is a hold. It passes through each key, holds outside the first and last, and the speed is continuous
-// through the ones in between (a monotone cubic, so it never overshoots a key).
+// none do. The keys need not be sorted. The frame can go backward from one key to the next. It passes through
+// each key, holds outside the first and last, and the speed is continuous through the ones in between (a
+// monotone cubic, so it never overshoots a key, and it stops where it turns around).
 bool camera_keyframes_evaluate_frame(double* out_frame, const CameraKeyframe* keys, size_t count, double time);
 
 mat4_t camera_world_to_view_matrix(const ViewTransform& transform);
