@@ -6209,7 +6209,7 @@ void create_screenshot(str_t path) {
 static double movie_duration(const ApplicationState* state) {
     if (state->movie.duration_auto) {
         const double fps = fabs((double)state->animation.fps);
-        return fps > 0.0 ? (state->movie.end_frame - state->movie.start_frame) / fps : 0.0;
+        return fps > 0.0 ? fabs(state->movie.end_frame - state->movie.start_frame) / fps : 0.0;
     }
     return (double)state->movie.duration;
 }
@@ -6563,8 +6563,8 @@ static void movie_recording_start(ApplicationState* state) {
     const double max_frame = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
     m.start_frame = CLAMP(m.start_frame, 0.0, max_frame);
     m.end_frame   = CLAMP(m.end_frame,   0.0, max_frame);
-    if (m.duration_auto && m.end_frame <= m.start_frame) {
-        VIAMD_LOG_ERROR("Cannot start movie recording: end frame must be greater than start frame");
+    if (m.duration_auto && m.end_frame == m.start_frame) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: the start and end frames are the same, so the movie has no duration");
         return;
     }
     if (movie_duration(state) <= 0.0) {
@@ -7668,7 +7668,7 @@ static void draw_movie_window(ApplicationState* data) {
     }
 
     const double max_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
-    if (m.end_frame <= 0.0) {
+    if (m.end_frame <= 0.0 && m.start_frame <= 0.0) {
         m.end_frame = max_frame;
     }
 
@@ -7787,14 +7787,9 @@ static void draw_movie_window(ApplicationState* data) {
         double frame_range[2] = { m.start_frame, m.end_frame };
         const double min_frame = 0.0;
         if (ImGui::SliderScalarN("Trajectory Frames", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
-            if (m.duration_auto) {
-                m.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
-                m.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
-            } else {
-                // The order matters when not tied to the Animation fps: start > end plays the trajectory backwards
-                m.start_frame = CLAMP(frame_range[0], 0.0, max_frame);
-                m.end_frame   = CLAMP(frame_range[1], 0.0, max_frame);
-            }
+            // Start after end plays the trajectory backwards
+            m.start_frame = CLAMP(frame_range[0], 0.0, max_frame);
+            m.end_frame   = CLAMP(frame_range[1], 0.0, max_frame);
         }
 
         double unused_frame;
