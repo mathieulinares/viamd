@@ -2,6 +2,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+#include <locale.h>
 #include <app/application.h>
 
 #include <core/md_log.h>
@@ -386,6 +387,9 @@ bool initialize(Context* ctx, size_t width, size_t height, str_t title) {
     if (NFD_Init() != NFD_OKAY) {
         MD_LOG_ERROR("Failed to initialize NativeFileDialog: %s", NFD_GetError());
     }
+    // GTK (used by NativeFileDialog on Linux) adopts the user's locale, which turns printf/strtod into
+    // decimal commas. Workspaces and scripts are written and parsed with a decimal point.
+    setlocale(LC_NUMERIC, "C");
 
     MEMCPY(ctx, &data.internal_ctx, sizeof(Context));
 

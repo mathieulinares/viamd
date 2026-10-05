@@ -227,6 +227,10 @@ bool extract_flt_vec (float* elem, size_t len, str_t arg) {
 		}
 	}
 	if (count != len) return false;
+	// Anything left over means this is not the vector asked for (e.g. a longer one)
+	while (extract_token_delim(&tok, &arg, ',')) {
+		if (str_trim(tok).len > 0) return false;
+	}
 	MEMCPY(elem, tmp, len * sizeof(float));
 	return true;
 }
