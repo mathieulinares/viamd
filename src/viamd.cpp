@@ -1177,6 +1177,29 @@ static str_t workspace_file_path(str_t folder, str_t arg, md_allocator_i* alloc)
     return md_path_make_canonical(path, alloc);
 }
 
+MovieKeys movie_keys_snapshot(const ApplicationState* app) {
+    MovieKeys k;
+    const CameraKeyframe* keys = app->movie.keyframes;
+    k.camera.assign(keys, keys + md_array_size(app->movie.keyframes));
+    k.params = app->movie.param_keys;
+    k.loop = app->movie.loop;
+    return k;
+}
+
+void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
+    auto& m = app->movie;
+    md_array_shrink(m.keyframes, 0);
+    for (const CameraKeyframe& k : keys.camera) {
+        md_array_push(m.keyframes, k, app->allocator.persistent);
+    }
+    m.param_keys = keys.params;
+    m.loop = keys.loop;
+}
+
+void movie_history_reset(ApplicationState* app) {
+    app->movie.history.clear(movie_keys_snapshot(app));
+}
+
 static void workspace_reset(ApplicationState* data) {
     remove_all_selections(data);
     remove_all_representations(data);
@@ -1219,7 +1242,15 @@ static void workspace_reset(ApplicationState* data) {
         m.playhead = 0.0f;
         snprintf(m.filename_prefix, sizeof(m.filename_prefix), "frame");
         m.animate_camera = false;
+        m.preview_playing = false;
+        m.show_path = true;
+        m.output = MovieOutput::Mp4;
+        m.crf = 18;
         md_array_shrink(m.keyframes, 0);
+        m.loop = false;
+        m.animate_params = true;
+        m.param_keys.clear();
+        for (int i = 0; i < MOVIE_MAX_PARAMS; ++i) m.param_saved_valid[i] = false;
     }
 
     data->selection.granularity = SelectionGranularity::Atom;
@@ -1236,6 +1267,8 @@ static void workspace_reset(ApplicationState* data) {
     recenter_mark_query_dirty(data);
     md_bitfield_clear(&data->operations.selection_mask);
     recenter_mark_selection_dirty(data);
+
+    movie_history_reset(data);
 }
 
 static void deserialize_files(viamd::deserialization_state_t& state, WorkspacePending& pending, str_t folder, md_allocator_i* alloc) {
@@ -1628,17 +1661,57 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Playhead")))       viamd::extract_flt(m.playhead, arg);
                 else if (str_eq(ident, STR_LIT("FilenamePrefix"))) viamd::extract_to_char_buf(m.filename_prefix, sizeof(m.filename_prefix), arg);
                 else if (str_eq(ident, STR_LIT("AnimateCamera")))  viamd::extract_bool(m.animate_camera, arg);
-                else if (str_eq(ident, STR_LIT("Keyframe"))) {
-                    // time, fov_y, distance, position (3), orientation (4)
-                    float v[10];
-                    if (viamd::extract_flt_vec(v, 10, arg)) {
+                else if (str_eq(ident, STR_LIT("ShowPath")))       viamd::extract_bool(m.show_path, arg);
+                else if (str_eq(ident, STR_LIT("Output")))         viamd::extract_enum(m.output, arg, (int)MovieOutput::Count);
+                else if (str_eq(ident, STR_LIT("Crf")))            viamd::extract_int(m.crf, arg);
+                else if (str_eq(ident, STR_LIT("Keyframe")) || str_eq(ident, STR_LIT("KeyframeV2"))) {
+                    // time, fov_y, distance, position (3), orientation (4). Keyframe is what was written before there
+                    // was more to a key: then use_frame, frame, spin_turns, spin_axis, spin_constant_speed and, in the
+                    // latest, the ease. KeyframeV2 with one less is what was written before that.
+                    const bool v2 = str_eq(ident, STR_LIT("KeyframeV2"));
+                    float v[16] = {};
+                    bool has_ease = false;
+                    bool ok = false;
+                    if (v2) {
+                        has_ease = viamd::extract_flt_vec(v, 16, arg);
+                        ok = has_ease || viamd::extract_flt_vec(v, 15, arg);
+                    } else {
+                        ok = viamd::extract_flt_vec(v, 10, arg);
+                    }
+                    if (ok) {
                         CameraKeyframe key = {};
                         key.time = v[0];
                         key.fov_y = v[1];
                         key.transform.distance = v[2];
                         key.transform.position = vec3_set(v[3], v[4], v[5]);
                         key.transform.orientation = quat_normalize(quat_t{v[6], v[7], v[8], v[9]});
+                        if (v2) {
+                            key.use_frame = v[10] != 0.0f;
+                            key.frame = v[11];
+                            key.spin_turns = CLAMP((int)lroundf(v[12]), -16, 16);
+                            key.spin_axis = (SpinAxis)CLAMP((int)lroundf(v[13]), 0, (int)SpinAxis::Count - 1);
+                            key.spin_constant_speed = v[14] != 0.0f;
+                        }
+                        if (has_ease) {
+                            key.ease = (KeyEase)CLAMP((int)lroundf(v[15]), 0, (int)KeyEase::Count - 1);
+                        }
                         md_array_push(m.keyframes, key, data->allocator.persistent);
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("Loop")))          viamd::extract_bool(m.loop, arg);
+                else if (str_eq(ident, STR_LIT("AnimateParams"))) viamd::extract_bool(m.animate_params, arg);
+                else if (str_eq(ident, STR_LIT("ParamKey"))) {
+                    // parameter, time, value (3), ease
+                    float v[6];
+                    if (viamd::extract_flt_vec(v, 6, arg)) {
+                        ParamKey key;
+                        key.param = (int)lroundf(v[0]);
+                        key.time = v[1];
+                        key.value[0] = v[2];
+                        key.value[1] = v[3];
+                        key.value[2] = v[4];
+                        key.ease = (KeyEase)CLAMP((int)lroundf(v[5]), 0, (int)KeyEase::Count - 1);
+                        if (0 <= key.param && key.param < MOVIE_MAX_PARAMS) m.param_keys.push_back(key);
                     }
                 }
             }
@@ -1646,8 +1719,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
             m.res_y = CLAMP(m.res_y, 480, 16384);
             m.fps = CLAMP(m.fps, 1.0f, 240.0f);
             m.duration = CLAMP(m.duration, 0.01f, 3600.0f);
+            m.crf = CLAMP(m.crf, 0, 51);
             std::stable_sort(m.keyframes, m.keyframes + md_array_size(m.keyframes),
                 [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+            movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("Operations"))) {
             auto& op = data->operations;
             while (viamd::next_entry(ident, arg, state)) {
@@ -1971,14 +2046,25 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_flt (state, STR_LIT("Playhead"), m.playhead);
         viamd::write_str (state, STR_LIT("FilenamePrefix"), str_from_cstr(m.filename_prefix));
         viamd::write_bool(state, STR_LIT("AnimateCamera"), m.animate_camera);
+        viamd::write_bool(state, STR_LIT("ShowPath"), m.show_path);
+        viamd::write_int (state, STR_LIT("Output"), (int)m.output);
+        viamd::write_int (state, STR_LIT("Crf"), m.crf);
+        viamd::write_bool(state, STR_LIT("Loop"), m.loop);
+        viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
             const CameraKeyframe& k = m.keyframes[i];
-            const float v[10] = {
+            const float v[16] = {
                 (float)k.time, k.fov_y, k.transform.distance,
                 k.transform.position.x, k.transform.position.y, k.transform.position.z,
                 k.transform.orientation.x, k.transform.orientation.y, k.transform.orientation.z, k.transform.orientation.w,
+                k.use_frame ? 1.0f : 0.0f, (float)k.frame, (float)k.spin_turns, (float)(int)k.spin_axis, k.spin_constant_speed ? 1.0f : 0.0f,
+                (float)(int)k.ease,
             };
-            viamd::write_flt_vec(state, STR_LIT("Keyframe"), v, 10);
+            viamd::write_flt_vec(state, STR_LIT("KeyframeV2"), v, 16);
+        }
+        for (const ParamKey& k : m.param_keys) {
+            const float v[6] = { (float)k.param, (float)k.time, k.value[0], k.value[1], k.value[2], (float)(int)k.ease };
+            viamd::write_flt_vec(state, STR_LIT("ParamKey"), v, 6);
         }
     }
 

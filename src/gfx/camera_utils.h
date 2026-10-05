@@ -98,7 +98,21 @@ void camera_interpolate_look_at(vec3_t* out_pos, quat_t* out_ori, float* out_dis
 // through the ones in between, so it does not stop at each of them. The look-at point follows a
 // Catmull-Rom spline, distance and fov a monotone cubic (no overshoot) and the orientation a spherical
 // cubic Bezier along the shortest rotation. The start and end of the path ease in and out.
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time);
+// A keyframe with spin_turns adds whole turns around the look-at point over the segment that ends at it.
+// The easing of a key shapes the segment that ends at it. With loop, the path is cyclic: the last key must
+// be in the same pose as the first, and the velocity is then continuous across the seam.
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false);
+
+// A value that is keyed over time, with the easing of the key that ends each segment (eases[i] shapes the
+// stretch from i - 1 to i; eases[0] is not used). Times must be strictly increasing. Holds the first and
+// last value outside of them.
+double keyed_curve_evaluate(const double* times, const double* values, const KeyEase* eases, size_t n, double time);
+
+// The trajectory frame at 'time', given by the keyframes that have one (use_frame). Returns false if
+// none do. The keys need not be sorted. The frame only moves forward: one that is behind the previous
+// is a hold. It passes through each key, holds outside the first and last, and the speed is continuous
+// through the ones in between (a monotone cubic, so it never overshoots a key).
+bool camera_keyframes_evaluate_frame(double* out_frame, const CameraKeyframe* keys, size_t count, double time);
 
 mat4_t camera_world_to_view_matrix(const ViewTransform& transform);
 mat4_t camera_view_to_world_matrix(const ViewTransform& transform);

@@ -6,6 +6,9 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include <algorithm>
+#include <vector>
+
 static vec4_t projection_extents(float fov_y, int width, int height, float texel_offset_x, float texel_offset_y) {
     const float aspect_ratio = (float)width / (float)height;
     const float half_h = tanf(fov_y * 0.5f);
@@ -207,7 +210,7 @@ static dvec3 quat_path_tangent(const quat_t* prev, quat_t cur, const quat_t* nex
     return {catmull_slope(d0.x, d1.x, h0, h1), catmull_slope(d0.y, d1.y, h0, h1), catmull_slope(d0.z, d1.z, h0, h1)};
 }
 
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time) {
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop) {
     ASSERT(count > 0);
 
     if (count == 1) {
@@ -227,34 +230,53 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
         u = (time - keys[i].time) / (keys[i + 1].time - keys[i].time);
     }
     const size_t j = i + 1;
-    const bool has_p = i > 0;
-    const bool has_n = j + 1 < count;
+
+    // The keys on either side of the segment. Around a loop the ends meet: the key before the first is the
+    // one before the last (the last being the first again), and the key after the last is the second.
+    const double period = keys[count - 1].time - keys[0].time;
+    const bool wrap = loop && count >= 3 && period > 0.0;
+    CameraKeyframe kp, kn;
+    bool has_p = false, has_n = false;
+    if (i > 0)          { kp = keys[i - 1];     has_p = true; }
+    else if (wrap)      { kp = keys[count - 2]; kp.time -= period; has_p = true; }
+    if (j + 1 < count)  { kn = keys[j + 1];     has_n = true; }
+    else if (wrap)      { kn = keys[1];         kn.time += period; has_n = true; }
+
+    // The easing of the segment is the one of the key it leads to
+    const KeyEase ease = keys[j].ease;
+    double ue = u;      // how far along the segment it is, as the easing sees it
+    if (ease == KeyEase::EaseInOut)  ue = u * u * (3.0 - 2.0 * u);
+    else if (ease == KeyEase::Hold)  ue = u >= 1.0 ? 1.0 : 0.0;
+    const bool linear = ease == KeyEase::Linear;
+
     const double h  = MAX(keys[j].time - keys[i].time, 1.0e-9);
-    const double hp = has_p ? MAX(keys[i].time - keys[i - 1].time, 1.0e-9) : 1.0;
-    const double hn = has_n ? MAX(keys[j + 1].time - keys[j].time, 1.0e-9) : 1.0;
+    const double hp = has_p ? MAX(keys[i].time - kp.time, 1.0e-9) : 1.0;
+    const double hn = has_n ? MAX(kn.time - keys[j].time, 1.0e-9) : 1.0;
 
     // Look-at point: Catmull-Rom
     const vec3_t la[4] = {
-        has_p ? camera_get_look_at(keys[i - 1].transform) : vec3_t{0, 0, 0},
+        has_p ? camera_get_look_at(kp.transform) : vec3_t{0, 0, 0},
         camera_get_look_at(keys[i].transform),
         camera_get_look_at(keys[j].transform),
-        has_n ? camera_get_look_at(keys[j + 1].transform) : vec3_t{0, 0, 0},
+        has_n ? camera_get_look_at(kn.transform) : vec3_t{0, 0, 0},
     };
     double look[3];
     for (int c = 0; c < 3; ++c) {
         const double d = ((double)la[2].elem[c] - la[1].elem[c]) / h;
-        const double m0 = has_p ? catmull_slope(((double)la[1].elem[c] - la[0].elem[c]) / hp, d, hp, h) : 0.0;
-        const double m1 = has_n ? catmull_slope(d, ((double)la[3].elem[c] - la[2].elem[c]) / hn, h, hn) : 0.0;
-        look[c] = hermite(la[1].elem[c], la[2].elem[c], m0, m1, h, u);
+        double m0 = has_p ? catmull_slope(((double)la[1].elem[c] - la[0].elem[c]) / hp, d, hp, h) : 0.0;
+        double m1 = has_n ? catmull_slope(d, ((double)la[3].elem[c] - la[2].elem[c]) / hn, h, hn) : 0.0;
+        if (linear) m0 = m1 = d;
+        look[c] = hermite(la[1].elem[c], la[2].elem[c], m0, m1, h, ue);
     }
 
     // Distance and fov: monotone cubic
     auto scalar = [&](auto get) {
         const double v0 = get(keys[i]), v1 = get(keys[j]);
         const double d = (v1 - v0) / h;
-        const double m0 = has_p ? monotone_slope((v0 - get(keys[i - 1])) / hp, d, hp, h) : 0.0;
-        const double m1 = has_n ? monotone_slope(d, (get(keys[j + 1]) - v1) / hn, h, hn) : 0.0;
-        return hermite(v0, v1, m0, m1, h, u);
+        double m0 = has_p ? monotone_slope((v0 - get(kp)) / hp, d, hp, h) : 0.0;
+        double m1 = has_n ? monotone_slope(d, (get(kn) - v1) / hn, h, hn) : 0.0;
+        if (linear) m0 = m1 = d;
+        return hermite(v0, v1, m0, m1, h, ue);
     };
     const float dist = (float)scalar([](const CameraKeyframe& k) { return (double)k.transform.distance; });
     const float fov  = (float)scalar([](const CameraKeyframe& k) { return (double)k.fov_y; });
@@ -263,8 +285,8 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
     const quat_t q1 = quat_normalize(keys[i].transform.orientation);
     const quat_t q2 = quat_align(q1, quat_normalize(keys[j].transform.orientation));
     quat_t q0 = {}, q3 = {};
-    if (has_p) q0 = quat_align(q1, quat_normalize(keys[i - 1].transform.orientation));
-    if (has_n) q3 = quat_align(q2, quat_normalize(keys[j + 1].transform.orientation));
+    if (has_p) q0 = quat_align(q1, quat_normalize(kp.transform.orientation));
+    if (has_n) q3 = quat_align(q2, quat_normalize(kn.transform.orientation));
 
     const dvec3 w1 = quat_path_tangent(has_p ? &q0 : nullptr, q1, &q2, hp, h);
     const dvec3 w2 = quat_path_tangent(&q1, q2, has_n ? &q3 : nullptr, h, hn);
@@ -275,18 +297,92 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
     const quat_t b2 = quat_normalize(q2 * quat_exp_rot(vec3_t{(float)(-w2.x * k), (float)(-w2.y * k), (float)(-w2.z * k)}));
     const quat_t b3 = q2;
 
-    const float uf = (float)u;
+    const float uf = (float)ue;
     const quat_t a01 = quat_slerp(b0, quat_align(b0, b1), uf);
     const quat_t a12 = quat_slerp(b1, quat_align(b1, b2), uf);
     const quat_t a23 = quat_slerp(b2, quat_align(b2, b3), uf);
     const quat_t a012 = quat_slerp(a01, quat_align(a01, a12), uf);
     const quat_t a123 = quat_slerp(a12, quat_align(a12, a23), uf);
-    const quat_t ori = quat_normalize(quat_slerp(a012, quat_align(a012, a123), uf));
+    quat_t ori = linear ? quat_normalize(quat_slerp(q1, q2, uf))
+                        : quat_normalize(quat_slerp(a012, quat_align(a012, a123), uf));
+
+    // Whole turns turn the camera back to where it was at both ends of the segment, so the keys are still hit exactly.
+    // They follow the segment's easing only when that is a hold.
+    const double us = ease == KeyEase::Hold ? ue : u;
+    if (keys[j].spin_turns != 0 && us > 0.0 && us < 1.0) {
+        vec3_t axis = {0, 1, 0};
+        switch (keys[j].spin_axis) {
+        case SpinAxis::ViewUp: axis = q1 * vec3_t{0, 1, 0}; break;
+        case SpinAxis::WorldX: axis = {1, 0, 0}; break;
+        case SpinAxis::WorldZ: axis = {0, 0, 1}; break;
+        default: break;
+        }
+        const double s = keys[j].spin_constant_speed ? us : us * us * (3.0 - 2.0 * us);
+        const double angle = 6.283185307179586 * (double)keys[j].spin_turns * s;
+        ori = quat_normalize(quat_axis_angle(vec3_normalize(axis), (float)angle) * ori);
+    }
 
     out_transform->orientation = ori;
     out_transform->distance = dist;
     out_transform->position = camera_position_from_look_at(vec3_t{(float)look[0], (float)look[1], (float)look[2]}, ori, dist);
     *out_fov_y = fov;
+}
+
+double keyed_curve_evaluate(const double* times, const double* values, const KeyEase* eases, size_t n, double time) {
+    if (n == 0) return 0.0;
+    if (n == 1 || time <= times[0]) return values[0];
+    if (time >= times[n - 1]) return values[n - 1];
+
+    size_t k = 0;
+    while (k + 2 < n && time >= times[k + 1]) ++k;
+
+    const double h = times[k + 1] - times[k];
+    const double u = (time - times[k]) / h;
+    const double v0 = values[k], v1 = values[k + 1];
+
+    switch (eases[k + 1]) {
+    case KeyEase::Hold:      return v0;
+    case KeyEase::Linear:    return v0 + (v1 - v0) * u;
+    case KeyEase::EaseInOut: return v0 + (v1 - v0) * (u * u * (3.0 - 2.0 * u));
+    default: break;
+    }
+
+    // The ends continue at the speed of their segment rather than easing, a single segment is constant speed
+    const double d = (v1 - v0) / h;
+    double m0 = d, m1 = d;
+    if (k > 0) {
+        const double hp = times[k] - times[k - 1];
+        m0 = monotone_slope((v0 - values[k - 1]) / hp, d, hp, h);
+    }
+    if (k + 2 < n) {
+        const double hn = times[k + 2] - times[k + 1];
+        m1 = monotone_slope(d, (values[k + 2] - v1) / hn, h, hn);
+    }
+    const double v = hermite(v0, v1, m0, m1, h, u);
+    return CLAMP(v, MIN(v0, v1), MAX(v0, v1));
+}
+
+bool camera_keyframes_evaluate_frame(double* out_frame, const CameraKeyframe* keys, size_t count, double time) {
+    struct Point { double t, f; KeyEase e; };
+    std::vector<Point> all;
+    for (size_t i = 0; i < count; ++i) {
+        if (keys[i].use_frame) all.push_back({keys[i].time, keys[i].frame, keys[i].ease});
+    }
+    if (all.empty()) return false;
+    std::stable_sort(all.begin(), all.end(), [](const Point& a, const Point& b) { return a.t < b.t; });
+
+    // Keys on the same time are one key, and a frame behind the previous one is a hold
+    std::vector<double> times, frames;
+    std::vector<KeyEase> eases;
+    for (const Point& q : all) {
+        if (!times.empty() && q.t <= times.back()) continue;
+        times.push_back(q.t);
+        frames.push_back(frames.empty() ? q.f : MAX(q.f, frames.back()));
+        eases.push_back(q.e);
+    }
+
+    *out_frame = keyed_curve_evaluate(times.data(), frames.data(), eases.data(), times.size(), time);
+    return true;
 }
 
 // We want to interpolate along an arc which is formed by maintaining a distance to the look_at position and smoothly interpolating the orientation,

@@ -269,6 +269,331 @@ UTEST(viamd_camera, keyframes_stay_valid_and_do_not_overshoot) {
     }
 }
 
+/* Extra turns. Two keys with the same pose, so whatever the camera does in between is the spin. */
+
+static void kf_orbit(CameraKeyframe* k, int turns, SpinAxis axis, bool constant_speed) {
+    kf_set(k[0], 0.0, vec3_set(0.3f, 1.0f, 0.1f), 0.4f, vec3_set(5, -2, 3), 12.0f, 0.8f);
+    k[1] = k[0];
+    k[1].time = 4.0;
+    k[1].spin_turns = turns;
+    k[1].spin_axis = axis;
+    k[1].spin_constant_speed = constant_speed;
+}
+
+static vec3_t kf_relative_eye(const CameraKeyframe& k, const ViewTransform& v) {
+    return v.position - camera_get_look_at(k.transform);
+}
+
+UTEST(viamd_camera, a_spin_orbits_the_look_at_point_and_arrives_where_it_started) {
+    CameraKeyframe k[2];
+    kf_orbit(k, 1, SpinAxis::WorldY, true);
+    const vec3_t r0 = kf_relative_eye(k[0], k[0].transform);
+
+    ViewTransform v; float fov;
+    for (double t = 0.0; t <= 4.0; t += 0.25) {
+        camera_keyframes_evaluate(&v, &fov, k, 2, t);
+        EXPECT_NEAR(vec3_length(r0), vec3_length(kf_relative_eye(k[0], v)), 1.0e-3f);
+        EXPECT_NEAR(1.0f, sqrtf(v.orientation.x*v.orientation.x + v.orientation.y*v.orientation.y + v.orientation.z*v.orientation.z + v.orientation.w*v.orientation.w), 1.0e-4f);
+    }
+
+    /* Both ends are the key's pose, whatever the sign of the quaternion */
+    for (int e = 0; e < 2; ++e) {
+        camera_keyframes_evaluate(&v, &fov, k, 2, k[e].time);
+        EXPECT_NEAR(k[0].transform.position.x, v.position.x, 1.0e-3f);
+        EXPECT_NEAR(k[0].transform.position.y, v.position.y, 1.0e-3f);
+        EXPECT_NEAR(k[0].transform.position.z, v.position.z, 1.0e-3f);
+        EXPECT_NEAR(1.0f, fabsf(quat_dot(k[0].transform.orientation, v.orientation)), 1.0e-5f);
+    }
+
+    /* A quarter of the way at constant speed is a quarter turn: counter-clockwise seen from +Y is
+     * (x, y, z) -> (z, y, -x). Halfway it is on the other side. */
+    camera_keyframes_evaluate(&v, &fov, k, 2, 1.0);
+    vec3_t r = kf_relative_eye(k[0], v);
+    EXPECT_NEAR( r0.z, r.x, 2.0e-3f);
+    EXPECT_NEAR( r0.y, r.y, 2.0e-3f);
+    EXPECT_NEAR(-r0.x, r.z, 2.0e-3f);
+
+    camera_keyframes_evaluate(&v, &fov, k, 2, 2.0);
+    r = kf_relative_eye(k[0], v);
+    EXPECT_NEAR(-r0.x, r.x, 2.0e-3f);
+    EXPECT_NEAR( r0.y, r.y, 2.0e-3f);
+    EXPECT_NEAR(-r0.z, r.z, 2.0e-3f);
+}
+
+UTEST(viamd_camera, a_negative_spin_goes_the_other_way) {
+    CameraKeyframe k[2];
+    kf_orbit(k, -1, SpinAxis::WorldY, true);
+    const vec3_t r0 = kf_relative_eye(k[0], k[0].transform);
+
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 2, 1.0);
+    const vec3_t r = kf_relative_eye(k[0], v);
+    EXPECT_NEAR(-r0.z, r.x, 2.0e-3f);
+    EXPECT_NEAR( r0.x, r.z, 2.0e-3f);
+}
+
+UTEST(viamd_camera, a_spin_eases_in_and_out_unless_it_is_constant) {
+    CameraKeyframe k[2];
+    kf_orbit(k, 1, SpinAxis::WorldY, false);
+    const vec3_t r0 = kf_relative_eye(k[0], k[0].transform);
+
+    /* A quarter of the way the eased turn has covered smoothstep(0.25) of it */
+    const double s = 0.25 * 0.25 * (3.0 - 2.0 * 0.25);
+    const float a = (float)(6.283185307179586 * s);
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 2, 1.0);
+    const vec3_t r = kf_relative_eye(k[0], v);
+    EXPECT_NEAR(r0.x * cosf(a) + r0.z * sinf(a), r.x, 2.0e-3f);
+    EXPECT_NEAR(-r0.x * sinf(a) + r0.z * cosf(a), r.z, 2.0e-3f);
+
+    /* and it starts slowly */
+    ViewTransform a0, a1; 
+    camera_keyframes_evaluate(&a0, &fov, k, 2, 0.0);
+    camera_keyframes_evaluate(&a1, &fov, k, 2, 0.01);
+    EXPECT_LT(vec3_length(a1.position - a0.position), 0.05f);
+}
+
+UTEST(viamd_camera, a_spin_about_the_view_up_keeps_the_camera_level) {
+    CameraKeyframe k[2];
+    kf_orbit(k, 2, SpinAxis::ViewUp, true);
+    const vec3_t up0 = k[0].transform.orientation * vec3_set(0, 1, 0);
+    const vec3_t r0 = kf_relative_eye(k[0], k[0].transform);
+
+    ViewTransform v; float fov;
+    for (double t = 0.0; t <= 4.0; t += 0.2) {
+        camera_keyframes_evaluate(&v, &fov, k, 2, t);
+        const vec3_t up = v.orientation * vec3_set(0, 1, 0);
+        EXPECT_NEAR(up0.x, up.x, 1.0e-3f);
+        EXPECT_NEAR(up0.y, up.y, 1.0e-3f);
+        EXPECT_NEAR(up0.z, up.z, 1.0e-3f);
+        /* and it stays in the plane it started in */
+        EXPECT_NEAR(vec3_dot(r0, up0), vec3_dot(kf_relative_eye(k[0], v), up0), 2.0e-3f);
+    }
+}
+
+UTEST(viamd_camera, a_spin_is_not_applied_to_the_first_key) {
+    CameraKeyframe k[2];
+    kf_orbit(k, 1, SpinAxis::WorldY, true);
+    k[0].spin_turns = 3;
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 2, 0.0);
+    EXPECT_NEAR(k[0].transform.position.x, v.position.x, 1.0e-3f);
+    EXPECT_NEAR(k[0].transform.position.z, v.position.z, 1.0e-3f);
+}
+
+/* Trajectory frame from keyframes. */
+
+static void kf_frame(CameraKeyframe& k, double time, double frame) {
+    k = CameraKeyframe{};
+    k.time = time;
+    k.use_frame = true;
+    k.frame = frame;
+}
+
+UTEST(viamd_camera, no_frame_keys_gives_no_frame_curve) {
+    CameraKeyframe k[2];
+    k[0] = CameraKeyframe{};
+    k[1] = CameraKeyframe{};
+    k[1].time = 1.0;
+    double f = -1.0;
+    EXPECT_FALSE(camera_keyframes_evaluate_frame(&f, k, 2, 0.5));
+    EXPECT_FALSE(camera_keyframes_evaluate_frame(&f, k, 0, 0.5));
+}
+
+UTEST(viamd_camera, two_frame_keys_play_at_constant_speed_and_hold_outside) {
+    CameraKeyframe k[2];
+    kf_frame(k[0], 1.0, 0.0);
+    kf_frame(k[1], 11.0, 100.0);
+    double f = 0.0;
+    ASSERT_TRUE(camera_keyframes_evaluate_frame(&f, k, 2, 6.0));
+    EXPECT_NEAR(50.0, f, 1.0e-9);
+    camera_keyframes_evaluate_frame(&f, k, 2, 3.0);
+    EXPECT_NEAR(20.0, f, 1.0e-9);
+    camera_keyframes_evaluate_frame(&f, k, 2, -5.0);
+    EXPECT_NEAR(0.0, f, 1.0e-12);
+    camera_keyframes_evaluate_frame(&f, k, 2, 99.0);
+    EXPECT_NEAR(100.0, f, 1.0e-12);
+}
+
+UTEST(viamd_camera, a_single_frame_key_holds_that_frame) {
+    CameraKeyframe k[1];
+    kf_frame(k[0], 3.0, 42.0);
+    double f = 0.0;
+    ASSERT_TRUE(camera_keyframes_evaluate_frame(&f, k, 1, 0.0));
+    EXPECT_NEAR(42.0, f, 1.0e-12);
+    camera_keyframes_evaluate_frame(&f, k, 1, 10.0);
+    EXPECT_NEAR(42.0, f, 1.0e-12);
+}
+
+UTEST(viamd_camera, a_slow_then_fast_frame_curve_is_forward_only_and_hits_its_keys) {
+    CameraKeyframe k[3];
+    kf_frame(k[0], 0.0, 0.0);
+    kf_frame(k[1], 5.0, 10.0);
+    kf_frame(k[2], 10.0, 110.0);
+    double prev = -1.0, f = 0.0;
+    for (double t = 0.0; t <= 10.0; t += 0.01) {
+        ASSERT_TRUE(camera_keyframes_evaluate_frame(&f, k, 3, t));
+        EXPECT_GE(f, prev - 1.0e-9);
+        EXPECT_GE(f, -1.0e-9);
+        EXPECT_LE(f, 110.0 + 1.0e-9);
+        prev = f;
+    }
+    for (int i = 0; i < 3; ++i) {
+        camera_keyframes_evaluate_frame(&f, k, 3, k[i].time);
+        EXPECT_NEAR(k[i].frame, f, 1.0e-9);
+    }
+
+    /* Slow in the first half, fast in the second */
+    double a0, a1, b0, b1;
+    camera_keyframes_evaluate_frame(&a0, k, 3, 2.4);
+    camera_keyframes_evaluate_frame(&a1, k, 3, 2.5);
+    camera_keyframes_evaluate_frame(&b0, k, 3, 7.4);
+    camera_keyframes_evaluate_frame(&b1, k, 3, 7.5);
+    EXPECT_LT(a1 - a0, 0.5 * (b1 - b0));
+}
+
+UTEST(viamd_camera, equal_frames_hold_and_a_frame_behind_is_a_hold) {
+    CameraKeyframe k[4];
+    kf_frame(k[0], 0.0, 0.0);
+    kf_frame(k[1], 2.0, 100.0);
+    kf_frame(k[2], 4.0, 40.0);     /* behind the previous: held at 100 */
+    kf_frame(k[3], 6.0, 200.0);
+    double f = 0.0;
+    camera_keyframes_evaluate_frame(&f, k, 4, 3.0);
+    EXPECT_NEAR(100.0, f, 1.0e-9);
+    camera_keyframes_evaluate_frame(&f, k, 4, 4.0);
+    EXPECT_NEAR(100.0, f, 1.0e-9);
+    camera_keyframes_evaluate_frame(&f, k, 4, 6.0);
+    EXPECT_NEAR(200.0, f, 1.0e-9);
+
+    /* The held stretch is flat, it does not creep */
+    double prev = 100.0;
+    for (double t = 2.0; t <= 4.0; t += 0.05) {
+        camera_keyframes_evaluate_frame(&f, k, 4, t);
+        EXPECT_NEAR(prev, f, 1.0e-9);
+    }
+}
+
+UTEST(viamd_camera, frame_keys_need_not_be_sorted_or_alone) {
+    CameraKeyframe sorted[3], mixed[5];
+    kf_frame(sorted[0], 0.0, 0.0);
+    kf_frame(sorted[1], 5.0, 10.0);
+    kf_frame(sorted[2], 10.0, 110.0);
+
+    mixed[0] = sorted[2];
+    mixed[1] = CameraKeyframe{};     /* camera only, no frame */
+    mixed[1].time = 3.0;
+    mixed[2] = sorted[0];
+    mixed[3] = CameraKeyframe{};
+    mixed[3].time = 8.0;
+    mixed[4] = sorted[1];
+
+    for (double t = 0.0; t <= 10.0; t += 0.37) {
+        double a = 0.0, b = 0.0;
+        camera_keyframes_evaluate_frame(&a, sorted, 3, t);
+        camera_keyframes_evaluate_frame(&b, mixed, 5, t);
+        EXPECT_NEAR(a, b, 1.0e-12);
+    }
+}
+
+/* Easing of a segment, and loops */
+
+static void kf_two_poses(CameraKeyframe* k, KeyEase ease) {
+    kf_set(k[0], 0.0, vec3_set(0.3f, 1.0f, 0.1f), 0.2f, vec3_set(0, 0, 0),   10.0f, 0.8f);
+    kf_set(k[1], 4.0, vec3_set(0.3f, 1.0f, 0.1f), 1.2f, vec3_set(40, 0, 0),  20.0f, 0.6f);
+    k[1].ease = ease;
+}
+
+UTEST(viamd_camera, a_hold_stays_in_the_pose_until_the_key_and_then_jumps) {
+    CameraKeyframe k[2];
+    kf_two_poses(k, KeyEase::Hold);
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 2, 3.99);
+    EXPECT_NEAR(k[0].transform.distance, v.distance, 1.0e-4f);
+    EXPECT_NEAR(k[0].fov_y, fov, 1.0e-5f);
+    EXPECT_NEAR(k[0].transform.position.x, v.position.x, 1.0e-3f);
+    EXPECT_NEAR(1.0f, fabsf(quat_dot(k[0].transform.orientation, v.orientation)), 1.0e-5f);
+    camera_keyframes_evaluate(&v, &fov, k, 2, 4.0);
+    EXPECT_NEAR(k[1].transform.distance, v.distance, 1.0e-4f);
+    EXPECT_NEAR(k[1].fov_y, fov, 1.0e-5f);
+}
+
+UTEST(viamd_camera, a_linear_segment_moves_at_constant_speed_where_a_smooth_one_eases) {
+    CameraKeyframe lin[2], smooth[2];
+    kf_two_poses(lin, KeyEase::Linear);
+    kf_two_poses(smooth, KeyEase::Smooth);
+
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, lin, 2, 1.0);
+    EXPECT_NEAR(12.5f, v.distance, 1.0e-3f);
+    EXPECT_NEAR(0.75f, fov, 1.0e-4f);
+    camera_keyframes_evaluate(&v, &fov, smooth, 2, 1.0);
+    EXPECT_NEAR(10.0f + 10.0f * 0.15625f, v.distance, 1.0e-3f);   /* two keys alone ease at both ends */
+
+    /* The orientation is turned at a constant rate too: halfway is halfway */
+    camera_keyframes_evaluate(&v, &fov, lin, 2, 2.0);
+    const float full = 2.0f * acosf(fminf(1.0f, fabsf(quat_dot(lin[0].transform.orientation, lin[1].transform.orientation))));
+    const float half = 2.0f * acosf(fminf(1.0f, fabsf(quat_dot(lin[0].transform.orientation, v.orientation))));
+    EXPECT_NEAR(0.5f * full, half, 2.0e-3f);
+}
+
+UTEST(viamd_camera, ease_in_and_out_starts_and_ends_slowly) {
+    CameraKeyframe k[2];
+    kf_two_poses(k, KeyEase::EaseInOut);
+    ViewTransform a, b; float fov;
+    camera_keyframes_evaluate(&a, &fov, k, 2, 0.0);
+    camera_keyframes_evaluate(&b, &fov, k, 2, 0.02);
+    const float start = vec3_length(b.position - a.position);
+    camera_keyframes_evaluate(&a, &fov, k, 2, 1.99);
+    camera_keyframes_evaluate(&b, &fov, k, 2, 2.01);
+    const float middle = vec3_length(b.position - a.position);
+    EXPECT_LT(start * 20.0f, middle);
+}
+
+static void kf_loop_keys(CameraKeyframe* k) {
+    kf_set(k[0], 0.0, vec3_set(0.3f, 1.0f, 0.1f), 0.2f, vec3_set(0, 0, 0),    10.0f, 0.8f);
+    kf_set(k[1], 2.0, vec3_set(0.3f, 1.0f, 0.1f), 0.8f, vec3_set(20, 10, 0),  14.0f, 0.8f);
+    kf_set(k[2], 4.0, vec3_set(0.3f, 1.0f, 0.1f), 1.4f, vec3_set(40, -5, 8),  12.0f, 0.8f);
+    k[3] = k[0];
+    k[3].time = 6.0;
+}
+
+UTEST(viamd_camera, a_loop_has_no_corner_at_the_seam) {
+    CameraKeyframe k[4];
+    kf_loop_keys(k);
+    const double e = 1.0e-2;   /* a smaller step drowns in the float noise of slerp over tiny angles */
+
+    /* Not a loop: the camera eases away from the first key and into the last, it stands still at the seam */
+    ViewTransform a, b; float fov;
+    camera_keyframes_evaluate(&a, &fov, k, 4, 0.0, false);
+    camera_keyframes_evaluate(&b, &fov, k, 4, e, false);
+    const vec3_t open_start = (b.position - a.position) * (float)(1.0 / e);
+
+    camera_keyframes_evaluate(&a, &fov, k, 4, 0.0, true);
+    camera_keyframes_evaluate(&b, &fov, k, 4, e, true);
+    const vec3_t v_start = (b.position - a.position) * (float)(1.0 / e);
+
+    camera_keyframes_evaluate(&a, &fov, k, 4, 6.0 - e, true);
+    camera_keyframes_evaluate(&b, &fov, k, 4, 6.0, true);
+    const vec3_t v_end = (b.position - a.position) * (float)(1.0 / e);
+
+    EXPECT_GT(vec3_length(v_start), 5.0f);
+    EXPECT_GT(vec3_length(v_start), 5.0f * vec3_length(open_start));
+    EXPECT_LT(vec3_length(v_end - v_start), 0.15f * vec3_length(v_start));
+}
+
+UTEST(viamd_camera, a_loop_still_hits_every_key) {
+    CameraKeyframe k[4];
+    kf_loop_keys(k);
+    for (int i = 0; i < 4; ++i) {
+        ViewTransform v; float fov;
+        camera_keyframes_evaluate(&v, &fov, k, 4, k[i].time, true);
+        EXPECT_NEAR(k[i].transform.position.x, v.position.x, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.y, v.position.y, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.z, v.position.z, 1.0e-3f);
+    }
+}
+
 /* Default view. These pin the behaviour rather than the numbers: what is up, what faces the viewer, and
  * that everything fits. Synthetic systems, deterministic (a fixed LCG, not rand()). */
 

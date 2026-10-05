@@ -58,6 +58,8 @@
 #include <implot.h>
 #include <implot_internal.h>
 
+#include <float.h>
+
 #include <stdio.h>
 #include <cmath>
 #include <string>
@@ -211,7 +213,20 @@ static void create_screenshot(str_t path);
 
 static void movie_recording_start(ApplicationState* state);
 static void movie_recording_stop(ApplicationState* state);
+static void movie_shutdown(ApplicationState* state);
+static void movie_add_keyframe(ApplicationState* state);
 static void update_movie_recording(ApplicationState* state);
+static void update_movie_preview(ApplicationState* state);
+static void update_movie_history(ApplicationState* state);
+static void movie_undo(ApplicationState* state);
+static void movie_redo(ApplicationState* state);
+static void draw_movie_window(ApplicationState* state);
+static void draw_movie_timeline_window(ApplicationState* state);
+static void draw_movie_recording_banner(ApplicationState* state);
+static void movie_draw_camera_path(ApplicationState* state);
+static bool movie_draw_timeline_markers(ApplicationState* state);
+static void movie_blit_preview(ApplicationState* state);
+static void movie_capture_frame(ApplicationState* state);
 static void movie_sort_keyframes(ApplicationState* state);
 static void movie_apply_time(ApplicationState* state, double time, bool apply_camera);
 static double movie_duration(const ApplicationState* state);
@@ -457,6 +472,8 @@ int main(int argc, char** argv) {
     workspace_register_window("Representations", &state.representation.show_window);
     workspace_register_window("ScriptEditor",    &state.show_script_window);
     workspace_register_window("Animation",       &state.animation.show_window);
+    workspace_register_window("Movie",           &state.movie.show_window);
+    workspace_register_window("MovieTimeline",   &state.movie.show_timeline_window);
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdInitialize, viamd::EventPayloadType_ApplicationState, &state);
 
@@ -552,6 +569,9 @@ int main(int argc, char** argv) {
         if (state.structure_export.show_window) draw_structure_export_window(&state);
         if (state.show_debug_window) draw_debug_window(&state);
         if (state.animation.show_window) draw_animation_window(&state);
+        if (state.movie.show_window) draw_movie_window(&state);
+        if (state.movie.show_timeline_window) draw_movie_timeline_window(&state);
+        draw_movie_recording_banner(&state);
 
         draw_async_task_window(&state);
         draw_main_menu(&state);
@@ -566,12 +586,16 @@ int main(int argc, char** argv) {
         InteractionSurfaceState surface_state = interaction_surface(interaction_surface_main, vec_cast(view_size));
         ImGui::EndCanvas();
 
+        // The recording drives the frame and the camera, and the viewport shows the frames at the movie's
+        // resolution rather than the scene under the mouse, so picking and navigation are off meanwhile
+        const bool movie_recording = state.movie.state == MovieRecordingState::Recording;
+
         const mat4_t clip_to_world = camera_view_to_world_matrix(state.view.camera) * state.view.param.matrix.inv.proj;
         const mat4_t world_to_clip = state.view.param.matrix.curr.proj * state.view.param.matrix.curr.view;
 
         PickingHit hit = {};
 
-        if (surface_state.hovered) {
+        if (surface_state.hovered && !movie_recording) {
             InteractionSurfaceHitArgs args = {
                 .picking_surface = &state.picking_surface,
                 .picking_handler = state.picking_handler,
@@ -626,7 +650,10 @@ int main(int argc, char** argv) {
             .trackball_param = state.view.trackball_param,
         };
 
-        InteractionSurfaceViewTransformResult view_result = interaction_surface_view_transform_apply(&state.view.target, surface_state, view_args);
+        InteractionSurfaceViewTransformResult view_result = {};
+        if (!movie_recording) {
+            view_result = interaction_surface_view_transform_apply(&state.view.target, surface_state, view_args);
+        }
         if (view_result.reset_requested) {
             ViewTransform reset_transform = {};
             if (hit.depth < 1.0f) {
@@ -661,6 +688,22 @@ int main(int argc, char** argv) {
                 state.show_debug_window = true;
             }
 
+            if (movie_recording && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                movie_recording_stop(&state);
+            }
+
+            if ((state.movie.show_window || state.movie.show_timeline_window) && !movie_recording && ImGui::IsKeyPressed(KEY_ADD_MOVIE_KEYFRAME, false)) {
+                movie_add_keyframe(&state);
+            }
+
+            if ((state.movie.show_window || state.movie.show_timeline_window) && !movie_recording) {
+                if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) {
+                    movie_undo(&state);
+                } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) || ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)) {
+                    movie_redo(&state);
+                }
+            }
+
             if (ImGui::IsKeyPressed(KEY_RECOMPILE_SHADERS)) {
                 VIAMD_LOG_INFO("Recompiling shaders and re-initializing volume");
                 postprocess_pipeline::initialize(state.gbuffer.width, state.gbuffer.height);
@@ -669,7 +712,7 @@ int main(int argc, char** argv) {
                 state.gl.shaders = md_gl_shaders_create(shader_output_snippet);
             }
 
-            if (ImGui::IsKeyPressed(KEY_PLAY_PAUSE)) {
+            if (!movie_recording && ImGui::IsKeyPressed(KEY_PLAY_PAUSE)) {
                 switch (state.animation.mode) {
                     case PlaybackMode::Playing:
                         state.animation.mode = PlaybackMode::Stopped;
@@ -689,7 +732,7 @@ int main(int argc, char** argv) {
 
             }
 
-            if (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME)) {
+            if (!movie_recording && (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME))) {
                 double step = ImGui::IsKeyDown(ImGuiMod_Ctrl) ? 10.0 : 1.0;
                 if (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME)) step = -step;
                 state.animation.frame = CLAMP(state.animation.frame + step, 0.0, max_frame);
@@ -710,7 +753,9 @@ int main(int argc, char** argv) {
 
         // Must run before the time_changed check below so a frame set here is interpolated
         // and uploaded to the GPU within this same loop iteration, before render() is called.
+        update_movie_preview(&state);
         update_movie_recording(&state);
+        update_movie_history(&state);
 
         {
             static auto prev_frame = state.animation.frame;
@@ -1152,6 +1197,7 @@ int main(int argc, char** argv) {
         application::swap_buffers(&state.app);
     }
 
+    movie_shutdown(&state);
     interrupt_async_tasks(&state);
     series_cache_free(&state);
 
@@ -1424,6 +1470,8 @@ static void draw_main_menu(ApplicationState* data) {
         }
         if (ImGui::BeginMenu("Windows")) {
             ImGui::Checkbox("Animation", &data->animation.show_window);
+            ImGui::Checkbox("Movie", &data->movie.show_window);
+            ImGui::Checkbox("Movie Timeline", &data->movie.show_timeline_window);
             ImGui::Checkbox("Representations", &data->representation.show_window);
             ImGui::Checkbox("Script Editor", &data->show_script_window);
             ImGui::Checkbox("Script Reference", &data->show_script_reference_window);
@@ -1565,7 +1613,7 @@ static void draw_main_menu(ApplicationState* data) {
                 data->screenshot.res_x = data->gbuffer.width;
                 data->screenshot.res_y = data->gbuffer.height;
             }
-            if (ImGui::MenuItem("Take Screenshot")) {
+            if (ImGui::MenuItem("Take Screenshot", nullptr, false, data->movie.state != MovieRecordingState::Recording)) {
                 if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, STR_LIT("jpg,png,bmp"))) {
                     size_t path_len = strnlen(path_buf, sizeof(path_buf));
                     str_t ext;
@@ -1587,190 +1635,6 @@ static void draw_main_menu(ApplicationState* data) {
                 }
                 ImGui::GetCurrentWindow()->Hidden = true;
             }
-            ImGui::EndMenu();
-        }
-        if (ImGui::BeginMenu("Record Movie")) {
-            const bool recording = data->movie.state == MovieRecordingState::Recording;
-
-            ImGui::BeginDisabled(recording);
-
-            if (ImGui::Button("Select Output Folder...")) {
-                if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Dir)) {
-                    size_t path_len = strnlen(path_buf, sizeof(path_buf));
-                    str_free(data->movie.output_dir, persistent_alloc);
-                    data->movie.output_dir = str_copy({path_buf, path_len}, persistent_alloc);
-                }
-            }
-            if (!str_empty(data->movie.output_dir)) {
-                ImGui::TextWrapped(STR_FMT, STR_ARG(data->movie.output_dir));
-            } else {
-                ImGui::TextDisabled("No output folder selected");
-            }
-
-            ImGui::InputText("Filename Prefix", data->movie.filename_prefix, sizeof(data->movie.filename_prefix));
-
-            data->movie.resolution = (ScreenshotResolution)MIN((int)data->movie.resolution, (int)ScreenshotResolution::Count - 1);
-            if (ImGui::BeginCombo("Resolution", screenshot_resolution_str[(int)data->movie.resolution])) {
-                for (int i = 0; i < (int)ScreenshotResolution::Count; ++i) {
-                    if (ImGui::Selectable(screenshot_resolution_str[i], (i == (int)data->movie.resolution))) {
-                        data->movie.resolution = (ScreenshotResolution)i;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            switch (data->movie.resolution) {
-            case ScreenshotResolution::Window:
-                data->movie.res_x = data->gbuffer.width;
-                data->movie.res_y = data->gbuffer.height;
-                break;
-            case ScreenshotResolution::FHD:
-                data->movie.res_x = 1920;
-                data->movie.res_y = 1080;
-                break;
-            case ScreenshotResolution::QHD:
-                data->movie.res_x = 2560;
-                data->movie.res_y = 1440;
-                break;
-            case ScreenshotResolution::UHD_4K:
-                data->movie.res_x = 3840;
-                data->movie.res_y = 2160;
-                break;
-            case ScreenshotResolution::UHD_8K:
-                data->movie.res_x = 7680;
-                data->movie.res_y = 4320;
-                break;
-            case ScreenshotResolution::Custom:
-                ImGui::InputInt("Res X", &data->movie.res_x);
-                ImGui::InputInt("Res Y", &data->movie.res_y);
-                data->movie.res_x = CLAMP(data->movie.res_x, 640, 16384);
-                data->movie.res_y = CLAMP(data->movie.res_y, 480, 16384);
-                break;
-            default:
-                ASSERT(false);
-            }
-
-            ImGui::InputFloat("Output FPS", &data->movie.fps, 1.0f, 5.0f, "%.1f");
-            data->movie.fps = CLAMP(data->movie.fps, 1.0f, 240.0f);
-
-            const double max_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
-            if (data->movie.end_frame <= 0.0) {
-                data->movie.end_frame = max_frame;
-            }
-            double frame_range[2] = { data->movie.start_frame, data->movie.end_frame };
-            const double min_frame = 0.0;
-            if (ImGui::SliderScalarN("Trajectory Frames", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
-                if (data->movie.duration_auto) {
-                    data->movie.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
-                    data->movie.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
-                } else {
-                    // The order matters when not tied to the Animation fps: start > end plays the trajectory backwards
-                    data->movie.start_frame = CLAMP(frame_range[0], 0.0, max_frame);
-                    data->movie.end_frame   = CLAMP(frame_range[1], 0.0, max_frame);
-                }
-            }
-
-            ImGui::SeparatorText("Timeline");
-            ImGui::Checkbox("Duration from trajectory", &data->movie.duration_auto);
-            ImGui::SetItemTooltip("On: the movie is the trajectory at the Animation panel's fps.\n"
-                "Off: set the duration yourself and choose when the trajectory plays within it.\n"
-                "Set both trajectory frames equal to hold the trajectory still while the camera moves.");
-            if (data->movie.duration_auto) {
-                ImGui::TextDisabled("%.2f s, %d frames", movie_duration(data), movie_num_frames(data));
-            } else {
-                ImGui::InputFloat("Duration (s)", &data->movie.duration, 0.5f, 5.0f, "%.2f");
-                data->movie.duration = CLAMP(data->movie.duration, 0.01f, 3600.0f);
-                ImGui::SliderFloat("Trajectory starts (s)", &data->movie.traj_begin, 0.0f, data->movie.duration, "%.2f");
-                ImGui::SliderFloat("Trajectory ends (s)", &data->movie.traj_end, 0.0f, data->movie.duration, "%.2f");
-                data->movie.traj_begin = CLAMP(data->movie.traj_begin, 0.0f, data->movie.duration);
-                data->movie.traj_end   = CLAMP(data->movie.traj_end,   data->movie.traj_begin, data->movie.duration);
-                ImGui::TextDisabled("%d frames", movie_num_frames(data));
-            }
-
-            const float movie_len = (float)movie_duration(data);
-            data->movie.playhead = CLAMP(data->movie.playhead, 0.0f, movie_len);
-
-            ImGui::SeparatorText("Camera Keyframes");
-            ImGui::Checkbox("Animate camera", &data->movie.animate_camera);
-            if (ImGui::SliderFloat("Preview time (s)", &data->movie.playhead, 0.0f, movie_len, "%.2f")) {
-                movie_apply_time(data, (double)data->movie.playhead, true);
-            }
-            ImGui::SetItemTooltip("Scrub the movie: shows the trajectory frame and, with 'Animate camera' on, the camera at this time.");
-            if (ImGui::Button("Add Keyframe (current view)")) {
-                CameraKeyframe key = {};
-                key.transform = data->view.target;
-                key.fov_y = data->view.camera.fov_y;
-                key.time = (double)data->movie.playhead;
-                md_array_push(data->movie.keyframes, key, data->allocator.persistent);
-                movie_sort_keyframes(data);
-            }
-            {
-                bool resort = false;
-                int  remove_idx = -1;
-                for (int i = 0; i < (int)md_array_size(data->movie.keyframes); ++i) {
-                    CameraKeyframe& key = data->movie.keyframes[i];
-                    ImGui::PushID(i);
-                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
-                    double t = key.time;
-                    if (ImGui::InputDouble("##time", &t, 0.0, 0.0, "%.2f s")) {
-                        key.time = MAX(t, 0.0);
-                    }
-                    resort |= ImGui::IsItemDeactivatedAfterEdit();
-                    ImGui::SameLine();
-                    if (ImGui::Button("Go To")) {
-                        data->view.target = key.transform;
-                        data->view.camera.fov_y = key.fov_y;
-                        data->movie.playhead = CLAMP((float)key.time, 0.0f, movie_len);
-                        data->animation.frame = movie_trajectory_frame(data, key.time);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Update")) {
-                        key.transform = data->view.target;
-                        key.fov_y = data->view.camera.fov_y;
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Remove"))  remove_idx = i;
-                    ImGui::PopID();
-                }
-                if (remove_idx >= 0) {
-                    // Keeps the order, unlike swap-and-pop
-                    CameraKeyframe* keys = data->movie.keyframes;
-                    const size_t n = md_array_size(keys);
-                    memmove(keys + remove_idx, keys + remove_idx + 1, (n - remove_idx - 1) * sizeof(CameraKeyframe));
-                    md_array_pop(keys);
-                }
-                if (resort) {
-                    movie_sort_keyframes(data);
-                }
-            }
-
-            ImGui::EndDisabled();
-
-            if (!recording) {
-                if (ImGui::Button("Start Recording")) {
-                    movie_recording_start(data);
-                }
-            } else {
-                ImGui::Text("Recording frame %d / %d (%.2f s)",
-                    data->movie.frame_index, movie_num_frames(data), data->movie.cur_time);
-                if (ImGui::Button("Stop Recording")) {
-                    movie_recording_stop(data);
-                }
-            }
-
-            ImGui::Separator();
-            ImGui::TextWrapped("Writes a numbered PNG sequence ('%s_00000.png', ...), to be encoded into a video with ffmpeg.",
-                data->movie.filename_prefix);
-            ImGui::BeginDisabled(str_empty(data->movie.output_dir));
-            if (ImGui::Button("Copy ffmpeg command")) {
-                char cmd[2048];
-                // Quoted for a shell; the folder is only copied, never executed from here. libx264 with yuv420p needs even dimensions, hence the scale.
-                snprintf(cmd, sizeof(cmd), "ffmpeg -framerate %g -i \"" STR_FMT "/%s_%%05d.png\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -c:v libx264 -pix_fmt yuv420p \"" STR_FMT "/%s.mp4\"",
-                    data->movie.fps, STR_ARG(data->movie.output_dir), data->movie.filename_prefix,
-                    STR_ARG(data->movie.output_dir), data->movie.filename_prefix);
-                ImGui::SetClipboardText(cmd);
-            }
-            ImGui::EndDisabled();
-
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Operations")) {
@@ -2977,6 +2841,8 @@ static void draw_animation_window(ApplicationState* data) {
 
     ImGui::SetNextWindowSize({300,200}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Animation", &data->animation.show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
+        // The recording sets the frame itself
+        ImGui::BeginDisabled(data->movie.state == MovieRecordingState::Recording);
         ImGui::Text("Num Frames: %zu", num_frames);
         md_unit_t time_unit = data->timeline.time_unit;
         double t   = frame_to_time(data->animation.frame, *data);
@@ -3039,6 +2905,7 @@ static void draw_animation_window(ApplicationState* data) {
             data->animation.frame = 0.0;
         }
         ImGui::PopItemWidth();
+        ImGui::EndDisabled();
     }
     ImGui::End();
 }
@@ -4739,6 +4606,10 @@ static void draw_timeline_window(ApplicationState* data) {
                         time = CLAMP(time, min_x_value, max_x_value);
                     }
 
+                    if (movie_draw_timeline_markers(data)) {
+                        print_timeline_tooltip = false;
+                    }
+
                     if (ImPlot::IsPlotHovered() && hovered_idx != -1 && views[hovered_idx].script_ident[0] != '\0') {
                         const SeriesTemporalView& v = views[hovered_idx];
                         const int pop_idx = v.dim > 1 ? hovered_pop_idx : -1;
@@ -6344,8 +6215,14 @@ static int movie_num_frames(const ApplicationState* state) {
     return (int)floor(movie_duration(state) * (double)state->movie.fps + 1.0e-6) + 1;
 }
 
-// Trajectory frame shown at a time on the movie timeline
+// Trajectory frame shown at a time on the movie timeline: from the keyframes that have one, otherwise
+// the trajectory plays linearly between the times of the movie's timeline settings
 static double movie_trajectory_frame(const ApplicationState* state, double time) {
+    double keyed;
+    if (camera_keyframes_evaluate_frame(&keyed, state->movie.keyframes, md_array_size(state->movie.keyframes), time)) {
+        const double last = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
+        return CLAMP(keyed, 0.0, last);
+    }
     const double t0 = state->movie.duration_auto ? 0.0 : (double)state->movie.traj_begin;
     const double t1 = state->movie.duration_auto ? movie_duration(state) : (double)state->movie.traj_end;
     const double u = t1 > t0 ? CLAMP((time - t0) / (t1 - t0), 0.0, 1.0) : (time < t0 ? 0.0 : 1.0);
@@ -6357,23 +6234,110 @@ static void movie_sort_keyframes(ApplicationState* state) {
         [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
 }
 
-// Shows the movie at a time on its timeline: the trajectory frame and, if enabled, the camera.
+// The look parameters that can be keyed. The id is what a key stores and what a workspace saves, so an
+// id never changes meaning: new parameters go at the end.
+enum MovieParamId : int {
+    MovieParam_BackgroundColor = 0,
+    MovieParam_BackgroundIntensity,
+    MovieParam_SsaoIntensity,
+    MovieParam_SsaoRadius,
+    MovieParam_Exposure,
+    MovieParam_DofStrength,
+    MovieParam_NearClip,
+    MovieParam_FarClip,
+};
+
+struct MovieParamDesc {
+    int         id;
+    const char* label;
+    int         comps;       // 3 for a colour
+    bool        color;
+    float       lo, hi;
+    bool        log;         // Shown on a logarithmic axis, where the range spans orders of magnitude
+    float*    (*ptr)(ApplicationState*);
+    const char* tip;
+};
+
+static const MovieParamDesc movie_param_table[] = {
+    { MovieParam_BackgroundColor,     "Background color",     3, true,  0.0f, 1.0f,     false, [](ApplicationState* s) { return s->visuals.background.color.elem; }, nullptr },
+    { MovieParam_BackgroundIntensity, "Background intensity", 1, false, 0.0f, 100.0f,   false, [](ApplicationState* s) { return &s->visuals.background.intensity; }, nullptr },
+    { MovieParam_SsaoIntensity,       "Ambient occlusion",    1, false, 0.0f, 10.0f,    false, [](ApplicationState* s) { return &s->visuals.ssao.intensity; }, "The intensity of the ambient occlusion. It has to be enabled." },
+    { MovieParam_SsaoRadius,          "Occlusion radius",     1, false, 0.1f, 50.0f,    true,  [](ApplicationState* s) { return &s->visuals.ssao.radius; }, nullptr },
+    { MovieParam_Exposure,            "Exposure",             1, false, 0.05f, 10.0f,   true,  [](ApplicationState* s) { return &s->visuals.tonemapping.exposure; }, "The exposure of the tonemapping. It has to be enabled." },
+    { MovieParam_DofStrength,         "Depth of field blur",  1, false, 0.001f, 100.0f, true,  [](ApplicationState* s) { return &s->visuals.dof.focus_scale; }, "The blur strength. Depth of field has to be enabled; it focuses on what the camera looks at." },
+    { MovieParam_NearClip,            "Near clipping plane",  1, false, 0.01f, 5000.0f, true,  [](ApplicationState* s) { return &s->view.camera.near_plane; }, "Distance from the camera to where things start to show. Raise it to cut into the structure." },
+    { MovieParam_FarClip,             "Far clipping plane",   1, false, 1.0f, 100000.0f,true,  [](ApplicationState* s) { return &s->view.camera.far_plane; }, "Distance from the camera to where things stop showing." },
+};
+static_assert(sizeof(movie_param_table) / sizeof(movie_param_table[0]) <= MOVIE_MAX_PARAMS, "more parameters than MOVIE_MAX_PARAMS");
+
+static const MovieParamDesc* movie_param_desc(int id) {
+    for (const MovieParamDesc& d : movie_param_table) {
+        if (d.id == id) return &d;
+    }
+    return nullptr;
+}
+
+static const char* key_ease_str[(int)KeyEase::Count] = {
+    "Smooth",
+    "Ease in/out",
+    "Linear",
+    "Hold",
+};
+
+// Puts the keyed parameters at their values at a time. A parameter is taken hold of when it first has a key
+// to follow, and what it was is kept, to be put back when the keys let go of it or the recording is over.
+static void movie_params_apply(ApplicationState* state, double time) {
+    auto& m = state->movie;
+    for (const MovieParamDesc& d : movie_param_table) {
+        float v[3] = {};
+        const bool keyed = m.animate_params && param_keys_evaluate(v, d.comps, m.param_keys.data(), m.param_keys.size(), d.id, time);
+        float* dst = d.ptr(state);
+        if (keyed) {
+            if (!m.param_saved_valid[d.id]) {
+                for (int c = 0; c < d.comps; ++c) m.param_saved[d.id][c] = dst[c];
+                m.param_saved_valid[d.id] = true;
+            }
+            for (int c = 0; c < d.comps; ++c) dst[c] = v[c];
+        } else if (m.param_saved_valid[d.id]) {
+            for (int c = 0; c < d.comps; ++c) dst[c] = m.param_saved[d.id][c];
+            m.param_saved_valid[d.id] = false;
+        }
+    }
+}
+
+static void movie_params_restore(ApplicationState* state) {
+    auto& m = state->movie;
+    for (const MovieParamDesc& d : movie_param_table) {
+        if (!m.param_saved_valid[d.id]) continue;
+        float* dst = d.ptr(state);
+        for (int c = 0; c < d.comps; ++c) dst[c] = m.param_saved[d.id][c];
+        m.param_saved_valid[d.id] = false;
+    }
+}
+
 // Both view targets are set so the exponential smoothing in camera_animate does not lag behind.
-static void movie_apply_time(ApplicationState* state, double time, bool apply_camera) {
+// The keys must be sorted by time.
+static void movie_apply_time_with_keys(ApplicationState* state, double time, bool apply_camera, const CameraKeyframe* keys, size_t num_keys) {
     state->animation.frame = movie_trajectory_frame(state, time);
-    if (apply_camera && state->movie.animate_camera && md_array_size(state->movie.keyframes) > 0) {
+    movie_params_apply(state, time);
+    if (apply_camera && state->movie.animate_camera && num_keys > 0) {
         ViewTransform vt;
         float fov_y;
-        camera_keyframes_evaluate(&vt, &fov_y, state->movie.keyframes, md_array_size(state->movie.keyframes), time);
+        camera_keyframes_evaluate(&vt, &fov_y, keys, num_keys, time, state->movie.loop);
         state->view.target = vt;
         state->view.camera = vt;
         state->view.camera.fov_y = fov_y;
     }
 }
 
+// Shows the movie at a time on its timeline: the trajectory frame and, if enabled, the camera.
+static void movie_apply_time(ApplicationState* state, double time, bool apply_camera) {
+    movie_apply_time_with_keys(state, time, apply_camera, state->movie.keyframes, md_array_size(state->movie.keyframes));
+}
+
 static void movie_restore_state(ApplicationState* state) {
     state->animation.mode = state->movie.prev_playback_mode;
-    state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
+    movie_params_restore(state);
     if (state->movie.camera_was_animated) {
         state->view.target = state->movie.prev_view_target;
         state->view.camera = state->movie.prev_view_target;
@@ -6382,27 +6346,169 @@ static void movie_restore_state(ApplicationState* state) {
     }
 }
 
-// Begins a movie recording: the trajectory is stepped deterministically (independent of real
-// render speed) from movie.start_frame to movie.end_frame, capturing one numbered image per
-// output frame by driving the existing screenshot capture path. The resulting image sequence
-// is meant to be encoded into a video file with an external tool, e.g.:
-//   ffmpeg -framerate <fps> -i <prefix>_%05d.png movie.mp4
-static void movie_recording_start(ApplicationState* state) {
-    ASSERT(state);
+static void movie_frame_size(const ApplicationState* state, int* w, int* h) {
+    switch (state->movie.resolution) {
+    case ScreenshotResolution::Window:
+        *w = (int)state->app.framebuffer.width;
+        *h = (int)state->app.framebuffer.height;
+        break;
+    case ScreenshotResolution::FHD:    *w = 1920; *h = 1080; break;
+    case ScreenshotResolution::QHD:    *w = 2560; *h = 1440; break;
+    case ScreenshotResolution::UHD_4K: *w = 3840; *h = 2160; break;
+    case ScreenshotResolution::UHD_8K: *w = 7680; *h = 4320; break;
+    default:
+        *w = CLAMP(state->movie.res_x, 640, 16384);
+        *h = CLAMP(state->movie.res_y, 480, 16384);
+        break;
+    }
+}
 
-    if (state->movie.state == MovieRecordingState::Recording) {
+static void movie_pbo_free(ApplicationState* state) {
+    auto& m = state->movie;
+    for (int i = 0; i < MOVIE_RING_SIZE; ++i) {
+        if (m.fence[i]) {
+            glDeleteSync(m.fence[i]);
+            m.fence[i] = nullptr;
+        }
+    }
+    if (m.pbo[0]) {
+        glDeleteBuffers(MOVIE_RING_SIZE, m.pbo);
+        for (int i = 0; i < MOVIE_RING_SIZE; ++i) m.pbo[i] = 0;
+    }
+    m.pbo_head = 0;
+    m.pbo_count = 0;
+    m.pbo_bytes = 0;
+}
+
+static void movie_pbo_alloc(ApplicationState* state, size_t bytes) {
+    movie_pbo_free(state);
+    auto& m = state->movie;
+    glGenBuffers(MOVIE_RING_SIZE, m.pbo);
+    for (int i = 0; i < MOVIE_RING_SIZE; ++i) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, m.pbo[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)bytes, nullptr, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    m.pbo_bytes = bytes;
+}
+
+// Hands the oldest read back frame to the sink. Without wait it only does so if the GPU is done with
+// it and the sink has a buffer to spare, otherwise it leaves everything as it was and returns false.
+static bool movie_pbo_pop(ApplicationState* state, bool wait) {
+    auto& m = state->movie;
+    if (m.pbo_count == 0 || !m.sink) return false;
+
+    const int slot = m.pbo_head;
+    if (!wait && m.fence[slot]) {
+        const GLenum r = glClientWaitSync(m.fence[slot], 0, 0);
+        if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) return false;
+    }
+
+    uint8_t* dst = frame_sink::acquire(m.sink, wait);
+    if (!dst) return false;
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, m.pbo[slot]);
+    const void* src = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)m.pbo_bytes, GL_MAP_READ_BIT);
+    if (src) {
+        memcpy(dst, src, m.pbo_bytes);
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        frame_sink::submit(m.sink, dst, m.pbo_frame[slot]);
+    } else {
+        VIAMD_LOG_ERROR("Could not read back movie frame %d from the GPU", m.pbo_frame[slot]);
+        frame_sink::release(m.sink, dst);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+    if (m.fence[slot]) {
+        glDeleteSync(m.fence[slot]);
+        m.fence[slot] = nullptr;
+    }
+    m.pbo_head = (m.pbo_head + 1) % MOVIE_RING_SIZE;
+    m.pbo_count -= 1;
+    return true;
+}
+
+static void movie_pbo_flush(ApplicationState* state) {
+    while (movie_pbo_pop(state, true)) {}
+}
+
+// Starts the read back of the frame that was just rendered. The pixels reach the sink some frames later,
+// from movie_pbo_pop, so the GPU is not waited for here.
+static void movie_capture_frame(ApplicationState* state) {
+    auto& m = state->movie;
+    ASSERT(m.pbo_count < MOVIE_RING_SIZE);
+
+    if ((int)state->gbuffer.width != m.rec_w || (int)state->gbuffer.height != m.rec_h) {
+        VIAMD_LOG_ERROR("Movie recording stopped: the render target is %dx%d, not the %dx%d of the movie",
+            (int)state->gbuffer.width, (int)state->gbuffer.height, m.rec_w, m.rec_h);
+        movie_recording_stop(state);
         return;
     }
 
-    if (str_empty(state->movie.output_dir)) {
+    const int slot = (m.pbo_head + m.pbo_count) % MOVIE_RING_SIZE;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, state->gbuffer.fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, m.pbo[slot]);
+    glReadPixels(0, 0, m.rec_w, m.rec_h, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+
+    if (m.fence[slot]) glDeleteSync(m.fence[slot]);
+    m.fence[slot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    m.pbo_frame[slot] = m.frame_index;
+    m.pbo_count += 1;
+}
+
+// Shows the frame that was just rendered in the viewport, scaled to fit. The GUI is drawn over it.
+static void movie_blit_preview(ApplicationState* state) {
+    const int fw = (int)state->app.framebuffer.width;
+    const int fh = (int)state->app.framebuffer.height;
+    const int gw = (int)state->gbuffer.width;
+    const int gh = (int)state->gbuffer.height;
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glDrawBuffer(GL_BACK);
+    glViewport(0, 0, fw, fh);
+    const float background[4] = {0.07f, 0.07f, 0.07f, 1.0f};
+    glClearBufferfv(GL_COLOR, 0, background);
+
+    if (fw <= 0 || fh <= 0 || gw <= 0 || gh <= 0) return;
+
+    const float scale = MIN((float)fw / (float)gw, (float)fh / (float)gh);
+    const int dw = MAX(1, (int)(gw * scale));
+    const int dh = MAX(1, (int)(gh * scale));
+    const int x0 = (fw - dw) / 2;
+    const int y0 = (fh - dh) / 2;
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, state->gbuffer.fbo);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glBlitFramebuffer(0, 0, gw, gh, x0, y0, x0 + dw, y0 + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+}
+
+// Begins a movie recording: the trajectory is stepped deterministically (independent of real
+// render speed) from movie.start_frame to movie.end_frame. One frame is rendered per output frame
+// at the movie's resolution and handed to a frame_sink, which writes it in the background.
+static void movie_recording_start(ApplicationState* state) {
+    ASSERT(state);
+    auto& m = state->movie;
+
+    if (m.state == MovieRecordingState::Recording) {
+        return;
+    }
+
+    if (m.sink) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: the previous movie is still being written");
+        return;
+    }
+
+    if (str_empty(m.output_dir)) {
         VIAMD_LOG_ERROR("Cannot start movie recording: no output directory selected");
         return;
     }
 
     const double max_frame = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
-    state->movie.start_frame = CLAMP(state->movie.start_frame, 0.0, max_frame);
-    state->movie.end_frame   = CLAMP(state->movie.end_frame,   0.0, max_frame);
-    if (state->movie.duration_auto && state->movie.end_frame <= state->movie.start_frame) {
+    m.start_frame = CLAMP(m.start_frame, 0.0, max_frame);
+    m.end_frame   = CLAMP(m.end_frame,   0.0, max_frame);
+    if (m.duration_auto && m.end_frame <= m.start_frame) {
         VIAMD_LOG_ERROR("Cannot start movie recording: end frame must be greater than start frame");
         return;
     }
@@ -6411,85 +6517,1363 @@ static void movie_recording_start(ApplicationState* state) {
         return;
     }
 
-    state->movie.cur_time    = 0.0;
-    state->movie.frame_index = 0;
+    if (m.filename_prefix[0] == '\0') {
+        snprintf(m.filename_prefix, sizeof(m.filename_prefix), "frame");
+    }
 
-    state->movie.prev_playback_mode = state->animation.mode;
+    int w = 0, h = 0;
+    movie_frame_size(state, &w, &h);
+    if (w <= 0 || h <= 0) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: the window has no size");
+        return;
+    }
+
+    frame_sink::Desc desc;
+    desc.kind   = m.output == MovieOutput::Mp4 ? frame_sink::Kind::Ffmpeg : frame_sink::Kind::PngSequence;
+    desc.dir    = m.output_dir;
+    desc.prefix = str_from_cstr(m.filename_prefix);
+    desc.width  = w;
+    desc.height = h;
+    desc.fps    = m.fps;
+    desc.crf    = m.crf;
+    desc.ffmpeg = str_from_cstr(m.ffmpeg_path);
+
+    char err[256] = {};
+    m.sink = frame_sink::create(desc, err, sizeof(err));
+    if (!m.sink) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: %s%s", err,
+            m.output == MovieOutput::Mp4 ? ". The PNG sequence output does not need ffmpeg" : "");
+        return;
+    }
+
+    movie_pbo_alloc(state, (size_t)w * (size_t)h * 4);
+
+    if (m.output == MovieOutput::Mp4) {
+        snprintf(m.rec_result, sizeof(m.rec_result), STR_FMT "/%s.mp4", STR_ARG(m.output_dir), m.filename_prefix);
+    } else {
+        snprintf(m.rec_result, sizeof(m.rec_result), STR_FMT, STR_ARG(m.output_dir));
+    }
+
+    m.rec_w = w;
+    m.rec_h = h;
+    m.rec_output = m.output;
+    m.cur_time = 0.0;
+    m.frame_index = 0;
+    m.samples_done = 0;
+    m.sample_target = state->visuals.temporal_aa.enabled ? JITTER_SEQUENCE_SIZE : 1;
+    m.can_capture = true;
+
+    m.prev_playback_mode = state->animation.mode;
     state->animation.mode = PlaybackMode::Stopped;
 
-    state->movie.prev_screenshot_hide_gui = state->screenshot.hide_gui;
+    m.camera_was_animated = m.animate_camera && md_array_size(m.keyframes) > 0;
+    m.prev_view_target = state->view.target;
+    m.prev_fov_y = state->view.camera.fov_y;
 
-    state->movie.camera_was_animated = state->movie.animate_camera && md_array_size(state->movie.keyframes) > 0;
-    state->movie.prev_view_target = state->view.target;
-    state->movie.prev_fov_y = state->view.camera.fov_y;
+    m.state = MovieRecordingState::Recording;
 
-    state->movie.state = MovieRecordingState::Recording;
-
-    VIAMD_LOG_INFO("Recording %d movie frame(s) (%.2f s) to '" STR_FMT "'", movie_num_frames(state), movie_duration(state), STR_ARG(state->movie.output_dir));
+    VIAMD_LOG_INFO("Recording %d movie frame(s) (%.2f s, %dx%d) to '%s'", movie_num_frames(state), movie_duration(state), w, h, m.rec_result);
 }
 
+// Ends the recording. The frames captured so far are kept: the sink writes what it has and is
+// closed, so a stopped movie is a shorter movie.
 static void movie_recording_stop(ApplicationState* state) {
     ASSERT(state);
+    auto& m = state->movie;
 
-    if (state->movie.state != MovieRecordingState::Recording) {
+    if (m.state != MovieRecordingState::Recording) {
         return;
     }
 
-    state->movie.state = MovieRecordingState::Idle;
+    m.state = MovieRecordingState::Idle;
     movie_restore_state(state);
 
-    // Cancel any in-flight screenshot capture belonging to this recording
-    if (!str_empty(state->screenshot.path_to_file)) {
-        str_free(state->screenshot.path_to_file, state->allocator.persistent);
-        state->screenshot.path_to_file = {};
-        state->screenshot.sample_count  = 0;
-        state->screenshot.sample_target = 0;
-    }
+    movie_pbo_flush(state);
+    movie_pbo_free(state);
+    if (m.sink) frame_sink::close(m.sink);
 
-    VIAMD_LOG_INFO("Movie recording stopped after %d frame(s)", state->movie.frame_index);
+    VIAMD_LOG_INFO("Movie recording stopped after %d frame(s)", m.frame_index);
 }
 
-// Drives the movie recording state machine. Called once per application loop iteration,
-// before render(), so it can queue up the next frame capture (reusing the screenshot
-// capture path) once the previous one has finished writing to disk.
+static void movie_shutdown(ApplicationState* state) {
+    movie_recording_stop(state);
+    movie_pbo_free(state);
+    if (state->movie.sink) {
+        // Waits for whatever is still being written
+        frame_sink::destroy(state->movie.sink);
+        state->movie.sink = nullptr;
+    }
+}
+
+// Plays the movie in the viewport at real time, with the trajectory and the camera as they will be recorded
+static void update_movie_preview(ApplicationState* state) {
+    auto& m = state->movie;
+    if (!m.preview_playing) return;
+
+    const float len = (float)movie_duration(state);
+    if (m.state == MovieRecordingState::Recording || len <= 0.0f || run_num_frames(state) == 0) {
+        m.preview_playing = false;
+        return;
+    }
+
+    state->animation.mode = PlaybackMode::Stopped;
+    m.playhead += (float)state->app.timing.delta_s;
+    if (m.playhead >= len) {
+        if (m.preview_loop) {
+            m.playhead = fmodf(m.playhead, len);
+        } else {
+            m.playhead = len;
+            m.preview_playing = false;
+        }
+    }
+    movie_apply_time(state, (double)m.playhead, true);
+}
+
+// Drives the movie recording. Called once per application loop iteration, before render(): it sets the
+// scene to the time of the frame being captured (and keeps it there while that frame's samples are
+// accumulated), and passes finished read backs on to the sink.
 static void update_movie_recording(ApplicationState* state) {
     ASSERT(state);
+    auto& m = state->movie;
 
-    if (state->movie.state != MovieRecordingState::Recording) {
+    if (m.state != MovieRecordingState::Recording) {
+        // The recording is over but the sink may still be writing. Report when it is done.
+        if (m.sink) {
+            const frame_sink::Status st = frame_sink::status(m.sink);
+            if (st.done) {
+                if (st.ok) {
+                    if (m.rec_output == MovieOutput::Mp4) {
+                        VIAMD_LOG_SUCCESS("Movie saved to '%s' (%d frames)", m.rec_result, st.written);
+                    } else {
+                        VIAMD_LOG_SUCCESS("%d PNG frame(s) written to '%s'", st.written, m.rec_result);
+                    }
+                } else {
+                    VIAMD_LOG_ERROR("Writing the movie failed: %s (%d of %d frame(s) written)", st.message, st.written, st.submitted);
+                }
+                frame_sink::destroy(m.sink);
+                m.sink = nullptr;
+            }
+        }
         return;
     }
 
-    // A capture is still in flight (possibly accumulating multiple samples for TAA); wait for it.
-    if (!str_empty(state->screenshot.path_to_file)) {
+    // A writer that has failed (ffmpeg gone, disk full) ends the recording rather than rendering for nothing
+    const frame_sink::Status st = frame_sink::status(m.sink);
+    if (!st.ok) {
+        VIAMD_LOG_ERROR("Movie recording stopped: %s", st.message);
+        movie_recording_stop(state);
         return;
     }
 
-    if (state->movie.frame_index >= movie_num_frames(state)) {
-        VIAMD_LOG_SUCCESS("Movie recording complete: %d frame(s) written to '" STR_FMT "'. "
-            "Encode with e.g. ffmpeg -framerate %.3f -i '" STR_FMT "/%s_%%05d.png' movie.mp4 (see 'Copy ffmpeg command')",
-            state->movie.frame_index, STR_ARG(state->movie.output_dir), state->movie.fps,
-            STR_ARG(state->movie.output_dir), state->movie.filename_prefix);
+    state->animation.mode = PlaybackMode::Stopped;
 
-        state->movie.state = MovieRecordingState::Idle;
+    while (movie_pbo_pop(state, false)) {}
+    m.can_capture = m.pbo_count < MOVIE_RING_SIZE;
+
+    if (m.frame_index >= movie_num_frames(state)) {
+        const int num_frames = m.frame_index;
+        movie_pbo_flush(state);
+        movie_pbo_free(state);
+        frame_sink::close(m.sink);
+        m.state = MovieRecordingState::Idle;
         movie_restore_state(state);
+        VIAMD_LOG_INFO("Movie recording finished, %d frame(s) captured. Writing the rest in the background", num_frames);
         return;
     }
 
-    // Computed from the index rather than accumulated, so the time does not drift
-    state->movie.cur_time = (double)state->movie.frame_index / (double)state->movie.fps;
-    movie_apply_time(state, state->movie.cur_time, state->movie.camera_was_animated);
+    // Computed from the index rather than accumulated, so the time does not drift. Applied on every
+    // iteration so that nothing done in the meantime moves the scene away from this frame.
+    m.cur_time = (double)m.frame_index / (double)m.fps;
+    movie_apply_time(state, m.cur_time, m.camera_was_animated);
+}
 
-    char path_buf[1024];
-    int len = snprintf(path_buf, sizeof(path_buf), STR_FMT "/%s_%05d.png",
-        STR_ARG(state->movie.output_dir), state->movie.filename_prefix, state->movie.frame_index);
-    state->screenshot.path_to_file = str_copy({path_buf, (size_t)len}, state->allocator.persistent);
-    state->screenshot.hide_gui = true;
-    state->screenshot.res_x = state->movie.res_x;
-    state->screenshot.res_y = state->movie.res_y;
-    state->screenshot.sample_count  = 0;
-    state->screenshot.sample_target = state->visuals.temporal_aa.enabled ? JITTER_SEQUENCE_SIZE : 1;
+// ### MOVIE WINDOW ###
 
-    state->movie.frame_index += 1;
+constexpr float MOVIE_DEG_TO_RAD = 3.14159265358979f / 180.0f;
+constexpr float MOVIE_RAD_TO_DEG = 180.0f / 3.14159265358979f;
+
+static const char* spin_axis_str[(int)SpinAxis::Count] = {
+    "Camera up",
+    "World Y",
+    "World X",
+    "World Z",
+};
+
+// At the playhead. A second key at the same time would leave the path undefined, so it replaces the first.
+static void movie_add_keyframe(ApplicationState* state) {
+    auto& m = state->movie;
+    CameraKeyframe key = {};
+    key.transform = state->view.target;
+    key.fov_y = state->view.camera.fov_y;
+    key.time = (double)m.playhead;
+    if (m.key_includes_frame) {
+        key.use_frame = true;
+        key.frame = state->animation.frame;
+    }
+
+    for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+        const CameraKeyframe& old = m.keyframes[i];
+        if (fabs(old.time - key.time) < 1.0e-3) {
+            // The pose is what is replaced; the spin stays, and so does the frame unless there is a new one
+            key.spin_turns = old.spin_turns;
+            key.spin_axis = old.spin_axis;
+            key.spin_constant_speed = old.spin_constant_speed;
+            if (!m.key_includes_frame) {
+                key.use_frame = old.use_frame;
+                key.frame = old.frame;
+            }
+            m.keyframes[i] = key;
+            return;
+        }
+    }
+    md_array_push(m.keyframes, key, state->allocator.persistent);
+    movie_sort_keyframes(state);
+}
+
+// Two keys with the view as it is now, the second after the orbit's duration with whole turns around it.
+// The camera leaves and comes back to the same pose.
+static void movie_add_orbit(ApplicationState* state) {
+    auto& m = state->movie;
+    if (m.orbit_turns == 0) return;
+
+    const double t0 = (double)m.playhead;
+    const double t1 = t0 + (double)MAX(m.orbit_duration, 0.1f);
+    if (t1 > movie_duration(state) + 1.0e-6) {
+        if (m.duration_auto) {
+            VIAMD_LOG_ERROR("The orbit ends at %.2f s, after the end of the movie. Move the preview time earlier, shorten the orbit or set a duration of your own", t1);
+            return;
+        }
+        m.duration = (float)MIN(t1, 3600.0);
+    }
+
+    movie_add_keyframe(state);
+
+    CameraKeyframe end = {};
+    for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+        if (fabs(m.keyframes[i].time - t0) < 1.0e-3) end = m.keyframes[i];
+    }
+    end.time = t1;
+    end.spin_turns = m.orbit_turns;
+    end.spin_axis = m.orbit_axis;
+    end.spin_constant_speed = false;
+
+    bool replaced = false;
+    for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+        if (fabs(m.keyframes[i].time - t1) < 1.0e-3) {
+            m.keyframes[i] = end;
+            replaced = true;
+        }
+    }
+    if (!replaced) {
+        md_array_push(m.keyframes, end, state->allocator.persistent);
+        movie_sort_keyframes(state);
+    }
+    m.playhead = (float)t1;
+}
+
+// Makes the camera path a loop: the movie ends in the pose it starts in, and the path is smooth across the seam
+static void movie_close_loop(ApplicationState* state) {
+    auto& m = state->movie;
+    const size_t n = md_array_size(m.keyframes);
+    if (n < 2) {
+        VIAMD_LOG_ERROR("A loop needs at least two keyframes");
+        return;
+    }
+
+    const CameraKeyframe first = m.keyframes[0];
+    const double len = movie_duration(state);
+    CameraKeyframe& last = m.keyframes[n - 1];
+    if (last.time < len - 1.0e-3) {
+        CameraKeyframe end = first;
+        end.time = len;
+        end.use_frame = false;
+        end.spin_turns = 0;
+        end.ease = KeyEase::Smooth;
+        md_array_push(m.keyframes, end, state->allocator.persistent);
+    } else {
+        // The last key is at the end already: it becomes the first again
+        last.transform = first.transform;
+        last.fov_y = first.fov_y;
+    }
+    m.loop = true;
+}
+
+static void movie_param_sort(ApplicationState* state) {
+    std::stable_sort(state->movie.param_keys.begin(), state->movie.param_keys.end(), [](const ParamKey& a, const ParamKey& b) {
+        return a.param != b.param ? a.param < b.param : a.time < b.time;
+    });
+}
+
+// Keys what the parameter is now, at the playhead
+static void movie_key_param(ApplicationState* state, int id) {
+    auto& m = state->movie;
+    const MovieParamDesc* d = movie_param_desc(id);
+    if (!d) return;
+
+    ParamKey key;
+    key.param = id;
+    key.time = (double)m.playhead;
+    const float* src = d->ptr(state);
+    for (int c = 0; c < d->comps; ++c) key.value[c] = src[c];
+
+    for (ParamKey& k : m.param_keys) {
+        if (k.param == id && fabs(k.time - key.time) < 1.0e-3) {
+            key.ease = k.ease;
+            k = key;
+            return;
+        }
+    }
+    m.param_keys.push_back(key);
+    movie_param_sort(state);
+}
+
+static void movie_undo(ApplicationState* state) {
+    MovieKeys keys = movie_keys_snapshot(state);
+    if (state->movie.history.undo(&keys)) movie_keys_restore(state, keys);
+}
+
+static void movie_redo(ApplicationState* state) {
+    MovieKeys keys = movie_keys_snapshot(state);
+    if (state->movie.history.redo(&keys)) movie_keys_restore(state, keys);
+}
+
+// Once per frame. What is edited is not reported, the history sees the keys change.
+static void update_movie_history(ApplicationState* state) {
+    if (state->movie.state == MovieRecordingState::Recording) return;
+    const bool editing = ImGui::IsAnyItemActive() || ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    state->movie.history.update(movie_keys_snapshot(state), editing);
+}
+
+static void movie_goto_keyframe(ApplicationState* state, size_t idx) {
+    auto& m = state->movie;
+    if (idx >= md_array_size(m.keyframes)) return;
+    const CameraKeyframe& key = m.keyframes[idx];
+    state->view.target = key.transform;
+    state->view.camera.fov_y = key.fov_y;
+    m.playhead = CLAMP((float)key.time, 0.0f, (float)movie_duration(state));
+    state->animation.frame = movie_trajectory_frame(state, key.time);
+}
+
+static void movie_draw_frustum(immediate::Queue* q, const ViewTransform& vt, float fov_y, float aspect, float length, uint32_t color) {
+    const vec3_t eye   = vt.position;
+    const vec3_t fwd   = vt.orientation * vec3_t{0, 0, -1};
+    const vec3_t right = vt.orientation * vec3_t{1, 0, 0};
+    const vec3_t up    = vt.orientation * vec3_t{0, 1, 0};
+    const float  hh = tanf(fov_y * 0.5f) * length;
+    const float  hw = hh * aspect;
+    const vec3_t c  = eye + fwd * length;
+    const vec3_t p[4] = {
+        c - right * hw - up * hh,
+        c + right * hw - up * hh,
+        c + right * hw + up * hh,
+        c - right * hw + up * hh,
+    };
+    for (int i = 0; i < 4; ++i) {
+        immediate::line(q, eye, p[i], color);
+        immediate::line(q, p[i], p[(i + 1) % 4], color);
+    }
+    // A roof on the top edge, so that it can be told which way is up
+    const vec3_t roof = c + up * (hh * 1.4f);
+    immediate::line(q, p[2], roof, color);
+    immediate::line(q, p[3], roof, color);
+}
+
+// The camera path of the keyframes in the viewport: the eye, what it looks at, and the camera at each key.
+// Not part of what is recorded, which is why this is not called for frames that are captured.
+static void movie_draw_camera_path(ApplicationState* state) {
+    auto& m = state->movie;
+    const size_t n = md_array_size(m.keyframes);
+    if (!m.show_window || !m.show_path || n == 0) return;
+
+    int w = 0, h = 0;
+    movie_frame_size(state, &w, &h);
+    const float aspect = h > 0 ? (float)w / (float)h : 1.0f;
+
+    const uint32_t col_eye  = IM_COL32(90, 200, 255, 255);
+    const uint32_t col_look = IM_COL32(255, 200, 60, 255);
+    const uint32_t col_key  = IM_COL32(255, 255, 255, 230);
+    const uint32_t col_sel  = IM_COL32(255, 110, 40, 255);
+    const uint32_t col_head = IM_COL32(80, 255, 120, 255);
+    const uint32_t col_dim  = IM_COL32(255, 255, 255, 70);
+
+    immediate::Scope scope(state->gfx.overlay, "movie camera path");
+    immediate::Queue* q = scope;
+    const CameraKeyframe* keys = m.keyframes;
+
+    if (n >= 2) {
+        const int samples = CLAMP((int)n * 48, 64, 1024);
+        const double t0 = keys[0].time;
+        const double t1 = keys[n - 1].time;
+        vec3_t prev_eye = {}, prev_look = {};
+        for (int i = 0; i <= samples; ++i) {
+            ViewTransform vt;
+            float fov_y;
+            camera_keyframes_evaluate(&vt, &fov_y, keys, n, t0 + (t1 - t0) * (double)i / (double)samples, m.loop);
+            const vec3_t eye  = vt.position;
+            const vec3_t look = camera_get_look_at(vt);
+            if (i > 0) {
+                immediate::line(q, prev_eye,  eye,  col_eye);
+                immediate::line(q, prev_look, look, col_look);
+            }
+            prev_eye = eye;
+            prev_look = look;
+        }
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+        const CameraKeyframe& k = keys[i];
+        const bool selected = fabs(k.time - (double)m.playhead) < 1.0e-3;
+        movie_draw_frustum(q, k.transform, k.fov_y, aspect, k.transform.distance * 0.25f, selected ? col_sel : col_key);
+
+        // What the camera looks at, and the line of sight to it
+        const vec3_t look = camera_get_look_at(k.transform);
+        const float s = k.transform.distance * 0.03f;
+        immediate::line(q, k.transform.position, look, col_dim);
+        immediate::line(q, look - vec3_t{s, 0, 0}, look + vec3_t{s, 0, 0}, col_look);
+        immediate::line(q, look - vec3_t{0, s, 0}, look + vec3_t{0, s, 0}, col_look);
+        immediate::line(q, look - vec3_t{0, 0, s}, look + vec3_t{0, 0, s}, col_look);
+    }
+
+    // The camera at the playhead
+    ViewTransform vt;
+    float fov_y;
+    camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop);
+    movie_draw_frustum(q, vt, fov_y, aspect, vt.distance * 0.18f, col_head);
+}
+
+// Keyframes in the Timelines plots, which are in trajectory time. A keyframe is at a time of the movie,
+// so it is put where the trajectory is at that time; keys that fall on the same spot (the trajectory is
+// held) are stacked. Read only: they are edited in the Movie window. Returns whether one is hovered.
+static bool movie_draw_timeline_markers(ApplicationState* data) {
+    auto& m = data->movie;
+    const size_t n = md_array_size(m.keyframes);
+    if ((n == 0 && !m.show_window) || md_array_size(data->timeline.x_values) == 0) return false;
+
+    ImDrawList* dl = ImPlot::GetPlotDrawList();
+    const ImVec2 plot_pos  = ImPlot::GetPlotPos();
+    const ImVec2 plot_size = ImPlot::GetPlotSize();
+    const float  r = ImGui::GetFontSize() * 0.4f;
+    const ImU32  col = IM_COL32(255, 120, 40, 255);
+
+    int hovered_key = -1;
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const bool plot_hovered = ImPlot::IsPlotHovered();
+
+    ImPlot::PushPlotClipRect();
+
+    if (m.show_window) {
+        // The part of the trajectory that the movie plays
+        const double f0 = MIN(m.start_frame, m.end_frame);
+        const double f1 = MAX(m.start_frame, m.end_frame);
+        const float x0 = ImPlot::PlotToPixels(frame_to_time(f0, *data), 0.0).x;
+        const float x1 = ImPlot::PlotToPixels(frame_to_time(f1, *data), 0.0).x;
+        dl->AddRectFilled(ImVec2(x0, plot_pos.y), ImVec2(MAX(x1, x0 + 1.0f), plot_pos.y + plot_size.y), IM_COL32(255, 170, 40, 26));
+    }
+
+    std::vector<float> xs(n);
+    for (size_t i = 0; i < n; ++i) {
+        const double t = frame_to_time(movie_trajectory_frame(data, m.keyframes[i].time), *data);
+        const float x = ImPlot::PlotToPixels(t, 0.0).x;
+        xs[i] = x;
+
+        int stack = 0;
+        for (size_t j = 0; j < i; ++j) {
+            if (fabsf(xs[j] - x) < 2.0f * r) stack += 1;
+        }
+
+        const ImVec2 c(x, plot_pos.y + r + 2.0f + (float)stack * (2.0f * r + 2.0f));
+        dl->AddLine(ImVec2(x, plot_pos.y), ImVec2(x, plot_pos.y + plot_size.y), IM_COL32(255, 120, 40, 90));
+        dl->AddQuadFilled(ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y), col);
+
+        char label[16];
+        snprintf(label, sizeof(label), "%d", (int)i + 1);
+        dl->AddText(ImVec2(c.x + r + 2.0f, c.y - ImGui::GetFontSize() * 0.5f), IM_COL32(255, 200, 150, 255), label);
+
+        if (plot_hovered) {
+            const float dx = mouse.x - c.x;
+            const float dy = mouse.y - c.y;
+            if (dx * dx + dy * dy < (r * 1.6f) * (r * 1.6f)) hovered_key = (int)i;
+        }
+    }
+
+    ImPlot::PopPlotClipRect();
+
+    if (hovered_key >= 0) {
+        const CameraKeyframe& k = m.keyframes[hovered_key];
+        ImGui::SetTooltip("Camera keyframe %d\nMovie time: %.2f s\nField of view: %.1f deg\nClick to go to it",
+            hovered_key + 1, k.time, k.fov_y * MOVIE_RAD_TO_DEG);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m.state != MovieRecordingState::Recording) {
+            movie_goto_keyframe(data, (size_t)hovered_key);
+        }
+    }
+    return hovered_key >= 0;
+}
+
+// Time along the movie with the keyframes on it, which can be dragged in time. The curves show what the
+// camera does between them: the distance to what it looks at and the field of view, each scaled to fit.
+static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const size_t n = md_array_size(m.keyframes);
+
+    // Evaluated on a sorted copy, the keys themselves are only re-sorted when a drag ends
+    std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
+    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+
+    constexpr int N = 200;
+    float xs[N], dist[N], fov[N];
+    float d_lo = FLT_MAX, d_hi = -FLT_MAX, f_lo = FLT_MAX, f_hi = -FLT_MAX;
+    if (n > 0) {
+        for (int i = 0; i < N; ++i) {
+            ViewTransform vt;
+            float fov_y;
+            const double t = (double)movie_len * (double)i / (double)(N - 1);
+            camera_keyframes_evaluate(&vt, &fov_y, sorted.data(), n, t, m.loop);
+            xs[i] = (float)t;
+            dist[i] = vt.distance;
+            fov[i] = fov_y * MOVIE_RAD_TO_DEG;
+            d_lo = MIN(d_lo, dist[i]); d_hi = MAX(d_hi, dist[i]);
+            f_lo = MIN(f_lo, fov[i]);  f_hi = MAX(f_hi, fov[i]);
+        }
+    }
+    auto norm = [](float v, float lo, float hi) { return hi - lo > 1.0e-6f ? 0.15f + 0.7f * CLAMP((v - lo) / (hi - lo), 0.0f, 1.0f) : 0.5f; };
+    for (int i = 0; i < N && n > 0; ++i) {
+        dist[i] = norm(dist[i], d_lo, d_hi);
+        fov[i]  = norm(fov[i], f_lo, f_hi);
+    }
+
+    // The trajectory frame over the movie, against the whole trajectory (not scaled to fit, so that a point
+    // can be dragged to a frame)
+    const double last_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
+    const double frame_scale = last_frame > 0.0 ? last_frame : 1.0;
+    float tx[N], frm[N];
+    for (int i = 0; i < N; ++i) {
+        const double t = (double)movie_len * (double)i / (double)(N - 1);
+        tx[i] = (float)t;
+        frm[i] = 0.15f + 0.7f * (float)(movie_trajectory_frame(data, t) / frame_scale);
+    }
+    double unused_frame;
+    const bool has_frame_keys = camera_keyframes_evaluate_frame(&unused_frame, m.keyframes, n, 0.0);
+
+    const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    static bool resort_pending = false;
+
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle;
+    if (ImPlot::BeginPlot("##movie_strip", size, plot_flags)) {
+        ImPlot::SetupAxes("Movie time (s)", nullptr, ImPlotAxisFlags_Lock, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations);
+        ImPlot::SetupAxisLimits(ImAxis_X1, -0.03 * movie_len, 1.03 * movie_len, ImPlotCond_Always);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.12, 1.15, ImPlotCond_Always);
+        ImPlot::SetupLegend(ImPlotLocation_North, ImPlotLegendFlags_Outside | ImPlotLegendFlags_Horizontal);
+
+        {
+            // When the trajectory plays, if the keyframes do not say
+            const double tb = m.duration_auto ? 0.0 : (double)m.traj_begin;
+            const double te = m.duration_auto ? (double)movie_len : (double)m.traj_end;
+            if (!has_frame_keys) {
+                const ImVec2 p0 = ImPlot::PlotToPixels(tb, -0.12);
+                const ImVec2 p1 = ImPlot::PlotToPixels(MAX(te, tb), 0.0);
+                ImPlot::PushPlotClipRect();
+                ImPlot::GetPlotDrawList()->AddRectFilled(p0, ImVec2(MAX(p1.x, p0.x + 1.0f), p1.y), IM_COL32(90, 160, 255, 90));
+                ImPlot::PopPlotClipRect();
+                const bool held = m.start_frame == m.end_frame;
+                ImPlot::PlotText(held ? "trajectory (held)" : "trajectory", 0.5 * (tb + te), -0.06);
+            }
+        }
+
+        ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.4f, 0.9f, 0.4f, 1.0f));
+        ImPlot::PlotLine("Trajectory frame", tx, frm, N);
+        ImPlot::PopStyleColor();
+
+        if (!m.param_keys.empty()) {
+            // Where look parameters have keys, they are edited in the table below
+            std::vector<float> px(m.param_keys.size()), py(m.param_keys.size(), -0.05f);
+            for (size_t i = 0; i < m.param_keys.size(); ++i) px[i] = (float)m.param_keys[i].time;
+            ImPlot::SetNextMarkerStyle(ImPlotMarker_Square, 5.0f, ImVec4(0.75f, 0.5f, 1.0f, 1.0f));
+            ImPlot::PlotScatter("Look parameters", px.data(), py.data(), (int)px.size());
+        }
+
+        if (n >= 2) {
+            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.35f, 0.8f, 1.0f, 1.0f));
+            ImPlot::PlotLine("Distance", xs, dist, N);
+            ImPlot::PopStyleColor();
+            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1.0f, 0.8f, 0.25f, 1.0f));
+            ImPlot::PlotLine("Field of view", xs, fov, N);
+            ImPlot::PopStyleColor();
+        }
+
+        bool any_moved = false;
+        bool any_held = false;
+        for (size_t i = 0; i < n; ++i) {
+            CameraKeyframe& key = m.keyframes[i];
+            double x = key.time;
+            double y = n >= 2 ? norm(key.transform.distance, d_lo, d_hi) : 0.5;
+            bool hovered = false, held = false;
+            if (ImPlot::DragPoint(2000 + (int)i, &x, &y, ImVec4(1.0f, 0.45f, 0.15f, 1.0f), 7.0f, drag_flags, nullptr, &hovered, &held)) {
+                key.time = CLAMP(x, 0.0, (double)movie_len);
+                any_moved = true;
+            }
+            if (held && !locked) {
+                any_held = true;
+                m.playhead = (float)key.time;
+            }
+            char label[16];
+            snprintf(label, sizeof(label), "%d", (int)i + 1);
+            ImPlot::PlotText(label, key.time, y, ImVec2(0, -14));
+            if (hovered && !held) {
+                ImGui::SetTooltip("Keyframe %d\n%.2f s\nDrag to change its time", (int)i + 1, key.time);
+            }
+
+            if (key.use_frame) {
+                // Where the trajectory is at this key: drag up and down for the frame, sideways for the time
+                double fx = key.time;
+                double fy = 0.15 + 0.7 * CLAMP(key.frame / frame_scale, 0.0, 1.0);
+                bool fhovered = false, fheld = false;
+                if (ImPlot::DragPoint(3000 + (int)i, &fx, &fy, ImVec4(0.4f, 0.9f, 0.4f, 1.0f), 6.0f, drag_flags, nullptr, &fhovered, &fheld)) {
+                    key.time = CLAMP(fx, 0.0, (double)movie_len);
+                    key.frame = CLAMP((fy - 0.15) / 0.7 * frame_scale, 0.0, last_frame);
+                    any_moved = true;
+                }
+                if (fheld && !locked) {
+                    any_held = true;
+                    m.playhead = (float)key.time;
+                }
+                if (fhovered && !fheld) {
+                    ImGui::SetTooltip("Keyframe %d shows frame %.0f at %.2f s\nDrag up and down to change the frame", (int)i + 1, key.frame, key.time);
+                }
+            }
+        }
+
+        double playhead = (double)m.playhead;
+        if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
+            m.playhead = CLAMP((float)playhead, 0.0f, movie_len);
+            if (!locked) movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
+        }
+
+        if (locked) {
+            double cur = m.cur_time;
+            ImPlot::DragLineX(1001, &cur, ImVec4(1.0f, 0.3f, 0.3f, 1), 1.5f, ImPlotDragToolFlags_NoInputs | ImPlotDragToolFlags_NoFit);
+        }
+
+        ImPlot::EndPlot();
+
+        if (any_held) {
+            movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
+        }
+        if (any_moved) resort_pending = true;
+    }
+    if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        movie_sort_keyframes(data);
+        resort_pending = false;
+    }
+}
+
+// A look parameter over the movie, as a curve whose keys can be dragged: sideways for their time, up and down
+// for their value. A double click adds a key, a right click on one removes it. Fills the space that is left.
+static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool locked) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
+    m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
+    const MovieParamDesc& d = movie_param_table[m.param_selected];
+
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+    if (ImGui::BeginCombo("##lane_param", d.label)) {
+        for (int i = 0; i < num_params; ++i) {
+            if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Double click to add a key. Drag a key to change it, right click to remove it.");
+
+    std::vector<int> mine;
+    for (int i = 0; i < (int)m.param_keys.size(); ++i) {
+        if (m.param_keys[i].param == d.id) mine.push_back(i);
+    }
+
+    constexpr int N = 200;
+    float xs[N], ys[N];
+    if (!d.color && !mine.empty()) {
+        for (int i = 0; i < N; ++i) {
+            const double t = (double)movie_len * (double)i / (double)(N - 1);
+            float v = 0.0f;
+            param_keys_evaluate(&v, 1, m.param_keys.data(), m.param_keys.size(), d.id, t);
+            xs[i] = (float)t;
+            ys[i] = v;
+        }
+    }
+
+    const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    static bool resort_pending = false;
+    bool any_moved = false, any_held = false, any_hovered = false;
+    int  remove_idx = -1;
+    bool add_key = false;
+    double add_time = 0.0, add_value = 0.0;
+
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
+    if (ImPlot::BeginPlot("##param_lane", ImVec2(-1, -1), plot_flags)) {
+        ImPlot::SetupAxes("Movie time (s)", d.color ? nullptr : d.label, ImPlotAxisFlags_Lock, ImPlotAxisFlags_Lock | (d.color ? ImPlotAxisFlags_NoDecorations : 0));
+        ImPlot::SetupAxisLimits(ImAxis_X1, -0.03 * movie_len, 1.03 * movie_len, ImPlotCond_Always);
+        if (d.color) {
+            ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 1.0, ImPlotCond_Always);
+        } else if (d.log) {
+            ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
+            ImPlot::SetupAxisLimits(ImAxis_Y1, d.lo * 0.8, d.hi * 1.25, ImPlotCond_Always);
+        } else {
+            const double pad = 0.05 * (d.hi - d.lo);
+            ImPlot::SetupAxisLimits(ImAxis_Y1, d.lo - pad, d.hi + pad, ImPlotCond_Always);
+        }
+
+        if (!d.color && !mine.empty()) {
+            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.75f, 0.5f, 1.0f, 1.0f));
+            ImPlot::PlotLine(d.label, xs, ys, N);
+            ImPlot::PopStyleColor();
+        }
+
+        for (int ki : mine) {
+            ParamKey& key = m.param_keys[ki];
+            double x = key.time;
+            double y = d.color ? 0.5 : (double)key.value[0];
+            const ImVec4 col = d.color ? ImVec4(key.value[0], key.value[1], key.value[2], 1.0f) : ImVec4(0.75f, 0.5f, 1.0f, 1.0f);
+            bool hovered = false, held = false;
+            if (ImPlot::DragPoint(4000 + ki, &x, &y, col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
+                key.time = CLAMP(x, 0.0, (double)movie_len);
+                if (!d.color) key.value[0] = (float)CLAMP(y, (double)d.lo, (double)d.hi);
+                any_moved = true;
+            }
+            if (held && !locked) {
+                any_held = true;
+                m.playhead = (float)key.time;
+            }
+            if (hovered) {
+                any_hovered = true;
+                if (!held) {
+                    if (d.color) ImGui::SetTooltip("%.2f s\nDrag to change its time. Its color is edited in the table of the Movie window.", key.time);
+                    else         ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it", key.time, key.value[0]);
+                }
+                if (!locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) remove_idx = ki;
+            }
+        }
+
+        if (!locked && !any_hovered && ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const ImPlotPoint p = ImPlot::GetPlotMousePos();
+            add_key = true;
+            add_time = CLAMP(p.x, 0.0, (double)movie_len);
+            add_value = CLAMP(p.y, (double)d.lo, (double)d.hi);
+        }
+
+        double playhead = (double)m.playhead;
+        if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
+            m.playhead = CLAMP((float)playhead, 0.0f, movie_len);
+            if (!locked) movie_apply_time(data, (double)m.playhead, true);
+        }
+
+        if (locked) {
+            double cur = m.cur_time;
+            ImPlot::DragLineX(1001, &cur, ImVec4(1.0f, 0.3f, 0.3f, 1), 1.5f, ImPlotDragToolFlags_NoInputs | ImPlotDragToolFlags_NoFit);
+        }
+
+        ImPlot::EndPlot();
+    }
+
+    if (any_held) {
+        movie_apply_time(data, (double)m.playhead, true);
+    }
+    if (any_moved) resort_pending = true;
+    if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        movie_param_sort(data);
+        resort_pending = false;
+    }
+
+    if (remove_idx >= 0) {
+        m.param_keys.erase(m.param_keys.begin() + remove_idx);
+        // The parameter lets go of its values if this was its last key
+        movie_params_apply(data, (double)m.playhead);
+    }
+    if (add_key) {
+        ParamKey key;
+        key.param = d.id;
+        key.time = add_time;
+        if (d.color) {
+            // The colour it has at that time, or as it is now if there are no keys yet
+            const float* now = d.ptr(data);
+            float v[3] = {now[0], now[1], now[2]};
+            param_keys_evaluate(v, 3, m.param_keys.data(), m.param_keys.size(), d.id, add_time);
+            for (int c = 0; c < 3; ++c) key.value[c] = v[c];
+        } else {
+            key.value[0] = (float)add_value;
+        }
+        m.param_keys.push_back(key);
+        movie_param_sort(data);
+        movie_apply_time(data, (double)m.playhead, true);
+    }
+}
+
+// The timeline of the movie in a window of its own, to be docked wide: the camera and the trajectory
+// frame on top, one look parameter below.
+static void draw_movie_timeline_window(ApplicationState* data) {
+    auto& m = data->movie;
+    const bool recording = m.state == MovieRecordingState::Recording;
+
+    ImGui::SetNextWindowSize(ImVec2(960, 460), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Movie Timeline", &m.show_timeline_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
+        ImGui::End();
+        return;
+    }
+
+    const float movie_len = (float)movie_duration(data);
+    m.playhead = CLAMP(m.playhead, 0.0f, movie_len);
+    const float fs = ImGui::GetFontSize();
+
+    ImGui::BeginDisabled(recording);
+    if (ImGui::Button(m.preview_playing ? "Pause Preview" : "Play Preview")) {
+        m.preview_playing = !m.preview_playing;
+        if (m.preview_playing && m.playhead >= movie_len) m.playhead = 0.0f;
+    }
+    ImGui::SetItemTooltip("Plays the movie in the viewport at the speed it will have, without recording.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Repeat", &m.preview_loop);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(MAX(ImGui::GetContentRegionAvail().x - fs * 14.0f, fs * 8.0f));
+    if (ImGui::SliderFloat("##timeline_playhead", &m.playhead, 0.0f, movie_len, "%.2f s")) {
+        movie_apply_time(data, (double)m.playhead, true);
+    }
+    ImGui::SetItemTooltip("Scrub the movie: shows the trajectory frame, the camera with 'Animate camera' on, and the keyed look parameters.");
+    ImGui::SameLine();
+    if (ImGui::Button("Add Keyframe")) {
+        movie_add_keyframe(data);
+    }
+    ImGui::SetItemTooltip("Adds a keyframe of the current view at the playhead. Shortcut: K");
+    ImGui::EndDisabled();
+
+    if (movie_len <= 0.0f) {
+        ImGui::TextDisabled("The movie has no duration yet.");
+        ImGui::End();
+        return;
+    }
+
+    const float avail = ImGui::GetContentRegionAvail().y;
+    draw_movie_strip(data, movie_len, recording, ImVec2(-1, MAX(avail * 0.58f, fs * 8.0f)));
+    draw_movie_param_lane(data, movie_len, recording);
+
+    ImGui::End();
+}
+
+static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, bool locked) {
+    auto& m = data->movie;
+    if (md_array_size(m.keyframes) == 0) {
+        ImGui::TextDisabled("Move the view, then 'Add Keyframe' (K) at a time on the timeline.");
+        return;
+    }
+
+    bool resort = false;
+    int  remove_idx = -1;
+    int  dup_idx = -1;
+
+    const double last_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
+    double prev_frame = -1.0;
+
+    if (ImGui::BeginTable("##keyframes", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.8f);
+        ImGui::TableSetupColumn("Time (s)");
+        ImGui::TableSetupColumn("FOV (deg)");
+        ImGui::TableSetupColumn("Ease");
+        ImGui::TableSetupColumn("Frame");
+        ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 13.0f);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
+            CameraKeyframe& key = m.keyframes[i];
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", i + 1);
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            double t = key.time;
+            if (ImGui::InputDouble("##time", &t, 0.0, 0.0, "%.2f")) {
+                key.time = CLAMP(t, 0.0, (double)movie_len);
+            }
+            resort |= ImGui::IsItemDeactivatedAfterEdit();
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            float fov_deg = key.fov_y * MOVIE_RAD_TO_DEG;
+            if (ImGui::DragFloat("##fov", &fov_deg, 0.1f, 1.0f, 170.0f, "%.1f")) {
+                key.fov_y = fov_deg * MOVIE_DEG_TO_RAD;
+            }
+
+            ImGui::TableNextColumn();
+            if (i == 0) {
+                ImGui::TextDisabled("-");
+                ImGui::SetItemTooltip("How the movie gets to a keyframe is set on that keyframe, so the first has none.");
+            } else {
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int ease = (int)key.ease;
+                if (ImGui::Combo("##ease", &ease, key_ease_str, (int)KeyEase::Count)) key.ease = (KeyEase)ease;
+                ImGui::SetItemTooltip("How the camera, and the trajectory frame if it is keyed, move in the stretch leading to this keyframe.\n"
+                    "Smooth: through the keys without stopping. Ease in/out: starts and ends slowly.\n"
+                    "Linear: constant speed. Hold: stays as it was until the key, then jumps.");
+            }
+
+            ImGui::TableNextColumn();
+            bool use_frame = key.use_frame;
+            if (ImGui::Checkbox("##useframe", &use_frame)) {
+                // Taken from the movie as it is, so that switching it on does not change anything
+                if (use_frame) key.frame = movie_trajectory_frame(data, key.time);
+                key.use_frame = use_frame;
+            }
+            ImGui::SetItemTooltip("Key the trajectory frame shown at this time. With two or more, the trajectory plays\nfrom one to the next, so the speed can change between them.");
+            if (key.use_frame) {
+                const bool behind = key.frame < prev_frame - 0.5;
+                const double zero = 0.0;
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                if (behind) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                ImGui::DragScalar("##frame", ImGuiDataType_Double, &key.frame, 0.5f, &zero, &last_frame, "%.0f");
+                if (behind) {
+                    ImGui::PopStyleColor();
+                    ImGui::SetItemTooltip("Behind the previous frame. The trajectory only plays forward, so it is held at that frame.");
+                }
+                prev_frame = MAX(prev_frame, key.frame);
+            }
+
+            ImGui::TableNextColumn();
+            if (i == 0) {
+                ImGui::TextDisabled("-");
+                ImGui::SetItemTooltip("A spin is made in the stretch leading to a keyframe, so the first has none.");
+            } else {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4.0f);
+                ImGui::DragInt("##spin", &key.spin_turns, 0.05f, -16, 16, "%d x");
+                ImGui::SetItemTooltip("Extra whole turns of the camera around what it looks at, made in the stretch leading to this\nkeyframe. Positive is counter-clockwise seen from the tip of the axis.");
+                if (key.spin_turns != 0) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("...")) ImGui::OpenPopup("##spin_options");
+                    if (ImGui::BeginPopup("##spin_options")) {
+                        int axis = (int)key.spin_axis;
+                        if (ImGui::Combo("Around", &axis, spin_axis_str, (int)SpinAxis::Count)) key.spin_axis = (SpinAxis)axis;
+                        ImGui::Checkbox("Constant speed", &key.spin_constant_speed);
+                        ImGui::SetItemTooltip("Otherwise it starts and ends slowly.");
+                        ImGui::EndPopup();
+                    }
+                }
+            }
+
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Go To")) movie_goto_keyframe(data, (size_t)i);
+            ImGui::SetItemTooltip("Move the view to this keyframe");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Update")) {
+                key.transform = data->view.target;
+                key.fov_y = data->view.camera.fov_y;
+                if (key.use_frame) key.frame = data->animation.frame;
+            }
+            ImGui::SetItemTooltip("Set this keyframe to the current view, and the current frame if it has one");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Dup")) dup_idx = i;
+            ImGui::SetItemTooltip("Copy it to one second later");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove")) remove_idx = i;
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (locked) return;
+
+    if (dup_idx >= 0) {
+        CameraKeyframe copy = m.keyframes[dup_idx];
+        copy.time = MIN(copy.time + 1.0, (double)movie_len);
+        copy.spin_turns = 0;
+        md_array_push(m.keyframes, copy, data->allocator.persistent);
+        resort = true;
+    }
+    if (remove_idx >= 0) {
+        // Keeps the order, unlike swap-and-pop
+        CameraKeyframe* keys = m.keyframes;
+        const size_t n = md_array_size(keys);
+        memmove(keys + remove_idx, keys + remove_idx + 1, (n - remove_idx - 1) * sizeof(CameraKeyframe));
+        md_array_pop(keys);
+    }
+    if (resort) {
+        movie_sort_keyframes(data);
+    }
+}
+
+// Look parameters keyed over the movie: you set one up in the Settings as it should look at some time, and key it.
+static void draw_movie_param_section(ApplicationState* data, float movie_len) {
+    auto& m = data->movie;
+    const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
+
+    if (ImGui::Checkbox("Animate parameters", &m.animate_params)) {
+        // Turning it off lets go of them
+        movie_params_apply(data, (double)m.playhead);
+    }
+    ImGui::SetItemTooltip("The keyed parameters follow their keys when the movie is scrubbed, previewed or recorded.\nOff, they stay as they are.");
+
+    m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
+    const MovieParamDesc& sel = movie_param_table[m.param_selected];
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+    if (ImGui::BeginCombo("##param", sel.label)) {
+        for (int i = 0; i < num_params; ++i) {
+            if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Key Now")) {
+        movie_key_param(data, sel.id);
+    }
+    ImGui::SetItemTooltip("Keys the value the parameter has now at the preview time.\nSet it up in the Settings first, then key it.");
+    if (sel.tip) ImGui::TextDisabled("%s", sel.tip);
+    ImGui::TextDisabled("The keys can be dragged in the Movie Timeline window.");
+
+    if (m.param_keys.empty()) return;
+
+    bool resort = false;
+    int  remove_idx = -1;
+    int  prev_param = -1;
+
+    if (ImGui::BeginTable("##param_keys", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Parameter");
+        ImGui::TableSetupColumn("Time (s)");
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableSetupColumn("Ease");
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 4.5f);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < (int)m.param_keys.size(); ++i) {
+            ParamKey& key = m.param_keys[i];
+            const MovieParamDesc* d = movie_param_desc(key.param);
+            const bool first_of_param = key.param != prev_param;
+            prev_param = key.param;
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(d ? d->label : "(unknown)");
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            double t = key.time;
+            if (ImGui::InputDouble("##time", &t, 0.0, 0.0, "%.2f")) {
+                key.time = CLAMP(t, 0.0, (double)movie_len);
+            }
+            resort |= ImGui::IsItemDeactivatedAfterEdit();
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (d && d->color) {
+                ImGui::ColorEdit3("##value", key.value, ImGuiColorEditFlags_NoInputs);
+            } else if (d) {
+                ImGui::DragFloat("##value", &key.value[0], (d->hi - d->lo) * 0.005f, d->lo, d->hi, "%.3g");
+            }
+
+            ImGui::TableNextColumn();
+            if (first_of_param) {
+                ImGui::TextDisabled("-");
+            } else {
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int ease = (int)key.ease;
+                if (ImGui::Combo("##ease", &ease, key_ease_str, (int)KeyEase::Count)) key.ease = (KeyEase)ease;
+                ImGui::SetItemTooltip("How the value moves in the stretch leading to this key");
+            }
+
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Remove")) remove_idx = i;
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (remove_idx >= 0) {
+        m.param_keys.erase(m.param_keys.begin() + remove_idx);
+        // The parameter lets go of its values if this was its last key
+        movie_params_apply(data, (double)m.playhead);
+    }
+    if (resort) {
+        movie_param_sort(data);
+    }
+}
+
+static void draw_movie_window(ApplicationState* data) {
+    ASSERT(data);
+    auto& m = data->movie;
+    const bool recording = m.state == MovieRecordingState::Recording;
+    char path_buf[2048] = "";
+
+    ImGui::SetNextWindowSize(ImVec2(560, 780), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Movie", &m.show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
+        ImGui::End();
+        return;
+    }
+
+    const double max_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
+    if (m.end_frame <= 0.0) {
+        m.end_frame = max_frame;
+    }
+
+    int frame_w = 0, frame_h = 0;
+    movie_frame_size(data, &frame_w, &frame_h);
+
+    // --- Recording ---
+    if (!recording) {
+        const bool can_start = !str_empty(m.output_dir) && !m.sink;
+        ImGui::BeginDisabled(!can_start);
+        if (ImGui::Button("Start Recording")) {
+            movie_recording_start(data);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (str_empty(m.output_dir)) {
+            ImGui::TextDisabled("Select an output folder first");
+        } else if (m.sink) {
+            const frame_sink::Status st = frame_sink::status(m.sink);
+            ImGui::TextDisabled("Still writing the previous movie, %d frame(s) left", st.queued);
+        } else {
+            ImGui::TextDisabled("%d frames, %.2f s, %dx%d", movie_num_frames(data), movie_duration(data), frame_w, frame_h);
+        }
+    } else {
+        if (ImGui::Button("Stop Recording")) {
+            movie_recording_stop(data);
+        }
+        ImGui::SameLine();
+        ImGui::Text("Recording frame %d / %d (%.2f s)", m.frame_index, movie_num_frames(data), m.cur_time);
+    }
+
+    ImGui::BeginDisabled(recording);
+    ImGui::BeginDisabled(!m.history.can_undo());
+    if (ImGui::Button("Undo")) movie_undo(data);
+    ImGui::SetItemTooltip("Undo the last change to the keyframes or the look parameters. Ctrl+Z");
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!m.history.can_redo());
+    if (ImGui::Button("Redo")) movie_redo(data);
+    ImGui::SetItemTooltip("Ctrl+Y or Ctrl+Shift+Z");
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::Checkbox("Timeline window", &m.show_timeline_window);
+    ImGui::SetItemTooltip("The timeline with the keyframes and the look parameters, which can be dragged. Dock it wide, below the viewport.");
+
+    ImGui::BeginDisabled(recording);
+
+    if (ImGui::CollapsingHeader("Output", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button("Select Output Folder...")) {
+            if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Dir)) {
+                size_t path_len = strnlen(path_buf, sizeof(path_buf));
+                str_free(m.output_dir, data->allocator.persistent);
+                m.output_dir = str_copy({path_buf, path_len}, data->allocator.persistent);
+            }
+        }
+        if (!str_empty(m.output_dir)) {
+            ImGui::TextWrapped(STR_FMT, STR_ARG(m.output_dir));
+        } else {
+            ImGui::TextDisabled("No output folder selected");
+        }
+
+        ImGui::InputText("Filename Prefix", m.filename_prefix, sizeof(m.filename_prefix));
+
+        m.output = (MovieOutput)CLAMP((int)m.output, 0, (int)MovieOutput::Count - 1);
+        if (ImGui::BeginCombo("Format", movie_output_str[(int)m.output])) {
+            for (int i = 0; i < (int)MovieOutput::Count; ++i) {
+                if (ImGui::Selectable(movie_output_str[i], i == (int)m.output)) {
+                    m.output = (MovieOutput)i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (m.output == MovieOutput::Mp4) {
+            ImGui::SliderInt("Quality (CRF)", &m.crf, 0, 51);
+            ImGui::SetItemTooltip("x264 constant rate factor. Lower is better and larger: 18 is close to lossless, 23 is the x264 default.");
+            ImGui::InputText("ffmpeg", m.ffmpeg_path, sizeof(m.ffmpeg_path));
+            ImGui::SetItemTooltip("The ffmpeg executable. Found on the PATH if it is only a name.\nFrames are piped straight into it, no image files are written.");
+        } else {
+            ImGui::TextWrapped("Writes a numbered PNG sequence ('%s_00000.png', ...), to be encoded into a video with ffmpeg.", m.filename_prefix);
+            ImGui::BeginDisabled(str_empty(m.output_dir));
+            if (ImGui::Button("Copy ffmpeg command")) {
+                char cmd[2048];
+                // Quoted for a shell; the folder is only copied, never executed from here. libx264 with yuv420p needs even dimensions, hence the scale.
+                snprintf(cmd, sizeof(cmd), "ffmpeg -framerate %g -i \"" STR_FMT "/%s_%%05d.png\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -c:v libx264 -pix_fmt yuv420p \"" STR_FMT "/%s.mp4\"",
+                    m.fps, STR_ARG(m.output_dir), m.filename_prefix,
+                    STR_ARG(m.output_dir), m.filename_prefix);
+                ImGui::SetClipboardText(cmd);
+            }
+            ImGui::EndDisabled();
+        }
+
+        m.resolution = (ScreenshotResolution)MIN((int)m.resolution, (int)ScreenshotResolution::Count - 1);
+        if (ImGui::BeginCombo("Resolution", screenshot_resolution_str[(int)m.resolution])) {
+            for (int i = 0; i < (int)ScreenshotResolution::Count; ++i) {
+                if (ImGui::Selectable(screenshot_resolution_str[i], (i == (int)m.resolution))) {
+                    m.resolution = (ScreenshotResolution)i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (m.resolution == ScreenshotResolution::Custom) {
+            ImGui::InputInt("Res X", &m.res_x);
+            ImGui::InputInt("Res Y", &m.res_y);
+            m.res_x = CLAMP(m.res_x, 640, 16384);
+            m.res_y = CLAMP(m.res_y, 480, 16384);
+        } else if (m.resolution == ScreenshotResolution::Window) {
+            ImGui::TextDisabled("%dx%d, the size of the window when recording starts", frame_w, frame_h);
+        }
+
+        ImGui::InputFloat("Output FPS", &m.fps, 1.0f, 5.0f, "%.1f");
+        m.fps = CLAMP(m.fps, 1.0f, 240.0f);
+    }
+
+    if (ImGui::CollapsingHeader("Timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
+        double frame_range[2] = { m.start_frame, m.end_frame };
+        const double min_frame = 0.0;
+        if (ImGui::SliderScalarN("Trajectory Frames", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
+            if (m.duration_auto) {
+                m.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
+                m.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
+            } else {
+                // The order matters when not tied to the Animation fps: start > end plays the trajectory backwards
+                m.start_frame = CLAMP(frame_range[0], 0.0, max_frame);
+                m.end_frame   = CLAMP(frame_range[1], 0.0, max_frame);
+            }
+        }
+
+        double unused_frame;
+        if (camera_keyframes_evaluate_frame(&unused_frame, m.keyframes, md_array_size(m.keyframes), 0.0)) {
+            ImGui::TextWrapped("Keyframes with a frame decide how the trajectory plays, so the frames and times below are not used. "
+                "Only the length of the movie is: turn off 'Trajectory at Animation speed' to set it.");
+        }
+
+        ImGui::Checkbox("Trajectory at Animation speed", &m.duration_auto);
+        ImGui::SetItemTooltip("On: the movie lasts as long as the trajectory takes to play at the Animation panel's speed.\n"
+            "Off: set the duration yourself and choose when the trajectory plays within it.\n"
+            "Set both trajectory frames equal to hold the trajectory still while the camera moves.");
+        if (m.duration_auto) {
+            ImGui::TextDisabled("%.2f s, %d frames", movie_duration(data), movie_num_frames(data));
+        } else {
+            ImGui::InputFloat("Duration (s)", &m.duration, 0.5f, 5.0f, "%.2f");
+            m.duration = CLAMP(m.duration, 0.01f, 3600.0f);
+            ImGui::SliderFloat("Trajectory starts (s)", &m.traj_begin, 0.0f, m.duration, "%.2f");
+            ImGui::SliderFloat("Trajectory ends (s)", &m.traj_end, 0.0f, m.duration, "%.2f");
+            m.traj_begin = CLAMP(m.traj_begin, 0.0f, m.duration);
+            m.traj_end   = CLAMP(m.traj_end,   m.traj_begin, m.duration);
+            ImGui::TextDisabled("%d frames", movie_num_frames(data));
+        }
+    }
+
+    const float movie_len = (float)movie_duration(data);
+    m.playhead = CLAMP(m.playhead, 0.0f, movie_len);
+
+    ImGui::EndDisabled();
+
+    if (ImGui::CollapsingHeader("Camera Keyframes", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::BeginDisabled(recording);
+        ImGui::Checkbox("Animate camera", &m.animate_camera);
+        ImGui::SetItemTooltip("Record with the camera following the keyframes, instead of staying where it is.");
+        ImGui::SameLine();
+        ImGui::Checkbox("Show path in viewport", &m.show_path);
+        ImGui::SetItemTooltip("The path of the camera (blue) and of what it looks at (yellow), with the camera at each keyframe.\nThe green camera is where the playhead is.");
+
+        ImGui::Checkbox("Seamless loop", &m.loop);
+        ImGui::SetItemTooltip("The camera path is cyclic: it moves through the end into the start without a corner.\nFor that the movie has to end in the pose it starts in, 'Close Loop' sets that up.");
+        ImGui::SameLine();
+        if (ImGui::Button("Close Loop")) {
+            movie_close_loop(data);
+        }
+        ImGui::SetItemTooltip("Ends the movie in the pose of the first keyframe and turns the loop on.");
+
+        if (ImGui::Button(m.preview_playing ? "Pause Preview" : "Play Preview")) {
+            m.preview_playing = !m.preview_playing;
+            if (m.preview_playing && m.playhead >= movie_len) m.playhead = 0.0f;
+        }
+        ImGui::SetItemTooltip("Plays the movie in the viewport at the speed it will have, without recording.");
+        ImGui::SameLine();
+        ImGui::Checkbox("Repeat", &m.preview_loop);
+        if (m.preview_playing && !m.animate_camera && md_array_size(m.keyframes) > 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("'Animate camera' is off, only the trajectory plays");
+        }
+
+        if (ImGui::SliderFloat("Preview time (s)", &m.playhead, 0.0f, movie_len, "%.2f")) {
+            movie_apply_time(data, (double)m.playhead, true);
+        }
+        ImGui::SetItemTooltip("Scrub the movie: shows the trajectory frame and, with 'Animate camera' on, the camera at this time.");
+
+        if (ImGui::Button("Add Keyframe (current view)")) {
+            movie_add_keyframe(data);
+        }
+        ImGui::SetItemTooltip("Adds a keyframe of the current view at the preview time. Shortcut: K");
+        ImGui::SameLine();
+        ImGui::Checkbox("with trajectory frame", &m.key_includes_frame);
+        ImGui::SetItemTooltip("Also key the trajectory frame shown now. Keys with a frame decide how the trajectory plays,\nso the speed can change between them.");
+
+        const float fs = ImGui::GetFontSize();
+        ImGui::SetNextItemWidth(fs * 5.5f);
+        ImGui::DragInt("##orbit_turns", &m.orbit_turns, 0.05f, -16, 16, "%d turn(s)");
+        ImGui::SetItemTooltip("Whole turns around what the camera looks at. Positive is counter-clockwise seen from the tip of the axis.");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 5.0f);
+        ImGui::InputFloat("##orbit_duration", &m.orbit_duration, 0.0f, 0.0f, "%.1f s");
+        m.orbit_duration = CLAMP(m.orbit_duration, 0.1f, 3600.0f);
+        ImGui::SetItemTooltip("How long the orbit takes");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 7.0f);
+        int orbit_axis = (int)m.orbit_axis;
+        if (ImGui::Combo("##orbit_axis", &orbit_axis, spin_axis_str, (int)SpinAxis::Count)) m.orbit_axis = (SpinAxis)orbit_axis;
+        ImGui::SetItemTooltip("What the camera turns around: its own up direction, or a world axis");
+        ImGui::SameLine();
+        if (ImGui::Button("Add Orbit")) {
+            movie_add_orbit(data);
+        }
+        ImGui::SetItemTooltip("Adds a keyframe of the current view at the preview time and another after the orbit's duration,\nwhere the camera is back in the same place after its turns.");
+        ImGui::EndDisabled();
+
+        ImGui::BeginDisabled(recording);
+        draw_movie_keyframe_table(data, movie_len, recording);
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("Look Parameters")) {
+        ImGui::BeginDisabled(recording);
+        draw_movie_param_section(data, movie_len);
+        ImGui::EndDisabled();
+    }
+
+    ImGui::End();
+}
+
+// Over the viewport while recording, and while the last frames are still being written afterwards
+static void draw_movie_recording_banner(ApplicationState* state) {
+    auto& m = state->movie;
+    const bool recording = m.state == MovieRecordingState::Recording;
+    if (!recording && !m.sink) return;
+
+    const frame_sink::Status st = frame_sink::status(m.sink);
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + ImGui::GetFontSize()), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.88f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##movie_recording_banner", nullptr, flags)) {
+        const float bar_width = ImGui::GetFontSize() * 22.0f;
+        if (recording) {
+            const int n = movie_num_frames(state);
+            ImGui::Text("Recording movie, frame %d / %d  (%.2f s)", MIN(m.frame_index, n), n, m.cur_time);
+            ImGui::ProgressBar(n > 0 ? (float)m.frame_index / (float)n : 0.0f, ImVec2(bar_width, 0));
+            ImGui::TextDisabled("%d written, %d waiting to be written", st.written, st.queued);
+            if (ImGui::Button("Stop (Esc)")) {
+                movie_recording_stop(state);
+            }
+        } else {
+            ImGui::Text("Writing the movie, %d frame(s) left", st.queued);
+            ImGui::ProgressBar(st.submitted > 0 ? (float)(st.written + st.failed) / (float)st.submitted : 1.0f, ImVec2(bar_width, 0));
+        }
+    }
+    ImGui::End();
 }
 
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current) {
@@ -6526,11 +7910,16 @@ static void draw_coordinate_system_widget_window(ViewTransform* target, const Vi
 }
 
 static void render(ApplicationState* state) {
-    bool do_screenshot = !str_empty(state->screenshot.path_to_file);
+    // Frames of a recording are rendered at the movie's size into the G-buffer for as long as it lasts
+    const bool movie_capture = state->movie.state == MovieRecordingState::Recording;
+    bool do_screenshot = !str_empty(state->screenshot.path_to_file) && !movie_capture;
 
     uint32_t gbuffer_target_width  = state->app.framebuffer.width;
     uint32_t gbuffer_target_height = state->app.framebuffer.height;
-    if (do_screenshot) {
+    if (movie_capture) {
+        gbuffer_target_width  = (uint32_t)state->movie.rec_w;
+        gbuffer_target_height = (uint32_t)state->movie.rec_h;
+    } else if (do_screenshot) {
         gbuffer_target_width  = state->screenshot.res_x;
         gbuffer_target_height = state->screenshot.res_y;
     }
@@ -6566,6 +7955,10 @@ static void render(ApplicationState* state) {
 		md_unitcell_A_extract_float(A.elem, &state->mold.state.unitcell);
         immediate::Scope scope(state->gfx.world, "simulation box");
         immediate::box_wireframe(scope, {0,0,0}, {1,1,1}, mat4_from_mat3(A), convert_color(state->simulation_box.color));
+    }
+
+    if (!movie_capture && !do_screenshot) {
+        movie_draw_camera_path(state);
     }
 
     {
@@ -6766,8 +8159,8 @@ static void render(ApplicationState* state) {
 
     POP_GPU_SECTION()  // G-buffer
 
-    if (do_screenshot && state->screenshot.hide_gui) {
-        // Activate gbuffer to store screenshot
+    if (movie_capture || (do_screenshot && state->screenshot.hide_gui)) {
+        // Activate gbuffer to store the frame
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state->gbuffer.fbo);
         glViewport(0, 0, state->gbuffer.width, state->gbuffer.height);
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
@@ -6822,6 +8215,20 @@ static void render(ApplicationState* state) {
 
     postprocess_pipeline::execute(inputs, settings, state->view.param);
     POP_GPU_SECTION()
+
+    if (movie_capture) {
+        // Samples of one output frame are accumulated by temporal AA, the last of them is the frame
+        auto& m = state->movie;
+        if (m.can_capture) {
+            m.samples_done += 1;
+            if (m.samples_done >= m.sample_target) {
+                movie_capture_frame(state);
+                m.frame_index += 1;
+                m.samples_done = 0;
+            }
+        }
+        movie_blit_preview(state);
+    }
 
     if (do_screenshot && state->screenshot.hide_gui) {
         state->screenshot.sample_count += 1;

@@ -21,9 +21,39 @@ struct Camera : ViewTransform {
 	}
 };
 
+// How the camera, and the trajectory frame, move in the stretch leading to a keyframe
+enum class KeyEase : int {
+    Smooth,     // Through the key without stopping
+    EaseInOut,  // Starts and ends slowly, so it stops at the keys
+    Linear,     // Constant speed in a straight line
+    Hold,       // Stays as it was until the key, where it jumps
+    Count,
+};
+
+// What a keyframe's extra turns go around
+enum class SpinAxis : int {
+    ViewUp,   // The up direction of the camera at the start of the segment
+    WorldY,
+    WorldX,
+    WorldZ,
+    Count,
+};
+
 // A camera pose that a movie passes through at 'time' seconds on the movie timeline.
 struct CameraKeyframe {
     ViewTransform transform = {};
     float  fov_y = (3.1415926534f / 4.0f);
     double time = 0.0;
+
+    KeyEase ease = KeyEase::Smooth;
+    // The trajectory frame shown at this time. The keys that have one decide how the trajectory plays in the movie.
+    bool   use_frame = false;
+    double frame = 0.0;
+
+    // Extra whole turns of the camera around what it looks at, made over the segment that ends at this
+    // key (positive is counter-clockwise seen from the tip of the axis). A whole number so that the camera
+    // still arrives at this key's pose.
+    int      spin_turns = 0;
+    SpinAxis spin_axis = SpinAxis::ViewUp;
+    bool     spin_constant_speed = false;  // Otherwise it eases in and out
 };

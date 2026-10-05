@@ -1,0 +1,55 @@
+#pragma once
+
+#include <gfx/camera.h>
+
+#include <stddef.h>
+#include <vector>
+
+// What is keyed on a movie's timeline besides the camera: look parameters (background, depth of field,
+// clipping ...), each with its own keys. The application has a table of the parameters, a key refers to
+// one by its index there.
+struct ParamKey {
+    int     param = 0;
+    double  time = 0.0;
+    float   value[3] = {0, 0, 0};   // A colour uses all three, a scalar the first
+    KeyEase ease = KeyEase::Smooth; // Shapes the stretch leading to this key
+};
+
+// The value of a parameter at 'time' from the keys that are for it, which need not be sorted. Returns
+// false if there are none. Passes through every key and holds outside the first and last.
+bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t count, int param, double time);
+
+// Everything on the timeline that the user edits, so that it can be undone as one
+struct MovieKeys {
+    std::vector<CameraKeyframe> camera;
+    std::vector<ParamKey> params;
+    bool loop = false;
+};
+
+bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b);
+
+// Undo and redo of edits to the keys. It is not told what changed: it is shown the keys every frame, and
+// whenever they differ from the last committed state and no edit is under way (a slider being dragged, a
+// point being moved) that is one step. A drag is therefore one undo, not hundreds.
+class MovieHistory {
+public:
+    // Forgets everything, e.g. when another workspace is loaded
+    void clear(const MovieKeys& current);
+
+    void update(const MovieKeys& current, bool editing);
+
+    bool can_undo() const { return !undo_.empty(); }
+    bool can_redo() const { return !redo_.empty(); }
+
+    // 'state' is the present keys. On true it holds the ones to go back to (or forward to).
+    bool undo(MovieKeys* state);
+    bool redo(MovieKeys* state);
+
+private:
+    static constexpr size_t MAX_STEPS = 200;
+
+    std::vector<MovieKeys> undo_;
+    std::vector<MovieKeys> redo_;
+    MovieKeys committed_;
+    bool has_committed_ = false;
+};

@@ -26,6 +26,8 @@
 #include <gfx/immediate_draw_utils.h>
 
 #include <task_system.h>
+#include <frame_sink.h>
+#include <movie_keys.h>
 #include <loader.h>
 #include <event.h>
 #include <plot_series.h>
@@ -77,6 +79,7 @@ inline constexpr uint32_t PROPERTY_COLORS[] = {4293119554, 4290017311, 428729131
 constexpr ImGuiKey KEY_PLAY_PAUSE               = ImGuiKey_Space;
 constexpr ImGuiKey KEY_SKIP_TO_PREV_FRAME       = ImGuiKey_LeftArrow;
 constexpr ImGuiKey KEY_SKIP_TO_NEXT_FRAME       = ImGuiKey_RightArrow;
+constexpr ImGuiKey KEY_ADD_MOVIE_KEYFRAME       = ImGuiKey_K;
 constexpr ImGuiKey KEY_RECOMPILE_SHADERS        = ImGuiKey_F5;
 constexpr ImGuiKey KEY_SHOW_DEBUG_WINDOW        = ImGuiKey_F11;
 constexpr ImGuiKey KEY_RECENTER_ON_HIGHLIGHT    = ImGuiKey_F2;
@@ -346,12 +349,29 @@ inline const char* screenshot_resolution_str[(int)ScreenshotResolution::Count] =
     "Custom",
 };
 
-// Movie recording captures the trajectory playing as a sequence of numbered image files
-// (one per output frame). The resulting sequence is intended to be encoded into an actual
-// video file by an external tool such as ffmpeg.
+// Movie recording captures the trajectory playing, one image per output frame. The frames are handed
+// to a frame_sink that writes them in the background, either as a numbered PNG sequence or piped
+// into ffmpeg to give a video file directly.
 enum class MovieRecordingState {
     Idle,
     Recording,
+};
+
+enum class MovieOutput {
+    Mp4,          // Piped into ffmpeg
+    PngSequence,
+    Count,
+};
+
+// Finished movie frames waiting to be read back from the GPU
+constexpr int MOVIE_RING_SIZE = 3;
+
+// The look parameters that can be keyed are numbered 0 .. MOVIE_MAX_PARAMS - 1, see the table in main.cpp
+constexpr int MOVIE_MAX_PARAMS = 16;
+
+inline const char* movie_output_str[(int)MovieOutput::Count] = {
+    "MP4 video (ffmpeg)",
+    "PNG sequence",
 };
 
 enum class BondColorMode {
@@ -1051,13 +1071,21 @@ struct ApplicationState {
 
     // --- MOVIE RECORDING ---
     struct {
+        bool  show_window = false;
+        bool  show_timeline_window = true;   // The timeline of the movie, in a window of its own
+        bool  show_path   = true;    // Draw the camera path and keyframes in the viewport
+
         MovieRecordingState state = MovieRecordingState::Idle;
 
         ScreenshotResolution resolution = ScreenshotResolution::Window;
         int    res_x = 1920;
         int    res_y = 1080;
 
-        float  fps         = 24.0f;  // Output frames per second for the image sequence
+        MovieOutput output = MovieOutput::Mp4;
+        int    crf = 18;                         // x264 quality for the mp4, lower is better
+        char   ffmpeg_path[512] = "ffmpeg";      // Found on PATH unless it is a path
+
+        float  fps         = 24.0f;  // Output frames per second
         double start_frame = 0.0;    // Trajectory frame shown at the start of the trajectory's part of the movie
         double end_frame   = 0.0;    // Trajectory frame shown at the end of it
 
@@ -1073,7 +1101,25 @@ struct ApplicationState {
         float  playhead      = 0.0f; // Time previewed in the viewport and used for new keyframes
 
         double cur_time    = 0.0;    // Movie time currently being captured
-        int    frame_index = 0;      // Output file index, used to number frame_%05d.png
+        int    frame_index = 0;      // The output frame being captured, numbers the file and sets cur_time
+        int    samples_done  = 0;    // Samples of it rendered so far, they are accumulated by temporal AA
+        int    sample_target = 1;
+        bool   can_capture   = true; // False while the readback ring is full, the sample is then not counted
+        int    rec_w = 0;            // The size of the frames, fixed when the recording starts
+        int    rec_h = 0;
+        MovieOutput rec_output = MovieOutput::Mp4;
+        char   rec_result[1024] = "";  // Where the movie ends up, for the message once it is written
+
+        // The finished frames are read back through pixel buffers so that the GPU is not waited for.
+        // Each slot holds the frame it was filled with until its pixels have been copied to the sink.
+        GLuint pbo[MOVIE_RING_SIZE]       = {};
+        GLsync fence[MOVIE_RING_SIZE]     = {};
+        int    pbo_frame[MOVIE_RING_SIZE] = {};
+        int    pbo_head  = 0;        // Oldest slot in use
+        int    pbo_count = 0;
+        size_t pbo_bytes = 0;
+
+        frame_sink::Sink* sink = nullptr;  // Lives on after the recording ends until it has written everything
 
         str_t  output_dir = {};
         char   filename_prefix[64] = "frame";
@@ -1082,9 +1128,29 @@ struct ApplicationState {
         // these (smoothly, through every one of them) instead of staying where the user left it.
         md_array(CameraKeyframe) keyframes = 0;
         bool animate_camera = false;
+        bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
+
+        // Look parameters (background, depth of field, clipping ...) keyed over time
+        std::vector<ParamKey> param_keys;
+        bool animate_params = true;
+        int  param_selected = 0;              // What 'Key Now' keys
+        // What a parameter was before the keys took hold of it, put back when they let go
+        float param_saved[MOVIE_MAX_PARAMS][3] = {};
+        bool  param_saved_valid[MOVIE_MAX_PARAMS] = {};
+
+        MovieHistory history;
+
+        // Preview of the movie in the viewport, at the speed it will have
+        bool preview_playing = false;
+        bool preview_loop    = false;
+
+        // What 'Add Keyframe' and 'Add Orbit' make
+        bool     key_includes_frame = false;
+        int      orbit_turns        = 1;
+        float    orbit_duration     = 6.0f;
+        SpinAxis orbit_axis         = SpinAxis::ViewUp;
 
         PlaybackMode prev_playback_mode = PlaybackMode::Stopped;  // Restored once recording finishes
-        bool prev_screenshot_hide_gui   = true;                   // Restored once recording finishes
         bool camera_was_animated        = false;                  // Whether prev_view_target must be restored
         ViewTransform prev_view_target  = {};
         float prev_fov_y                = 0.0f;
@@ -1805,6 +1871,12 @@ bool save_workspace(ApplicationState* app, str_t file);
 // is the window's identity in the file, so it stays the same when the window is renamed on screen.
 // Call once, at initialization; show has to outlive the application.
 void workspace_register_window(const char* name, bool* show);
+
+// The keys on the movie timeline as one value, for undo and redo
+MovieKeys movie_keys_snapshot(const ApplicationState* app);
+void movie_keys_restore(ApplicationState* app, const MovieKeys& keys);
+// Starts the undo history over from the keys as they are now, e.g. after a workspace was loaded
+void movie_history_reset(ApplicationState* app);
 
 // Selections
 Selection* create_selection(ApplicationState* app, str_t name, md_bitfield_t* bf = 0);

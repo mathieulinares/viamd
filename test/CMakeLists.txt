@@ -13,6 +13,9 @@ project(viamd_test VERSION 0.1 LANGUAGES C CXX)
 set(UNIT_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/serialization_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/event.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/frame_sink.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/image.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/movie_keys.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/task_system.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/gfx/camera_utils.cpp
@@ -73,6 +76,6 @@ target_include_directories(viamd_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../ext/enkiTS/src
 )
 
-target_link_libraries(viamd_test PRIVATE mdlib enkiTS)
+target_link_libraries(viamd_test PRIVATE mdlib enkiTS stb)
 
 add_test(NAME viamd_test COMMAND viamd_test)

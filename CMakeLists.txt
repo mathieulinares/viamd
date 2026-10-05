@@ -175,11 +175,13 @@ set(SRC_FILES
     src/color_utils.cpp
     src/display_units.cpp
     src/event.cpp
+    src/frame_sink.cpp
     src/image.cpp
     src/imgui_widgets.cpp
     src/implot_widgets.cpp
     src/loader.cpp
     src/main.cpp
+    src/movie_keys.cpp
     src/plot_series.cpp
     src/script_editor.cpp
     src/script_reference.cpp
@@ -191,10 +193,12 @@ set(SRC_FILES
     src/color_utils.h
     src/display_units.h
     src/event.h
+    src/frame_sink.h
     src/image.h
     src/imgui_widgets.h
     src/implot_widgets.h
     src/loader.h
+    src/movie_keys.h
     src/plot_series.h
     src/script_editor.h
     src/script_reference.h
