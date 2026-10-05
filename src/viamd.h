@@ -354,12 +354,6 @@ enum class MovieRecordingState {
     Recording,
 };
 
-// A camera pose that the movie camera passes through when the trajectory reaches 'frame'.
-struct CameraKeyframe {
-    ViewTransform transform = {};
-    double frame = 0.0;
-};
-
 enum class BondColorMode {
     NearestAtom,
 	SmoothAtom,
@@ -1064,22 +1058,28 @@ struct ApplicationState {
         int    res_y = 1080;
 
         float  fps         = 24.0f;  // Output frames per second for the image sequence
-        double start_frame = 0.0;    // First trajectory frame to capture (inclusive)
-        double end_frame   = 0.0;    // Last trajectory frame to capture (inclusive)
+        double start_frame = 0.0;    // Trajectory frame shown at the start of the trajectory's part of the movie
+        double end_frame   = 0.0;    // Trajectory frame shown at the end of it
 
-        // Derived at the start of a recording: how much the trajectory frame advances per
-        // output frame. Computed from the animation playback fps and the output fps so that
-        // the recorded movie plays back the trajectory at the same relative speed as the
-        // on-screen playback would.
-        double frame_step  = 1.0;
-        double cur_frame   = 0.0;    // Trajectory frame currently being captured
+        // The movie runs on its own timeline in seconds, independent of the trajectory. The trajectory
+        // plays from start_frame to end_frame between traj_begin and traj_end and is held at either
+        // frame outside of that. With duration_auto the movie is exactly the trajectory at the
+        // Animation panel's fps; otherwise the times below apply (and start_frame == end_frame holds
+        // the trajectory still, e.g. to orbit the camera around it).
+        bool   duration_auto = true;
+        float  duration      = 5.0f;
+        float  traj_begin    = 0.0f;
+        float  traj_end      = 5.0f;
+        float  playhead      = 0.0f; // Time previewed in the viewport and used for new keyframes
+
+        double cur_time    = 0.0;    // Movie time currently being captured
         int    frame_index = 0;      // Output file index, used to number frame_%05d.png
 
         str_t  output_dir = {};
         char   filename_prefix[64] = "frame";
 
-        // Kept sorted by frame. While recording with animate_camera set, the camera follows
-        // these (interpolated between neighbours) instead of staying where the user left it.
+        // Kept sorted by time. While recording with animate_camera set, the camera follows
+        // these (smoothly, through every one of them) instead of staying where the user left it.
         md_array(CameraKeyframe) keyframes = 0;
         bool animate_camera = false;
 
@@ -1087,6 +1087,7 @@ struct ApplicationState {
         bool prev_screenshot_hide_gui   = true;                   // Restored once recording finishes
         bool camera_was_animated        = false;                  // Whether prev_view_target must be restored
         ViewTransform prev_view_target  = {};
+        float prev_fov_y                = 0.0f;
     } movie;
 
     struct {

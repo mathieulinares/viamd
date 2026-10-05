@@ -155,6 +155,140 @@ static inline vec3_t highp_quat_vec3_mul(const quat_t& q, const vec3_t& v) {
     return vec3_set((float)res[0], (float)res[1], (float)res[2]);
 }
 
+struct dvec3 { double x, y, z; };
+
+// ---- Keyframe path -------------------------------------------------------------------------------
+
+static inline double hermite(double p0, double p1, double m0, double m1, double h, double u) {
+    const double u2 = u * u, u3 = u2 * u;
+    return (2*u3 - 3*u2 + 1) * p0 + (u3 - 2*u2 + u) * h * m0 + (-2*u3 + 3*u2) * p1 + (u3 - u2) * h * m1;
+}
+
+// Slope at a key from the secant slopes d0 (before) and d1 (after) over intervals h0 and h1.
+// Monotone: zero at a local extreme, so the curve never leaves the range of its keys.
+static inline double monotone_slope(double d0, double d1, double h0, double h1) {
+    if (d0 * d1 <= 0.0) return 0.0;
+    return 3.0 * (h0 + h1) / ((2.0 * h1 + h0) / d0 + (h1 + 2.0 * h0) / d1);
+}
+
+// Non-uniform Catmull-Rom slope
+static inline double catmull_slope(double d0, double d1, double h0, double h1) {
+    return (h1 * d0 + h0 * d1) / (h0 + h1);
+}
+
+static inline quat_t quat_align(quat_t ref, quat_t q) {
+    return quat_dot(ref, q) < 0.0f ? quat_t{-q.x, -q.y, -q.z, -q.w} : q;
+}
+
+static inline quat_t quat_exp_rot(vec3_t r) {
+    const double a = sqrt((double)r.x*r.x + (double)r.y*r.y + (double)r.z*r.z);
+    if (a < 1.0e-9) return quat_normalize(quat_t{r.x * 0.5f, r.y * 0.5f, r.z * 0.5f, 1.0f});
+    const double s = sin(a * 0.5) / a;
+    return quat_t{(float)(r.x * s), (float)(r.y * s), (float)(r.z * s), (float)cos(a * 0.5)};
+}
+
+// Rotation vector (axis * angle) taking a to b, in the frame of a, along the shortest arc.
+static inline dvec3 quat_rel_log(quat_t a, quat_t b) {
+    quat_t d = quat_align(quat_t{0, 0, 0, 1}, quat_normalize(quat_conj(a) * b));
+    const double vn = sqrt((double)d.x*d.x + (double)d.y*d.y + (double)d.z*d.z);
+    if (vn < 1.0e-9) return {0, 0, 0};
+    const double k = 2.0 * atan2(vn, (double)d.w) / vn;
+    return {d.x * k, d.y * k, d.z * k};
+}
+
+// Angular velocity (rotation vector per unit time, in the frame of cur) of a Catmull-Rom path through
+// prev, cur and next. A missing neighbour gives zero, i.e. the path eases at its ends.
+static dvec3 quat_path_tangent(const quat_t* prev, quat_t cur, const quat_t* next, double h0, double h1) {
+    if (!prev || !next) return {0, 0, 0};
+    const dvec3 a = quat_rel_log(cur, *prev);
+    const dvec3 b = quat_rel_log(cur, *next);
+    const dvec3 d0 = {-a.x / h0, -a.y / h0, -a.z / h0};
+    const dvec3 d1 = { b.x / h1,  b.y / h1,  b.z / h1};
+    return {catmull_slope(d0.x, d1.x, h0, h1), catmull_slope(d0.y, d1.y, h0, h1), catmull_slope(d0.z, d1.z, h0, h1)};
+}
+
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time) {
+    ASSERT(count > 0);
+
+    if (count == 1) {
+        *out_transform = keys[0].transform;
+        *out_fov_y = keys[0].fov_y;
+        return;
+    }
+
+    size_t i = 0;
+    double u = 0.0;
+    if (time <= keys[0].time) {
+        i = 0; u = 0.0;
+    } else if (time >= keys[count - 1].time) {
+        i = count - 2; u = 1.0;
+    } else {
+        while (i + 2 < count && time >= keys[i + 1].time) ++i;
+        u = (time - keys[i].time) / (keys[i + 1].time - keys[i].time);
+    }
+    const size_t j = i + 1;
+    const bool has_p = i > 0;
+    const bool has_n = j + 1 < count;
+    const double h  = MAX(keys[j].time - keys[i].time, 1.0e-9);
+    const double hp = has_p ? MAX(keys[i].time - keys[i - 1].time, 1.0e-9) : 1.0;
+    const double hn = has_n ? MAX(keys[j + 1].time - keys[j].time, 1.0e-9) : 1.0;
+
+    // Look-at point: Catmull-Rom
+    const vec3_t la[4] = {
+        has_p ? camera_get_look_at(keys[i - 1].transform) : vec3_t{0, 0, 0},
+        camera_get_look_at(keys[i].transform),
+        camera_get_look_at(keys[j].transform),
+        has_n ? camera_get_look_at(keys[j + 1].transform) : vec3_t{0, 0, 0},
+    };
+    double look[3];
+    for (int c = 0; c < 3; ++c) {
+        const double d = ((double)la[2].elem[c] - la[1].elem[c]) / h;
+        const double m0 = has_p ? catmull_slope(((double)la[1].elem[c] - la[0].elem[c]) / hp, d, hp, h) : 0.0;
+        const double m1 = has_n ? catmull_slope(d, ((double)la[3].elem[c] - la[2].elem[c]) / hn, h, hn) : 0.0;
+        look[c] = hermite(la[1].elem[c], la[2].elem[c], m0, m1, h, u);
+    }
+
+    // Distance and fov: monotone cubic
+    auto scalar = [&](auto get) {
+        const double v0 = get(keys[i]), v1 = get(keys[j]);
+        const double d = (v1 - v0) / h;
+        const double m0 = has_p ? monotone_slope((v0 - get(keys[i - 1])) / hp, d, hp, h) : 0.0;
+        const double m1 = has_n ? monotone_slope(d, (get(keys[j + 1]) - v1) / hn, h, hn) : 0.0;
+        return hermite(v0, v1, m0, m1, h, u);
+    };
+    const float dist = (float)scalar([](const CameraKeyframe& k) { return (double)k.transform.distance; });
+    const float fov  = (float)scalar([](const CameraKeyframe& k) { return (double)k.fov_y; });
+
+    // Orientation: cubic Bezier on the sphere with control points derived from the angular velocity
+    const quat_t q1 = quat_normalize(keys[i].transform.orientation);
+    const quat_t q2 = quat_align(q1, quat_normalize(keys[j].transform.orientation));
+    quat_t q0 = {}, q3 = {};
+    if (has_p) q0 = quat_align(q1, quat_normalize(keys[i - 1].transform.orientation));
+    if (has_n) q3 = quat_align(q2, quat_normalize(keys[j + 1].transform.orientation));
+
+    const dvec3 w1 = quat_path_tangent(has_p ? &q0 : nullptr, q1, &q2, hp, h);
+    const dvec3 w2 = quat_path_tangent(&q1, q2, has_n ? &q3 : nullptr, h, hn);
+
+    const double k = h / 3.0;
+    const quat_t b0 = q1;
+    const quat_t b1 = quat_normalize(q1 * quat_exp_rot(vec3_t{(float)(w1.x * k), (float)(w1.y * k), (float)(w1.z * k)}));
+    const quat_t b2 = quat_normalize(q2 * quat_exp_rot(vec3_t{(float)(-w2.x * k), (float)(-w2.y * k), (float)(-w2.z * k)}));
+    const quat_t b3 = q2;
+
+    const float uf = (float)u;
+    const quat_t a01 = quat_slerp(b0, quat_align(b0, b1), uf);
+    const quat_t a12 = quat_slerp(b1, quat_align(b1, b2), uf);
+    const quat_t a23 = quat_slerp(b2, quat_align(b2, b3), uf);
+    const quat_t a012 = quat_slerp(a01, quat_align(a01, a12), uf);
+    const quat_t a123 = quat_slerp(a12, quat_align(a12, a23), uf);
+    const quat_t ori = quat_normalize(quat_slerp(a012, quat_align(a012, a123), uf));
+
+    out_transform->orientation = ori;
+    out_transform->distance = dist;
+    out_transform->position = camera_position_from_look_at(vec3_t{(float)look[0], (float)look[1], (float)look[2]}, ori, dist);
+    *out_fov_y = fov;
+}
+
 // We want to interpolate along an arc which is formed by maintaining a distance to the look_at position and smoothly interpolating the orientation,
 // We linearly interpolate a look_at position which is implicitly defined by position, orientation and distance
 // There is some precision errors creeping into the posision because we transform back and forth to look at using the orientation

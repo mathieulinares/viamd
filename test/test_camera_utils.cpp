@@ -180,6 +180,95 @@ UTEST(viamd_camera, interpolation_reproduces_its_endpoints) {
     EXPECT_NEAR(1.0f, len, 1.0e-4f);
 }
 
+/* Keyframe path. Uneven spacing and an off-axis, off-origin pose per key, so a time that is not used
+ * as a time (or a rotation that is not taken the short way) shows up. */
+
+static void kf_set(CameraKeyframe& k, double time, vec3_t axis, float angle, vec3_t look_at, float dist, float fov) {
+    k.time = time;
+    k.transform.orientation = quat_normalize(quat_axis_angle(vec3_normalize(axis), angle));
+    k.transform.distance = dist;
+    k.transform.position = camera_position_from_look_at(look_at, k.transform.orientation, dist);
+    k.fov_y = fov;
+}
+
+static void kf_make3(CameraKeyframe* k) {
+    kf_set(k[0], 0.0, vec3_set(0.3f, 1.0f, 0.1f), 0.2f, vec3_set(0, 0, 0),     10.0f, 0.8f);
+    kf_set(k[1], 1.0, vec3_set(0.3f, 1.0f, 0.1f), 1.0f, vec3_set(10, 5, -3),   20.0f, 0.6f);
+    kf_set(k[2], 3.0, vec3_set(0.3f, 1.0f, 0.1f), 1.8f, vec3_set(30, -5, 12),  15.0f, 1.0f);
+}
+
+UTEST(viamd_camera, keyframes_hit_their_poses_and_hold_outside) {
+    CameraKeyframe k[3];
+    kf_make3(k);
+    for (int i = 0; i < 3; ++i) {
+        ViewTransform v; float fov;
+        camera_keyframes_evaluate(&v, &fov, k, 3, k[i].time);
+        EXPECT_NEAR(k[i].transform.position.x, v.position.x, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.y, v.position.y, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.z, v.position.z, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.distance, v.distance, 1.0e-4f);
+        EXPECT_NEAR(k[i].fov_y, fov, 1.0e-5f);
+        EXPECT_NEAR(1.0f, fabsf(quat_dot(k[i].transform.orientation, v.orientation)), 1.0e-5f);
+    }
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 3, -5.0);
+    EXPECT_NEAR(k[0].transform.distance, v.distance, 1.0e-4f);
+    camera_keyframes_evaluate(&v, &fov, k, 3, 99.0);
+    EXPECT_NEAR(k[2].transform.distance, v.distance, 1.0e-4f);
+    EXPECT_NEAR(k[2].fov_y, fov, 1.0e-5f);
+    camera_keyframes_evaluate(&v, &fov, k, 1, 0.5);
+    EXPECT_NEAR(k[0].transform.distance, v.distance, 1.0e-4f);
+}
+
+UTEST(viamd_camera, keyframes_pass_through_a_key_without_stopping) {
+    CameraKeyframe k[3];
+    kf_make3(k);
+    const double eps = 1.0e-3;
+    ViewTransform a, b, c; float fov;
+    camera_keyframes_evaluate(&a, &fov, k, 3, 1.0 - eps);
+    camera_keyframes_evaluate(&b, &fov, k, 3, 1.0);
+    camera_keyframes_evaluate(&c, &fov, k, 3, 1.0 + eps);
+
+    /* Same velocity on both sides (no corner) ... */
+    const vec3_t v0 = (b.position - a.position) * (float)(1.0 / eps);
+    const vec3_t v1 = (c.position - b.position) * (float)(1.0 / eps);
+    EXPECT_LT(vec3_length(v1 - v0), 0.05f * vec3_length(v0));
+    /* ... and it is moving: the average speed over the path is ~14 per second; a per-segment ease would be 0 here. */
+    EXPECT_GT(vec3_length(v0), 5.0f);
+
+    /* Rotation speed through the key is likewise non-zero and continuous */
+    const double re = 0.05;   /* acos of a float dot is too coarse for a smaller step */
+    camera_keyframes_evaluate(&a, &fov, k, 3, 1.0 - re);
+    camera_keyframes_evaluate(&c, &fov, k, 3, 1.0 + re);
+    const float ang0 = 2.0f * acosf(fminf(1.0f, fabsf(quat_dot(a.orientation, b.orientation)))) / (float)re;
+    const float ang1 = 2.0f * acosf(fminf(1.0f, fabsf(quat_dot(b.orientation, c.orientation)))) / (float)re;
+    EXPECT_GT(ang0, 0.1f);
+    EXPECT_NEAR(ang0, ang1, 0.15f * ang0);
+}
+
+UTEST(viamd_camera, keyframes_stay_valid_and_do_not_overshoot) {
+    CameraKeyframe k[3];
+    kf_make3(k);
+    /* The middle key is the extreme of both distance and fov: the path must not exceed it */
+    k[1].transform.distance = 30.0f;
+    k[1].fov_y = 1.2f;
+    /* A quaternion of opposite sign is the same rotation; the path must not spin the long way around */
+    k[1].transform.orientation = quat_t{-k[1].transform.orientation.x, -k[1].transform.orientation.y, -k[1].transform.orientation.z, -k[1].transform.orientation.w};
+    for (double t = 0.0; t <= 3.0; t += 0.01) {
+        ViewTransform v; float fov;
+        camera_keyframes_evaluate(&v, &fov, k, 3, t);
+        EXPECT_LE(v.distance, 30.0f + 1.0e-3f);
+        EXPECT_GE(v.distance, 10.0f - 1.0e-3f);
+        EXPECT_LE(fov, 1.2f + 1.0e-4f);
+        const quat_t q = v.orientation;
+        EXPECT_NEAR(1.0f, sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w), 1.0e-4f);
+        /* Rotation about one axis, 0.2 -> 1.0 -> 1.8 rad: the angle stays within that range */
+        const float angle = 2.0f * acosf(fminf(1.0f, fabsf(q.w)));
+        EXPECT_GT(angle, 0.2f - 0.05f);
+        EXPECT_LT(angle, 1.8f + 0.05f);
+    }
+}
+
 /* Default view. These pin the behaviour rather than the numbers: what is up, what faces the viewer, and
  * that everything fits. Synthetic systems, deterministic (a fixed LCG, not rand()). */
 

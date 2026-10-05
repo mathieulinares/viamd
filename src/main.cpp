@@ -212,6 +212,11 @@ static void create_screenshot(str_t path);
 static void movie_recording_start(ApplicationState* state);
 static void movie_recording_stop(ApplicationState* state);
 static void update_movie_recording(ApplicationState* state);
+static void movie_sort_keyframes(ApplicationState* state);
+static void movie_apply_time(ApplicationState* state, double time, bool apply_camera);
+static double movie_duration(const ApplicationState* state);
+static double movie_trajectory_frame(const ApplicationState* state, double time);
+static int movie_num_frames(const ApplicationState* state);
 static void movie_restore_state(ApplicationState* state);
 
 // The sizes offered in the Settings menu. The stored setting is the size itself, not an
@@ -1653,18 +1658,50 @@ static void draw_main_menu(ApplicationState* data) {
             }
             double frame_range[2] = { data->movie.start_frame, data->movie.end_frame };
             const double min_frame = 0.0;
-            if (ImGui::SliderScalarN("Frame Range", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
-                data->movie.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
-                data->movie.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
+            if (ImGui::SliderScalarN("Trajectory Frames", ImGuiDataType_Double, frame_range, 2, &min_frame, &max_frame, "%.0f")) {
+                if (data->movie.duration_auto) {
+                    data->movie.start_frame = CLAMP(MIN(frame_range[0], frame_range[1]), 0.0, max_frame);
+                    data->movie.end_frame   = CLAMP(MAX(frame_range[0], frame_range[1]), 0.0, max_frame);
+                } else {
+                    // The order matters when not tied to the Animation fps: start > end plays the trajectory backwards
+                    data->movie.start_frame = CLAMP(frame_range[0], 0.0, max_frame);
+                    data->movie.end_frame   = CLAMP(frame_range[1], 0.0, max_frame);
+                }
             }
+
+            ImGui::SeparatorText("Timeline");
+            ImGui::Checkbox("Duration from trajectory", &data->movie.duration_auto);
+            ImGui::SetItemTooltip("On: the movie is the trajectory at the Animation panel's fps.\n"
+                "Off: set the duration yourself and choose when the trajectory plays within it.\n"
+                "Set both trajectory frames equal to hold the trajectory still while the camera moves.");
+            if (data->movie.duration_auto) {
+                ImGui::TextDisabled("%.2f s, %d frames", movie_duration(data), movie_num_frames(data));
+            } else {
+                ImGui::InputFloat("Duration (s)", &data->movie.duration, 0.5f, 5.0f, "%.2f");
+                data->movie.duration = CLAMP(data->movie.duration, 0.01f, 3600.0f);
+                ImGui::SliderFloat("Trajectory starts (s)", &data->movie.traj_begin, 0.0f, data->movie.duration, "%.2f");
+                ImGui::SliderFloat("Trajectory ends (s)", &data->movie.traj_end, 0.0f, data->movie.duration, "%.2f");
+                data->movie.traj_begin = CLAMP(data->movie.traj_begin, 0.0f, data->movie.duration);
+                data->movie.traj_end   = CLAMP(data->movie.traj_end,   data->movie.traj_begin, data->movie.duration);
+                ImGui::TextDisabled("%d frames", movie_num_frames(data));
+            }
+
+            const float movie_len = (float)movie_duration(data);
+            data->movie.playhead = CLAMP(data->movie.playhead, 0.0f, movie_len);
 
             ImGui::SeparatorText("Camera Keyframes");
             ImGui::Checkbox("Animate camera", &data->movie.animate_camera);
+            if (ImGui::SliderFloat("Preview time (s)", &data->movie.playhead, 0.0f, movie_len, "%.2f")) {
+                movie_apply_time(data, (double)data->movie.playhead, true);
+            }
+            ImGui::SetItemTooltip("Scrub the movie: shows the trajectory frame and, with 'Animate camera' on, the camera at this time.");
             if (ImGui::Button("Add Keyframe (current view)")) {
-                CameraKeyframe key = { data->view.target, CLAMP(data->animation.frame, 0.0, max_frame) };
-                md_array_push(data->movie.keyframes, key, persistent_alloc);
-                std::stable_sort(data->movie.keyframes, data->movie.keyframes + md_array_size(data->movie.keyframes),
-                    [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.frame < b.frame; });
+                CameraKeyframe key = {};
+                key.transform = data->view.target;
+                key.fov_y = data->view.camera.fov_y;
+                key.time = (double)data->movie.playhead;
+                md_array_push(data->movie.keyframes, key, data->allocator.persistent);
+                movie_sort_keyframes(data);
             }
             {
                 bool resort = false;
@@ -1673,26 +1710,36 @@ static void draw_main_menu(ApplicationState* data) {
                     CameraKeyframe& key = data->movie.keyframes[i];
                     ImGui::PushID(i);
                     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
-                    double f = key.frame;
-                    if (ImGui::InputDouble("##frame", &f, 0.0, 0.0, "%.1f")) {
-                        key.frame = CLAMP(f, 0.0, max_frame);
+                    double t = key.time;
+                    if (ImGui::InputDouble("##time", &t, 0.0, 0.0, "%.2f s")) {
+                        key.time = MAX(t, 0.0);
                     }
                     resort |= ImGui::IsItemDeactivatedAfterEdit();
                     ImGui::SameLine();
-                    if (ImGui::Button("Go To"))   data->view.target = key.transform;
+                    if (ImGui::Button("Go To")) {
+                        data->view.target = key.transform;
+                        data->view.camera.fov_y = key.fov_y;
+                        data->movie.playhead = CLAMP((float)key.time, 0.0f, movie_len);
+                        data->animation.frame = movie_trajectory_frame(data, key.time);
+                    }
                     ImGui::SameLine();
-                    if (ImGui::Button("Update"))  key.transform = data->view.target;
+                    if (ImGui::Button("Update")) {
+                        key.transform = data->view.target;
+                        key.fov_y = data->view.camera.fov_y;
+                    }
                     ImGui::SameLine();
                     if (ImGui::Button("Remove"))  remove_idx = i;
                     ImGui::PopID();
                 }
                 if (remove_idx >= 0) {
-                    md_array_swap_back_and_pop(data->movie.keyframes, remove_idx);
-                    resort = true;
+                    // Keeps the order, unlike swap-and-pop
+                    CameraKeyframe* keys = data->movie.keyframes;
+                    const size_t n = md_array_size(keys);
+                    memmove(keys + remove_idx, keys + remove_idx + 1, (n - remove_idx - 1) * sizeof(CameraKeyframe));
+                    md_array_pop(keys);
                 }
                 if (resort) {
-                    std::stable_sort(data->movie.keyframes, data->movie.keyframes + md_array_size(data->movie.keyframes),
-                        [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.frame < b.frame; });
+                    movie_sort_keyframes(data);
                 }
             }
 
@@ -1703,17 +1750,26 @@ static void draw_main_menu(ApplicationState* data) {
                     movie_recording_start(data);
                 }
             } else {
-                ImGui::Text("Recording frame %d (trajectory frame %.1f / %.1f)",
-                    data->movie.frame_index, data->movie.cur_frame, data->movie.end_frame);
+                ImGui::Text("Recording frame %d / %d (%.2f s)",
+                    data->movie.frame_index, movie_num_frames(data), data->movie.cur_time);
                 if (ImGui::Button("Stop Recording")) {
                     movie_recording_stop(data);
                 }
             }
 
             ImGui::Separator();
-            ImGui::TextWrapped("Writes a numbered PNG sequence ('%s_00000.png', ...). "
-                "Encode it into a video with e.g. ffmpeg -framerate <fps> -i %s_%%05d.png movie.mp4",
-                data->movie.filename_prefix, data->movie.filename_prefix);
+            ImGui::TextWrapped("Writes a numbered PNG sequence ('%s_00000.png', ...), to be encoded into a video with ffmpeg.",
+                data->movie.filename_prefix);
+            ImGui::BeginDisabled(str_empty(data->movie.output_dir));
+            if (ImGui::Button("Copy ffmpeg command")) {
+                char cmd[2048];
+                // Quoted for a shell; the folder is only copied, never executed from here
+                snprintf(cmd, sizeof(cmd), "ffmpeg -framerate %g -i \"" STR_FMT "/%s_%%05d.png\" -c:v libx264 -pix_fmt yuv420p \"" STR_FMT "/%s.mp4\"",
+                    data->movie.fps, STR_ARG(data->movie.output_dir), data->movie.filename_prefix,
+                    STR_ARG(data->movie.output_dir), data->movie.filename_prefix);
+                ImGui::SetClipboardText(cmd);
+            }
+            ImGui::EndDisabled();
 
             ImGui::EndMenu();
         }
@@ -6275,36 +6331,44 @@ void create_screenshot(str_t path) {
     VIAMD_LOG_SUCCESS("Screenshot saved to: '" STR_FMT "'", STR_ARG(path));
 }
 
-// Camera pose at a trajectory frame: holds the first/last keyframe outside their range and eases
-// (smoothstep) between neighbouring keyframes inside it. keys must be sorted by frame and count > 0.
-static ViewTransform camera_keyframes_evaluate(const CameraKeyframe* keys, size_t count, double frame) {
-    ASSERT(count > 0);
-    if (frame <= keys[0].frame)         return keys[0].transform;
-    if (frame >= keys[count - 1].frame) return keys[count - 1].transform;
-
-    size_t i = 0;
-    while (i + 2 < count && frame >= keys[i + 1].frame) ++i;
-
-    const CameraKeyframe& a = keys[i];
-    const CameraKeyframe& b = keys[i + 1];
-
-    const double span = b.frame - a.frame;
-    double t = span > 0.0 ? (frame - a.frame) / span : 1.0;
-    t = t * t * (3.0 - 2.0 * t);
-
-    // Take the shorter rotation arc; camera_interpolate_look_at expects non-negative dot.
-    quat_t qb = b.transform.orientation;
-    if (quat_dot(a.transform.orientation, qb) < 0.0f) {
-        qb = quat_t{-qb.x, -qb.y, -qb.z, -qb.w};
+// Length of the movie in seconds
+static double movie_duration(const ApplicationState* state) {
+    if (state->movie.duration_auto) {
+        const double fps = fabs((double)state->animation.fps);
+        return fps > 0.0 ? (state->movie.end_frame - state->movie.start_frame) / fps : 0.0;
     }
+    return (double)state->movie.duration;
+}
 
-    vec3_t pos[2]  = {a.transform.position, b.transform.position};
-    quat_t ori[2]  = {a.transform.orientation, qb};
-    float  dist[2] = {a.transform.distance, b.transform.distance};
+static int movie_num_frames(const ApplicationState* state) {
+    return (int)floor(movie_duration(state) * (double)state->movie.fps + 1.0e-6) + 1;
+}
 
-    ViewTransform out = {};
-    camera_interpolate_look_at(&out.position, &out.orientation, &out.distance, pos, ori, dist, t);
-    return out;
+// Trajectory frame shown at a time on the movie timeline
+static double movie_trajectory_frame(const ApplicationState* state, double time) {
+    const double t0 = state->movie.duration_auto ? 0.0 : (double)state->movie.traj_begin;
+    const double t1 = state->movie.duration_auto ? movie_duration(state) : (double)state->movie.traj_end;
+    const double u = t1 > t0 ? CLAMP((time - t0) / (t1 - t0), 0.0, 1.0) : (time < t0 ? 0.0 : 1.0);
+    return state->movie.start_frame + (state->movie.end_frame - state->movie.start_frame) * u;
+}
+
+static void movie_sort_keyframes(ApplicationState* state) {
+    std::stable_sort(state->movie.keyframes, state->movie.keyframes + md_array_size(state->movie.keyframes),
+        [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+}
+
+// Shows the movie at a time on its timeline: the trajectory frame and, if enabled, the camera.
+// Both view targets are set so the exponential smoothing in camera_animate does not lag behind.
+static void movie_apply_time(ApplicationState* state, double time, bool apply_camera) {
+    state->animation.frame = movie_trajectory_frame(state, time);
+    if (apply_camera && state->movie.animate_camera && md_array_size(state->movie.keyframes) > 0) {
+        ViewTransform vt;
+        float fov_y;
+        camera_keyframes_evaluate(&vt, &fov_y, state->movie.keyframes, md_array_size(state->movie.keyframes), time);
+        state->view.target = vt;
+        state->view.camera = vt;
+        state->view.camera.fov_y = fov_y;
+    }
 }
 
 static void movie_restore_state(ApplicationState* state) {
@@ -6312,6 +6376,8 @@ static void movie_restore_state(ApplicationState* state) {
     state->screenshot.hide_gui = state->movie.prev_screenshot_hide_gui;
     if (state->movie.camera_was_animated) {
         state->view.target = state->movie.prev_view_target;
+        state->view.camera = state->movie.prev_view_target;
+        state->view.camera.fov_y = state->movie.prev_fov_y;
         state->movie.camera_was_animated = false;
     }
 }
@@ -6336,17 +6402,16 @@ static void movie_recording_start(ApplicationState* state) {
     const double max_frame = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
     state->movie.start_frame = CLAMP(state->movie.start_frame, 0.0, max_frame);
     state->movie.end_frame   = CLAMP(state->movie.end_frame,   0.0, max_frame);
-    if (state->movie.end_frame <= state->movie.start_frame) {
+    if (state->movie.duration_auto && state->movie.end_frame <= state->movie.start_frame) {
         VIAMD_LOG_ERROR("Cannot start movie recording: end frame must be greater than start frame");
         return;
     }
+    if (movie_duration(state) <= 0.0) {
+        VIAMD_LOG_ERROR("Cannot start movie recording: the movie has no duration");
+        return;
+    }
 
-    // Trajectory frames advanced per output (video) frame, so the recording plays the
-    // trajectory back at the same relative speed as the Animation panel's fps setting.
-    state->movie.frame_step = (state->animation.fps != 0.0f) ? (double)fabsf(state->animation.fps) / (double)state->movie.fps : 1.0;
-    state->movie.frame_step = MAX(state->movie.frame_step, 1.0e-6);
-
-    state->movie.cur_frame   = state->movie.start_frame;
+    state->movie.cur_time    = 0.0;
     state->movie.frame_index = 0;
 
     state->movie.prev_playback_mode = state->animation.mode;
@@ -6356,10 +6421,11 @@ static void movie_recording_start(ApplicationState* state) {
 
     state->movie.camera_was_animated = state->movie.animate_camera && md_array_size(state->movie.keyframes) > 0;
     state->movie.prev_view_target = state->view.target;
+    state->movie.prev_fov_y = state->view.camera.fov_y;
 
     state->movie.state = MovieRecordingState::Recording;
 
-    VIAMD_LOG_INFO("Recording movie frames %.1f-%.1f to '" STR_FMT "'", state->movie.start_frame, state->movie.end_frame, STR_ARG(state->movie.output_dir));
+    VIAMD_LOG_INFO("Recording %d movie frame(s) (%.2f s) to '" STR_FMT "'", movie_num_frames(state), movie_duration(state), STR_ARG(state->movie.output_dir));
 }
 
 static void movie_recording_stop(ApplicationState* state) {
@@ -6398,9 +6464,9 @@ static void update_movie_recording(ApplicationState* state) {
         return;
     }
 
-    if (state->movie.cur_frame > state->movie.end_frame + 1.0e-6) {
+    if (state->movie.frame_index >= movie_num_frames(state)) {
         VIAMD_LOG_SUCCESS("Movie recording complete: %d frame(s) written to '" STR_FMT "'. "
-            "Encode with e.g. ffmpeg -framerate %.3f -i '" STR_FMT "/%s_%%05d.png' movie.mp4",
+            "Encode with e.g. ffmpeg -framerate %.3f -i '" STR_FMT "/%s_%%05d.png' movie.mp4 (see 'Copy ffmpeg command')",
             state->movie.frame_index, STR_ARG(state->movie.output_dir), state->movie.fps,
             STR_ARG(state->movie.output_dir), state->movie.filename_prefix);
 
@@ -6409,14 +6475,9 @@ static void update_movie_recording(ApplicationState* state) {
         return;
     }
 
-    state->animation.frame = state->movie.cur_frame;
-
-    if (state->movie.camera_was_animated) {
-        // Set both so the exponential smoothing in camera_animate does not lag behind the keyframes
-        const ViewTransform vt = camera_keyframes_evaluate(state->movie.keyframes, md_array_size(state->movie.keyframes), state->movie.cur_frame);
-        state->view.target = vt;
-        state->view.camera = vt;
-    }
+    // Computed from the index rather than accumulated, so the time does not drift
+    state->movie.cur_time = (double)state->movie.frame_index / (double)state->movie.fps;
+    movie_apply_time(state, state->movie.cur_time, state->movie.camera_was_animated);
 
     char path_buf[1024];
     int len = snprintf(path_buf, sizeof(path_buf), STR_FMT "/%s_%05d.png",
@@ -6429,7 +6490,6 @@ static void update_movie_recording(ApplicationState* state) {
     state->screenshot.sample_target = state->visuals.temporal_aa.enabled ? JITTER_SEQUENCE_SIZE : 1;
 
     state->movie.frame_index += 1;
-    state->movie.cur_frame   += state->movie.frame_step;
 }
 
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current) {

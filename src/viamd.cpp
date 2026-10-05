@@ -1203,6 +1203,25 @@ static void workspace_reset(ApplicationState* data) {
     data->view.mode = CameraMode::Perspective;
     data->view.camera.fov_y = Camera{}.fov_y;
 
+    {
+        // The settings and keyframes, not the output folder or a recording under way
+        auto& m = data->movie;
+        m.resolution = ScreenshotResolution::Window;
+        m.res_x = 1920;
+        m.res_y = 1080;
+        m.fps = 24.0f;
+        m.start_frame = 0.0;
+        m.end_frame = 0.0;
+        m.duration_auto = true;
+        m.duration = 5.0f;
+        m.traj_begin = 0.0f;
+        m.traj_end = 5.0f;
+        m.playhead = 0.0f;
+        snprintf(m.filename_prefix, sizeof(m.filename_prefix), "frame");
+        m.animate_camera = false;
+        md_array_shrink(m.keyframes, 0);
+    }
+
     data->selection.granularity = SelectionGranularity::Atom;
     md_bitfield_clear(&data->selection.selection_mask);
     single_selection_sequence_clear(&data->selection.single_selection_sequence);
@@ -1593,6 +1612,42 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     viamd::extract_flt(data->view.camera.fov_y, arg);
                 }
             }
+        } else if (str_eq(section, STR_LIT("Movie"))) {
+            auto& m = data->movie;
+            while (viamd::next_entry(ident, arg, state)) {
+                if      (str_eq(ident, STR_LIT("Resolution")))     viamd::extract_enum(m.resolution, arg, (int)ScreenshotResolution::Count);
+                else if (str_eq(ident, STR_LIT("ResX")))           viamd::extract_int(m.res_x, arg);
+                else if (str_eq(ident, STR_LIT("ResY")))           viamd::extract_int(m.res_y, arg);
+                else if (str_eq(ident, STR_LIT("Fps")))            viamd::extract_flt(m.fps, arg);
+                else if (str_eq(ident, STR_LIT("StartFrame")))     viamd::extract_dbl(m.start_frame, arg);
+                else if (str_eq(ident, STR_LIT("EndFrame")))       viamd::extract_dbl(m.end_frame, arg);
+                else if (str_eq(ident, STR_LIT("DurationAuto")))   viamd::extract_bool(m.duration_auto, arg);
+                else if (str_eq(ident, STR_LIT("Duration")))       viamd::extract_flt(m.duration, arg);
+                else if (str_eq(ident, STR_LIT("TrajectoryBegin"))) viamd::extract_flt(m.traj_begin, arg);
+                else if (str_eq(ident, STR_LIT("TrajectoryEnd")))  viamd::extract_flt(m.traj_end, arg);
+                else if (str_eq(ident, STR_LIT("Playhead")))       viamd::extract_flt(m.playhead, arg);
+                else if (str_eq(ident, STR_LIT("FilenamePrefix"))) viamd::extract_to_char_buf(m.filename_prefix, sizeof(m.filename_prefix), arg);
+                else if (str_eq(ident, STR_LIT("AnimateCamera")))  viamd::extract_bool(m.animate_camera, arg);
+                else if (str_eq(ident, STR_LIT("Keyframe"))) {
+                    // time, fov_y, distance, position (3), orientation (4)
+                    float v[10];
+                    if (viamd::extract_flt_vec(v, 10, arg)) {
+                        CameraKeyframe key = {};
+                        key.time = v[0];
+                        key.fov_y = v[1];
+                        key.transform.distance = v[2];
+                        key.transform.position = vec3_set(v[3], v[4], v[5]);
+                        key.transform.orientation = quat_normalize(quat_t{v[6], v[7], v[8], v[9]});
+                        md_array_push(m.keyframes, key, data->allocator.persistent);
+                    }
+                }
+            }
+            m.res_x = CLAMP(m.res_x, 640, 16384);
+            m.res_y = CLAMP(m.res_y, 480, 16384);
+            m.fps = CLAMP(m.fps, 1.0f, 240.0f);
+            m.duration = CLAMP(m.duration, 0.01f, 3600.0f);
+            std::stable_sort(m.keyframes, m.keyframes + md_array_size(m.keyframes),
+                [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
         } else if (str_eq(section, STR_LIT("Operations"))) {
             auto& op = data->operations;
             while (viamd::next_entry(ident, arg, state)) {
@@ -1899,6 +1954,33 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
     viamd::write_flt(state,  STR_LIT("Distance"), app_state->view.camera.distance);
     viamd::write_int(state,  STR_LIT("Mode"), (int)app_state->view.mode);
     viamd::write_flt(state,  STR_LIT("FovY"), app_state->view.camera.fov_y);
+
+    {
+        const auto& m = app_state->movie;
+        viamd::write_section_header(state, STR_LIT("Movie"));
+        viamd::write_int (state, STR_LIT("Resolution"), (int)m.resolution);
+        viamd::write_int (state, STR_LIT("ResX"), m.res_x);
+        viamd::write_int (state, STR_LIT("ResY"), m.res_y);
+        viamd::write_flt (state, STR_LIT("Fps"), m.fps);
+        viamd::write_dbl (state, STR_LIT("StartFrame"), m.start_frame);
+        viamd::write_dbl (state, STR_LIT("EndFrame"), m.end_frame);
+        viamd::write_bool(state, STR_LIT("DurationAuto"), m.duration_auto);
+        viamd::write_flt (state, STR_LIT("Duration"), m.duration);
+        viamd::write_flt (state, STR_LIT("TrajectoryBegin"), m.traj_begin);
+        viamd::write_flt (state, STR_LIT("TrajectoryEnd"), m.traj_end);
+        viamd::write_flt (state, STR_LIT("Playhead"), m.playhead);
+        viamd::write_str (state, STR_LIT("FilenamePrefix"), str_from_cstr(m.filename_prefix));
+        viamd::write_bool(state, STR_LIT("AnimateCamera"), m.animate_camera);
+        for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+            const CameraKeyframe& k = m.keyframes[i];
+            const float v[10] = {
+                (float)k.time, k.fov_y, k.transform.distance,
+                k.transform.position.x, k.transform.position.y, k.transform.position.z,
+                k.transform.orientation.x, k.transform.orientation.y, k.transform.orientation.z, k.transform.orientation.w,
+            };
+            viamd::write_flt_vec(state, STR_LIT("Keyframe"), v, 10);
+        }
+    }
 
     {
         const auto& op = app_state->operations;

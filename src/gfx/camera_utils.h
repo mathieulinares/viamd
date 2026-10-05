@@ -93,6 +93,13 @@ vec3_t camera_position_from_look_at(const vec3_t& look_at, const quat_t& orienta
 
 void camera_interpolate_look_at(vec3_t* out_pos, quat_t* out_ori, float* out_dist, vec3_t in_pos[2], quat_t in_ori[2], float in_dist[2], double t);
 
+// Pose of the camera at 'time' along a path through keyframes, which must be sorted by time (count > 0).
+// The camera holds the first/last keyframe outside their range and moves smoothly (continuous velocity)
+// through the ones in between, so it does not stop at each of them. The look-at point follows a
+// Catmull-Rom spline, distance and fov a monotone cubic (no overshoot) and the orientation a spherical
+// cubic Bezier along the shortest rotation. The start and end of the path ease in and out.
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time);
+
 mat4_t camera_world_to_view_matrix(const ViewTransform& transform);
 mat4_t camera_view_to_world_matrix(const ViewTransform& transform);
 

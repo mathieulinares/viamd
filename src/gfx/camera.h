@@ -20,3 +20,10 @@ struct Camera : ViewTransform {
         return *this;
 	}
 };
+
+// A camera pose that a movie passes through at 'time' seconds on the movie timeline.
+struct CameraKeyframe {
+    ViewTransform transform = {};
+    float  fov_y = (3.1415926534f / 4.0f);
+    double time = 0.0;
+};
