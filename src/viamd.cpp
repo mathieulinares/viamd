@@ -1253,6 +1253,7 @@ static void workspace_reset(ApplicationState* data) {
         m.loop = false;
         m.animate_params = true;
         m.param_keys.clear();
+        m.overlays.clear();
         md_bitfield_clear(&m.follow_mask);
         m.key_follow = false;
         m.follow_pending = false;
@@ -1736,6 +1737,28 @@ void load_workspace(ApplicationState* data, str_t filename) {
             std::stable_sort(m.keyframes, m.keyframes + md_array_size(m.keyframes),
                 [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
             movie_history_reset(data);
+        } else if (str_eq(section, STR_LIT("MovieOverlay"))) {
+            MovieOverlay o;
+            while (viamd::next_entry(ident, arg, state)) {
+                if      (str_eq(ident, STR_LIT("Type")))    viamd::extract_enum(o.type, arg, (int)MovieOverlayType::Count);
+                else if (str_eq(ident, STR_LIT("Enabled"))) viamd::extract_bool(o.enabled, arg);
+                else if (str_eq(ident, STR_LIT("Range"))) {
+                    float r[4];
+                    if (viamd::extract_flt_vec(r, 4, arg)) {
+                        o.begin = r[0];
+                        o.end = r[1];
+                        o.fade_in = r[2];
+                        o.fade_out = r[3];
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("Anchor"))) viamd::extract_enum(o.anchor, arg, (int)MovieOverlayAnchor::Count);
+                else if (str_eq(ident, STR_LIT("Size")))   viamd::extract_flt(o.size, arg);
+                else if (str_eq(ident, STR_LIT("Color")))  viamd::extract_flt_vec(o.color, 4, arg);
+                else if (str_eq(ident, STR_LIT("Length"))) viamd::extract_flt(o.length, arg);
+                else if (str_eq(ident, STR_LIT("Text")))   viamd::extract_to_char_buf(o.text, sizeof(o.text), arg);
+            }
+            o.size = CLAMP(o.size, 0.01f, 0.3f);
+            data->movie.overlays.push_back(o);
         } else if (str_eq(section, STR_LIT("Operations"))) {
             auto& op = data->operations;
             while (viamd::next_entry(ident, arg, state)) {
@@ -2085,6 +2108,18 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         for (const ParamKey& k : m.param_keys) {
             const float v[6] = { (float)k.param, (float)k.time, k.value[0], k.value[1], k.value[2], (float)(int)k.ease };
             viamd::write_flt_vec(state, STR_LIT("ParamKey"), v, 6);
+        }
+        for (const MovieOverlay& o : m.overlays) {
+            viamd::write_section_header(state, STR_LIT("MovieOverlay"));
+            viamd::write_int (state, STR_LIT("Type"), (int)o.type);
+            viamd::write_bool(state, STR_LIT("Enabled"), o.enabled);
+            const float range[4] = { (float)o.begin, (float)o.end, o.fade_in, o.fade_out };
+            viamd::write_flt_vec(state, STR_LIT("Range"), range, 4);
+            viamd::write_int (state, STR_LIT("Anchor"), (int)o.anchor);
+            viamd::write_flt (state, STR_LIT("Size"), o.size);
+            viamd::write_flt_vec(state, STR_LIT("Color"), o.color, 4);
+            viamd::write_flt (state, STR_LIT("Length"), o.length);
+            viamd::write_str (state, STR_LIT("Text"), str_from_cstr(o.text));
         }
     }
 

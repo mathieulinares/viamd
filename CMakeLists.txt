@@ -182,6 +182,7 @@ set(SRC_FILES
     src/loader.cpp
     src/main.cpp
     src/movie_keys.cpp
+    src/movie_overlay.cpp
     src/plot_series.cpp
     src/script_editor.cpp
     src/script_reference.cpp
@@ -199,6 +200,7 @@ set(SRC_FILES
     src/implot_widgets.h
     src/loader.h
     src/movie_keys.h
+    src/movie_overlay.h
     src/plot_series.h
     src/script_editor.h
     src/script_reference.h

@@ -54,6 +54,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <app/imgui_impl_opengl3.h>
 
 #include <implot.h>
 #include <implot_internal.h>
@@ -227,6 +228,7 @@ static void movie_draw_camera_path(ApplicationState* state);
 static bool movie_draw_timeline_markers(ApplicationState* state);
 static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
+static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state);
 static void movie_sort_keyframes(ApplicationState* state);
 static void movie_apply_time(ApplicationState* state, double time, bool apply_camera);
 static void movie_follow_update(ApplicationState* state);
@@ -1073,6 +1075,16 @@ int main(int argc, char** argv) {
                 }
             }
             POP_CPU_SECTION();
+        }
+
+        if (state.movie.show_overlay_preview && !state.movie.overlays.empty() && state.movie.state != MovieRecordingState::Recording &&
+            (state.movie.show_window || state.movie.show_timeline_window)) {
+            // The movie's overlays at the preview time, laid out for the viewport
+            ImGuiWindow* window = ImGui::FindWindowByName("Main interaction window");
+            if (window) {
+                movie_overlays_draw(window->DrawList, ImVec2(0, 0), ImVec2((float)state.app.window.width, (float)state.app.window.height),
+                    (double)state.movie.playhead, &state);
+            }
         }
 
         if (ImGui::IsKeyPressed(KEY_RECENTER_ON_HIGHLIGHT) && !state.editor_focused) {
@@ -6487,6 +6499,121 @@ static void movie_pbo_flush(ApplicationState* state) {
     while (movie_pbo_pop(state, true)) {}
 }
 
+static const char* movie_overlay_type_str[(int)MovieOverlayType::Count] = {
+    "Text",
+    "Time stamp",
+    "Scale bar",
+};
+
+static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
+    "Top left", "Top center", "Top right",
+    "Middle left", "Center", "Middle right",
+    "Bottom left", "Bottom center", "Bottom right",
+};
+
+// The overlays that are visible at a movie time, drawn into the rectangle (pos, size) of a frame. Everything scales with the
+// height of the frame, so a frame looks the same at any resolution.
+static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state) {
+    const auto& m = state->movie;
+    ImFont* font = ImGui::GetFont();
+    if (!font || size.x <= 0.0f || size.y <= 0.0f) return;
+
+    const float margin = 0.035f * size.y;
+    for (const MovieOverlay& o : m.overlays) {
+        const float alpha = movie_overlay_alpha(o, time);
+        if (alpha <= 0.0f) continue;
+
+        const float font_px = MAX(o.size * size.y, 4.0f);
+        const ImU32 col    = ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha));
+        const ImU32 shadow = IM_COL32(0, 0, 0, (int)(160.0f * o.color[3] * alpha));
+        const float soff   = MAX(font_px * 0.05f, 1.0f);
+
+        char buf[160] = "";
+        float bar_px = 0.0f;   // Scale bar only
+        switch (o.type) {
+        case MovieOverlayType::Text:
+            snprintf(buf, sizeof(buf), "%s", o.text);
+            break;
+        case MovieOverlayType::Timestamp: {
+            const double frame = movie_trajectory_frame(state, time);
+            if (md_array_size(state->timeline.x_values) > 0) {
+                char unit_buf[32] = "";
+                if (!md_unit_is_none(state->timeline.time_unit)) md_unit_print(unit_buf, sizeof(unit_buf), state->timeline.time_unit);
+                snprintf(buf, sizeof(buf), "%.1f %s", frame_to_time(frame, *state), unit_buf);
+            } else {
+                snprintf(buf, sizeof(buf), "Frame %d", (int)(frame + 0.5));
+            }
+            break;
+        }
+        case MovieOverlayType::ScaleBar: {
+            const double upp = movie_units_per_pixel(state->view.camera.distance, state->view.camera.fov_y, size.y);
+            const float len = o.length > 0.0f ? o.length : movie_scale_bar_length(upp, size.x, 0.2);
+            if (len <= 0.0f || upp <= 0.0) continue;
+            bar_px = (float)((double)len / upp);
+            snprintf(buf, sizeof(buf), "%g \xC3\x85", (double)len);
+            break;
+        }
+        default: break;
+        }
+
+        const ImVec2 text_size = font->CalcTextSizeA(font_px, FLT_MAX, 0.0f, buf);
+        const float bar_h = MAX(font_px * 0.18f, 2.0f);
+        const float gap   = font_px * 0.2f;
+        const ImVec2 block = o.type == MovieOverlayType::ScaleBar
+            ? ImVec2(MAX(bar_px, text_size.x), text_size.y + gap + bar_h)
+            : text_size;
+
+        const int ai = (int)o.anchor;
+        const float fx = 0.5f * (float)(ai % 3);
+        const float fy = 0.5f * (float)(ai / 3);
+        const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - block.x) * fx,
+                                 pos.y + margin + (size.y - 2.0f * margin - block.y) * fy);
+
+        if (o.type == MovieOverlayType::ScaleBar) {
+            const float tx = p0.x + 0.5f * (block.x - text_size.x);
+            dl->AddText(font, font_px, ImVec2(tx + soff, p0.y + soff), shadow, buf);
+            dl->AddText(font, font_px, ImVec2(tx, p0.y), col, buf);
+            const float bx = p0.x + 0.5f * (block.x - bar_px);
+            const float by = p0.y + text_size.y + gap;
+            dl->AddRectFilled(ImVec2(bx + soff, by + soff), ImVec2(bx + bar_px + soff, by + bar_h + soff), shadow);
+            dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bar_px, by + bar_h), col);
+        } else {
+            dl->AddText(font, font_px, ImVec2(p0.x + soff, p0.y + soff), shadow, buf);
+            dl->AddText(font, font_px, p0, col, buf);
+        }
+    }
+}
+
+// Draws the overlays onto the frame in the G-buffer, after post processing and before it is read back
+static void movie_overlays_render(ApplicationState* state, double time) {
+    if (state->movie.overlays.empty()) return;
+
+    const float w = (float)state->gbuffer.width;
+    const float h = (float)state->gbuffer.height;
+
+    ImDrawList dl(ImGui::GetDrawListSharedData());
+    dl._ResetForNewFrame();
+    dl.PushTexture(ImGui::GetIO().Fonts->TexRef);
+    dl.PushClipRect(ImVec2(0, 0), ImVec2(w, h));
+    movie_overlays_draw(&dl, ImVec2(0, 0), ImVec2(w, h), time, state);
+    if (dl.VtxBuffer.Size == 0) return;
+
+    ImDrawData dd;
+    dd.Valid = true;
+    dd.CmdLists.push_back(&dl);
+    dd.CmdListsCount = 1;
+    dd.TotalVtxCount = dl.VtxBuffer.Size;
+    dd.TotalIdxCount = dl.IdxBuffer.Size;
+    dd.DisplayPos = ImVec2(0, 0);
+    dd.DisplaySize = ImVec2(w, h);
+    dd.FramebufferScale = ImVec2(1, 1);
+    dd.Textures = &ImGui::GetPlatformIO().Textures;
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state->gbuffer.fbo);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ImGui_ImplOpenGL3_RenderDrawData(&dd);
+}
+
 // Starts the read back of the frame that was just rendered. The pixels reach the sink some frames later,
 // from movie_pbo_pop, so the GPU is not waited for here.
 static void movie_capture_frame(ApplicationState* state) {
@@ -7417,6 +7544,83 @@ static void draw_movie_timeline_window(ApplicationState* data) {
     ImGui::End();
 }
 
+static void draw_movie_overlay_section(ApplicationState* data, float movie_len) {
+    auto& m = data->movie;
+
+    auto add = [&](MovieOverlayType type) {
+        MovieOverlay o;
+        o.type = type;
+        o.begin = (double)m.playhead;
+        o.end = (double)MAX(movie_len, m.playhead);
+        switch (type) {
+        case MovieOverlayType::Text:      snprintf(o.text, sizeof(o.text), "Title"); o.anchor = MovieOverlayAnchor::BottomCenter; break;
+        case MovieOverlayType::Timestamp: o.anchor = MovieOverlayAnchor::TopRight; break;
+        case MovieOverlayType::ScaleBar:  o.anchor = MovieOverlayAnchor::BottomLeft; break;
+        default: break;
+        }
+        m.overlays.push_back(o);
+    };
+
+    if (ImGui::Button("Add Text")) add(MovieOverlayType::Text);
+    ImGui::SameLine();
+    if (ImGui::Button("Add Time Stamp")) add(MovieOverlayType::Timestamp);
+    ImGui::SetItemTooltip("The time of the trajectory frame that is shown, in the unit of the timeline");
+    ImGui::SameLine();
+    if (ImGui::Button("Add Scale Bar")) add(MovieOverlayType::ScaleBar);
+    ImGui::SetItemTooltip("A bar of a known length in the structure. It is as long on the frame as that length is at the\ndistance the camera looks at, so it follows the zoom.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Show in viewport", &m.show_overlay_preview);
+    ImGui::SetItemTooltip("Shows them at the preview time. The recorded frames have the proportions of the movie's size,\nso where they sit is only exact when the viewport has them too.");
+
+    int remove_idx = -1;
+    for (int i = 0; i < (int)m.overlays.size(); ++i) {
+        MovieOverlay& o = m.overlays[i];
+        ImGui::PushID(i);
+        char label[192];
+        snprintf(label, sizeof(label), "%d  %s%s%s###overlay", i + 1, movie_overlay_type_str[(int)o.type],
+            o.type == MovieOverlayType::Text ? ": " : "", o.type == MovieOverlayType::Text ? o.text : "");
+        const bool open = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 6.0f);
+        ImGui::Checkbox("##enabled", &o.enabled);
+        ImGui::SetItemTooltip("Shown in the movie");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) remove_idx = i;
+        if (open) {
+            int type = (int)o.type;
+            if (ImGui::Combo("Type", &type, movie_overlay_type_str, (int)MovieOverlayType::Count)) o.type = (MovieOverlayType)type;
+            if (o.type == MovieOverlayType::Text) {
+                ImGui::InputText("Text", o.text, sizeof(o.text));
+            }
+            if (o.type == MovieOverlayType::ScaleBar) {
+                ImGui::DragFloat("Length (\xC3\x85)", &o.length, 0.1f, 0.0f, 10000.0f, o.length > 0.0f ? "%.2f" : "automatic");
+                ImGui::SetItemTooltip("0 chooses a length that suits the frame: 1, 2 or 5 times a power of ten");
+                o.length = MAX(o.length, 0.0f);
+            }
+
+            float range[2] = {(float)o.begin, (float)o.end};
+            if (ImGui::DragFloatRange2("Shown (s)", &range[0], &range[1], 0.05f, 0.0f, movie_len, "from %.2f", "to %.2f")) {
+                o.begin = range[0];
+                o.end = range[1];
+            }
+            if (ImGui::SmallButton("Start at preview time")) o.begin = MIN((double)m.playhead, o.end);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("End at preview time")) o.end = MAX((double)m.playhead, o.begin);
+
+            ImGui::DragFloat("Fade in (s)", &o.fade_in, 0.01f, 0.0f, 10.0f, "%.2f");
+            ImGui::DragFloat("Fade out (s)", &o.fade_out, 0.01f, 0.0f, 10.0f, "%.2f");
+
+            int anchor = (int)o.anchor;
+            if (ImGui::Combo("Position", &anchor, movie_overlay_anchor_str, (int)MovieOverlayAnchor::Count)) o.anchor = (MovieOverlayAnchor)anchor;
+            ImGui::SliderFloat("Size", &o.size, 0.01f, 0.3f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SetItemTooltip("The height of the text, as a part of the height of the frame");
+            ImGui::ColorEdit4("Color", o.color, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs);
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (remove_idx >= 0) m.overlays.erase(m.overlays.begin() + remove_idx);
+}
+
 static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, bool locked) {
     auto& m = data->movie;
     if (md_array_size(m.keyframes) == 0) {
@@ -7427,6 +7631,8 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
     bool resort = false;
     int  remove_idx = -1;
     int  dup_idx = -1;
+    int  move_idx = -1;   // The key that changes place with its neighbour, above (-1) or below (+1)
+    int  move_dir = 0;
 
     const double last_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
     double prev_frame = -1.0;
@@ -7438,7 +7644,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         ImGui::TableSetupColumn("Ease");
         ImGui::TableSetupColumn("Frame");
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.0f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 13.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 18.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
@@ -7519,6 +7725,16 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             }
 
             ImGui::TableNextColumn();
+            ImGui::BeginDisabled(i == 0);
+            if (ImGui::SmallButton("Up")) { move_idx = i; move_dir = -1; }
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Move this keyframe, with its pose, easing and frame, to the time of the one above, and that one to this time");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(i + 1 >= (int)md_array_size(m.keyframes));
+            if (ImGui::SmallButton("Down")) { move_idx = i; move_dir = 1; }
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Move this keyframe, with its pose, easing and frame, to the time of the one below, and that one to this time");
+            ImGui::SameLine();
             if (ImGui::SmallButton("Go To")) movie_goto_keyframe(data, (size_t)i);
             ImGui::SetItemTooltip("Move the view to this keyframe");
             ImGui::SameLine();
@@ -7540,6 +7756,18 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
 
     if (locked) return;
 
+    if (move_idx >= 0) {
+        const int other = move_idx + move_dir;
+        if (0 <= other && other < (int)md_array_size(m.keyframes)) {
+            // The times stay where they are: it is the keys that change places along them
+            CameraKeyframe& a = m.keyframes[move_idx];
+            CameraKeyframe& b = m.keyframes[other];
+            const double ta = a.time, tb = b.time;
+            std::swap(a, b);
+            a.time = ta;
+            b.time = tb;
+        }
+    }
     if (dup_idx >= 0) {
         CameraKeyframe copy = m.keyframes[dup_idx];
         copy.time = MIN(copy.time + 1.0, (double)movie_len);
@@ -7912,6 +8140,12 @@ static void draw_movie_window(ApplicationState* data) {
     if (ImGui::CollapsingHeader("Look Parameters")) {
         ImGui::BeginDisabled(recording);
         draw_movie_param_section(data, movie_len);
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("Overlays")) {
+        ImGui::BeginDisabled(recording);
+        draw_movie_overlay_section(data, movie_len);
         ImGui::EndDisabled();
     }
 
@@ -8295,6 +8529,7 @@ static void render(ApplicationState* state) {
         if (m.can_capture) {
             m.samples_done += 1;
             if (m.samples_done >= m.sample_target) {
+                movie_overlays_render(state, m.cur_time);
                 movie_capture_frame(state);
                 m.frame_index += 1;
                 m.samples_done = 0;

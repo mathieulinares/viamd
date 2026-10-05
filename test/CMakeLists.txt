@@ -16,6 +16,7 @@ set(UNIT_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/frame_sink.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/image.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/movie_keys.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/movie_overlay.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/task_system.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/loader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/gfx/camera_utils.cpp

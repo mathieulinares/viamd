@@ -28,6 +28,7 @@
 #include <task_system.h>
 #include <frame_sink.h>
 #include <movie_keys.h>
+#include <movie_overlay.h>
 #include <loader.h>
 #include <event.h>
 #include <plot_series.h>
@@ -1146,6 +1147,10 @@ struct ApplicationState {
         bool  param_saved_valid[MOVIE_MAX_PARAMS] = {};
 
         MovieHistory history;
+
+        // Text, a time stamp and a scale bar on the frames, and in the viewport while the movie is not recording
+        std::vector<MovieOverlay> overlays;
+        bool show_overlay_preview = true;
 
         // Preview of the movie in the viewport, at the speed it will have
         bool preview_playing = false;
