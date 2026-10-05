@@ -56,4 +56,9 @@ struct CameraKeyframe {
     int      spin_turns = 0;
     SpinAxis spin_axis = SpinAxis::ViewUp;
     bool     spin_constant_speed = false;  // Otherwise it eases in and out
+
+    // The look-at point moves with a target (the movie's follow target) rather than staying put. follow_center
+    // is where the target was when the key was made, so the key's look-at is kept relative to it.
+    bool   follow = false;
+    vec3_t follow_center = {0, 0, 0};
 };

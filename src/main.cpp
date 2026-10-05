@@ -229,6 +229,7 @@ static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
 static void movie_sort_keyframes(ApplicationState* state);
 static void movie_apply_time(ApplicationState* state, double time, bool apply_camera);
+static void movie_follow_update(ApplicationState* state);
 static double movie_duration(const ApplicationState* state);
 static double movie_trajectory_frame(const ApplicationState* state, double time);
 static int movie_num_frames(const ApplicationState* state);
@@ -376,6 +377,7 @@ int main(int argc, char** argv) {
     md_bitfield_init(&state.selection.query.mask, persistent_alloc);
     md_bitfield_init(&state.selection.grow.mask, persistent_alloc);
     md_bitfield_init(&state.operations.selection_mask, persistent_alloc);
+    md_bitfield_init(&state.movie.follow_mask, persistent_alloc);
     md_bitfield_init(&state.operations.recenter_query.mask, persistent_alloc);
     md_bitfield_init(&state.representation.visibility_mask, persistent_alloc);
 
@@ -1183,6 +1185,7 @@ int main(int argc, char** argv) {
         // re-interpolates mold.state from the trajectory before it is ever uploaded.
         viamd::event_system_process_event_queue();
 
+        movie_follow_update(&state);
         update_md_buffers(&state);
         update_timeline_time_unit(&state);
 
@@ -6315,19 +6318,70 @@ static void movie_params_restore(ApplicationState* state) {
     }
 }
 
+// Where the follow target is now, in the space the camera is in. False when there is no target, or it
+// holds atoms that are not in the system.
+static bool movie_follow_center(const ApplicationState* state, vec3_t* out) {
+    const md_bitfield_t* mask = &state->movie.follow_mask;
+    const size_t count = md_bitfield_popcount(mask);
+    const size_t num_atoms = state->mold.sys.atom.count;
+    if (count == 0 || state->mold.state.num_atoms != num_atoms) return false;
+    uint64_t first = 0, last = 0;
+    if (!md_bitfield_get_range(&first, &last, mask) || last >= num_atoms) return false;
+
+    md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
+    defer { md_temp_end(temp); };
+    vec4_t* xyzw = md_temp_alloc_array(temp, vec4_t, count);
+    md_util_system_extract_xyzw_from_mask(xyzw, mask, &state->mold.sys, &state->mold.state);
+
+    vec3_t com = vec3_zero();
+    md_util_deperiodize_self_vec4(xyzw, count, &state->mold.state.unitcell, &com);
+    *out = mat4_mul_vec3(state->mold.unitcell_transform, com, 1.0f);
+    return true;
+}
+
+static bool movie_keys_follow(const CameraKeyframe* keys, size_t num_keys) {
+    for (size_t i = 0; i < num_keys; ++i) {
+        if (keys[i].follow) return true;
+    }
+    return false;
+}
+
+static void movie_camera_apply(ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now) {
+    ViewTransform vt;
+    float fov_y;
+    camera_keyframes_evaluate(&vt, &fov_y, keys, num_keys, time, state->movie.loop, follow_now);
+    state->view.target = vt;
+    state->view.camera = vt;
+    state->view.camera.fov_y = fov_y;
+}
+
 // Both view targets are set so the exponential smoothing in camera_animate does not lag behind.
 // The keys must be sorted by time.
 static void movie_apply_time_with_keys(ApplicationState* state, double time, bool apply_camera, const CameraKeyframe* keys, size_t num_keys) {
+    auto& m = state->movie;
     state->animation.frame = movie_trajectory_frame(state, time);
     movie_params_apply(state, time);
-    if (apply_camera && state->movie.animate_camera && num_keys > 0) {
-        ViewTransform vt;
-        float fov_y;
-        camera_keyframes_evaluate(&vt, &fov_y, keys, num_keys, time, state->movie.loop);
-        state->view.target = vt;
-        state->view.camera = vt;
-        state->view.camera.fov_y = fov_y;
+    m.follow_pending = false;
+    if (apply_camera && m.animate_camera && num_keys > 0) {
+        if (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask)) {
+            // The target is not where it will be until the trajectory frame has been loaded, so the camera waits for that
+            m.follow_keys.assign(keys, keys + num_keys);
+            m.follow_time = time;
+            m.follow_pending = true;
+        } else {
+            movie_camera_apply(state, time, keys, num_keys, nullptr);
+        }
     }
+}
+
+// Runs once the frame of the movie's time is in the system state: puts the camera where the keys say, around the target
+static void movie_follow_update(ApplicationState* state) {
+    auto& m = state->movie;
+    if (!m.follow_pending) return;
+    m.follow_pending = false;
+    vec3_t center;
+    const bool have = movie_follow_center(state, &center);
+    movie_camera_apply(state, m.follow_time, m.follow_keys.data(), m.follow_keys.size(), have ? &center : nullptr);
 }
 
 // Shows the movie at a time on its timeline: the trajectory frame and, if enabled, the camera.
@@ -6337,6 +6391,7 @@ static void movie_apply_time(ApplicationState* state, double time, bool apply_ca
 
 static void movie_restore_state(ApplicationState* state) {
     state->animation.mode = state->movie.prev_playback_mode;
+    state->movie.follow_pending = false;
     movie_params_restore(state);
     if (state->movie.camera_was_animated) {
         state->view.target = state->movie.prev_view_target;
@@ -6709,6 +6764,9 @@ static void movie_add_keyframe(ApplicationState* state) {
     if (m.key_includes_frame) {
         key.use_frame = true;
         key.frame = state->animation.frame;
+    }
+    if (m.key_follow && movie_follow_center(state, &key.follow_center)) {
+        key.follow = true;
     }
 
     for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
@@ -7809,6 +7867,28 @@ static void draw_movie_window(ApplicationState* data) {
         ImGui::SameLine();
         ImGui::Checkbox("with trajectory frame", &m.key_includes_frame);
         ImGui::SetItemTooltip("Also key the trajectory frame shown now. Keys with a frame decide how the trajectory plays,\nso the speed can change between them.");
+
+        {
+            const size_t follow_count = md_bitfield_popcount(&m.follow_mask);
+            if (ImGui::Button("Set Follow Target")) {
+                md_bitfield_copy(&m.follow_mask, &data->selection.selection_mask);
+                m.key_follow = md_bitfield_popcount(&m.follow_mask) > 0;
+            }
+            ImGui::SetItemTooltip("Uses the atoms selected now as what the camera can follow: it then looks at their middle.");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(follow_count == 0);
+            if (ImGui::Button("Clear##follow")) {
+                md_bitfield_clear(&m.follow_mask);
+                m.key_follow = false;
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("keys follow target", &m.key_follow);
+            ImGui::SetItemTooltip("New keyframes look at a point that moves with the target, kept where it is relative to the target.\nBetween a following key and a fixed one the camera blends from one to the other.");
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (follow_count > 0) ImGui::TextDisabled("%zu atoms", follow_count);
+            else                  ImGui::TextDisabled("no target");
+        }
 
         const float fs = ImGui::GetFontSize();
         ImGui::SetNextItemWidth(fs * 5.5f);

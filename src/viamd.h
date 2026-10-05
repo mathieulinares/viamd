@@ -1130,6 +1130,13 @@ struct ApplicationState {
         bool animate_camera = false;
         bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
 
+        // The camera can look at the middle of these atoms rather than a fixed point (keys with 'follow')
+        md_bitfield_t follow_mask = {};
+        bool   key_follow     = false;        // What 'Add Keyframe' makes
+        bool   follow_pending = false;        // The camera waits for the system state of follow_time
+        double follow_time    = 0.0;
+        std::vector<CameraKeyframe> follow_keys;
+
         // Look parameters (background, depth of field, clipping ...) keyed over time
         std::vector<ParamKey> param_keys;
         bool animate_params = true;

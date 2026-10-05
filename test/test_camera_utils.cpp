@@ -220,6 +220,62 @@ UTEST(viamd_camera, keyframes_hit_their_poses_and_hold_outside) {
     EXPECT_NEAR(k[0].transform.distance, v.distance, 1.0e-4f);
 }
 
+UTEST(viamd_camera, a_following_key_keeps_its_look_at_relative_to_the_target) {
+    CameraKeyframe k[3];
+    kf_make3(k);
+    const vec3_t c0 = vec3_set(1, 2, 3);
+    const vec3_t c1 = vec3_set(-4, 0, 5);
+    k[0].follow = true; k[0].follow_center = c0;
+    k[1].follow = true; k[1].follow_center = c1;
+    k[2].follow = true; k[2].follow_center = vec3_set(0, 0, 0);
+
+    /* With the target where a key saw it, the key is hit exactly. */
+    for (int i = 0; i < 3; ++i) {
+        const vec3_t now = k[i].follow_center;
+        ViewTransform v; float fov;
+        camera_keyframes_evaluate(&v, &fov, k, 3, k[i].time, false, &now);
+        EXPECT_NEAR(k[i].transform.position.x, v.position.x, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.y, v.position.y, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.z, v.position.z, 1.0e-3f);
+    }
+
+    /* A target that has moved takes the look-at point with it, by the same amount at every key. */
+    const vec3_t shift = vec3_set(7, -3, 2);
+    for (int i = 0; i < 3; ++i) {
+        const vec3_t now = k[i].follow_center + shift;
+        ViewTransform v; float fov;
+        camera_keyframes_evaluate(&v, &fov, k, 3, k[i].time, false, &now);
+        EXPECT_NEAR(k[i].transform.position.x + shift.x, v.position.x, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.y + shift.y, v.position.y, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.z + shift.z, v.position.z, 1.0e-3f);
+    }
+
+    /* Without a target the keys are fixed points as before. */
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 3, k[1].time, false, nullptr);
+    EXPECT_NEAR(k[1].transform.position.x, v.position.x, 1.0e-3f);
+}
+
+UTEST(viamd_camera, a_fixed_key_ignores_the_target) {
+    CameraKeyframe k[2];
+    kf_set(k[0], 0.0, vec3_set(0.3f, 1.0f, 0.1f), 0.2f, vec3_set(0, 0, 0),  10.0f, 0.8f);
+    kf_set(k[1], 2.0, vec3_set(0.3f, 1.0f, 0.1f), 0.2f, vec3_set(10, 0, 0), 10.0f, 0.8f);
+    k[1].follow = true;
+    k[1].follow_center = vec3_set(1, 1, 1);
+
+    const vec3_t now = vec3_set(5, 5, 5);
+    ViewTransform v; float fov;
+    camera_keyframes_evaluate(&v, &fov, k, 2, 0.0, false, &now);
+    EXPECT_NEAR(k[0].transform.position.x, v.position.x, 1.0e-3f);
+    EXPECT_NEAR(k[0].transform.position.y, v.position.y, 1.0e-3f);
+
+    /* The follow weight grows from 0 to 1 over the segment, so halfway the target counts for half. */
+    camera_keyframes_evaluate(&v, &fov, k, 2, 1.0, false, &now);
+    const vec3_t plain = camera_get_look_at(k[0].transform) * 0.5f + camera_get_look_at(k[1].transform) * 0.5f;
+    const vec3_t look = camera_get_look_at(v);
+    EXPECT_NEAR(plain.x + 0.5f * (now.x - 0.0f) - 0.5f * (k[1].follow_center.x - 0.0f), look.x, 5.0e-2f);
+}
+
 UTEST(viamd_camera, keyframes_pass_through_a_key_without_stopping) {
     CameraKeyframe k[3];
     kf_make3(k);

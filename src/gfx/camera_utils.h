@@ -101,7 +101,10 @@ void camera_interpolate_look_at(vec3_t* out_pos, quat_t* out_ori, float* out_dis
 // A keyframe with spin_turns adds whole turns around the look-at point over the segment that ends at it.
 // The easing of a key shapes the segment that ends at it. With loop, the path is cyclic: the last key must
 // be in the same pose as the first, and the velocity is then continuous across the seam.
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false);
+// follow_now is where the follow target is now. The look-at point of a key with follow is then kept relative to
+// the target, blended with the plain look-at across segments between keys that do and do not follow. Without it,
+// follow is ignored.
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false, const vec3_t* follow_now = nullptr);
 
 // A value that is keyed over time, with the easing of the key that ends each segment (eases[i] shapes the
 // stretch from i - 1 to i; eases[0] is not used). Times must be strictly increasing. Holds the first and

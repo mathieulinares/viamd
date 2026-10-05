@@ -1155,6 +1155,9 @@ struct WorkspacePending {
     bool has_recenter_target;
     md_bitfield_t recenter_target;
 
+    bool has_follow_target;
+    md_bitfield_t follow_target;
+
     // Timeline filter and zoom, in frames: a time would depend on the unit it is shown in
     bool   has_filter_range;
     double filter_beg_frame;
@@ -1250,6 +1253,9 @@ static void workspace_reset(ApplicationState* data) {
         m.loop = false;
         m.animate_params = true;
         m.param_keys.clear();
+        md_bitfield_clear(&m.follow_mask);
+        m.key_follow = false;
+        m.follow_pending = false;
         for (int i = 0; i < MOVIE_MAX_PARAMS; ++i) m.param_saved_valid[i] = false;
     }
 
@@ -1557,6 +1563,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
     WorkspacePending pending = {};
     md_bitfield_init(&pending.selection_mask, temp_alloc);
     md_bitfield_init(&pending.recenter_target, temp_alloc);
+    md_bitfield_init(&pending.follow_target, temp_alloc);
 
     str_t folder = {};
     extract_folder_path(&folder, filename);
@@ -1669,11 +1676,12 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     // was more to a key: then use_frame, frame, spin_turns, spin_axis, spin_constant_speed and, in the
                     // latest, the ease. KeyframeV2 with one less is what was written before that.
                     const bool v2 = str_eq(ident, STR_LIT("KeyframeV2"));
-                    float v[16] = {};
-                    bool has_ease = false;
+                    float v[20] = {};
+                    bool has_ease = false, has_follow = false;
                     bool ok = false;
                     if (v2) {
-                        has_ease = viamd::extract_flt_vec(v, 16, arg);
+                        has_follow = viamd::extract_flt_vec(v, 20, arg);
+                        has_ease = has_follow || viamd::extract_flt_vec(v, 16, arg);
                         ok = has_ease || viamd::extract_flt_vec(v, 15, arg);
                     } else {
                         ok = viamd::extract_flt_vec(v, 10, arg);
@@ -1695,10 +1703,15 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         if (has_ease) {
                             key.ease = (KeyEase)CLAMP((int)lroundf(v[15]), 0, (int)KeyEase::Count - 1);
                         }
+                        if (has_follow) {
+                            key.follow = v[16] != 0.0f;
+                            key.follow_center = vec3_set(v[17], v[18], v[19]);
+                        }
                         md_array_push(m.keyframes, key, data->allocator.persistent);
                     }
                 }
                 else if (str_eq(ident, STR_LIT("Loop")))          viamd::extract_bool(m.loop, arg);
+                else if (str_eq(ident, STR_LIT("FollowTarget")))  pending.has_follow_target = deserialize_mask(&pending.follow_target, arg);
                 else if (str_eq(ident, STR_LIT("AnimateParams"))) viamd::extract_bool(m.animate_params, arg);
                 else if (str_eq(ident, STR_LIT("ParamKey"))) {
                     // parameter, time, value (3), ease
@@ -1869,6 +1882,9 @@ void load_workspace(ApplicationState* data, str_t filename) {
     };
     if (pending.has_selection_mask && mask_fits(&pending.selection_mask)) {
         md_bitfield_copy(&data->selection.selection_mask, &pending.selection_mask);
+    }
+    if (pending.has_follow_target && mask_fits(&pending.follow_target)) {
+        md_bitfield_copy(&data->movie.follow_mask, &pending.follow_target);
     }
     if (pending.has_recenter_target && mask_fits(&pending.recenter_target)) {
         md_bitfield_copy(&data->operations.selection_mask, &pending.recenter_target);
@@ -2053,14 +2069,18 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
             const CameraKeyframe& k = m.keyframes[i];
-            const float v[16] = {
+            const float v[20] = {
                 (float)k.time, k.fov_y, k.transform.distance,
                 k.transform.position.x, k.transform.position.y, k.transform.position.z,
                 k.transform.orientation.x, k.transform.orientation.y, k.transform.orientation.z, k.transform.orientation.w,
                 k.use_frame ? 1.0f : 0.0f, (float)k.frame, (float)k.spin_turns, (float)(int)k.spin_axis, k.spin_constant_speed ? 1.0f : 0.0f,
                 (float)(int)k.ease,
+                k.follow ? 1.0f : 0.0f, k.follow_center.x, k.follow_center.y, k.follow_center.z,
             };
-            viamd::write_flt_vec(state, STR_LIT("KeyframeV2"), v, 16);
+            viamd::write_flt_vec(state, STR_LIT("KeyframeV2"), v, 20);
+        }
+        if (!md_bitfield_empty(&m.follow_mask)) {
+            viamd::write_bitfield(state, STR_LIT("FollowTarget"), &m.follow_mask);
         }
         for (const ParamKey& k : m.param_keys) {
             const float v[6] = { (float)k.param, (float)k.time, k.value[0], k.value[1], k.value[2], (float)(int)k.ease };
