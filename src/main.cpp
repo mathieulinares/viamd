@@ -7631,8 +7631,8 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
     bool resort = false;
     int  remove_idx = -1;
     int  dup_idx = -1;
-    int  move_idx = -1;   // The key that changes place with its neighbour, above (-1) or below (+1)
-    int  move_dir = 0;
+    int  move_from = -1;  // Dragged to the place of move_to
+    int  move_to = -1;
 
     const double last_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
     double prev_frame = -1.0;
@@ -7644,7 +7644,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         ImGui::TableSetupColumn("Ease");
         ImGui::TableSetupColumn("Frame");
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.0f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 18.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 13.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
@@ -7653,7 +7653,22 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             ImGui::TableNextRow();
 
             ImGui::TableNextColumn();
-            ImGui::Text("%d", i + 1);
+            char num[16];
+            snprintf(num, sizeof(num), "%d", i + 1);
+            ImGui::Selectable(num, false, ImGuiSelectableFlags_None);
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+                ImGui::SetDragDropPayload("MOVIE_KEYFRAME", &i, sizeof(int));
+                ImGui::Text("Keyframe %d", i + 1);
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MOVIE_KEYFRAME")) {
+                    move_from = *(const int*)payload->Data;
+                    move_to = i;
+                }
+                ImGui::EndDragDropTarget();
+            }
+            ImGui::SetItemTooltip("Drag to another row to move this keyframe, with its pose, easing and frame, to that place.\nThe times stay where they are in the list.");
 
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
@@ -7725,16 +7740,6 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             }
 
             ImGui::TableNextColumn();
-            ImGui::BeginDisabled(i == 0);
-            if (ImGui::SmallButton("Up")) { move_idx = i; move_dir = -1; }
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Move this keyframe, with its pose, easing and frame, to the time of the one above, and that one to this time");
-            ImGui::SameLine();
-            ImGui::BeginDisabled(i + 1 >= (int)md_array_size(m.keyframes));
-            if (ImGui::SmallButton("Down")) { move_idx = i; move_dir = 1; }
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Move this keyframe, with its pose, easing and frame, to the time of the one below, and that one to this time");
-            ImGui::SameLine();
             if (ImGui::SmallButton("Go To")) movie_goto_keyframe(data, (size_t)i);
             ImGui::SetItemTooltip("Move the view to this keyframe");
             ImGui::SameLine();
@@ -7756,16 +7761,17 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
 
     if (locked) return;
 
-    if (move_idx >= 0) {
-        const int other = move_idx + move_dir;
-        if (0 <= other && other < (int)md_array_size(m.keyframes)) {
-            // The times stay where they are: it is the keys that change places along them
-            CameraKeyframe& a = m.keyframes[move_idx];
-            CameraKeyframe& b = m.keyframes[other];
-            const double ta = a.time, tb = b.time;
-            std::swap(a, b);
-            a.time = ta;
-            b.time = tb;
+    if (move_from >= 0 && move_from != move_to) {
+        const int n = (int)md_array_size(m.keyframes);
+        if (move_from < n && 0 <= move_to && move_to < n) {
+            // The times stay with their places in the list: it is the keys that are moved along them
+            std::vector<double> times(n);
+            for (int k = 0; k < n; ++k) times[k] = m.keyframes[k].time;
+            const CameraKeyframe moved = m.keyframes[move_from];
+            if (move_from < move_to) memmove(m.keyframes + move_from, m.keyframes + move_from + 1, (size_t)(move_to - move_from) * sizeof(CameraKeyframe));
+            else                     memmove(m.keyframes + move_to + 1, m.keyframes + move_to, (size_t)(move_from - move_to) * sizeof(CameraKeyframe));
+            m.keyframes[move_to] = moved;
+            for (int k = 0; k < n; ++k) m.keyframes[k].time = times[k];
         }
     }
     if (dup_idx >= 0) {
