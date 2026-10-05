@@ -1763,8 +1763,8 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::BeginDisabled(str_empty(data->movie.output_dir));
             if (ImGui::Button("Copy ffmpeg command")) {
                 char cmd[2048];
-                // Quoted for a shell; the folder is only copied, never executed from here
-                snprintf(cmd, sizeof(cmd), "ffmpeg -framerate %g -i \"" STR_FMT "/%s_%%05d.png\" -c:v libx264 -pix_fmt yuv420p \"" STR_FMT "/%s.mp4\"",
+                // Quoted for a shell; the folder is only copied, never executed from here. libx264 with yuv420p needs even dimensions, hence the scale.
+                snprintf(cmd, sizeof(cmd), "ffmpeg -framerate %g -i \"" STR_FMT "/%s_%%05d.png\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -c:v libx264 -pix_fmt yuv420p \"" STR_FMT "/%s.mp4\"",
                     data->movie.fps, STR_ARG(data->movie.output_dir), data->movie.filename_prefix,
                     STR_ARG(data->movie.output_dir), data->movie.filename_prefix);
                 ImGui::SetClipboardText(cmd);
