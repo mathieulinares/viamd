@@ -27,6 +27,7 @@ struct MovieOverlay {
     MovieOverlayAnchor anchor = MovieOverlayAnchor::BottomLeft;
     float              size = 0.05f;          // The height of the text, as a part of the height of the frame
     float              color[4] = {1, 1, 1, 1};
+    float              background[4] = {0, 0, 0, 0};  // A plate behind it, none while its alpha is 0
     char               text[128] = "";
     float              length = 0.0f;         // Scale bar: its length in Angstrom, 0 chooses one
 };

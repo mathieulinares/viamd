@@ -321,6 +321,10 @@ void set_error(char* err, size_t cap, const std::string& msg) {
 
 }  // namespace
 
+const char* file_extension(Codec codec) {
+    return codec == Codec::Vp9 ? "webm" : "mp4";
+}
+
 void ffmpeg_arguments(const Desc& desc, std::vector<std::string>& out) {
     out.clear();
     const std::string exe = desc.ffmpeg.len ? to_std(desc.ffmpeg) : std::string("ffmpeg");
@@ -332,17 +336,28 @@ void ffmpeg_arguments(const Desc& desc, std::vector<std::string>& out) {
     snprintf(rate, sizeof(rate), "%g", (double)desc.fps);
     snprintf(crf, sizeof(crf), "%d", desc.crf);
 
-    // The picture is flipped because OpenGL reads from the bottom row. libx264 with yuv420p needs even
-    // dimensions, hence the scale, which also does the colour conversion so that it can be tagged bt709.
+    // The picture is flipped because OpenGL reads from the bottom row. yuv420p needs even dimensions, hence the
+    // scale, which also does the colour conversion so that it can be tagged bt709.
     out = {
         exe, "-y", "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", size, "-framerate", rate, "-i", "-",
         "-vf", "vflip,scale=trunc(iw/2)*2:trunc(ih/2)*2:out_color_matrix=bt709:out_range=tv,format=yuv420p",
-        "-c:v", "libx264", "-crf", crf, "-pix_fmt", "yuv420p",
-        "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-        "-movflags", "+faststart",
-        dir + "/" + prefix + ".mp4",
     };
+    switch (desc.codec) {
+    case Codec::H264:
+        out.insert(out.end(), {"-c:v", "libx264", "-crf", crf});
+        break;
+    case Codec::H265:
+        out.insert(out.end(), {"-c:v", "libx265", "-crf", crf, "-tag:v", "hvc1", "-x265-params", "log-level=error"});
+        break;
+    case Codec::Vp9:
+        // -b:v 0 makes the crf the only quality control
+        out.insert(out.end(), {"-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0", "-row-mt", "1"});
+        break;
+    }
+    out.insert(out.end(), {"-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"});
+    if (desc.codec != Codec::Vp9) out.insert(out.end(), {"-movflags", "+faststart"});
+    out.push_back(dir + "/" + prefix + "." + file_extension(desc.codec));
 }
 
 Sink* create(const Desc& desc, char* err, size_t err_cap) {

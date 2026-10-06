@@ -216,6 +216,8 @@ static void movie_recording_start(ApplicationState* state);
 static void movie_recording_stop(ApplicationState* state);
 static void movie_shutdown(ApplicationState* state);
 static void movie_add_keyframe(ApplicationState* state);
+static void movie_copy_keyframe_at_playhead(ApplicationState* state);
+static void movie_paste_keyframe(ApplicationState* state);
 static void update_movie_recording(ApplicationState* state);
 static void update_movie_preview(ApplicationState* state);
 static void update_movie_history(ApplicationState* state);
@@ -719,6 +721,10 @@ int main(int argc, char** argv) {
                     movie_undo(&state);
                 } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) || ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)) {
                     movie_redo(&state);
+                } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C)) {
+                    movie_copy_keyframe_at_playhead(&state);
+                } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V)) {
+                    movie_paste_keyframe(&state);
                 }
             }
 
@@ -6854,6 +6860,12 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
         const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - block.x) * fx,
                                  pos.y + margin + (size.y - 2.0f * margin - block.y) * fy);
 
+        if (o.background[3] > 0.0f) {
+            const float pad = font_px * 0.3f;
+            const ImU32 plate = ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * alpha));
+            dl->AddRectFilled(ImVec2(p0.x - pad, p0.y - pad * 0.6f), ImVec2(p0.x + block.x + pad, p0.y + block.y + pad * 0.6f), plate, font_px * 0.25f);
+        }
+
         if (o.type == MovieOverlayType::ScaleBar) {
             const float tx = p0.x + 0.5f * (block.x - text_size.x);
             dl->AddText(font, font_px, ImVec2(tx + soff, p0.y + soff), shadow, buf);
@@ -6992,7 +7004,8 @@ static void movie_recording_start(ApplicationState* state) {
     }
 
     frame_sink::Desc desc;
-    desc.kind   = m.output == MovieOutput::Mp4 ? frame_sink::Kind::Ffmpeg : frame_sink::Kind::PngSequence;
+    desc.kind   = movie_output_is_video(m.output) ? frame_sink::Kind::Ffmpeg : frame_sink::Kind::PngSequence;
+    desc.codec  = m.output == MovieOutput::Mp4H265 ? frame_sink::Codec::H265 : m.output == MovieOutput::WebmVp9 ? frame_sink::Codec::Vp9 : frame_sink::Codec::H264;
     desc.dir    = m.output_dir;
     desc.prefix = str_from_cstr(m.filename_prefix);
     desc.width  = w;
@@ -7005,14 +7018,14 @@ static void movie_recording_start(ApplicationState* state) {
     m.sink = frame_sink::create(desc, err, sizeof(err));
     if (!m.sink) {
         VIAMD_LOG_ERROR("Cannot start movie recording: %s%s", err,
-            m.output == MovieOutput::Mp4 ? ". The PNG sequence output does not need ffmpeg" : "");
+            movie_output_is_video(m.output) ? ". The PNG sequence output does not need ffmpeg" : "");
         return;
     }
 
     movie_pbo_alloc(state, (size_t)w * (size_t)h * 4);
 
-    if (m.output == MovieOutput::Mp4) {
-        snprintf(m.rec_result, sizeof(m.rec_result), STR_FMT "/%s.mp4", STR_ARG(m.output_dir), m.filename_prefix);
+    if (movie_output_is_video(m.output)) {
+        snprintf(m.rec_result, sizeof(m.rec_result), STR_FMT "/%s.%s", STR_ARG(m.output_dir), m.filename_prefix, frame_sink::file_extension(desc.codec));
     } else {
         snprintf(m.rec_result, sizeof(m.rec_result), STR_FMT, STR_ARG(m.output_dir));
     }
@@ -7119,7 +7132,7 @@ static void update_movie_recording(ApplicationState* state) {
             const frame_sink::Status st = frame_sink::status(m.sink);
             if (st.done) {
                 if (st.ok) {
-                    if (m.rec_output == MovieOutput::Mp4) {
+                    if (movie_output_is_video(m.rec_output)) {
                         VIAMD_LOG_SUCCESS("Movie saved to '%s' (%d frames)", m.rec_result, st.written);
                     } else {
                         VIAMD_LOG_SUCCESS("%d PNG frame(s) written to '%s'", st.written, m.rec_result);
@@ -7220,6 +7233,19 @@ static CameraKeyframe movie_current_key(ApplicationState* state) {
 
 static void movie_add_keyframe(ApplicationState* state) {
     movie_insert_key(state, movie_current_key(state), true);
+}
+
+// Remembers the key at the playhead (the nearest one within half a frame), to paste somewhere else
+static void movie_copy_keyframe_at_playhead(ApplicationState* state) {
+    auto& m = state->movie;
+    const double half_frame = 0.5 / MAX((double)m.fps, 1.0);
+    for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+        if (fabs(m.keyframes[i].time - (double)m.playhead) <= half_frame) {
+            m.key_clipboard = m.keyframes[i];
+            m.has_key_clipboard = true;
+            return;
+        }
+    }
 }
 
 // The key that was copied from the table, at the playhead
@@ -8197,6 +8223,8 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
             ImGui::SliderFloat("Size", &o.size, 0.01f, 0.3f, "%.3f", ImGuiSliderFlags_Logarithmic);
             ImGui::SetItemTooltip("The height of the text, as a part of the height of the frame");
             ImGui::ColorEdit4("Color", o.color, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs);
+            ImGui::ColorEdit4("Background", o.background, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs);
+            ImGui::SetItemTooltip("A plate behind it, to read it over a busy picture. None while its opacity is 0.");
             ImGui::TreePop();
         }
         ImGui::PopID();
@@ -8764,9 +8792,11 @@ static void draw_movie_window(ApplicationState* data) {
             }
             ImGui::EndCombo();
         }
-        if (m.output == MovieOutput::Mp4) {
-            ImGui::SliderInt("Quality (CRF)", &m.crf, 0, 51);
-            ImGui::SetItemTooltip("x264 constant rate factor. Lower is better and larger: 18 is close to lossless, 23 is the x264 default.");
+        if (movie_output_is_video(m.output)) {
+            const int max_crf = m.output == MovieOutput::WebmVp9 ? 63 : 51;
+            m.crf = CLAMP(m.crf, 0, max_crf);
+            ImGui::SliderInt("Quality (CRF)", &m.crf, 0, max_crf);
+            ImGui::SetItemTooltip("Constant rate factor. Lower is better and larger.\nH.264: 18 is close to lossless, 23 is the default. H.265 looks about the same at a CRF 4 to 6 higher, in a\nsmaller file (default 28). VP9: 15 to 35 is the usual range (default 32)."); 
             ImGui::InputText("ffmpeg", m.ffmpeg_path, sizeof(m.ffmpeg_path));
             ImGui::SetItemTooltip("The ffmpeg executable. Found on the PATH if it is only a name.\nFrames are piped straight into it, no image files are written.");
         } else {
@@ -8942,7 +8972,7 @@ static void draw_movie_window(ApplicationState* data) {
             movie_paste_keyframe(data);
         }
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Puts the keyframe that was copied in the table at the preview time (replacing one that is there).");
+        ImGui::SetItemTooltip("Puts the keyframe that was copied in the table at the preview time (replacing one that is there).\nCtrl+C copies the keyframe at the preview time, Ctrl+V pastes.");
 
         {
             const size_t follow_count = md_bitfield_popcount(&m.follow_mask);

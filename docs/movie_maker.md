@@ -33,8 +33,8 @@ The top line has **Start Recording**, with a summary of what will be written: fr
 |---|---|
 | **Select Output Folder...** | Where the movie is written. Recording is disabled until one is chosen. |
 | **Filename Prefix** | The file name: `prefix.mp4`, or `prefix_00000.png`, `prefix_00001.png`, ... |
-| **Format** | **MP4 video (ffmpeg)** pipes the frames straight into ffmpeg, so no image files are written. **PNG sequence** writes one image per frame. |
-| **Quality (CRF)** | MP4 only. x264 constant rate factor: lower is better and larger. 18 is close to lossless, 23 is the x264 default. |
+| **Format** | **MP4 video, H.264 (ffmpeg)**, **MP4 video, H.265 (ffmpeg)** and **WebM video, VP9 (ffmpeg)** pipe the frames straight into ffmpeg, so no image files are written (ffmpeg needs libx264, libx265 or libvpx-vp9 for the one you pick). H.265 files are usually noticeably smaller than H.264 at a similar look and are tagged so that QuickTime plays them. **PNG sequence** writes one image per frame. |
+| **Quality (CRF)** | Video formats only. Constant rate factor: lower is better and larger. H.264: 18 is close to lossless, 23 is the default. H.265: a value 4 to 6 higher looks the same (default 28). VP9: 15 to 35 is the usual range (default 32, up to 63). |
 | **ffmpeg** | MP4 only. The ffmpeg executable. A bare name is looked up on the PATH. |
 | **Copy ffmpeg command** | PNG only. Copies a command that encodes the PNG sequence into an MP4. |
 | **Resolution** | **Window** (the window size when recording starts), Full HD, Quad HD, 4K, 8K or **Custom** (**Res X**, **Res Y**). |
@@ -87,7 +87,7 @@ The columns can be resized by dragging their borders. When they are wider than t
 | **Look at** | Click it, then click an atom in the viewport. The key now looks at that atom and **tracks it through the trajectory**. While picking, the button reads **Click atom**; press Esc to cancel. |
 | **Update position** | Moves the key's eye to where the viewport camera is now, still looking at the same point. The field of view and, if pinned, the frame are taken too. |
 | **Dup** | Copies the key to one second later. |
-| **Copy** | Remembers the key. **Paste Keyframe** (above the table) puts it in at the preview time, replacing a key that is there. |
+| **Copy** | Remembers the key. **Paste Keyframe** (above the table) puts it in at the preview time, replacing a key that is there. **Ctrl+C** copies the key at the preview time and **Ctrl+V** pastes, while a movie window is open. |
 | **Remove** | Removes the key. |
 
 So, to edit a keyframe: **Go To** it, move around, press **Update position** to set where the eye is, and use **Look at** to choose what it looks at. Below the table, a line shows the eye, the look-at point and the distance at the preview time, plus the focus distance when depth of field is on.
@@ -135,7 +135,7 @@ Under **Visuals > Depth of Field**, **Focus** chooses what is sharp:
 - an on/off box and **Remove**;
 - **Shown (s)**, the times it is shown from and to, with **Start at preview time** and **End at preview time**;
 - **Fade in (s)** and **Fade out (s)**;
-- a **Position** (nine anchors), **Size** (relative to the frame height, so it looks the same at any resolution) and **Color**.
+- a **Position** (nine anchors), **Size** (relative to the frame height, so it looks the same at any resolution), **Color** and a **Background** plate to read it over a busy picture (none while its opacity is 0).
 
 A scale bar picks a round length unless you set one. **Show in viewport** previews the overlays at the preview time. Their placement is exact only when the viewport has the same proportions as the movie.
 

@@ -358,11 +358,16 @@ enum class MovieRecordingState {
     Recording,
 };
 
+// The numbers are saved in workspaces: never renumber, add at the end
 enum class MovieOutput {
-    Mp4,          // Piped into ffmpeg
+    Mp4,          // H.264, piped into ffmpeg
     PngSequence,
+    Mp4H265,      // H.265, piped into ffmpeg
+    WebmVp9,      // VP9 in a webm, piped into ffmpeg
     Count,
 };
+
+inline bool movie_output_is_video(MovieOutput o) { return o != MovieOutput::PngSequence; }
 
 // Finished movie frames waiting to be read back from the GPU
 constexpr int MOVIE_RING_SIZE = 3;
@@ -371,8 +376,10 @@ constexpr int MOVIE_RING_SIZE = 3;
 constexpr int MOVIE_MAX_PARAMS = 16;
 
 inline const char* movie_output_str[(int)MovieOutput::Count] = {
-    "MP4 video (ffmpeg)",
+    "MP4 video, H.264 (ffmpeg)",
     "PNG sequence",
+    "MP4 video, H.265 (ffmpeg)",
+    "WebM video, VP9 (ffmpeg)",
 };
 
 // What depth of field keeps sharp

@@ -318,3 +318,45 @@ UTEST(viamd_frame_sink, no_buffer_is_handed_out_twice) {
 }
 
 #endif  // !_WIN32
+
+UTEST(viamd_frame_sink, the_codec_sets_the_encoder_and_the_file) {
+    frame_sink::Desc desc;
+    desc.kind = frame_sink::Kind::Ffmpeg;
+    desc.dir = STR_LIT("/out");
+    desc.prefix = STR_LIT("clip");
+    desc.width = 640;
+    desc.height = 480;
+    desc.crf = 24;
+
+    auto value_after = [](const std::vector<std::string>& a, const char* flag) -> std::string {
+        for (size_t i = 0; i + 1 < a.size(); ++i) if (a[i] == flag) return a[i + 1];
+        return "<missing>";
+    };
+    auto has = [](const std::vector<std::string>& a, const char* flag) {
+        for (const std::string& s : a) if (s == flag) return true;
+        return false;
+    };
+
+    std::vector<std::string> a;
+    desc.codec = frame_sink::Codec::H264;
+    frame_sink::ffmpeg_arguments(desc, a);
+    EXPECT_STREQ("libx264", value_after(a, "-c:v").c_str());
+    EXPECT_STREQ("/out/clip.mp4", a.back().c_str());
+    EXPECT_TRUE(has(a, "-movflags"));
+
+    desc.codec = frame_sink::Codec::H265;
+    frame_sink::ffmpeg_arguments(desc, a);
+    EXPECT_STREQ("libx265", value_after(a, "-c:v").c_str());
+    EXPECT_STREQ("hvc1", value_after(a, "-tag:v").c_str());   /* so that QuickTime plays it */
+    EXPECT_STREQ("24", value_after(a, "-crf").c_str());
+    EXPECT_STREQ("/out/clip.mp4", a.back().c_str());
+
+    desc.codec = frame_sink::Codec::Vp9;
+    frame_sink::ffmpeg_arguments(desc, a);
+    EXPECT_STREQ("libvpx-vp9", value_after(a, "-c:v").c_str());
+    EXPECT_STREQ("0", value_after(a, "-b:v").c_str());        /* the crf is the only quality control */
+    EXPECT_FALSE(has(a, "-movflags"));                         /* an mp4 option */
+    EXPECT_STREQ("/out/clip.webm", a.back().c_str());
+    EXPECT_STREQ("webm", frame_sink::file_extension(frame_sink::Codec::Vp9));
+    EXPECT_STREQ("mp4", frame_sink::file_extension(frame_sink::Codec::H265));
+}

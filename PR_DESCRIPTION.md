@@ -15,7 +15,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 ### Features
 
 **Recording**
-- Output as an MP4 (ffmpeg pipe, CRF setting) or a PNG sequence, with a button that copies the ffmpeg command to encode it.
+- Output as an MP4 (H.264 or H.265) or a WebM (VP9) through an ffmpeg pipe with a CRF setting, or a PNG sequence, with a button that copies the ffmpeg command to encode it.
 - Resolution can be the window size, presets up to 8K, or a custom size. Output FPS is configurable.
 - Frames are written off the render thread by a new `frame_sink`. It has a fixed pool of buffers, so memory use stays bounded.
 - When a recording finishes or is stopped, the user's view, playback state and screenshot settings are put back.
@@ -51,7 +51,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 
 **Overlays**
 - Text, time stamp and scale bar.
-- Each has a time range, fades, nine anchor positions, a size relative to the frame height, and a colour.
+- Each has a time range, fades, nine anchor positions, a size relative to the frame height, a colour and an optional background plate.
 
 **Undo/redo** (Ctrl+Z, Ctrl+Y)
 - Covers keys, overlays, length and timing.
@@ -80,7 +80,7 @@ New tests are in:
 - `test_movie_overlay`.
 - `test_serialization`.
 
-All 112 tests pass in a Release build on Linux.
+All 114 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and MP4s on Linux.

@@ -479,3 +479,12 @@ UTEST(viamd_movie_keys, no_visible_keys_means_no_factor) {
     EXPECT_FALSE(rep_visible_factor(&f, keys, 2, 2, 1.0, 2.0));
     EXPECT_FALSE(rep_visible_factor(&f, keys, 1, 1, 1.0, 2.0));
 }
+
+UTEST(viamd_movie_keys, an_overlay_background_is_part_of_the_undo_state) {
+    MovieKeys a, b;
+    a.overlays.push_back(MovieOverlay{});
+    b.overlays.push_back(MovieOverlay{});
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    b.overlays[0].background[3] = 0.5f;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+}

@@ -20,6 +20,16 @@ enum class Kind {
     Ffmpeg,       // <dir>/<prefix>.mp4
 };
 
+// What ffmpeg encodes to
+enum class Codec {
+    H264,  // libx264 in an mp4
+    H265,  // libx265 in an mp4, tagged hvc1 so that QuickTime plays it
+    Vp9,   // libvpx-vp9 in a webm
+};
+
+// The extension of the file ffmpeg writes, without the dot
+const char* file_extension(Codec codec);
+
 struct Desc {
     Kind  kind = Kind::PngSequence;
     str_t dir = {};
@@ -31,7 +41,8 @@ struct Desc {
 
     // Ffmpeg only
     str_t ffmpeg = {};        // Executable, "ffmpeg" (found on PATH) when empty
-    int   crf = 18;           // x264 quality, lower is better
+    Codec codec = Codec::H264;
+    int   crf = 18;           // Quality, lower is better and larger
 };
 
 struct Status {

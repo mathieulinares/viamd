@@ -33,6 +33,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Render ergonomics: frame **Scale**, **Samples per frame**, **Render only a range**, **Pause/Resume**, time-left estimate, optional workspace copy next to the movie.
 - Strip comfort (plan item 5): **Snap to frames** for dragged times, **Copy** / **Paste Keyframe**, **Key on Selection** (frames the selected atoms, periodic images placed together).
 - Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (grows in / shrinks away over **Transition (s)**, 2 s by default, from the key; solid representations cannot fade), the scales, **Tint scale**, **Saturation**, **Base color** and **Tint color**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
+- Output formats H.265 (mp4) and VP9 (webm) besides H.264, with their own quality ranges; Ctrl+C / Ctrl+V for keyframes; a background plate for overlays.
 - The Representations window is locked while recording (the cheap form of plan item 7).
 - Representation keys on the timeline: a lane for the chosen representation and property, keys dragged, added by double-click and removed by right-click, like the look parameter lane.
 
@@ -40,6 +41,8 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 
 - Representation lane in the timeline: drag, add (double-click) and remove (right-click) keys; Visible turns around on double-click; hiding the lane.
 - Visible transition: a representation grows in at its key and shrinks away at the next; scrub through a transition (also with the lane); transition 0 pops; a key closer than the transition turns around; Cartoon and Ribbons at very small sizes look right; electronic structure and dipole representations vanish at the end of the transition.
+- Output formats: record a few seconds as H.265 and as WebM VP9 (needs ffmpeg with libx265 and libvpx-vp9) and play the files; the workspace copy and the log name the right extension.
+- Ctrl+C / Ctrl+V on keyframes (also while a text box is not focused); the overlay Background plate over a busy picture and its fades.
 - Representation keys: key Visible at two times and scrub/preview; key a scale, a saturation and a tint color (the example workspace tints the protein blue-grey from 50 s to 60 s); remove a representation that has keys; duplicate one (the copy must not share keys); save and reload a workspace (ids and keys survive, an old workspace without ids still loads and keys can be added); the values must go back after a recording.
 - Key on Selection: select a molecule split over the periodic boundary and check it is framed whole; check the result with another viewing direction.
 - Snap to frames: drag keys, anchors and the playhead; add a key with the playhead between frames; Add Orbit with snapping on (the orbit's end key must be where expected).
@@ -70,11 +73,10 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 ## Still to do
 
 - Plan item 7, the real fix: allow editing representations during a recording (large; the lock covers the need for now).
-- Optional output: H.265 and WebM presets, transparent background (lowest value for MD movies).
-- Keyboard shortcuts for copy and paste of keys.
+- Optional output: transparent background (lowest value for MD movies).
 
 ## Ideas not yet planned
 
 - Keyframe table column to toggle follow on an existing key
 - Draw the follow-aware camera path in the viewport
-- Overlay background plate, per-overlay font size in points, image/logo overlay
+- Per-overlay font size in points, image/logo overlay
