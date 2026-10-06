@@ -415,3 +415,67 @@ UTEST(viamd_movie_keys, a_color_key_blends_all_three_components) {
     EXPECT_NEAR(1.0f, v[0], 1.0e-6f);
     EXPECT_NEAR(0.0f, v[1], 1.0e-6f);
 }
+
+/* A representation that grows in and shrinks away at its Visible keys */
+
+static RepKey vk(double time, bool shown) {
+    return rk(1, RepProp::Visible, time, shown ? 1.0f : 0.0f);
+}
+
+UTEST(viamd_movie_keys, a_visible_key_starts_a_smooth_transition) {
+    const RepKey keys[] = { vk(0.0, false), vk(10.0, true), vk(30.0, false) };
+    float f = -1.0f;
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 5.0, 2.0));   /* before the first change */
+    EXPECT_NEAR(0.0f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 10.0, 2.0));  /* it starts at the key */
+    EXPECT_NEAR(0.0f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 11.0, 2.0));  /* halfway */
+    EXPECT_NEAR(0.5f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 12.0, 2.0));  /* done */
+    EXPECT_NEAR(1.0f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 20.0, 2.0));
+    EXPECT_NEAR(1.0f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 31.0, 2.0));  /* shrinking away */
+    EXPECT_NEAR(0.5f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 99.0, 2.0));
+    EXPECT_NEAR(0.0f, f, 1.0e-6f);
+}
+
+UTEST(viamd_movie_keys, the_transition_never_overshoots_and_only_goes_one_way) {
+    const RepKey keys[] = { vk(0.0, false), vk(10.0, true) };
+    float prev = 0.0f, f = 0.0f;
+    for (double t = 10.0; t <= 13.0; t += 0.01) {
+        ASSERT_TRUE(rep_visible_factor(&f, keys, 2, 1, t, 2.0));
+        EXPECT_GE(f, prev - 1.0e-6f);
+        EXPECT_LE(f, 1.0f);
+        prev = f;
+    }
+}
+
+UTEST(viamd_movie_keys, a_transition_of_zero_changes_at_the_key) {
+    const RepKey keys[] = { vk(0.0, true), vk(4.0, false) };
+    float f = -1.0f;
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 2, 1, 3.99, 0.0));
+    EXPECT_NEAR(1.0f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 2, 1, 4.0, 0.0));
+    EXPECT_NEAR(0.0f, f, 1.0e-6f);
+}
+
+UTEST(viamd_movie_keys, a_change_that_comes_before_the_last_is_done_turns_around_from_where_it_was) {
+    /* Shown at 10 (takes 4 s), hidden again at 12: at 12 it was halfway up, and goes down from there */
+    const RepKey keys[] = { vk(0.0, false), vk(10.0, true), vk(12.0, false) };
+    float f = -1.0f;
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 12.0, 4.0));
+    EXPECT_NEAR(0.5f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 14.0, 4.0));
+    EXPECT_NEAR(0.25f, f, 1.0e-6f);
+    ASSERT_TRUE(rep_visible_factor(&f, keys, 3, 1, 16.0, 4.0));
+    EXPECT_NEAR(0.0f, f, 1.0e-6f);
+}
+
+UTEST(viamd_movie_keys, no_visible_keys_means_no_factor) {
+    const RepKey keys[] = { rk(1, RepProp::Scale0, 0.0, 2.0f), vk(0.0, true) };
+    float f = 0.0f;
+    EXPECT_FALSE(rep_visible_factor(&f, keys, 2, 2, 1.0, 2.0));
+    EXPECT_FALSE(rep_visible_factor(&f, keys, 1, 1, 1.0, 2.0));
+}

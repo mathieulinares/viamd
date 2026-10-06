@@ -76,6 +76,41 @@ bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t re
     return true;
 }
 
+bool rep_visible_factor(float* out, const RepKey* keys, size_t count, uint32_t rep, double time, double transition) {
+    std::vector<const RepKey*> mine;
+    for (size_t i = 0; i < count; ++i) {
+        if (keys[i].rep == rep && keys[i].prop == (int)RepProp::Visible) mine.push_back(&keys[i]);
+    }
+    if (mine.empty()) return false;
+    std::stable_sort(mine.begin(), mine.end(), [](const RepKey* a, const RepKey* b) { return a->time < b->time; });
+
+    // Keys on the same time are one key
+    std::vector<const RepKey*> unique;
+    for (const RepKey* k : mine) {
+        if (unique.empty() || k->time > unique.back()->time) unique.push_back(k);
+    }
+
+    auto smooth = [](double u) { u = std::clamp(u, 0.0, 1.0); return u * u * (3.0 - 2.0 * u); };
+    auto target = [](const RepKey* k) { return k->value[0] >= 0.5f ? 1.0 : 0.0; };
+
+    if (time < unique[0]->time) {
+        *out = (float)target(unique[0]);
+        return true;
+    }
+    size_t last = 0;
+    while (last + 1 < unique.size() && unique[last + 1]->time <= time) ++last;
+
+    // Each change starts from where the one before it had got to by then
+    auto ramp = [&](double since) { return transition > 0.0 ? smooth(since / transition) : 1.0; };
+    double start = target(unique[0]);
+    for (size_t i = 1; i <= last; ++i) {
+        start += (target(unique[i - 1]) - start) * ramp(unique[i]->time - unique[i - 1]->time);
+    }
+    const double end = target(unique[last]);
+    *out = (float)(start + (end - start) * ramp(time - unique[last]->time));
+    return true;
+}
+
 static bool equal(const RepKey& a, const RepKey& b) {
     return a.rep == b.rep && a.prop == b.prop && a.time == b.time && a.ease == b.ease &&
            a.value[0] == b.value[0] && a.value[1] == b.value[1] && a.value[2] == b.value[2];

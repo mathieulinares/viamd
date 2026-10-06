@@ -1268,6 +1268,7 @@ static void workspace_reset(ApplicationState* data) {
         m.res_scale = 100;
         m.aa_samples = 0;
         m.save_copy = true;
+        m.rep_transition = 2.0f;
         m.snap_frames = true;
         m.has_key_clipboard = false;
         m.range_enabled = false;
@@ -1712,6 +1713,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("ResScale")))       viamd::extract_int(m.res_scale, arg);
                 else if (str_eq(ident, STR_LIT("AaSamples")))      viamd::extract_int(m.aa_samples, arg);
                 else if (str_eq(ident, STR_LIT("SaveCopy")))       viamd::extract_bool(m.save_copy, arg);
+                else if (str_eq(ident, STR_LIT("RepTransition")))  viamd::extract_flt(m.rep_transition, arg);
                 else if (str_eq(ident, STR_LIT("SnapFrames")))     viamd::extract_bool(m.snap_frames, arg);
                 else if (str_eq(ident, STR_LIT("RenderRange"))) {
                     float r[3];
@@ -1832,6 +1834,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
             m.duration_init = true;
             m.crf = CLAMP(m.crf, 0, 51);
             m.res_scale = CLAMP(m.res_scale, 10, 100);
+            m.rep_transition = CLAMP(m.rep_transition, 0.0f, 60.0f);
             m.aa_samples = CLAMP(m.aa_samples, 0, 256);
             movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("MovieOverlay"))) {
@@ -2200,6 +2203,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_int (state, STR_LIT("ResScale"), m.res_scale);
         viamd::write_int (state, STR_LIT("AaSamples"), m.aa_samples);
         viamd::write_bool(state, STR_LIT("SaveCopy"), m.save_copy);
+        viamd::write_flt (state, STR_LIT("RepTransition"), m.rep_transition);
         viamd::write_bool(state, STR_LIT("SnapFrames"), m.snap_frames);
         const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
         viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);

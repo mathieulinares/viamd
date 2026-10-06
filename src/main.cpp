@@ -6456,7 +6456,7 @@ static const char* movie_rep_prop_label(const Representation& rep, int prop, flo
 // out has rep_prop_comps(prop) numbers
 static void movie_rep_prop_get(const Representation& rep, int prop, float* out) {
     switch ((RepProp)prop) {
-    case RepProp::Visible:    out[0] = rep.enabled ? 1.0f : 0.0f; break;
+    case RepProp::Visible:    out[0] = rep.enabled ? rep.presence : 0.0f; break;
     case RepProp::Scale0:     out[0] = rep.scale.elem[0]; break;
     case RepProp::Scale1:     out[0] = rep.scale.elem[1]; break;
     case RepProp::Scale2:     out[0] = rep.scale.elem[2]; break;
@@ -6476,11 +6476,17 @@ static void movie_rep_prop_set(ApplicationState* state, Representation* rep, int
     for (int c = 0; c < rep_prop_comps(prop); ++c) same &= fabsf(now[c] - v[c]) < 1.0e-6f;
     if (same) return;
     switch ((RepProp)prop) {
-    case RepProp::Visible:
-        rep->enabled = v[0] >= 0.5f;
-        state->representation.atom_visibility_mask_dirty = true;
-        if (rep->enabled) flag_representation_as_dirty(rep);
+    case RepProp::Visible: {
+        // A value between 0 and 1 is a representation on its way in or out: shown, at that part of its size
+        const bool was = rep->enabled;
+        rep->enabled = v[0] > 0.002f;
+        rep->presence = rep->enabled ? CLAMP(v[0], 0.0f, 1.0f) : 1.0f;
+        if (was != rep->enabled) {
+            state->representation.atom_visibility_mask_dirty = true;
+            if (rep->enabled) flag_representation_as_dirty(rep);
+        }
         break;
+    }
     case RepProp::Scale0: rep->scale.elem[0] = v[0]; break;
     case RepProp::Scale1: rep->scale.elem[1] = v[0]; break;
     case RepProp::Scale2: rep->scale.elem[2] = v[0]; break;
@@ -6505,6 +6511,13 @@ static bool movie_rep_has_keys(const ApplicationState* state, uint32_t rep, int 
     return false;
 }
 
+// Visible goes through its transition, the other properties are what their keys say
+static bool movie_rep_eval(const ApplicationState* state, uint32_t rep, int prop, double time, float* out) {
+    const auto& m = state->movie;
+    if (prop == (int)RepProp::Visible) return rep_visible_factor(out, m.rep_keys.data(), m.rep_keys.size(), rep, time, (double)m.rep_transition);
+    return rep_keys_evaluate(out, m.rep_keys.data(), m.rep_keys.size(), rep, prop, time);
+}
+
 // Puts the keyed properties of representations at their values at a time. A property is taken hold of when it first
 // has a key to follow, and what it was is kept, to be put back when the keys let go of it or the recording is over.
 static void movie_reps_apply(ApplicationState* state, double time) {
@@ -6516,7 +6529,7 @@ static void movie_reps_apply(ApplicationState* state, double time) {
             for (size_t j = 0; j < i && !seen; ++j) seen = m.rep_keys[j].rep == k.rep && m.rep_keys[j].prop == k.prop;
             Representation* rep = seen ? nullptr : movie_find_rep(state, k.rep);
             float v[3] = {};
-            if (!rep || !rep_keys_evaluate(v, m.rep_keys.data(), m.rep_keys.size(), k.rep, k.prop, time)) continue;
+            if (!rep || !movie_rep_eval(state, k.rep, k.prop, time, v)) continue;
 
             bool saved = false;
             for (const auto& s : m.rep_saved) saved |= s.rep == k.rep && s.prop == k.prop;
@@ -7882,7 +7895,7 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
         for (int i = 0; i < N; ++i) {
             const double t = (double)movie_len * (double)i / (double)(N - 1);
             float v[3] = {};
-            rep_keys_evaluate(v, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, t);
+            movie_rep_eval(data, rep->id, prop, t, v);
             xs[i] = (float)t;
             ys[i] = v[0];
         }
@@ -8504,7 +8517,10 @@ static void movie_key_rep(ApplicationState* state, const Representation& rep, in
     key.prop = prop;
     key.time = movie_snap_time(state, (double)m.playhead);
     movie_rep_prop_get(rep, prop, key.value);
-    if (prop == (int)RepProp::Visible) key.ease = KeyEase::Hold;
+    if (prop == (int)RepProp::Visible) {
+        key.value[0] = key.value[0] >= 0.5f ? 1.0f : 0.0f;
+        key.ease = KeyEase::Hold;
+    }
 
     for (RepKey& k : m.rep_keys) {
         if (k.rep == key.rep && k.prop == key.prop && fabs(k.time - key.time) < 1.0e-3) {
@@ -8526,6 +8542,11 @@ static void draw_movie_rep_section(ApplicationState* data, float movie_len) {
         ImGui::TextDisabled("Create a representation in the Representations window first.");
         return;
     }
+
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+    ImGui::DragFloat("Transition (s)", &m.rep_transition, 0.05f, 0.0f, 60.0f, "%.2f");
+    m.rep_transition = CLAMP(m.rep_transition, 0.0f, 60.0f);
+    ImGui::SetItemTooltip("How long a representation takes to grow in or shrink away at a Visible key. It starts at the key.\n0 shows or hides it at once. Keys closer together than this make it turn around on the way.");
 
     if (num_reps > 0) {
         m.rep_selected = CLAMP(m.rep_selected, 0, num_reps - 1);
@@ -9497,12 +9518,14 @@ static void draw_representations_opaque(ApplicationState* state) {
                         .rep = state->representation.reps[i].md_rep,
                         .model_matrix = NULL,
                     };
+                    // While it is shown or hidden by the movie it grows in or shrinks away
+                    const vec4_t sc = {rep.scale.x * rep.presence, rep.scale.y * rep.presence, rep.scale.z * rep.presence, rep.scale.w * rep.presence};
                     switch (rep.type) {
                     case RepresentationType::SpaceFill:
-                        op.args.space_fill.radius_scale = rep.scale.x;
+                        op.args.space_fill.radius_scale = sc.x;
                         break;
                     case RepresentationType::Licorice:
-                        op.args.licorice.radius = rep.scale.x;
+                        op.args.licorice.radius = sc.x;
                         op.args.licorice.color_mode = (md_gl_bond_mode_t)rep.bond_color;
                         op.args.licorice.sharpness = rep.bond_sharpness;
                         op.args.licorice.uniform_color = convert_color(rep.bond_base_color);
@@ -9511,8 +9534,8 @@ static void draw_representations_opaque(ApplicationState* state) {
                         }
                         break;
                     case RepresentationType::BallAndStick:
-                        op.args.ball_and_stick.ball_scale = rep.scale.x;
-                        op.args.ball_and_stick.stick_radius = rep.scale.y;
+                        op.args.ball_and_stick.ball_scale = sc.x;
+                        op.args.ball_and_stick.stick_radius = sc.y;
                         op.args.ball_and_stick.color_mode = (md_gl_bond_mode_t)rep.bond_color;
                         op.args.ball_and_stick.sharpness = rep.bond_sharpness;
                         op.args.ball_and_stick.uniform_color = convert_color(rep.bond_base_color);
@@ -9521,13 +9544,13 @@ static void draw_representations_opaque(ApplicationState* state) {
                         }
                         break;
                     case RepresentationType::Ribbons:
-                        op.args.ribbons.width_scale = rep.scale.x;
-                        op.args.ribbons.thickness_scale = rep.scale.y;
+                        op.args.ribbons.width_scale = sc.x;
+                        op.args.ribbons.thickness_scale = sc.y;
                         break;
                     case RepresentationType::Cartoon:
-                        op.args.cartoon.coil_scale = rep.scale.x;
-                        op.args.cartoon.sheet_scale = rep.scale.y;
-                        op.args.cartoon.helix_scale = rep.scale.z;
+                        op.args.cartoon.coil_scale = sc.x;
+                        op.args.cartoon.sheet_scale = sc.y;
+                        op.args.cartoon.helix_scale = sc.z;
                         break;
                     default:
                         break;
@@ -9705,7 +9728,8 @@ static void draw_representations_opaque_lean_and_mean(ApplicationState* data, ui
                 .rep = data->representation.reps[i].md_rep,
                 .model_matrix = NULL,
             };
-            MEMCPY(&op.args, &rep.scale, sizeof(op.args));
+            const vec4_t sc = {rep.scale.x * rep.presence, rep.scale.y * rep.presence, rep.scale.z * rep.presence, rep.scale.w * rep.presence};
+            MEMCPY(&op.args, &sc, sizeof(op.args));
             md_array_push(draw_ops, op, frame_alloc);
         }
     }

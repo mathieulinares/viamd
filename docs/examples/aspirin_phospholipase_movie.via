@@ -95,6 +95,7 @@ Crf=18
 ResScale=100
 AaSamples=0
 SaveCopy=1
+RepTransition=2
 SnapFrames=1
 RenderRange=0,0,80
 Loop=0

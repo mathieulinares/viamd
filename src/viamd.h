@@ -869,6 +869,7 @@ struct DipoleRepresentation {
 
 struct Representation {
     uint32_t id = 0;                  // Never changes and is not reused, unlike the place in the list
+    float presence = 1.0f;            // How much of it is drawn while a movie shows or hides it: scales its sizes
     char name[64] = "rep";
     char filt[256] = "all";
     char filt_error[256] = "";
@@ -1178,6 +1179,7 @@ struct ApplicationState {
         std::vector<RepSaved> rep_saved;      // What they were before the keys took hold of them, put back when they let go
         int rep_selected = 0;                 // Index in representation.reps, what 'Key Now' keys
         int rep_prop_selected = 0;            // A RepProp
+        float rep_transition = 2.0f;          // Seconds a representation takes to grow in or shrink away at a Visible key
 
         MovieHistory history;
 

@@ -52,6 +52,12 @@ struct RepKey {
 // 'out' has rep_prop_comps(prop) numbers.
 bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t rep, int prop, double time);
 
+// How much of a representation is there at 'time', 0 (gone) to 1 (all of it), from its Visible keys. At a key the
+// factor starts to go to the key's value (1 shown, 0 hidden), taking 'transition' seconds, smoothly; from wherever
+// it was if the previous change has not finished. The first key holds from the start. With a transition of 0 it
+// is held and changes at its keys, as rep_keys_evaluate does. Returns false if there are no keys.
+bool rep_visible_factor(float* out, const RepKey* keys, size_t count, uint32_t rep, double time, double transition);
+
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;
