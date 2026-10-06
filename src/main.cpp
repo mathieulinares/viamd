@@ -7741,14 +7741,16 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
     const double last_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
     double prev_frame = -1.0;
 
-    if (ImGui::BeginTable("##keyframes", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 1.8f);
-        ImGui::TableSetupColumn("Time (s)");
-        ImGui::TableSetupColumn("FOV (deg)");
-        ImGui::TableSetupColumn("Ease");
-        ImGui::TableSetupColumn("Frame");
-        ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.0f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 17.0f);
+    // Columns can be resized, and the table scrolls sideways when they do not fit
+    const float fs = ImGui::GetFontSize();
+    if (ImGui::BeginTable("##keyframes", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX)) {
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, fs * 1.8f);
+        ImGui::TableSetupColumn("Time (s)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
+        ImGui::TableSetupColumn("FOV (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
+        ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
+        ImGui::TableSetupColumn("Frame", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
+        ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 26.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
