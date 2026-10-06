@@ -216,7 +216,6 @@ static void movie_recording_start(ApplicationState* state);
 static void movie_recording_stop(ApplicationState* state);
 static void movie_shutdown(ApplicationState* state);
 static void movie_add_keyframe(ApplicationState* state);
-static void doc_shots_step(ApplicationState* state);
 static void update_movie_recording(ApplicationState* state);
 static void update_movie_preview(ApplicationState* state);
 static void update_movie_history(ApplicationState* state);
@@ -575,9 +574,7 @@ int main(int argc, char** argv) {
         if (state.structure_export.show_window) draw_structure_export_window(&state);
         if (state.show_debug_window) draw_debug_window(&state);
         if (state.animation.show_window) draw_animation_window(&state);
-        doc_shots_step(&state);
         if (state.movie.show_window) draw_movie_window(&state);
-        if (getenv("VIAMD_DOC_SHOTS")) { const ImVec2 ds = ImGui::GetIO().DisplaySize; ImGui::SetNextWindowPos(ImVec2(10, ds.y * 0.52f), ImGuiCond_Always); ImGui::SetNextWindowSize(ImVec2(ds.x - 670, ds.y * 0.48f - 10), ImGuiCond_Always); }
         if (state.movie.show_timeline_window) draw_movie_timeline_window(&state);
         draw_movie_recording_banner(&state);
 
@@ -7381,7 +7378,15 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             hi = MAX(hi, (double)values[i]);
         }
         const double padding = MAX((hi - lo) * 0.08, MAX(fabs(hi) * 0.05, 1.0e-3));
-        ImPlot::SetupAxisLimits(ImAxis_Y1, lo - padding, hi + padding, ImPlotCond_Once);
+        // Refit when the curve's range changes (keys added, a workspace loaded), but not while something is dragged
+        static double fitted[3][2] = {{1, 0}, {1, 0}, {1, 0}};
+        const bool range_changed = fitted[track][0] != lo || fitted[track][1] != hi;
+        const bool refit = range_changed && !ImGui::IsMouseDown(ImGuiMouseButton_Left);
+        if (refit) {
+            fitted[track][0] = lo;
+            fitted[track][1] = hi;
+        }
+        ImPlot::SetupAxisLimits(ImAxis_Y1, lo - padding, hi + padding, refit ? ImPlotCond_Always : ImPlotCond_Once);
 
         bool anchors_held = false;
         if (track == 0) {
@@ -9063,69 +9068,4 @@ static void draw_representations_opaque_lean_and_mean(ApplicationState* data, ui
     };
 
     md_gl_draw(&args);
-}
-
-// ---- TEMPORARY: scripted setup for documentation screenshots ----
-static void doc_rotate_view(ApplicationState* s, float yaw, float pitch, float dist_scale) {
-    ViewTransform t = s->view.target;
-    const vec3_t look = camera_get_look_at(t);
-    quat_t q = quat_mul(quat_axis_angle(vec3_set(0,1,0), yaw), t.orientation);
-    q = quat_mul(q, quat_axis_angle(vec3_set(1,0,0), pitch));
-    t.orientation = quat_normalize(q);
-    t.distance *= dist_scale;
-    t.position = vec3_add(look, quat_mul_vec3(t.orientation, vec3_set(0,0,t.distance)));
-    s->view.target = t; s->view.camera.position = t.position; s->view.camera.orientation = t.orientation; s->view.camera.distance = t.distance;
-}
-static void doc_shots_step(ApplicationState* s) {
-    static int frame = 0; static int stage = -1;
-    if (!getenv("VIAMD_DOC_SHOTS")) return;
-    ++frame;
-    auto& m = s->movie;
-    int want = 0;
-    if (FILE* f = fopen("/tmp/vshots/stage", "r")) { if (fscanf(f, "%d", &want) != 1) want = 0; fclose(f); }
-    const ImVec2 ds = ImGui::GetIO().DisplaySize;
-    if (frame == 150) {
-        m.show_window = true; m.show_timeline_window = true; m.show_path = true;
-        m.output_dir = str_copy(STR_LIT("/home/user/movies"), s->allocator.persistent);
-        snprintf(m.filename_prefix, sizeof(m.filename_prefix), "alanine");
-    }
-    if (frame == 170) {
-        const float L = (float)movie_duration(s);
-        m.traj_begin = 0.15f * L; m.traj_end = 0.95f * L;
-        m.animate_camera = true;
-        m.playhead = 0.0f; m.key_includes_frame = false; movie_add_keyframe(s);
-        doc_rotate_view(s, 0.9f, 0.2f, 0.7f); m.playhead = 0.3f*L; m.key_includes_frame = true; s->animation.frame = 120; movie_add_keyframe(s);
-        doc_rotate_view(s, 1.2f, -0.3f, 1.2f); m.playhead = 0.65f*L; s->animation.frame = 420; movie_add_keyframe(s);
-        doc_rotate_view(s, 1.0f, 0.1f, 0.9f); m.playhead = L; m.key_includes_frame = false; s->view.camera.fov_y *= 0.8f; movie_add_keyframe(s);
-        m.keyframes[3].spin_turns = 1;
-        m.keyframes[2].ease = KeyEase::EaseInOut;
-        m.playhead = 0.0f; movie_key_param(s, MovieParam_Exposure);
-        s->visuals.tonemapping.exposure *= 1.8f; m.playhead = 0.5f*L; movie_key_param(s, MovieParam_Exposure);
-        s->visuals.tonemapping.exposure /= 1.8f; m.playhead = L; movie_key_param(s, MovieParam_Exposure);
-        for (int i = 0; i < 16; ++i) if (movie_param_table[i % (sizeof(movie_param_table)/sizeof(movie_param_table[0]))].id == MovieParam_Exposure) { m.param_selected = i; break; }
-        MovieOverlay o; o.type = MovieOverlayType::Text; snprintf(o.text, sizeof(o.text), "Alanine peptide"); o.anchor = MovieOverlayAnchor::BottomCenter; o.begin = 0; o.end = 0.4*L; m.overlays.push_back(o);
-        MovieOverlay ts; ts.type = MovieOverlayType::Timestamp; ts.anchor = MovieOverlayAnchor::TopRight; ts.begin = 0; ts.end = L; m.overlays.push_back(ts);
-        MovieOverlay sb; sb.type = MovieOverlayType::ScaleBar; sb.anchor = MovieOverlayAnchor::BottomLeft; sb.begin = 0; sb.end = L; m.overlays.push_back(sb);
-        m.playhead = 0.42f*L; movie_apply_time(s, (double)m.playhead, true);
-        printf("DOC_SHOTS ready\n"); fflush(stdout);
-    }
-    if (frame < 150) return;
-    const float mw = 640.0f;
-    ImGui::SetNextWindowPos(ImVec2(ds.x - mw - 10, 30), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(mw, ds.y - 40), ImGuiCond_Always);
-    if (want != stage) {
-        stage = want;
-        ImGui::Begin("Movie");
-        ImGuiStorage* st = ImGui::GetStateStorage();
-        const bool sec = stage == 1;
-        st->SetInt(ImGui::GetID("Output"), !sec); st->SetInt(ImGui::GetID("Timeline"), !sec);
-        st->SetInt(ImGui::GetID("Camera Keyframes"), !sec);
-        st->SetInt(ImGui::GetID("Look Parameters"), sec); st->SetInt(ImGui::GetID("Overlays"), sec);
-        ImGui::End();
-        ImGui::SetNextWindowPos(ImVec2(ds.x - mw - 10, 30), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(mw, ds.y - 40), ImGuiCond_Always);
-        printf("DOC_SHOTS stage %d\n", stage); fflush(stdout);
-    }
-    // Timeline window placed in its own frame call below
-    static bool tl_next = true; (void)tl_next;
 }

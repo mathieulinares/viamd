@@ -1,0 +1,150 @@
+# Making movies
+
+VIAMD can record a movie of a trajectory. You set how long the movie is, and you can place camera keyframes, key look parameters (exposure, background and so on) and add text overlays. The result is either an MP4 file (encoded by ffmpeg) or a numbered PNG sequence.
+
+![The Movie window (right) and the Movie Timeline (bottom left), with the camera path drawn in the viewport](images/movie/overview.png)
+
+There are two windows, both opened from the **Windows** menu:
+
+- **Movie**: all the settings, the keyframe table and the record button.
+- **Movie Timeline**: curves of the trajectory frame, camera distance, field of view and one look parameter over time. Here you can drag keys and scrub. It is closed when VIAMD starts and when a workspace is loaded.
+
+## Quick start
+
+1. Load a trajectory and open **Windows > Movie**.
+2. Under **Output**, click **Select Output Folder...** and pick a format.
+3. Set **Movie length (s)** and press Enter. At first the trajectory fills the whole movie.
+4. Move **Preview time (s)** to 0, set up the view, and press **K** (or **Add Keyframe (current view)**).
+5. Move the preview time, set up another view, and press **K** again. Repeat as needed.
+6. Tick **Animate camera** and press **Play Preview** to watch the movie in the viewport.
+7. Press **Start Recording**. Press **Esc** or **Stop Recording** to stop early.
+
+When the recording is done, your own view, the animation playback and the screenshot settings are put back as they were.
+
+## The Movie window
+
+![The Movie window](images/movie/movie_window.png)
+
+The top line has **Start Recording**, with a summary of what will be written: frames, seconds and pixel size. **Undo** and **Redo** (Ctrl+Z, Ctrl+Y / Ctrl+Shift+Z) apply to everything on the movie's timeline: camera keys, look parameter keys, overlays, the movie length and the trajectory timing.
+
+### Output
+
+| Setting | What it does |
+|---|---|
+| **Select Output Folder...** | Where the movie is written. Recording is disabled until one is chosen. |
+| **Filename Prefix** | The file name: `prefix.mp4`, or `prefix_00000.png`, `prefix_00001.png`, ... |
+| **Format** | **MP4 video (ffmpeg)** pipes the frames straight into ffmpeg, so no image files are written. **PNG sequence** writes one image per frame. |
+| **Quality (CRF)** | MP4 only. x264 constant rate factor: lower is better and larger. 18 is close to lossless, 23 is the x264 default. |
+| **ffmpeg** | MP4 only. The ffmpeg executable. A bare name is looked up on the PATH. |
+| **Copy ffmpeg command** | PNG only. Copies a command that encodes the PNG sequence into an MP4. |
+| **Resolution** | **Window** (the window size when recording starts), Full HD, Quad HD, 4K, 8K or **Custom** (**Res X**, **Res Y**). |
+| **Output FPS** | Frames per second of the movie. The number of frames is length × FPS. |
+
+### Timeline: how long the movie is and how the trajectory plays
+
+![Timeline and camera keyframes](images/movie/timing_and_keyframes.png)
+
+- **Trajectory Frames**: the first and last trajectory frame used. If the start is after the end, the trajectory plays backwards.
+- **Movie length (s)**: the length of the whole movie, applied when you press Enter. **Everything on the timeline is scaled with it**: camera keys, look parameter keys, overlays and their fades, and when the trajectory starts and ends. The movie keeps its shape and only becomes faster or slower. Frame numbers and spin counts are not changed.
+- **Trajectory plays (s)**: when, in movie time, the trajectory is at its first and at its last frame. Before the start the trajectory is held on its first frame, for example to fly over the structure first. After the end it is held on its last frame. These two points are the blue **Start** and **End** lines in the Movie Timeline, where they can also be dragged.
+- The grey line below shows the average speed, in trajectory frames per second and compared with the Animation window's speed. **Match Animation speed** changes the movie length so the trajectory plays at the Animation window's speed.
+
+To make the trajectory play faster or slower in parts of the movie, pin frames on camera keyframes (see **Frame** below). Between two pinned frames the trajectory plays at whatever speed is needed to get from one to the other. A pinned frame before the Start line or after the End line moves that line out to it.
+
+### Camera keyframes
+
+A keyframe is a camera (where the eye is, where it looks, its distance and its field of view) at a time in the movie. Between keyframes the camera moves smoothly. Before the first and after the last keyframe it holds still.
+
+- **Animate camera**: while previewing or recording, the camera follows the keyframes. When it is off, the camera stays where you leave it and only the trajectory plays.
+- **Show path in viewport**: draws the path of the eye (blue), the path of the look-at point (yellow), a camera at each keyframe, and a green camera at the preview time.
+- **Seamless loop** and **Close Loop**: makes the camera path cyclic, so a movie played on repeat has no jump. **Close Loop** adds a final key in the first key's pose and turns the loop on.
+- **Play Preview**, **Repeat** and **Preview time (s)**: play or scrub the movie in the viewport at its real speed, without recording.
+- **Add Keyframe (current view)** (shortcut **K** while a movie window is open): adds a key of the current view at the preview time. A key at the same time is replaced. Tick **with trajectory frame** to also pin the trajectory frame shown now.
+- **Add Orbit**: the three fields before it set the number of turns, the duration and the axis (**Camera up**, **World X/Y/Z**). It adds a key at the preview time and another one *duration* later, where the camera has gone round the look-at point that many times. It is refused if the orbit would run past the end of the movie.
+
+#### The keyframe table
+
+![Keyframe table, with key 2 waiting for an atom to be clicked](images/movie/look_at_pick.png)
+
+The columns can be resized by dragging their borders. When they are wider than the window the table scrolls sideways.
+
+| Column | Meaning |
+|---|---|
+| **#** | The key's number. Drag it onto another row to move the key's pose there; the times stay in place. |
+| **Time (s)** | When in the movie. The list re-sorts when you finish editing. |
+| **FOV (deg)** | Field of view. Narrow it to zoom in without moving the camera. |
+| **Ease** | How the movie gets *to* this key from the previous one. **Smooth** passes through without stopping, **Ease in/out** slows down at both ends, **Linear** moves at constant speed, **Hold** stays put and then jumps. |
+| **Frame** | Tick to pin a trajectory frame to this key, then drag the number. Pins control the trajectory's speed (see above). A frame lower than the previous pin plays backwards. |
+| **Spin** | Extra whole turns around the look-at point on the way to this key. **...** opens the axis and a **Constant speed** option. |
+| **Go To** | Moves the viewport to this key. Clicking a key's orange marker in the **Timelines** window does the same. |
+| **Look at** | Click it, then click an atom in the viewport. The key now looks at that atom and **tracks it through the trajectory**. While picking, the button reads **Click atom**; press Esc to cancel. |
+| **Update position** | Moves the key's eye to where the viewport camera is now, still looking at the same point. The field of view and, if pinned, the frame are taken too. |
+| **Dup** | Copies the key to one second later. |
+| **Remove** | Removes the key. |
+
+So, to edit a keyframe: **Go To** it, move around, press **Update position** to set where the eye is, and use **Look at** to choose what it looks at. Below the table, a line shows the eye, the look-at point and the distance at the preview time, plus the focus distance when depth of field is on.
+
+#### Follow target
+
+**Set Follow Target** uses the current selection as a target. With **keys follow target** ticked, new keyframes look at a point that moves with the centre of the target, so a drifting molecule stays in view. Between a following key and a fixed key the camera blends from one to the other. **Look at** on a single key is the per-key version of this, tracking one atom.
+
+### Look parameters
+
+![Look parameters and overlays](images/movie/looks_and_overlays.png)
+
+Some visual settings can change during the movie: background color and intensity, ambient occlusion and its radius, exposure, depth of field blur, near and far clipping planes, and focus distance.
+
+1. Pick the parameter in the list.
+2. Set it up as it should look, in **Visuals**, at some preview time.
+3. Press **Key Now**.
+
+The table lists the keys, with their time, value, ease and **Remove**. With **Animate parameters** ticked, the keys are followed when scrubbing, previewing and recording. When the recording ends, the parameters go back to what they were.
+
+### Depth of field
+
+Under **Visuals > Depth of Field**, **Focus** chooses what is sharp:
+
+- **Look-at point**: what the camera looks at. This is the default and follows the keyframes.
+- **Distance**: a fixed distance from the camera (**Focus distance**, **From view** takes the current distance). Key **Focus distance** as a look parameter to pull focus during the movie.
+- **Follow target**: the centre of the movie's follow target, even when the camera looks elsewhere.
+
+### Overlays
+
+**Add Text**, **Add Time Stamp** and **Add Scale Bar** add overlays that are drawn into the recorded frames. Each overlay has:
+
+- an on/off box and **Remove**;
+- **Shown (s)**, the times it is shown from and to, with **Start at preview time** and **End at preview time**;
+- **Fade in (s)** and **Fade out (s)**;
+- a **Position** (nine anchors), **Size** (relative to the frame height, so it looks the same at any resolution) and **Color**.
+
+A scale bar picks a round length unless you set one. **Show in viewport** previews the overlays at the preview time. Their placement is exact only when the viewport has the same proportions as the movie.
+
+## The Movie Timeline window
+
+![The Movie Timeline](images/movie/movie_timeline.png)
+
+Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **Repeat**, a playhead slider and **Add Keyframe**. Below are aligned tracks with real axes, which share the time axis:
+
+- **Trajectory**: the trajectory frame shown at each moment. The blue **Start** and **End** lines are when the trajectory starts and stops; drag them. Orange dots are keys with a pinned frame: drag sideways to change the time and up or down to change the frame.
+- **Camera distance**: how far the camera is from what it looks at, in your preferred length unit. Dots can be dragged sideways (time only).
+- **Field of view** in degrees. Dots can be dragged sideways (time only).
+- **Look parameter**: the parameter chosen in the **Look parameter** list at the top. Double-click to add a key, drag to change it, right-click to remove it.
+
+The yellow line is the playhead. Scroll to zoom the time, drag the background to pan, and use **Show whole movie** to reset. Drag between tracks to change their heights. Untick **Trajectory**, **Distance** or **Field of view** to hide a track.
+
+## Saving
+
+The movie (length, trajectory timing, camera keys including what they look at, look parameter keys, overlays and follow target) is saved in the workspace (`.via`) under `[Movie]`. Workspaces from earlier versions load and are converted.
+
+## Tips
+
+- Plan the length first, then place keys. If the movie is too fast or too slow, change **Movie length** and everything stays in proportion.
+- For a fly-over before the dynamics start, drag the blue **Start** line to the right. The trajectory waits on its first frame until then.
+- To slow down an interesting event, pin frames on two keys around it and move them further apart in time.
+- **Smooth** keys never stop the camera. Use **Ease in/out** or **Hold** where the camera should rest.
+- PNG sequences are safest for very long or very large movies. Encode them afterwards with **Copy ffmpeg command**.
+
+## Known limits
+
+- **Follow target** depth of field uses the global follow target, not a key's own **Look at** atom.
+- Distance and field of view are edited in the table and the viewport. In the timeline their dots only move in time.
