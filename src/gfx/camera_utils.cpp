@@ -239,13 +239,19 @@ static dvec3 quat_path_tangent(const quat_t* prev, quat_t cur, const quat_t* nex
     return {catmull_slope(d0.x, d1.x, h0, h1), catmull_slope(d0.y, d1.y, h0, h1), catmull_slope(d0.z, d1.z, h0, h1)};
 }
 
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop, const vec3_t* follow_now) {
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop, const vec3_t* follow_now, const vec3_t* key_follow_now) {
     ASSERT(count > 0);
+    // A key that tracks an atom of its own is moved by that atom, the others by follow_now
+    auto now_of = [&](size_t k) -> const vec3_t* {
+        if (keys[k].follow_atom >= 0) return key_follow_now ? &key_follow_now[k] : nullptr;
+        return follow_now;
+    };
+    auto has_now = [&](const CameraKeyframe& k) { return k.follow_atom >= 0 ? key_follow_now != nullptr : follow_now != nullptr; };
 
     if (count == 1) {
         *out_transform = keys[0].transform;
         *out_fov_y = keys[0].fov_y;
-        if (follow_now && keys[0].follow) out_transform->position = out_transform->position + (*follow_now - keys[0].follow_center);
+        if (now_of(0) && keys[0].follow) out_transform->position = out_transform->position + (*now_of(0) - keys[0].follow_center);
         return;
     }
 
@@ -286,7 +292,7 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
     // Look-at point: Catmull-Rom. A following key is taken relative to its target, which is put back below.
     auto key_look_at = [&](const CameraKeyframe& k) {
         const vec3_t p = camera_get_look_at(k.transform);
-        return follow_now && k.follow ? p - k.follow_center : p;
+        return k.follow && has_now(k) ? p - k.follow_center : p;
     };
     const vec3_t la[4] = {
         has_p ? key_look_at(kp) : vec3_t{0, 0, 0},
@@ -302,11 +308,12 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
         if (linear) m0 = m1 = d;
         look[c] = hermite(la[1].elem[c], la[2].elem[c], m0, m1, h, ue);
     }
-    if (follow_now) {
-        const double wi = keys[i].follow ? 1.0 : 0.0;
-        const double wj = keys[j].follow ? 1.0 : 0.0;
-        const double w = wi + (wj - wi) * ue;
-        for (int c = 0; c < 3; ++c) look[c] += w * (double)follow_now->elem[c];
+    {
+        const vec3_t* ni = now_of(i);
+        const vec3_t* nj = now_of(j);
+        const double wi = keys[i].follow && ni ? 1.0 - ue : 0.0;
+        const double wj = keys[j].follow && nj ? ue : 0.0;
+        for (int c = 0; c < 3; ++c) look[c] += (ni ? wi * (double)ni->elem[c] : 0.0) + (nj ? wj * (double)nj->elem[c] : 0.0);
     }
 
     // Distance and fov: monotone cubic

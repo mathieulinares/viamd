@@ -798,3 +798,24 @@ UTEST(viamd_camera, aim_at_keeps_the_eye_and_looks_at_the_point) {
     EXPECT_NEAR(vec3_length(p - eye), c.distance, 1.0e-3f);
     EXPECT_FALSE(camera_aim_at(&c, eye));
 }
+
+UTEST(viamd_camera, keys_that_track_their_own_atoms_each_follow_their_atom) {
+    CameraKeyframe k[3];
+    kf_make3(k);
+    for (int i = 0; i < 3; ++i) {
+        k[i].follow = true;
+        k[i].follow_atom = i;
+        k[i].follow_center = vec3_set((float)i, 0, 0);
+    }
+    /* Each atom has moved by its own amount, and every key is hit at its own time */
+    const vec3_t shifts[3] = {vec3_set(1, 0, 0), vec3_set(0, 2, 0), vec3_set(0, 0, 3)};
+    vec3_t now[3];
+    for (int i = 0; i < 3; ++i) now[i] = k[i].follow_center + shifts[i];
+    for (int i = 0; i < 3; ++i) {
+        ViewTransform v; float fov;
+        camera_keyframes_evaluate(&v, &fov, k, 3, k[i].time, false, nullptr, now);
+        EXPECT_NEAR(k[i].transform.position.x + shifts[i].x, v.position.x, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.y + shifts[i].y, v.position.y, 1.0e-3f);
+        EXPECT_NEAR(k[i].transform.position.z + shifts[i].z, v.position.z, 1.0e-3f);
+    }
+}

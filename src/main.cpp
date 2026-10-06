@@ -226,6 +226,7 @@ static void draw_movie_timeline_window(ApplicationState* state);
 static void draw_movie_recording_banner(ApplicationState* state);
 static void movie_draw_camera_path(ApplicationState* state);
 static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view);
+static bool movie_key_look_at_atom(ApplicationState* state, int key_idx, int32_t atom);
 static bool movie_draw_timeline_markers(ApplicationState* state);
 static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
@@ -600,6 +601,10 @@ int main(int argc, char** argv) {
 
         PickingHit hit = {};
 
+        // A keyframe waits for an atom: the click picks it, so it must not select or rotate as well
+        const bool look_pick = state.movie.look_pick_key >= 0 && !movie_recording;
+        if (look_pick && ImGui::IsKeyPressed(ImGuiKey_Escape)) state.movie.look_pick_key = -1;
+
         if (surface_state.hovered && !movie_recording) {
             InteractionSurfaceHitArgs args = {
                 .picking_surface = &state.picking_surface,
@@ -612,13 +617,23 @@ int main(int argc, char** argv) {
 
             interaction_surface_hit_extract(&hit, surface_state, args);
 
+            if (look_pick) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hit.domain == PickingDomain_Atom) {
+                    movie_key_look_at_atom(&state, state.movie.look_pick_key, (int32_t)hit.local_idx);
+                    state.movie.look_pick_key = -1;
+                }
+            }
+
             InteractionSurfaceEvent event = {};
             interaction_surface_event_extract(&event, surface_state, hit);
 
             event.clip_to_world = clip_to_world;
             event.world_to_clip = world_to_clip;
 
-            if (event.kind == InteractionSurfaceEventKind::RegionSelect) {
+            if (look_pick) {
+                // handled above
+            } else if (event.kind == InteractionSurfaceEventKind::RegionSelect) {
                 const md_bitfield_t* candidate_mask = &state.representation.visibility_mask;
                 if (event.selection_mode == InteractionSelectionMode::Remove) {
                     // When removing, only consider currently selected atoms as candidates for region selection
@@ -647,7 +662,7 @@ int main(int argc, char** argv) {
             }
             
             // Since this is the main interaction view, we still broadcast all kinds of events, even if we have handled some explicitly here.
-            viamd::event_system_broadcast_event(viamd::EventType_ViamdInteractionSurface, viamd::EventPayloadType_InteractionSurfaceEvent, &event);
+            if (!look_pick) viamd::event_system_broadcast_event(viamd::EventType_ViamdInteractionSurface, viamd::EventPayloadType_InteractionSurfaceEvent, &event);
         }
 
         InteractionSurfaceViewTransformArgs view_args = {
@@ -656,21 +671,19 @@ int main(int argc, char** argv) {
         };
 
         InteractionSurfaceViewTransformResult view_result = {};
-        if (!movie_recording) {
+        if (!movie_recording && !look_pick) {
             view_result = interaction_surface_view_transform_apply(&state.view.target, surface_state, view_args);
         }
         if (view_result.reset_requested) {
+            ViewTransform reset_transform = {};
             if (hit.depth < 1.0f) {
-                // Aim at the clicked point with the eye fixed; depth of field focus follows unless it is set explicitly
-                camera_aim_at(&state.view.target, hit.world_pos);
-                if (state.visuals.dof.focus_mode == DofFocusMode::Distance && !ImGui::GetIO().KeyShift) {
-                    state.visuals.dof.focus_distance = state.view.target.distance;
-                }
+                reset_transform.distance = state.view.target.distance;
+                reset_transform.orientation = state.view.camera.orientation;
+                reset_transform.position = hit.world_pos + state.view.camera.orientation * vec3_set(0, 0, state.view.target.distance);
             } else {
-                ViewTransform reset_transform = {};
                 reset_view(&reset_transform, state.mold.state, &state.representation.visibility_mask);
-                state.view.target = reset_transform;
             }
+            state.view.target = reset_transform;
         }
 
         draw_context_popup(&state, hit);
@@ -6373,6 +6386,28 @@ static bool movie_follow_center(const ApplicationState* state, vec3_t* out) {
     return true;
 }
 
+// Where an atom is now, in the space the camera is in
+static bool movie_atom_position(const ApplicationState* state, int32_t atom, vec3_t* out) {
+    if (atom < 0 || (size_t)atom >= state->mold.sys.atom.count || state->mold.state.num_atoms != state->mold.sys.atom.count) return false;
+    *out = mat4_mul_vec3(state->mold.unitcell_transform, state->mold.state.xyz[atom], 1.0f);
+    return true;
+}
+
+// Makes a keyframe look at an atom and track it through the trajectory. The eye stays where it is.
+static bool movie_key_look_at_atom(ApplicationState* state, int key_idx, int32_t atom) {
+    auto& m = state->movie;
+    vec3_t pos;
+    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || !movie_atom_position(state, atom, &pos)) return false;
+    CameraKeyframe& key = m.keyframes[key_idx];
+    ViewTransform t = key.transform;
+    if (!camera_aim_at(&t, pos)) return false;
+    key.transform = t;
+    key.follow = true;
+    key.follow_atom = atom;
+    key.follow_center = pos;
+    return true;
+}
+
 // How far from the camera depth of field is sharp, for a camera, from the focus mode
 static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view) {
     const auto& dof = state->visuals.dof;
@@ -6393,10 +6428,26 @@ static bool movie_keys_follow(const CameraKeyframe* keys, size_t num_keys) {
     return false;
 }
 
+static bool movie_keys_track_atoms(const CameraKeyframe* keys, size_t num_keys) {
+    for (size_t i = 0; i < num_keys; ++i) {
+        if (keys[i].follow && keys[i].follow_atom >= 0) return true;
+    }
+    return false;
+}
+
 static void movie_camera_apply(ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now) {
     ViewTransform vt;
     float fov_y;
-    camera_keyframes_evaluate(&vt, &fov_y, keys, num_keys, time, state->movie.loop, follow_now);
+    // Keys that look at an atom of their own are moved by where that atom is now. One that cannot be found stays put.
+    std::vector<vec3_t> atom_now;
+    if (movie_keys_track_atoms(keys, num_keys)) {
+        atom_now.resize(num_keys);
+        for (size_t i = 0; i < num_keys; ++i) {
+            atom_now[i] = keys[i].follow_center;
+            if (keys[i].follow && keys[i].follow_atom >= 0 ) movie_atom_position(state, keys[i].follow_atom, &atom_now[i]);
+        }
+    }
+    camera_keyframes_evaluate(&vt, &fov_y, keys, num_keys, time, state->movie.loop, follow_now, atom_now.empty() ? nullptr : atom_now.data());
     state->view.target = vt;
     state->view.camera = vt;
     state->view.camera.fov_y = fov_y;
@@ -6410,7 +6461,7 @@ static void movie_apply_time_with_keys(ApplicationState* state, double time, boo
     movie_params_apply(state, time);
     m.follow_pending = false;
     if (apply_camera && m.animate_camera && num_keys > 0) {
-        if (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask)) {
+        if (movie_keys_track_atoms(keys, num_keys) || (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask))) {
             // The target is not where it will be until the trajectory frame has been loaded, so the camera waits for that
             m.follow_keys.assign(keys, keys + num_keys);
             m.follow_time = time;
@@ -7796,40 +7847,20 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             if (ImGui::SmallButton("Go To")) movie_goto_keyframe(data, (size_t)i);
             ImGui::SetItemTooltip("Move the view to this keyframe");
             ImGui::SameLine();
-            if (ImGui::SmallButton("Pose")) ImGui::OpenPopup("##pose");
-            ImGui::SetItemTooltip("Edit where this keyframe looks from and at, in 3D");
-            if (ImGui::BeginPopup("##pose")) {
-                ImGui::Text("Keyframe %d at %.2f s", i + 1, key.time);
-                vec3_t look = camera_get_look_at(key.transform);
-                ImGui::TextDisabled("Eye (%.2f, %.2f, %.2f)", key.transform.position.x, key.transform.position.y, key.transform.position.z);
-                if (ImGui::DragFloat3("Looks at", look.elem, 0.05f, 0.0f, 0.0f, "%.2f")) {
-                    // The camera keeps its direction and distance, so the eye moves with the point
-                    key.transform.position = camera_position_from_look_at(look, key.transform.orientation, key.transform.distance);
-                }
-                float dist = key.transform.distance;
-                if (ImGui::DragFloat("Distance", &dist, 0.05f, 0.01f, 100000.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
-                    // The point it looks at stays, the eye moves along the line of sight
-                    key.transform.distance = MAX(dist, 0.01f);
-                    key.transform.position = camera_position_from_look_at(look, key.transform.orientation, key.transform.distance);
-                }
-                vec3_t center;
-                if (movie_follow_center(data, &center)) {
-                    if (ImGui::Button("Look at follow target")) {
-                        key.transform.position = camera_position_from_look_at(center, key.transform.orientation, key.transform.distance);
-                    }
-                }
-                if (data->visuals.dof.enabled) {
-                    ImGui::TextDisabled("Focus at %.2f from the eye", dof_focus_depth(data, key.transform));
-                }
-                ImGui::EndPopup();
-            }
+            const bool picking_this = m.look_pick_key == i;
+            if (ImGui::SmallButton(picking_this ? "Click atom" : "Look at")) m.look_pick_key = picking_this ? -1 : i;
+            if (key.follow && key.follow_atom >= 0) ImGui::SetItemTooltip("Looks at atom %d, tracked through the trajectory.\nClick to pick another atom in the viewport. Esc cancels.", key.follow_atom + 1);
+            else ImGui::SetItemTooltip("Click an atom in the viewport for this keyframe to look at. It is tracked through the trajectory. Esc cancels.");
             ImGui::SameLine();
-            if (ImGui::SmallButton("Update")) {
-                key.transform = data->view.target;
+            if (ImGui::SmallButton("Update position")) {
+                // The camera moves to the current view's eye, still looking at the point the keyframe looks at
+                const vec3_t look = camera_get_look_at(key.transform);
+                ViewTransform t = data->view.target;
+                if (camera_aim_at(&t, look)) key.transform = t;
                 key.fov_y = data->view.camera.fov_y;
                 if (key.use_frame) key.frame = data->animation.frame;
             }
-            ImGui::SetItemTooltip("Set this keyframe to the current view, and the current frame if it has one");
+            ImGui::SetItemTooltip("Move this keyframe's camera to the current view's position. What it looks at stays.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Dup")) dup_idx = i;
             ImGui::SetItemTooltip("Copy it to one second later");

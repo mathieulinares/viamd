@@ -61,4 +61,6 @@ struct CameraKeyframe {
     // is where the target was when the key was made, so the key's look-at is kept relative to it.
     bool   follow = false;
     vec3_t follow_center = {0, 0, 0};
+    // With follow set: the atom this key's look-at tracks. Negative means the movie's follow target.
+    int32_t follow_atom = -1;
 };

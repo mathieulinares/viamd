@@ -40,7 +40,7 @@ static bool equal(const CameraKeyframe& a, const CameraKeyframe& b) {
            a.use_frame == b.use_frame && a.frame == b.frame &&
            a.spin_turns == b.spin_turns && a.spin_axis == b.spin_axis && a.spin_constant_speed == b.spin_constant_speed &&
            a.follow == b.follow && a.follow_center.x == b.follow_center.x && a.follow_center.y == b.follow_center.y &&
-           a.follow_center.z == b.follow_center.z;
+           a.follow_center.z == b.follow_center.z && a.follow_atom == b.follow_atom;
 }
 
 static bool equal(const ParamKey& a, const ParamKey& b) {

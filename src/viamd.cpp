@@ -1674,15 +1674,20 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("ShowPath")))       viamd::extract_bool(m.show_path, arg);
                 else if (str_eq(ident, STR_LIT("Output")))         viamd::extract_enum(m.output, arg, (int)MovieOutput::Count);
                 else if (str_eq(ident, STR_LIT("Crf")))            viamd::extract_int(m.crf, arg);
-                else if (str_eq(ident, STR_LIT("Keyframe")) || str_eq(ident, STR_LIT("KeyframeV2"))) {
+                else if (str_eq(ident, STR_LIT("Keyframe")) || str_eq(ident, STR_LIT("KeyframeV2")) || str_eq(ident, STR_LIT("KeyframeV3"))) {
                     // time, fov_y, distance, position (3), orientation (4). Keyframe is what was written before there
                     // was more to a key: then use_frame, frame, spin_turns, spin_axis, spin_constant_speed and, in the
                     // latest, the ease. KeyframeV2 with one less is what was written before that.
-                    const bool v2 = str_eq(ident, STR_LIT("KeyframeV2"));
-                    float v[20] = {};
+                    const bool v3 = str_eq(ident, STR_LIT("KeyframeV3"));
+                    const bool v2 = v3 || str_eq(ident, STR_LIT("KeyframeV2"));
+                    float v[21] = {};
                     bool has_ease = false, has_follow = false;
                     bool ok = false;
-                    if (v2) {
+                    if (v3) {
+                        has_follow = viamd::extract_flt_vec(v, 21, arg);
+                        has_ease = has_follow;
+                        ok = has_follow;
+                    } else if (v2) {
                         has_follow = viamd::extract_flt_vec(v, 20, arg);
                         has_ease = has_follow || viamd::extract_flt_vec(v, 16, arg);
                         ok = has_ease || viamd::extract_flt_vec(v, 15, arg);
@@ -1709,6 +1714,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         if (has_follow) {
                             key.follow = v[16] != 0.0f;
                             key.follow_center = vec3_set(v[17], v[18], v[19]);
+                            if (v3) key.follow_atom = (int32_t)lroundf(v[20]);
                         }
                         md_array_push(m.keyframes, key, data->allocator.persistent);
                     }
@@ -2096,15 +2102,16 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
             const CameraKeyframe& k = m.keyframes[i];
-            const float v[20] = {
+            const float v[21] = {
                 (float)k.time, k.fov_y, k.transform.distance,
                 k.transform.position.x, k.transform.position.y, k.transform.position.z,
                 k.transform.orientation.x, k.transform.orientation.y, k.transform.orientation.z, k.transform.orientation.w,
                 k.use_frame ? 1.0f : 0.0f, (float)k.frame, (float)k.spin_turns, (float)(int)k.spin_axis, k.spin_constant_speed ? 1.0f : 0.0f,
                 (float)(int)k.ease,
                 k.follow ? 1.0f : 0.0f, k.follow_center.x, k.follow_center.y, k.follow_center.z,
+                (float)k.follow_atom,
             };
-            viamd::write_flt_vec(state, STR_LIT("KeyframeV2"), v, 20);
+            viamd::write_flt_vec(state, STR_LIT("KeyframeV3"), v, 21);
         }
         if (!md_bitfield_empty(&m.follow_mask)) {
             viamd::write_bitfield(state, STR_LIT("FollowTarget"), &m.follow_mask);

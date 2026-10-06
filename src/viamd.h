@@ -1166,6 +1166,7 @@ struct ApplicationState {
 
         // What 'Add Keyframe' and 'Add Orbit' make
         bool     key_includes_frame = false;
+        int      look_pick_key      = -1;   // The keyframe waiting for an atom to be clicked to look at, or -1
         int      orbit_turns        = 1;
         float    orbit_duration     = 6.0f;
         SpinAxis orbit_axis         = SpinAxis::ViewUp;
