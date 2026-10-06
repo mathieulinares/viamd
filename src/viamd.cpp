@@ -1216,6 +1216,8 @@ void movie_history_reset(ApplicationState* app) {
 }
 
 static void workspace_reset(ApplicationState* data) {
+    data->movie.show_timeline_window = false;
+    data->movie.timeline_view_duration = 0.0f;
     remove_all_selections(data);
     remove_all_representations(data);
     data->editor.SetText("");

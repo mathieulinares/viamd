@@ -479,7 +479,6 @@ int main(int argc, char** argv) {
     workspace_register_window("ScriptEditor",    &state.show_script_window);
     workspace_register_window("Animation",       &state.animation.show_window);
     workspace_register_window("Movie",           &state.movie.show_window);
-    workspace_register_window("MovieTimeline",   &state.movie.show_timeline_window);
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdInitialize, viamd::EventPayloadType_ApplicationState, &state);
 
@@ -7313,8 +7312,9 @@ static bool movie_draw_timeline_markers(ApplicationState* data) {
     return hovered_key >= 0;
 }
 
-// Time along the movie with the keyframes on it, which can be dragged in time. The curves show what the
-// camera does between them: the distance to what it looks at and the field of view, each scaled to fit.
+static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool locked);
+
+// Subplots align the time axes and provide draggable row splitters.
 static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
     auto& m = data->movie;
     if (movie_len <= 0.0f) return;
@@ -7326,58 +7326,64 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 
     constexpr int N = 200;
     float xs[N], dist[N], fov[N];
-    float d_lo = FLT_MAX, d_hi = -FLT_MAX, f_lo = FLT_MAX, f_hi = -FLT_MAX;
-    if (n > 0) {
-        for (int i = 0; i < N; ++i) {
+    char distance_unit[32], distance_axis[64];
+    const double distance_scale = display_units::factor_print(distance_unit, sizeof(distance_unit), md_unit_angstrom());
+    snprintf(distance_axis, sizeof(distance_axis), "Distance (%s)", distance_unit);
+    for (int i = 0; i < N; ++i) {
+        xs[i] = movie_len * (float)i / (float)(N - 1);
+        if (n > 0) {
             ViewTransform vt;
             float fov_y;
-            const double t = (double)movie_len * (double)i / (double)(N - 1);
+            const double t = xs[i];
             camera_keyframes_evaluate(&vt, &fov_y, sorted.data(), n, t, m.loop);
-            xs[i] = (float)t;
-            dist[i] = vt.distance;
+            dist[i] = (float)(vt.distance * distance_scale);
             fov[i] = fov_y * MOVIE_RAD_TO_DEG;
-            d_lo = MIN(d_lo, dist[i]); d_hi = MAX(d_hi, dist[i]);
-            f_lo = MIN(f_lo, fov[i]);  f_hi = MAX(f_hi, fov[i]);
+        } else {
+            dist[i] = (float)(data->view.camera.distance * distance_scale);
+            fov[i] = data->view.camera.fov_y * MOVIE_RAD_TO_DEG;
         }
-    }
-    auto norm = [](float v, float lo, float hi) { return hi - lo > 1.0e-6f ? 0.15f + 0.7f * CLAMP((v - lo) / (hi - lo), 0.0f, 1.0f) : 0.5f; };
-    for (int i = 0; i < N && n > 0; ++i) {
-        dist[i] = norm(dist[i], d_lo, d_hi);
-        fov[i]  = norm(fov[i], f_lo, f_hi);
     }
 
     // The trajectory frame over the movie, against the whole trajectory (not scaled to fit, so that a point
     // can be dragged to a frame)
     const double last_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
-    const double frame_scale = last_frame > 0.0 ? last_frame : 1.0;
-    float tx[N], frm[N];
+    float frm[N];
     for (int i = 0; i < N; ++i) {
         const double t = (double)movie_len * (double)i / (double)(N - 1);
-        tx[i] = (float)t;
-        frm[i] = 0.15f + 0.7f * (float)(movie_trajectory_frame(data, t) / frame_scale);
+        frm[i] = (float)movie_trajectory_frame(data, t);
     }
     const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
     static bool resort_pending = false;
 
-    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle;
-    if (ImPlot::BeginPlot("##movie_strip", size, plot_flags)) {
-        ImPlot::SetupAxes("Movie time (s)", nullptr, ImPlotAxisFlags_Lock, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations);
-        ImPlot::SetupAxisLimits(ImAxis_X1, -0.03 * movie_len, 1.03 * movie_len, ImPlotCond_Always);
-        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.12, 1.15, ImPlotCond_Always);
-        ImPlot::SetupLegend(ImPlotLocation_North, ImPlotLegendFlags_Outside | ImPlotLegendFlags_Horizontal);
+    const char* titles[3] = {"Trajectory", "Camera distance", "Field of view"};
+    const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
+    const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
+    int rows = 0;
+    float ratios[4];
+    for (int track = 0; track < 3; ++track) {
+        if (m.timeline_tracks[track]) ratios[rows++] = m.timeline_row_ratios[track];
+    }
+    ratios[rows++] = m.timeline_row_ratios[3];
+    const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
+    if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
+      for (int track = 0; track < 3; ++track) {
+        if (!m.timeline_tracks[track]) continue;
+        if (!ImPlot::BeginPlot(titles[track], ImVec2(-1, -1), plot_flags)) continue;
+        ImPlot::SetupAxes(nullptr, axes[track]);
+        ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
+        const float* values = track == 0 ? frm : track == 1 ? dist : fov;
+        double lo = values[0], hi = values[0];
+        for (int i = 1; i < N; ++i) {
+            lo = MIN(lo, (double)values[i]);
+            hi = MAX(hi, (double)values[i]);
+        }
+        const double padding = MAX((hi - lo) * 0.08, MAX(fabs(hi) * 0.05, 1.0e-3));
+        ImPlot::SetupAxisLimits(ImAxis_Y1, lo - padding, hi + padding, ImPlotCond_Once);
 
         bool anchors_held = false;
-        {
-            // Where the trajectory plays, between its two anchors, which can be dragged in time
+        if (track == 0) {
             const double tb = (double)m.traj_begin;
             const double te = (double)m.traj_end;
-            const ImVec2 p0 = ImPlot::PlotToPixels(tb, -0.12);
-            const ImVec2 p1 = ImPlot::PlotToPixels(MAX(te, tb), 0.0);
-            ImPlot::PushPlotClipRect();
-            ImPlot::GetPlotDrawList()->AddRectFilled(p0, ImVec2(MAX(p1.x, p0.x + 1.0f), p1.y), IM_COL32(90, 160, 255, 90));
-            ImPlot::PopPlotClipRect();
-            const bool held = m.start_frame == m.end_frame;
-            ImPlot::PlotText(held ? "trajectory (held)" : "trajectory", 0.5 * (tb + te), -0.06);
 
             const ImVec4 anchor_col(0.3f, 0.6f, 1.0f, 1.0f);
             double ab = tb, ae = te;
@@ -7392,38 +7398,25 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             }
             if (hov && !hld) ImGui::SetTooltip("Trajectory ends at frame %.0f, at %.2f s\nDrag to change when. After it, the trajectory is held.", m.end_frame, m.traj_end);
             anchors_held |= hld;
+            ImPlot::PlotText("Start", m.traj_begin, m.start_frame, ImVec2(16, -12));
+            ImPlot::PlotText("End", m.traj_end, m.end_frame, ImVec2(-16, -12));
         }
 
-        ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.4f, 0.9f, 0.4f, 1.0f));
-        ImPlot::PlotLine("Trajectory frame", tx, frm, N);
+        ImPlot::PushStyleColor(ImPlotCol_Line, colors[track]);
+        ImPlot::PlotLine(titles[track], xs, track == 0 ? frm : track == 1 ? dist : fov, N);
         ImPlot::PopStyleColor();
-
-        if (!m.param_keys.empty()) {
-            // Where look parameters have keys, they are edited in the table below
-            std::vector<float> px(m.param_keys.size()), py(m.param_keys.size(), -0.05f);
-            for (size_t i = 0; i < m.param_keys.size(); ++i) px[i] = (float)m.param_keys[i].time;
-            ImPlot::SetNextMarkerStyle(ImPlotMarker_Square, 5.0f, ImVec4(0.75f, 0.5f, 1.0f, 1.0f));
-            ImPlot::PlotScatter("Look parameters", px.data(), py.data(), (int)px.size());
-        }
-
-        if (n >= 2) {
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.35f, 0.8f, 1.0f, 1.0f));
-            ImPlot::PlotLine("Distance", xs, dist, N);
-            ImPlot::PopStyleColor();
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1.0f, 0.8f, 0.25f, 1.0f));
-            ImPlot::PlotLine("Field of view", xs, fov, N);
-            ImPlot::PopStyleColor();
-        }
 
         bool any_moved = false;
         bool any_held = false;
         for (size_t i = 0; i < n; ++i) {
             CameraKeyframe& key = m.keyframes[i];
+            if (track == 0 && !key.use_frame) continue;
             double x = key.time;
-            double y = n >= 2 ? norm(key.transform.distance, d_lo, d_hi) : 0.5;
+            double y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
             bool hovered = false, held = false;
             if (ImPlot::DragPoint(2000 + (int)i, &x, &y, ImVec4(1.0f, 0.45f, 0.15f, 1.0f), 7.0f, drag_flags, nullptr, &hovered, &held)) {
                 key.time = CLAMP(x, 0.0, (double)movie_len);
+                if (track == 0) key.frame = CLAMP(y, 0.0, last_frame);
                 any_moved = true;
             }
             if (held && !locked) {
@@ -7432,28 +7425,11 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             }
             char label[16];
             snprintf(label, sizeof(label), "%d", (int)i + 1);
-            ImPlot::PlotText(label, key.time, y, ImVec2(0, -14));
+            const double key_y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
+            ImPlot::PlotText(label, key.time, key_y, ImVec2(0, -14));
             if (hovered && !held) {
-                ImGui::SetTooltip("Keyframe %d\n%.2f s\nDrag to change its time", (int)i + 1, key.time);
-            }
-
-            if (key.use_frame) {
-                // Where the trajectory is at this key: drag up and down for the frame, sideways for the time
-                double fx = key.time;
-                double fy = 0.15 + 0.7 * CLAMP(key.frame / frame_scale, 0.0, 1.0);
-                bool fhovered = false, fheld = false;
-                if (ImPlot::DragPoint(3000 + (int)i, &fx, &fy, ImVec4(0.4f, 0.9f, 0.4f, 1.0f), 6.0f, drag_flags, nullptr, &fhovered, &fheld)) {
-                    key.time = CLAMP(fx, 0.0, (double)movie_len);
-                    key.frame = CLAMP((fy - 0.15) / 0.7 * frame_scale, 0.0, last_frame);
-                    any_moved = true;
-                }
-                if (fheld && !locked) {
-                    any_held = true;
-                    m.playhead = (float)key.time;
-                }
-                if (fhovered && !fheld) {
-                    ImGui::SetTooltip("Keyframe %d shows frame %.0f at %.2f s\nDrag up and down to change the frame", (int)i + 1, key.frame, key.time);
-                }
+                ImGui::SetTooltip("Keyframe %d: %.2f s\n%s: %.2f\n%s", (int)i + 1, key.time, axes[track], key_y,
+                    track == 0 ? "Drag sideways for time, vertically for frame" : "Drag sideways to change time; value is read-only here");
             }
         }
 
@@ -7470,10 +7446,22 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 
         ImPlot::EndPlot();
 
+        if (any_moved) {
+            sorted.assign(m.keyframes, m.keyframes + n);
+            std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+        }
         if (any_held || anchors_held) {
             movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
         }
         if (any_moved) resort_pending = true;
+      }
+      draw_movie_param_lane(data, movie_len, locked);
+      ImPlot::EndSubplots();
+      int row = 0;
+      for (int track = 0; track < 3; ++track) {
+          if (m.timeline_tracks[track]) m.timeline_row_ratios[track] = ratios[row++];
+      }
+      m.timeline_row_ratios[3] = ratios[row];
     }
     if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         movie_sort_keyframes(data);
@@ -7489,16 +7477,6 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
     const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
     const MovieParamDesc& d = movie_param_table[m.param_selected];
-
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
-    if (ImGui::BeginCombo("##lane_param", d.label)) {
-        for (int i = 0; i < num_params; ++i) {
-            if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("Double click to add a key. Drag a key to change it, right click to remove it.");
 
     std::vector<int> mine;
     for (int i = 0; i < (int)m.param_keys.size(); ++i) {
@@ -7526,8 +7504,8 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
 
     const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
     if (ImPlot::BeginPlot("##param_lane", ImVec2(-1, -1), plot_flags)) {
-        ImPlot::SetupAxes("Movie time (s)", d.color ? nullptr : d.label, ImPlotAxisFlags_Lock, ImPlotAxisFlags_Lock | (d.color ? ImPlotAxisFlags_NoDecorations : 0));
-        ImPlot::SetupAxisLimits(ImAxis_X1, -0.03 * movie_len, 1.03 * movie_len, ImPlotCond_Always);
+        ImPlot::SetupAxes("Movie time (s)", d.color ? nullptr : d.label, 0, ImPlotAxisFlags_Lock | (d.color ? ImPlotAxisFlags_NoDecorations : 0));
+        ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         if (d.color) {
             ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 1.0, ImPlotCond_Always);
         } else if (d.log) {
@@ -7623,13 +7601,12 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
     }
 }
 
-// The timeline of the movie in a window of its own, to be docked wide: the camera and the trajectory
-// frame on top, one look parameter below.
+// The timeline of the movie: trajectory, distance, field of view and a look parameter.
 static void draw_movie_timeline_window(ApplicationState* data) {
     auto& m = data->movie;
     const bool recording = m.state == MovieRecordingState::Recording;
 
-    ImGui::SetNextWindowSize(ImVec2(960, 460), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(960, 760), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Movie Timeline", &m.show_timeline_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
         ImGui::End();
         return;
@@ -7666,9 +7643,32 @@ static void draw_movie_timeline_window(ApplicationState* data) {
         return;
     }
 
-    const float avail = ImGui::GetContentRegionAvail().y;
-    draw_movie_strip(data, movie_len, recording, ImVec2(-1, MAX(avail * 0.58f, fs * 8.0f)));
-    draw_movie_param_lane(data, movie_len, recording);
+    if (m.timeline_view_duration != movie_len) {
+        m.timeline_view_begin = -0.03 * movie_len;
+        m.timeline_view_end = 1.03 * movie_len;
+        m.timeline_view_duration = movie_len;
+    }
+    const char* track_names[3] = {"Trajectory", "Distance", "Field of view"};
+    for (int track = 0; track < 3; ++track) {
+        if (track > 0) ImGui::SameLine();
+        ImGui::Checkbox(track_names[track], &m.timeline_tracks[track]);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Show whole movie")) {
+        m.timeline_view_begin = -0.03 * movie_len;
+        m.timeline_view_end = 1.03 * movie_len;
+    }
+    const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
+    m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
+    ImGui::SetNextItemWidth(fs * 14.0f);
+    if (ImGui::BeginCombo("Look parameter", movie_param_table[m.param_selected].label)) {
+        for (int i = 0; i < num_params; ++i) {
+            if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::TextDisabled("Drag between tracks to resize. Parameter keys: double-click to add, right-click to remove.");
+    draw_movie_strip(data, movie_len, recording, ImVec2(-1, MAX(ImGui::GetContentRegionAvail().y, fs * 12.0f)));
 
     ImGui::End();
 }
@@ -8105,9 +8105,6 @@ static void draw_movie_window(ApplicationState* data) {
     ImGui::SetItemTooltip("Ctrl+Y or Ctrl+Shift+Z");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::Checkbox("Timeline window", &m.show_timeline_window);
-    ImGui::SetItemTooltip("The timeline with the keyframes and the look parameters, which can be dragged. Dock it wide, below the viewport.");
 
     ImGui::BeginDisabled(recording);
 

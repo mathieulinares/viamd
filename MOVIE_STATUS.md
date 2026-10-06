@@ -29,7 +29,7 @@ Branch: `video`. Last commit at the time of writing: `dbbea164`. Nothing is push
 4. Keyframe table: rows are reordered by dragging the number (times stay with their places in the list).
 5. Trajectory can play backward, both with frame keys (a key with a lower frame than the previous) and with a start frame after the end frame.
 7. Depth of field focus is separate from the camera distance: Settings > Depth of Field > Focus is "Look-at point" (as before), "Distance" (a number, keyable as the parameter "Focus distance") or "Follow target" (the middle of the follow target, wherever the camera looks). The keyframe table has a "Pose" popup to edit where a key looks at and its distance in 3D, a readout of eye / look-at / distance / focus at the preview time, and the viewport shows the focus plane (magenta). Workspace: `DofFocusMode`, `DofFocusDistance`.
-6. Timeline in its own window, legend outside the plot, look parameter lane with draggable keys.
+6. Movie Timeline opens explicitly from the window menu and stays closed on startup/workspace load. Aligned, height-resizable tracks show trajectory frames, camera distance (in the preferred length unit), field of view (degrees), and a selected look parameter. Time zoom/pan and the playhead are shared. Camera tracks can be hidden; distance/FOV markers edit timing only. The old shaded trajectory band is removed; labelled start/end anchors remain in the trajectory track.
 8. Movie length is set explicitly. The trajectory defaults to filling it; movable blue start/end anchors allow a still-frame fly-over before playback and a hold afterward. Camera keyframes with trajectory frames bend the speed between the anchors. Changing the length scales camera/parameter key times, anchors, overlays and fades, and the playhead; frame values and spin counts stay unchanged. Timing and overlays participate in undo/redo. Old workspace timing is migrated on load; new files store `Timeline=2` instead of `DurationAuto`.
 
 ## Untested in the GUI
@@ -40,6 +40,7 @@ Branch: `video`. Last commit at the time of writing: `dbbea164`. Nothing is push
 - Movie timing: drag the blue anchors, set trajectory frames on camera keys, then double the movie length and verify the same pacing at half speed. Check undo/redo restores overlay timing too.
 - Backward trajectory: a reversed frame range and reversed frame keys.
 - Drag and drop reordering of keyframe rows.
+- Timeline GUI: verify linked time zoom/pan, row resizing, hiding tracks, frame-pin dragging and read-only distance/FOV values. Load a workspace with `MovieTimeline=1` and verify it stays closed, then open it from the window menu.
 
 ## Known limits
 

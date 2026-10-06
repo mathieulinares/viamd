@@ -1081,7 +1081,12 @@ struct ApplicationState {
     // --- MOVIE RECORDING ---
     struct {
         bool  show_window = false;
-        bool  show_timeline_window = true;   // The timeline of the movie, in a window of its own
+        bool  show_timeline_window = false;  // Opened explicitly from the window menu
+        bool  timeline_tracks[3] = {true, true, true};
+        float timeline_row_ratios[4] = {1, 1, 1, 1};
+        double timeline_view_begin = 0.0;
+        double timeline_view_end = 0.0;
+        float timeline_view_duration = 0.0f;
         bool  show_path   = true;    // Draw the camera path and keyframes in the viewport
 
         MovieRecordingState state = MovieRecordingState::Idle;
