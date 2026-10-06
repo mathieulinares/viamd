@@ -34,10 +34,17 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - The way into each key can be set per key: Smooth, Ease in/out, Linear or Hold.
 - **Look at**: click the button, then click an atom, and the key looks at that atom and tracks it through the trajectory. **Update position** moves the key's eye and keeps what it looks at.
 - Extra spin turns per key, Add Orbit, a seamless loop with Close Loop, a follow target (centre of a selection), and drag-to-reorder rows.
+- **Key on Selection** adds a key that frames the selected atoms. Keys can be copied and pasted at the preview time.
+- **Snap to frames**: dragged times land on a frame of the movie.
 - The camera path and the camera at each key can be drawn in the viewport.
 
 **Look parameters**
 - These can be keyed over time: background colour and intensity, ambient occlusion and its radius, exposure, depth of field blur, near and far clipping, and focus distance.
+
+**Representation keys**
+- Show or hide a representation at a time (changes at its keys), and key its scales, tint scale and saturation (smooth between keys).
+- Representations now have a stable `id` (saved in the workspace, never reused), which keys refer to, so reordering, duplicating or removing representations does not break them. Removing one removes its keys.
+- The Representations window is locked while a recording is running.
 
 **Depth of field**
 - New focus modes: look-at point (the previous behaviour), a fixed distance that can be keyed, or the follow target.
@@ -68,12 +75,12 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 ### Tests
 New tests are in:
 - `test_camera_utils`: interpolation, easing, spin, loop, follow and anchors.
-- `test_movie_keys`: scaling and undo, render range, frame scaling, time left.
+- `test_movie_keys`: scaling and undo, render range, frame scaling, time left, snapping, representation keys.
 - `test_frame_sink`.
 - `test_movie_overlay`.
 - `test_serialization`.
 
-All 102 tests pass in a Release build on Linux.
+All 106 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and MP4s on Linux.

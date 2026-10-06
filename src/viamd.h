@@ -868,6 +868,7 @@ struct DipoleRepresentation {
 };
 
 struct Representation {
+    uint32_t id = 0;                  // Never changes and is not reused, unlike the place in the list
     char name[64] = "rep";
     char filt[256] = "all";
     char filt_error[256] = "";
@@ -1170,6 +1171,13 @@ struct ApplicationState {
         float param_saved[MOVIE_MAX_PARAMS][3] = {};
         bool  param_saved_valid[MOVIE_MAX_PARAMS] = {};
 
+        // Properties of representations keyed over time (shown or hidden, scale, tint), by the id of the representation
+        struct RepSaved { uint32_t rep; int prop; float value; };
+        std::vector<RepKey> rep_keys;
+        std::vector<RepSaved> rep_saved;      // What they were before the keys took hold of them, put back when they let go
+        int rep_selected = 0;                 // Index in representation.reps, what 'Key Now' keys
+        int rep_prop_selected = 0;            // A RepProp
+
         MovieHistory history;
 
         // Text, a time stamp and a scale bar on the frames, and in the viewport while the movie is not recording
@@ -1182,6 +1190,9 @@ struct ApplicationState {
 
         // What 'Add Keyframe' and 'Add Orbit' make
         bool     key_includes_frame = false;
+        bool     snap_frames        = true;   // Times dragged on the timeline land on frames of the movie
+        CameraKeyframe key_clipboard = {};    // Copied with 'Copy' in the keyframe table, put in with 'Paste'
+        bool     has_key_clipboard  = false;
         int      look_pick_key      = -1;   // The keyframe waiting for an atom to be clicked to look at, or -1
         int      orbit_turns        = 1;
         float    orbit_duration     = 6.0f;
@@ -1475,6 +1486,7 @@ struct ApplicationState {
     // --- REPRESENTATIONS ---
     struct {
         md_array(Representation) reps = 0;
+        uint32_t next_id = 1;                 // For the next representation: ids are never reused, so keys can refer to them
         md_bitfield_t visibility_mask = {0};
         uint64_t visibility_mask_hash = 0;
         bool atom_visibility_mask_dirty = false;

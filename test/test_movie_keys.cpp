@@ -329,3 +329,69 @@ UTEST(viamd_movie_keys, time_left_follows_the_pace_so_far) {
     ASSERT_TRUE(movie_time_left(100, 100, 50.0, &s));
     EXPECT_NEAR(0.0, s, 1.0e-12);
 }
+
+UTEST(viamd_movie_keys, a_time_snaps_to_the_nearest_frame_inside_the_movie) {
+    EXPECT_NEAR(24.0 / 24.0, movie_snap_to_frame(1.0 + 0.4 / 24.0, 24.0, 5.0), 1.0e-9);
+    EXPECT_NEAR(25.0 / 24.0, movie_snap_to_frame(1.0 + 0.6 / 24.0, 24.0, 5.0), 1.0e-9);
+    EXPECT_NEAR(0.0, movie_snap_to_frame(-3.0, 24.0, 5.0), 1.0e-12);
+    EXPECT_NEAR(5.0, movie_snap_to_frame(9.0, 24.0, 5.0), 1.0e-12);
+    /* A length that is not a whole number of frames: the end is the length, not a frame past it */
+    EXPECT_NEAR(5.01, movie_snap_to_frame(5.2, 10.0, 5.01), 1.0e-12);
+}
+
+/* Keys of properties of representations */
+
+static RepKey rk(uint32_t rep, RepProp prop, double time, float value, KeyEase ease = KeyEase::Smooth) {
+    RepKey k;
+    k.rep = rep;
+    k.prop = (int)prop;
+    k.time = time;
+    k.value = value;
+    k.ease = ease;
+    return k;
+}
+
+UTEST(viamd_movie_keys, rep_keys_follow_their_own_representation_and_property) {
+    const RepKey keys[] = {
+        rk(1, RepProp::Scale0, 0.0, 1.0f, KeyEase::Linear), rk(1, RepProp::Scale0, 4.0, 3.0f, KeyEase::Linear),
+        rk(2, RepProp::Scale0, 0.0, 10.0f), rk(1, RepProp::Saturation, 0.0, 0.5f),
+    };
+    float v = 0.0f;
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 4, 1, (int)RepProp::Scale0, 2.0));
+    EXPECT_NEAR(2.0f, v, 1.0e-6f);
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 4, 2, (int)RepProp::Scale0, 2.0));
+    EXPECT_NEAR(10.0f, v, 1.0e-6f);
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 4, 1, (int)RepProp::Saturation, 9.0));
+    EXPECT_NEAR(0.5f, v, 1.0e-6f);
+    EXPECT_FALSE(rep_keys_evaluate(&v, keys, 4, 3, (int)RepProp::Scale0, 2.0));
+    EXPECT_FALSE(rep_keys_evaluate(&v, keys, 4, 1, (int)RepProp::TintScale, 2.0));
+}
+
+UTEST(viamd_movie_keys, a_visible_key_changes_at_its_key_and_is_not_blended) {
+    /* Even with a smooth ease on the keys: shown, hidden at 2 s, shown again at 4 s */
+    const RepKey keys[] = {
+        rk(1, RepProp::Visible, 4.0, 1.0f), rk(1, RepProp::Visible, 0.0, 1.0f), rk(1, RepProp::Visible, 2.0, 0.0f),
+    };
+    float v = -1.0f;
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 3, 1, (int)RepProp::Visible, 1.99));
+    EXPECT_NEAR(1.0f, v, 1.0e-6f);
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 3, 1, (int)RepProp::Visible, 2.0));
+    EXPECT_NEAR(0.0f, v, 1.0e-6f);
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 3, 1, (int)RepProp::Visible, 3.99));
+    EXPECT_NEAR(0.0f, v, 1.0e-6f);
+    ASSERT_TRUE(rep_keys_evaluate(&v, keys, 3, 1, (int)RepProp::Visible, 4.0));
+    EXPECT_NEAR(1.0f, v, 1.0e-6f);
+}
+
+UTEST(viamd_movie_keys, rep_keys_are_part_of_the_undo_state_and_scale_with_time) {
+    MovieKeys a, b;
+    a.reps.push_back(rk(1, RepProp::Scale0, 2.0, 1.0f));
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    b.reps.push_back(rk(1, RepProp::Scale0, 2.0, 1.0f));
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    b.reps[0].rep = 2;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+
+    movie_keys_scale_time(&a, 2.0);
+    EXPECT_NEAR(4.0, a.reps[0].time, 1.0e-12);
+}

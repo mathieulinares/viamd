@@ -5,7 +5,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 ## How to build and test
 
 - Build: `cmake --build build --target viamd -j8` and `--target viamd_test`
-- Tests: `./build/bin/viamd_test` (102 tests, all passing in a Release build)
+- Tests: `./build/bin/viamd_test` (106 tests, all passing in a Release build)
 - ffmpeg is not installed in the dev environment; the frame sink tests use a fake script.
 - The GUI could not be run while the code was written, so everything under "Untested in the GUI" needs a manual check.
 
@@ -14,11 +14,11 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Movie window, timeline window, recording, preview, overlay drawing: `src/main.cpp` (`draw_movie_window`, `draw_movie_strip`, `movie_*`)
 - Movie state: `src/viamd.h` (`ApplicationState::movie`)
 - Async frame writer: `src/frame_sink.{h,cpp}`
-- Keyed look parameters, undo history, render range, frame scaling, time left: `src/movie_keys.{h,cpp}`
+- Keyed look parameters and representation keys, undo history, render range, frame scaling, snapping, time left: `src/movie_keys.{h,cpp}`
 - Overlay maths (fade, scale bar): `src/movie_overlay.{h,cpp}`
 - Camera path evaluation: `src/gfx/camera_utils.{h,cpp}`
-- Workspace save/load: `src/viamd.cpp` (`[Movie]`, `[MovieOverlay]` sections)
-- Parameter ids in `movie_param_table` (main.cpp) are saved in workspaces: never renumber, add at the end.
+- Workspace save/load: `src/viamd.cpp` (`[Movie]`, `[MovieOverlay]`, `[Representation]` sections)
+- Parameter ids in `movie_param_table` (main.cpp) and the numbers of `RepProp` (movie_keys.h) are saved in workspaces: never renumber, add at the end.
 
 ## Done
 
@@ -29,13 +29,19 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Keyframe table: resizable and scrollable, rows reordered by dragging their number.
 - Trajectory can play backward, with frame keys or with a start frame after the end frame.
 - Movie length is the master value; movable trajectory start/end anchors; old workspaces are migrated (`Timeline=2`).
-- Movie Timeline window with aligned tracks and real axes, opened from the Windows menu.
-- Render ergonomics (plan item 4): frame **Scale**, **Samples per frame**, **Render only a range** (PNG numbers stay those of the whole movie), **Pause/Resume**, time-left estimate, optional workspace copy next to the movie (`prefix.via`).
-- Settings for the above are saved in the workspace (`ResScale`, `AaSamples`, `SaveCopy`, `RenderRange`).
-- The face-on default view test now uses realistic (slightly jittered) coordinates; see "Known limits".
+- Movie Timeline window with aligned tracks and real axes, linked zoom and pan, opened from the Windows menu.
+- Render ergonomics: frame **Scale**, **Samples per frame**, **Render only a range**, **Pause/Resume**, time-left estimate, optional workspace copy next to the movie.
+- Strip comfort (plan item 5): **Snap to frames** for dragged times, **Copy** / **Paste Keyframe**, **Key on Selection** (frames the selected atoms, periodic images placed together).
+- Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (held, changes at the key), the scales, **Tint scale** and **Saturation**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
+- The Representations window is locked while recording (the cheap form of plan item 7).
 
 ## Untested in the GUI
 
+- Representation keys: key Visible at two times and scrub/preview; key a scale and a saturation; remove a representation that has keys; duplicate one (the copy must not share keys); save and reload a workspace (ids and keys survive, an old workspace without ids still loads and keys can be added); the values must go back after a recording.
+- Key on Selection: select a molecule split over the periodic boundary and check it is framed whole; check the result with another viewing direction.
+- Snap to frames: drag keys, anchors and the playhead; add a key with the playhead between frames; Add Orbit with snapping on (the orbit's end key must be where expected).
+- Copy / Paste Keyframe (a pasted key replaces one at the same time, and keeps its spin, ease and follow settings).
+- Representations window while recording: locked, and unlocked afterwards.
 - Render ergonomics: Pause/Resume (the recording must carry on from the same frame, with no duplicate), a range recording (PNG numbers and the MP4 length), Scale 25 % (frame size even, overlays scale), Samples per frame, the time-left estimate, and the workspace copy (the open workspace's name must not change).
 - Follow target and Look at atom: the camera tracks them through the trajectory; loading an old workspace still works.
 - Overlays in a recorded video: they are drawn through ImGui's OpenGL backend straight into the G-buffer before read back. Check that text and bar appear, are not upside down, and fade correctly, also with more than one sample per frame.
@@ -46,6 +52,9 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 
 ## Known limits
 
+- Representation keys are edited in a table in the Movie window; they are not on the timeline tracks. Only the properties listed above can be keyed: not the type, filter, colour mapping, base colour or the electronic structure settings (those cannot be blended, or are expensive to redo every frame).
+- Tint scale and saturation recolor the atoms of the representation every frame while they change: slow for very large systems.
+- Representation ids are assigned in the order they are created; a workspace written before they existed gets ids on load.
 - An existing keyframe cannot be switched to follow the target; add a new key at the same time with the option on (it replaces the old one).
 - The camera path drawn in the viewport does not show the follow motion.
 - The follow target itself is not part of undo.
@@ -55,24 +64,12 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
 - Distance and field of view can only be moved in time on the timeline; their values are edited in the table or the viewport.
 
-## Still to do (agreed plan order)
+## Still to do
 
-Plan item 4 (render ergonomics) is done apart from optional output formats and a separate settings file (the workspace copy covers reproducing a render).
-
-- Optional: H.265 and WebM presets, transparent background (lowest value for MD movies).
-
-5. Strip comfort
-   - Zoom and pan on the strip (the Movie Timeline window has linked zoom and pan; check whether anything is left for the old strip)
-   - Snap to output frames
-   - Copy and paste of keys
-   - "Fly to current selection" button that adds a key framing the selection
-6. Representation keys (hardest, do last)
-   - Stable representation ids first (representations only have an array index today)
-   - Keyed values reuse the keyed-parameter machinery; discrete changes (type, filter) cannot be interpolated
-   - Decide how manual edits in the Representations window interact with keys during recording
-   - Cost: recolouring per frame can be heavy on large systems
-7. Scene lock during recording
-   - Cheap option: lock the Representations window while recording. The real fix (editing during a recording) is large.
+- Plan item 7, the real fix: allow editing representations during a recording (large; the lock covers the need for now).
+- Optional output: H.265 and WebM presets, transparent background (lowest value for MD movies).
+- Representation keys on the timeline (a lane like the look parameter one), and keys for colours (base colour, tint colour).
+- Keyboard shortcuts for copy and paste of keys.
 
 ## Ideas not yet planned
 

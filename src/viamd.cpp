@@ -1185,6 +1185,7 @@ MovieKeys movie_keys_snapshot(const ApplicationState* app) {
     const CameraKeyframe* keys = app->movie.keyframes;
     k.camera.assign(keys, keys + md_array_size(app->movie.keyframes));
     k.params = app->movie.param_keys;
+    k.reps = app->movie.rep_keys;
     k.overlays = app->movie.overlays;
     k.loop = app->movie.loop;
     k.duration = app->movie.duration;
@@ -1202,6 +1203,7 @@ void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
         md_array_push(m.keyframes, k, app->allocator.persistent);
     }
     m.param_keys = keys.params;
+    m.rep_keys = keys.reps;
     m.overlays = keys.overlays;
     m.loop = keys.loop;
     m.duration = keys.duration;
@@ -1266,6 +1268,8 @@ static void workspace_reset(ApplicationState* data) {
         m.res_scale = 100;
         m.aa_samples = 0;
         m.save_copy = true;
+        m.snap_frames = true;
+        m.has_key_clipboard = false;
         m.range_enabled = false;
         m.range_begin = 0.0f;
         m.range_end = 0.0f;
@@ -1273,6 +1277,8 @@ static void workspace_reset(ApplicationState* data) {
         m.loop = false;
         m.animate_params = true;
         m.param_keys.clear();
+        m.rep_keys.clear();
+        m.rep_saved.clear();
         m.overlays.clear();
         md_bitfield_clear(&m.follow_mask);
         m.key_follow = false;
@@ -1322,6 +1328,9 @@ static void deserialize_representation(ApplicationState* data, viamd::deserializ
     while (viamd::next_entry(ident, arg, state)) {
         if (str_eq(ident, STR_LIT("Name"))) {
             viamd::extract_to_char_buf(rep->name, sizeof(rep->name), arg);
+        } else if (str_eq(ident, STR_LIT("Id"))) {
+            int id;
+            if (viamd::extract_int(id, arg) && id > 0) rep->id = (uint32_t)id;
         } else if (str_eq(ident, STR_LIT("Filter"))) {
             viamd::extract_to_char_buf(rep->filt, sizeof(rep->filt), arg);
         } else if (str_eq(ident, STR_LIT("Enabled"))) {
@@ -1473,6 +1482,7 @@ static void serialize_representation(viamd::serialization_state_t& state, const 
     const md_attributes_t* attributes = &app_state->mold.sys.attributes;
 
     viamd::write_section_header(state, STR_LIT("Representation"));
+    viamd::write_int(state,  STR_LIT("Id"), (int)rep.id);
     viamd::write_str(state,  STR_LIT("Name"), str_from_cstr(rep.name));
     viamd::write_str(state,  STR_LIT("Filter"), str_from_cstr(rep.filt));
     viamd::write_bool(state, STR_LIT("Enabled"), rep.enabled);
@@ -1702,6 +1712,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("ResScale")))       viamd::extract_int(m.res_scale, arg);
                 else if (str_eq(ident, STR_LIT("AaSamples")))      viamd::extract_int(m.aa_samples, arg);
                 else if (str_eq(ident, STR_LIT("SaveCopy")))       viamd::extract_bool(m.save_copy, arg);
+                else if (str_eq(ident, STR_LIT("SnapFrames")))     viamd::extract_bool(m.snap_frames, arg);
                 else if (str_eq(ident, STR_LIT("RenderRange"))) {
                     float r[3];
                     if (viamd::extract_flt_vec(r, 3, arg)) {
@@ -1758,6 +1769,19 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Loop")))          viamd::extract_bool(m.loop, arg);
                 else if (str_eq(ident, STR_LIT("FollowTarget")))  pending.has_follow_target = deserialize_mask(&pending.follow_target, arg);
                 else if (str_eq(ident, STR_LIT("AnimateParams"))) viamd::extract_bool(m.animate_params, arg);
+                else if (str_eq(ident, STR_LIT("RepKey"))) {
+                    // representation id, property, time, value, ease
+                    float v[5];
+                    if (viamd::extract_flt_vec(v, 5, arg)) {
+                        RepKey key;
+                        key.rep = (uint32_t)MAX(lroundf(v[0]), 0L);
+                        key.prop = (int)lroundf(v[1]);
+                        key.time = v[2];
+                        key.value = v[3];
+                        key.ease = (KeyEase)CLAMP((int)lroundf(v[4]), 0, (int)KeyEase::Count - 1);
+                        if (key.rep > 0 && 0 <= key.prop && key.prop < (int)RepProp::Count) m.rep_keys.push_back(key);
+                    }
+                }
                 else if (str_eq(ident, STR_LIT("ParamKey"))) {
                     // parameter, time, value (3), ease
                     float v[6];
@@ -1912,6 +1936,16 @@ void load_workspace(ApplicationState* data, str_t filename) {
     }
 
     // ## 3. Load the files, then apply what refers to them
+    {
+        // Representations from before they had ids get one, and no two share one
+        auto& reps = data->representation;
+        for (size_t i = 0; i < md_array_size(reps.reps); ++i) reps.next_id = MAX(reps.next_id, reps.reps[i].id + 1);
+        for (size_t i = 0; i < md_array_size(reps.reps); ++i) {
+            bool taken = reps.reps[i].id == 0;
+            for (size_t j = 0; j < i && !taken; ++j) taken = reps.reps[j].id == reps.reps[i].id;
+            if (taken) reps.reps[i].id = reps.next_id++;
+        }
+    }
     str_copy_to_char_buf(data->files.workspace, sizeof(data->files.workspace), filename);
     data->files.coarse_grained = pending.coarse_grained;
 
@@ -2164,6 +2198,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_int (state, STR_LIT("ResScale"), m.res_scale);
         viamd::write_int (state, STR_LIT("AaSamples"), m.aa_samples);
         viamd::write_bool(state, STR_LIT("SaveCopy"), m.save_copy);
+        viamd::write_bool(state, STR_LIT("SnapFrames"), m.snap_frames);
         const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
         viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);
         viamd::write_bool(state, STR_LIT("Loop"), m.loop);
@@ -2187,6 +2222,10 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         for (const ParamKey& k : m.param_keys) {
             const float v[6] = { (float)k.param, (float)k.time, k.value[0], k.value[1], k.value[2], (float)(int)k.ease };
             viamd::write_flt_vec(state, STR_LIT("ParamKey"), v, 6);
+        }
+        for (const RepKey& k : m.rep_keys) {
+            const float v[5] = { (float)k.rep, (float)k.prop, (float)k.time, k.value, (float)(int)k.ease };
+            viamd::write_flt_vec(state, STR_LIT("RepKey"), v, 5);
         }
         for (const MovieOverlay& o : m.overlays) {
             viamd::write_section_header(state, STR_LIT("MovieOverlay"));
@@ -2331,6 +2370,7 @@ Representation* create_representation(ApplicationState* state, RepresentationTyp
     ASSERT(state);
     md_array_push(state->representation.reps, Representation(), state->allocator.persistent);
     Representation* rep = md_array_last(state->representation.reps);
+    rep->id = state->representation.next_id++;
     rep->type = type;
     rep->color_mapping = color_mapping;
     if (!str_empty(filter)) {
@@ -2349,6 +2389,7 @@ Representation* clone_representation(ApplicationState* state, const Representati
     ASSERT(state);
     md_array_push(state->representation.reps, rep, state->allocator.persistent);
     Representation* clone = md_array_last(state->representation.reps);
+    clone->id = state->representation.next_id++;
     clone->md_rep = {0};
     clone->atom_mask = {0};
     init_representation(state, clone);
@@ -2359,6 +2400,12 @@ void remove_representation(ApplicationState* state, size_t idx) {
     ASSERT(state);
     ASSERT(idx < md_array_size(state->representation.reps));
     auto& rep = state->representation.reps[idx];
+    // Keys of a representation that is gone would refer to nothing
+    {
+        auto& rk = state->movie.rep_keys;
+        const uint32_t id = rep.id;
+        rk.erase(std::remove_if(rk.begin(), rk.end(), [id](const RepKey& k) { return k.rep == id; }), rk.end());
+    }
     md_bitfield_free(&rep.atom_mask);
     md_gl_rep_destroy(rep.md_rep);
     // A readback queued for this representation's volume would land in a texture that no longer

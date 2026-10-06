@@ -3386,6 +3386,9 @@ static void draw_representations_window(ApplicationState* state) {
 
     ImGui::SetNextWindowSize({300,200}, ImGuiCond_FirstUseEver);
     ImGui::Begin("Representations", &state->representation.show_window, ImGuiWindowFlags_NoFocusOnAppearing);
+    // The frames of a recording are made from the representations as they are, so they are not edited meanwhile
+    const bool movie_locked = state->movie.state == MovieRecordingState::Recording;
+    ImGui::BeginDisabled(movie_locked);
     if (ImGui::Button("create new")) {
         create_representation(state);
     }
@@ -3718,6 +3721,7 @@ static void draw_representations_window(ApplicationState* state) {
         }
     }
 
+    ImGui::EndDisabled();
     ImGui::End();
 }
 
@@ -6308,6 +6312,13 @@ static bool movie_time_left(const ApplicationState* state, double* seconds) {
     return movie_time_left(m.frame_index - m.rec_first, m.rec_last - m.rec_first + 1, m.rec_active_s, seconds);
 }
 
+// A time on the movie's timeline, moved to a frame when snapping is on
+static double movie_snap_time(const ApplicationState* state, double time) {
+    const auto& m = state->movie;
+    if (m.snap_frames) return movie_snap_to_frame(time, (double)m.fps, (double)m.duration);
+    return CLAMP(time, 0.0, (double)m.duration);
+}
+
 // Trajectory frame shown at a time on the movie timeline: from the keyframes that have one, otherwise
 // the trajectory plays linearly between the times of the movie's timeline settings
 static double movie_trajectory_frame(const ApplicationState* state, double time) {
@@ -6406,6 +6417,116 @@ static void movie_params_restore(ApplicationState* state) {
     }
 }
 
+static Representation* movie_find_rep(ApplicationState* state, uint32_t id) {
+    for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
+        if (state->representation.reps[i].id == id) return &state->representation.reps[i];
+    }
+    return nullptr;
+}
+
+// What a property is called for a representation, or null when its type has no such thing. Also the range it is edited in.
+static const char* movie_rep_prop_label(const Representation& rep, int prop, float* lo, float* hi) {
+    *lo = 0.0f;
+    *hi = 1.0f;
+    switch ((RepProp)prop) {
+    case RepProp::Visible:    return "Visible";
+    case RepProp::TintScale:  return "Tint scale";
+    case RepProp::Saturation: return "Saturation";
+    case RepProp::Scale0:
+    case RepProp::Scale1:
+    case RepProp::Scale2: {
+        const int c = prop - (int)RepProp::Scale0;
+        *lo = 0.1f;
+        *hi = 4.0f;
+        switch (rep.type) {
+        case RepresentationType::SpaceFill:
+        case RepresentationType::Licorice:    return c == 0 ? "Radius scale" : nullptr;
+        case RepresentationType::BallAndStick: return c == 0 ? "Ball scale" : c == 1 ? "Bond scale" : nullptr;
+        case RepresentationType::Ribbons:      *hi = 3.0f; return c == 0 ? "Width" : c == 1 ? "Thickness" : nullptr;
+        case RepresentationType::Cartoon:      *hi = 3.0f; return c == 0 ? "Coil" : c == 1 ? "Sheet" : "Helix";
+        default: return nullptr;
+        }
+    }
+    default: return nullptr;
+    }
+}
+
+static float movie_rep_prop_get(const Representation& rep, int prop) {
+    switch ((RepProp)prop) {
+    case RepProp::Visible:    return rep.enabled ? 1.0f : 0.0f;
+    case RepProp::Scale0:     return rep.scale.elem[0];
+    case RepProp::Scale1:     return rep.scale.elem[1];
+    case RepProp::Scale2:     return rep.scale.elem[2];
+    case RepProp::TintScale:  return rep.tint_scale;
+    case RepProp::Saturation: return rep.saturation;
+    default: return 0.0f;
+    }
+}
+
+// The scales are used as they are when drawing; what changes the colours of the atoms has to be updated
+static void movie_rep_prop_set(ApplicationState* state, Representation* rep, int prop, float v) {
+    if (fabsf(movie_rep_prop_get(*rep, prop) - v) < 1.0e-6f) return;
+    switch ((RepProp)prop) {
+    case RepProp::Visible:
+        rep->enabled = v >= 0.5f;
+        state->representation.atom_visibility_mask_dirty = true;
+        if (rep->enabled) flag_representation_as_dirty(rep);
+        break;
+    case RepProp::Scale0: rep->scale.elem[0] = v; break;
+    case RepProp::Scale1: rep->scale.elem[1] = v; break;
+    case RepProp::Scale2: rep->scale.elem[2] = v; break;
+    case RepProp::TintScale:  rep->tint_scale = v; flag_representation_as_dirty(rep); break;
+    case RepProp::Saturation: rep->saturation = v; flag_representation_as_dirty(rep); break;
+    default: break;
+    }
+}
+
+static bool movie_rep_has_keys(const ApplicationState* state, uint32_t rep, int prop) {
+    for (const RepKey& k : state->movie.rep_keys) {
+        if (k.rep == rep && k.prop == prop) return true;
+    }
+    return false;
+}
+
+// Puts the keyed properties of representations at their values at a time. A property is taken hold of when it first
+// has a key to follow, and what it was is kept, to be put back when the keys let go of it or the recording is over.
+static void movie_reps_apply(ApplicationState* state, double time) {
+    auto& m = state->movie;
+    if (m.animate_params) {
+        for (size_t i = 0; i < m.rep_keys.size(); ++i) {
+            const RepKey& k = m.rep_keys[i];
+            bool seen = false;
+            for (size_t j = 0; j < i && !seen; ++j) seen = m.rep_keys[j].rep == k.rep && m.rep_keys[j].prop == k.prop;
+            Representation* rep = seen ? nullptr : movie_find_rep(state, k.rep);
+            float v;
+            if (!rep || !rep_keys_evaluate(&v, m.rep_keys.data(), m.rep_keys.size(), k.rep, k.prop, time)) continue;
+
+            bool saved = false;
+            for (const auto& s : m.rep_saved) saved |= s.rep == k.rep && s.prop == k.prop;
+            if (!saved) m.rep_saved.push_back({k.rep, k.prop, movie_rep_prop_get(*rep, k.prop)});
+            movie_rep_prop_set(state, rep, k.prop, v);
+        }
+    }
+    for (size_t s = 0; s < m.rep_saved.size();) {
+        const auto saved = m.rep_saved[s];
+        Representation* rep = movie_find_rep(state, saved.rep);
+        if (m.animate_params && rep && movie_rep_has_keys(state, saved.rep, saved.prop)) {
+            ++s;
+            continue;
+        }
+        if (rep) movie_rep_prop_set(state, rep, saved.prop, saved.value);
+        m.rep_saved.erase(m.rep_saved.begin() + s);
+    }
+}
+
+static void movie_reps_restore(ApplicationState* state) {
+    auto& m = state->movie;
+    for (const auto& s : m.rep_saved) {
+        if (Representation* rep = movie_find_rep(state, s.rep)) movie_rep_prop_set(state, rep, s.prop, s.value);
+    }
+    m.rep_saved.clear();
+}
+
 // Where the follow target is now, in the space the camera is in. False when there is no target, or it
 // holds atoms that are not in the system.
 static bool movie_follow_center(const ApplicationState* state, vec3_t* out) {
@@ -6500,6 +6621,7 @@ static void movie_apply_time_with_keys(ApplicationState* state, double time, boo
     auto& m = state->movie;
     state->animation.frame = movie_trajectory_frame(state, time);
     movie_params_apply(state, time);
+    movie_reps_apply(state, time);
     m.follow_pending = false;
     if (apply_camera && m.animate_camera && num_keys > 0) {
         if (movie_keys_track_atoms(keys, num_keys) || (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask))) {
@@ -6532,6 +6654,7 @@ static void movie_restore_state(ApplicationState* state) {
     state->animation.mode = state->movie.prev_playback_mode;
     state->movie.follow_pending = false;
     movie_params_restore(state);
+    movie_reps_restore(state);
     if (state->movie.camera_was_animated) {
         state->view.target = state->movie.prev_view_target;
         state->view.camera = state->movie.prev_view_target;
@@ -7020,31 +7143,21 @@ static const char* spin_axis_str[(int)SpinAxis::Count] = {
     "World Z",
 };
 
-// At the playhead. A second key at the same time would leave the path undefined, so it replaces the first.
-static void movie_add_keyframe(ApplicationState* state) {
+// A second key at the same time would leave the path undefined, so it replaces the first. With keep_extras
+// the spin of the key it replaces stays, and so does its frame unless the new key has one.
+static void movie_insert_key(ApplicationState* state, CameraKeyframe key, bool keep_extras) {
     auto& m = state->movie;
-    CameraKeyframe key = {};
-    key.transform = state->view.target;
-    key.fov_y = state->view.camera.fov_y;
-    key.time = (double)m.playhead;
-    if (m.key_includes_frame) {
-        key.use_frame = true;
-        key.frame = state->animation.frame;
-    }
-    if (m.key_follow && movie_follow_center(state, &key.follow_center)) {
-        key.follow = true;
-    }
-
     for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
         const CameraKeyframe& old = m.keyframes[i];
         if (fabs(old.time - key.time) < 1.0e-3) {
-            // The pose is what is replaced; the spin stays, and so does the frame unless there is a new one
-            key.spin_turns = old.spin_turns;
-            key.spin_axis = old.spin_axis;
-            key.spin_constant_speed = old.spin_constant_speed;
-            if (!m.key_includes_frame) {
-                key.use_frame = old.use_frame;
-                key.frame = old.frame;
+            if (keep_extras) {
+                key.spin_turns = old.spin_turns;
+                key.spin_axis = old.spin_axis;
+                key.spin_constant_speed = old.spin_constant_speed;
+                if (!key.use_frame) {
+                    key.use_frame = old.use_frame;
+                    key.frame = old.frame;
+                }
             }
             m.keyframes[i] = key;
             return;
@@ -7054,16 +7167,81 @@ static void movie_add_keyframe(ApplicationState* state) {
     movie_sort_keyframes(state);
 }
 
+// The view as it is now, at the playhead
+static CameraKeyframe movie_current_key(ApplicationState* state) {
+    auto& m = state->movie;
+    CameraKeyframe key = {};
+    key.transform = state->view.target;
+    key.fov_y = state->view.camera.fov_y;
+    key.time = movie_snap_time(state, (double)m.playhead);
+    if (m.key_includes_frame) {
+        key.use_frame = true;
+        key.frame = state->animation.frame;
+    }
+    if (m.key_follow && movie_follow_center(state, &key.follow_center)) {
+        key.follow = true;
+    }
+    return key;
+}
+
+static void movie_add_keyframe(ApplicationState* state) {
+    movie_insert_key(state, movie_current_key(state), true);
+}
+
+// The key that was copied from the table, at the playhead
+static void movie_paste_keyframe(ApplicationState* state) {
+    auto& m = state->movie;
+    if (!m.has_key_clipboard) return;
+    CameraKeyframe key = m.key_clipboard;
+    key.time = movie_snap_time(state, (double)m.playhead);
+    movie_insert_key(state, key, false);
+}
+
+// Adds a key that frames the selected atoms, seen from the direction the camera has now, and moves the view there
+static void movie_add_selection_keyframe(ApplicationState* state) {
+    const md_bitfield_t* mask = &state->selection.selection_mask;
+    const size_t count = md_bitfield_popcount(mask);
+    const size_t num_atoms = state->mold.sys.atom.count;
+    uint64_t first = 0, last = 0;
+    if (count == 0) {
+        VIAMD_LOG_ERROR("Select some atoms to frame first");
+        return;
+    }
+    if (state->mold.state.num_atoms != num_atoms || !md_bitfield_get_range(&first, &last, mask) || last >= num_atoms) {
+        VIAMD_LOG_ERROR("The selection does not match the system");
+        return;
+    }
+
+    // Placed together across periodic boundaries, so that a molecule split by the cell is framed as one
+    md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
+    defer { md_temp_end(temp); };
+    vec4_t* xyzw = md_temp_alloc_array(temp, vec4_t, count);
+    vec3_t* xyz = md_temp_alloc_array(temp, vec3_t, count);
+    md_util_system_extract_xyzw_from_mask(xyzw, mask, &state->mold.sys, &state->mold.state);
+    vec3_t center = vec3_zero();
+    md_util_deperiodize_self_vec4(xyzw, count, &state->mold.state.unitcell, &center);
+    for (size_t i = 0; i < count; ++i) xyz[i] = vec3_from_vec4(xyzw[i]);
+
+    CameraKeyframe key = movie_current_key(state);
+    ViewTransform t = state->view.target;
+    t.distance = camera_fit_distance(xyz, nullptr, count, center, t.orientation, state->view.camera.fov_y);
+    t.position = camera_position_from_look_at(mat4_mul_vec3(state->mold.unitcell_transform, center, 1.0f), t.orientation, t.distance);
+    key.transform = t;
+    key.follow = false;
+    movie_insert_key(state, key, true);
+    state->view.target = t;
+}
+
 // Two keys with the view as it is now, the second after the orbit's duration with whole turns around it.
 // The camera leaves and comes back to the same pose.
 static void movie_add_orbit(ApplicationState* state) {
     auto& m = state->movie;
     if (m.orbit_turns == 0) return;
 
-    const double t0 = (double)m.playhead;
-    const double t1 = t0 + (double)MAX(m.orbit_duration, 0.1f);
-    if (t1 > movie_duration(state) + 1.0e-6) {
-        VIAMD_LOG_ERROR("The orbit ends at %.2f s, after the movie. Move the preview time earlier, shorten the orbit or increase the movie length", t1);
+    const double t0 = movie_snap_time(state, (double)m.playhead);
+    const double t1 = movie_snap_time(state, t0 + (double)MAX(m.orbit_duration, 0.1f));
+    if (t0 + (double)MAX(m.orbit_duration, 0.1f) > movie_duration(state) + 1.0e-6) {
+        VIAMD_LOG_ERROR("The orbit ends at %.2f s, after the movie. Move the preview time earlier, shorten the orbit or increase the movie length", t0 + (double)MAX(m.orbit_duration, 0.1f));
         return;
     }
 
@@ -7133,7 +7311,7 @@ static void movie_key_param(ApplicationState* state, int id) {
 
     ParamKey key;
     key.param = id;
-    key.time = (double)m.playhead;
+    key.time = movie_snap_time(state, (double)m.playhead);
     const float* src = d->ptr(state);
     for (int c = 0; c < d->comps; ++c) key.value[c] = src[c];
 
@@ -7433,12 +7611,12 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             double ab = tb, ae = te;
             bool clicked = false, hov = false, hld = false;
             if (ImPlot::DragLineX(1100, &ab, anchor_col, 2.0f, drag_flags, &clicked, &hov, &hld)) {
-                m.traj_begin = (float)CLAMP(ab, 0.0, (double)m.traj_end);
+                m.traj_begin = (float)CLAMP(movie_snap_time(data, ab), 0.0, (double)m.traj_end);
             }
             if (hov && !hld) ImGui::SetTooltip("Trajectory starts at frame %.0f, at %.2f s\nDrag to change when. Before it, the trajectory is held.", m.start_frame, m.traj_begin);
             anchors_held |= hld;
             if (ImPlot::DragLineX(1101, &ae, anchor_col, 2.0f, drag_flags, &clicked, &hov, &hld)) {
-                m.traj_end = (float)CLAMP(ae, (double)m.traj_begin, (double)movie_len);
+                m.traj_end = (float)CLAMP(movie_snap_time(data, ae), (double)m.traj_begin, (double)movie_len);
             }
             if (hov && !hld) ImGui::SetTooltip("Trajectory ends at frame %.0f, at %.2f s\nDrag to change when. After it, the trajectory is held.", m.end_frame, m.traj_end);
             anchors_held |= hld;
@@ -7459,7 +7637,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             double y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
             bool hovered = false, held = false;
             if (ImPlot::DragPoint(2000 + (int)i, &x, &y, ImVec4(1.0f, 0.45f, 0.15f, 1.0f), 7.0f, drag_flags, nullptr, &hovered, &held)) {
-                key.time = CLAMP(x, 0.0, (double)movie_len);
+                key.time = movie_snap_time(data, x);
                 if (track == 0) key.frame = CLAMP(y, 0.0, last_frame);
                 any_moved = true;
             }
@@ -7479,7 +7657,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 
         double playhead = (double)m.playhead;
         if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
-            m.playhead = CLAMP((float)playhead, 0.0f, movie_len);
+            m.playhead = (float)movie_snap_time(data, playhead);
             if (!locked) movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
         }
 
@@ -7573,7 +7751,7 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
             const ImVec4 col = d.color ? ImVec4(key.value[0], key.value[1], key.value[2], 1.0f) : ImVec4(0.75f, 0.5f, 1.0f, 1.0f);
             bool hovered = false, held = false;
             if (ImPlot::DragPoint(4000 + ki, &x, &y, col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
-                key.time = CLAMP(x, 0.0, (double)movie_len);
+                key.time = movie_snap_time(data, x);
                 if (!d.color) key.value[0] = (float)CLAMP(y, (double)d.lo, (double)d.hi);
                 any_moved = true;
             }
@@ -7600,7 +7778,7 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
 
         double playhead = (double)m.playhead;
         if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
-            m.playhead = CLAMP((float)playhead, 0.0f, movie_len);
+            m.playhead = (float)movie_snap_time(data, playhead);
             if (!locked) movie_apply_time(data, (double)m.playhead, true);
         }
 
@@ -7702,6 +7880,9 @@ static void draw_movie_timeline_window(ApplicationState* data) {
         m.timeline_view_begin = -0.03 * movie_len;
         m.timeline_view_end = 1.03 * movie_len;
     }
+    ImGui::SameLine();
+    ImGui::Checkbox("Snap to frames", &m.snap_frames);
+    ImGui::SetItemTooltip("Keys, the playhead and the trajectory's start and end that are dragged here land on a frame of the movie (at the Output FPS).");
     const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
     ImGui::SetNextItemWidth(fs * 14.0f);
@@ -7819,7 +8000,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableSetupColumn("Frame", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 26.0f);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 30.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
@@ -7936,6 +8117,12 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             if (ImGui::SmallButton("Dup")) dup_idx = i;
             ImGui::SetItemTooltip("Copy it to one second later");
             ImGui::SameLine();
+            if (ImGui::SmallButton("Copy")) {
+                m.key_clipboard = key;
+                m.has_key_clipboard = true;
+            }
+            ImGui::SetItemTooltip("Remember this keyframe, to put it in at the preview time with 'Paste Keyframe'");
+            ImGui::SameLine();
             if (ImGui::SmallButton("Remove")) remove_idx = i;
             ImGui::PopID();
         }
@@ -7997,8 +8184,9 @@ static void draw_movie_param_section(ApplicationState* data, float movie_len) {
     if (ImGui::Checkbox("Animate parameters", &m.animate_params)) {
         // Turning it off lets go of them
         movie_params_apply(data, (double)m.playhead);
+        movie_reps_apply(data, (double)m.playhead);
     }
-    ImGui::SetItemTooltip("The keyed parameters follow their keys when the movie is scrubbed, previewed or recorded.\nOff, they stay as they are.");
+    ImGui::SetItemTooltip("The keyed parameters, and the keyed properties of representations, follow their keys when the movie is\nscrubbed, previewed or recorded. Off, they stay as they are.");
 
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
     const MovieParamDesc& sel = movie_param_table[m.param_selected];
@@ -8083,6 +8271,151 @@ static void draw_movie_param_section(ApplicationState* data, float movie_len) {
     if (resort) {
         movie_param_sort(data);
     }
+}
+
+static void movie_rep_sort(ApplicationState* state) {
+    std::stable_sort(state->movie.rep_keys.begin(), state->movie.rep_keys.end(), [](const RepKey& a, const RepKey& b) {
+        if (a.rep != b.rep) return a.rep < b.rep;
+        return a.prop != b.prop ? a.prop < b.prop : a.time < b.time;
+    });
+}
+
+// Keys what the property is now, at the preview time
+static void movie_key_rep(ApplicationState* state, const Representation& rep, int prop) {
+    auto& m = state->movie;
+    RepKey key;
+    key.rep = rep.id;
+    key.prop = prop;
+    key.time = movie_snap_time(state, (double)m.playhead);
+    key.value = movie_rep_prop_get(rep, prop);
+    if (prop == (int)RepProp::Visible) key.ease = KeyEase::Hold;
+
+    for (RepKey& k : m.rep_keys) {
+        if (k.rep == key.rep && k.prop == key.prop && fabs(k.time - key.time) < 1.0e-3) {
+            key.ease = k.ease;
+            k = key;
+            return;
+        }
+    }
+    m.rep_keys.push_back(key);
+    movie_rep_sort(state);
+}
+
+// Properties of representations keyed over the movie: show or hide one, change its scale or tint. You set it up
+// in the Representations window as it should look at some time, and key it.
+static void draw_movie_rep_section(ApplicationState* data, float movie_len) {
+    auto& m = data->movie;
+    const int num_reps = (int)md_array_size(data->representation.reps);
+    if (num_reps == 0 && m.rep_keys.empty()) {
+        ImGui::TextDisabled("Create a representation in the Representations window first.");
+        return;
+    }
+
+    if (num_reps > 0) {
+        m.rep_selected = CLAMP(m.rep_selected, 0, num_reps - 1);
+        const Representation& rep = data->representation.reps[m.rep_selected];
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+        if (ImGui::BeginCombo("##rep", rep.name)) {
+            for (int i = 0; i < num_reps; ++i) {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(data->representation.reps[i].name, i == m.rep_selected)) m.rep_selected = i;
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+
+        float lo, hi;
+        m.rep_prop_selected = CLAMP(m.rep_prop_selected, 0, (int)RepProp::Count - 1);
+        if (!movie_rep_prop_label(rep, m.rep_prop_selected, &lo, &hi)) m.rep_prop_selected = (int)RepProp::Visible;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        if (ImGui::BeginCombo("##rep_prop", movie_rep_prop_label(rep, m.rep_prop_selected, &lo, &hi))) {
+            for (int p = 0; p < (int)RepProp::Count; ++p) {
+                if (const char* label = movie_rep_prop_label(rep, p, &lo, &hi)) {
+                    if (ImGui::Selectable(label, p == m.rep_prop_selected)) m.rep_prop_selected = p;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Key Now##rep")) {
+            movie_key_rep(data, rep, m.rep_prop_selected);
+        }
+        ImGui::SetItemTooltip("Keys the value the property has now at the preview time. Set it up in the Representations window first\n(the eye shows or hides it). Visible changes at its keys, the others move smoothly between them.");
+    }
+
+    if (m.rep_keys.empty()) return;
+
+    bool resort = false;
+    int  remove_idx = -1;
+    if (ImGui::BeginTable("##rep_keys", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Representation");
+        ImGui::TableSetupColumn("Property");
+        ImGui::TableSetupColumn("Time (s)");
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableSetupColumn("Ease");
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 4.5f);
+        ImGui::TableHeadersRow();
+
+        uint32_t prev_rep = 0;
+        int prev_prop = -1;
+        for (int i = 0; i < (int)m.rep_keys.size(); ++i) {
+            RepKey& key = m.rep_keys[i];
+            const Representation* rep = movie_find_rep(data, key.rep);
+            const bool first = key.rep != prev_rep || key.prop != prev_prop;
+            prev_rep = key.rep;
+            prev_prop = key.prop;
+            float lo = 0.0f, hi = 1.0f;
+            const char* label = rep ? movie_rep_prop_label(*rep, key.prop, &lo, &hi) : nullptr;
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(rep ? rep->name : "(removed)");
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(label ? label : "(not for its type)");
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            double t = key.time;
+            if (ImGui::InputDouble("##time", &t, 0.0, 0.0, "%.2f")) {
+                key.time = CLAMP(t, 0.0, (double)movie_len);
+            }
+            resort |= ImGui::IsItemDeactivatedAfterEdit();
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (key.prop == (int)RepProp::Visible) {
+                bool visible = key.value >= 0.5f;
+                if (ImGui::Checkbox("##visible", &visible)) key.value = visible ? 1.0f : 0.0f;
+            } else {
+                ImGui::DragFloat("##value", &key.value, (hi - lo) * 0.005f, lo, hi, "%.3g");
+            }
+
+            ImGui::TableNextColumn();
+            if (first || key.prop == (int)RepProp::Visible) {
+                ImGui::TextDisabled(key.prop == (int)RepProp::Visible && !first ? "at the key" : "-");
+            } else {
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int ease = (int)key.ease;
+                if (ImGui::Combo("##ease", &ease, key_ease_str, (int)KeyEase::Count)) key.ease = (KeyEase)ease;
+                ImGui::SetItemTooltip("How the value moves in the stretch leading to this key");
+            }
+
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Remove")) remove_idx = i;
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (remove_idx >= 0) {
+        m.rep_keys.erase(m.rep_keys.begin() + remove_idx);
+        // The property lets go of its value if this was its last key
+        movie_reps_apply(data, (double)m.playhead);
+    }
+    if (resort) movie_rep_sort(data);
 }
 
 static void draw_movie_window(ApplicationState* data) {
@@ -8360,6 +8693,18 @@ static void draw_movie_window(ApplicationState* data) {
         ImGui::Checkbox("with trajectory frame", &m.key_includes_frame);
         ImGui::SetItemTooltip("Also key the trajectory frame shown now. Keys with a frame decide how the trajectory plays,\nso the speed can change between them.");
 
+        if (ImGui::Button("Key on Selection")) {
+            movie_add_selection_keyframe(data);
+        }
+        ImGui::SetItemTooltip("Adds a keyframe at the preview time that frames the selected atoms, seen from the direction the camera\nhas now, and moves the view there.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!m.has_key_clipboard);
+        if (ImGui::Button("Paste Keyframe")) {
+            movie_paste_keyframe(data);
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Puts the keyframe that was copied in the table at the preview time (replacing one that is there).");
+
         {
             const size_t follow_count = md_bitfield_popcount(&m.follow_mask);
             if (ImGui::Button("Set Follow Target")) {
@@ -8411,6 +8756,12 @@ static void draw_movie_window(ApplicationState* data) {
     if (ImGui::CollapsingHeader("Look Parameters")) {
         ImGui::BeginDisabled(recording);
         draw_movie_param_section(data, movie_len);
+        ImGui::EndDisabled();
+    }
+
+    if (ImGui::CollapsingHeader("Representations")) {
+        ImGui::BeginDisabled(recording);
+        draw_movie_rep_section(data, movie_len);
         ImGui::EndDisabled();
     }
 

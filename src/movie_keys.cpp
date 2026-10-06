@@ -50,15 +50,42 @@ static bool equal(const ParamKey& a, const ParamKey& b) {
            a.value[0] == b.value[0] && a.value[1] == b.value[1] && a.value[2] == b.value[2];
 }
 
+bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t rep, int prop, double time) {
+    std::vector<const RepKey*> mine;
+    for (size_t i = 0; i < count; ++i) {
+        if (keys[i].rep == rep && keys[i].prop == prop) mine.push_back(&keys[i]);
+    }
+    if (mine.empty()) return false;
+    std::stable_sort(mine.begin(), mine.end(), [](const RepKey* a, const RepKey* b) { return a->time < b->time; });
+
+    std::vector<double> times, values;
+    std::vector<KeyEase> eases;
+    for (const RepKey* k : mine) {
+        if (!times.empty() && k->time <= times.back()) continue;
+        times.push_back(k->time);
+        values.push_back(k->value);
+        eases.push_back(prop == (int)RepProp::Visible ? KeyEase::Hold : k->ease);
+    }
+    *out = (float)keyed_curve_evaluate(times.data(), values.data(), eases.data(), times.size(), time);
+    return true;
+}
+
+static bool equal(const RepKey& a, const RepKey& b) {
+    return a.rep == b.rep && a.prop == b.prop && a.time == b.time && a.value == b.value && a.ease == b.ease;
+}
+
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
     if (a.loop != b.loop || a.duration != b.duration || a.traj_begin != b.traj_begin || a.traj_end != b.traj_end ||
         a.start_frame != b.start_frame || a.end_frame != b.end_frame || a.camera.size() != b.camera.size() ||
-        a.params.size() != b.params.size() || a.overlays.size() != b.overlays.size()) return false;
+        a.params.size() != b.params.size() || a.reps.size() != b.reps.size() || a.overlays.size() != b.overlays.size()) return false;
     for (size_t i = 0; i < a.camera.size(); ++i) {
         if (!equal(a.camera[i], b.camera[i])) return false;
     }
     for (size_t i = 0; i < a.params.size(); ++i) {
         if (!equal(a.params[i], b.params[i])) return false;
+    }
+    for (size_t i = 0; i < a.reps.size(); ++i) {
+        if (!equal(a.reps[i], b.reps[i])) return false;
     }
     for (size_t i = 0; i < a.overlays.size(); ++i) {
         const MovieOverlay& x = a.overlays[i];
@@ -76,6 +103,7 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
 void movie_keys_scale_time(MovieKeys* keys, double scale) {
     for (CameraKeyframe& k : keys->camera) k.time *= scale;
     for (ParamKey& k : keys->params) k.time *= scale;
+    for (RepKey& k : keys->reps) k.time *= scale;
     for (MovieOverlay& o : keys->overlays) {
         o.begin *= scale;
         o.end *= scale;
@@ -149,4 +177,9 @@ bool movie_time_left(int done, int total, double active_seconds, double* seconds
     if (done < 2 || active_seconds < 1.0) return false;
     *seconds = active_seconds / (double)done * (double)std::max(total - done, 0);
     return true;
+}
+
+double movie_snap_to_frame(double time, double fps, double duration) {
+    if (fps > 0.0) time = std::round(time * fps) / fps;
+    return std::clamp(time, 0.0, std::max(duration, 0.0));
 }

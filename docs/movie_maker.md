@@ -66,6 +66,7 @@ A keyframe is a camera (where the eye is, where it looks, its distance and its f
 - **Seamless loop** and **Close Loop**: makes the camera path cyclic, so a movie played on repeat has no jump. **Close Loop** adds a final key in the first key's pose and turns the loop on.
 - **Play Preview**, **Repeat** and **Preview time (s)**: play or scrub the movie in the viewport at its real speed, without recording.
 - **Add Keyframe (current view)** (shortcut **K** while a movie window is open): adds a key of the current view at the preview time. A key at the same time is replaced. Tick **with trajectory frame** to also pin the trajectory frame shown now.
+- **Key on Selection**: adds a key at the preview time that frames the selected atoms, seen from the direction the camera has now, and moves the viewport there. Molecules split by the periodic cell are framed as one.
 - **Add Orbit**: the three fields before it set the number of turns, the duration and the axis (**Camera up**, **World X/Y/Z**). It adds a key at the preview time and another one *duration* later, where the camera has gone round the look-at point that many times. It is refused if the orbit would run past the end of the movie.
 
 #### The keyframe table
@@ -86,6 +87,7 @@ The columns can be resized by dragging their borders. When they are wider than t
 | **Look at** | Click it, then click an atom in the viewport. The key now looks at that atom and **tracks it through the trajectory**. While picking, the button reads **Click atom**; press Esc to cancel. |
 | **Update position** | Moves the key's eye to where the viewport camera is now, still looking at the same point. The field of view and, if pinned, the frame are taken too. |
 | **Dup** | Copies the key to one second later. |
+| **Copy** | Remembers the key. **Paste Keyframe** (above the table) puts it in at the preview time, replacing a key that is there. |
 | **Remove** | Removes the key. |
 
 So, to edit a keyframe: **Go To** it, move around, press **Update position** to set where the eye is, and use **Look at** to choose what it looks at. Below the table, a line shows the eye, the look-at point and the distance at the preview time, plus the focus distance when depth of field is on.
@@ -105,6 +107,17 @@ Some visual settings can change during the movie: background color and intensity
 3. Press **Key Now**.
 
 The table lists the keys, with their time, value, ease and **Remove**. With **Animate parameters** ticked, the keys are followed when scrubbing, previewing and recording. When the recording ends, the parameters go back to what they were.
+
+### Representations
+
+The properties of a representation can be keyed too, to show or hide it at some time or to change its size or look:
+
+- **Visible**: shown or hidden. It changes at its keys and is not blended, so key it once when it should appear and once when it should go.
+- The scales of the representation (**Radius scale**, **Ball scale** and **Bond scale**, **Width**, **Coil** and so on, whatever its type has), **Tint scale** and **Saturation**. These move smoothly between keys, with the same **Ease** choices as other keys.
+
+Pick the representation and the property, set it up in the **Representations** window as it should be at the preview time (the eye shows or hides it), and press **Key Now**. The table lists the keys. A key belongs to a representation by an id that stays with it when representations are moved, duplicated or removed, and is saved in the workspace; removing a representation removes its keys. **Animate parameters** switches them on and off together with the look parameters, and the values go back to what they were when the keys let go or the recording ends. The **Representations** window is locked while recording, because the frames are made from the representations as they are.
+
+Changing tint or saturation recolors the atoms of that representation every frame, which is slow for very large systems. Scales and visibility are cheap.
 
 ### Depth of field
 
@@ -136,11 +149,11 @@ Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **
 - **Field of view** in degrees. Dots can be dragged sideways (time only).
 - **Look parameter**: the parameter chosen in the **Look parameter** list at the top. Double-click to add a key, drag to change it, right-click to remove it.
 
-The yellow line is the playhead. Scroll to zoom the time, drag the background to pan, and use **Show whole movie** to reset. Drag between tracks to change their heights. Untick **Trajectory**, **Distance** or **Field of view** to hide a track.
+The yellow line is the playhead. Scroll to zoom the time, drag the background to pan, and use **Show whole movie** to reset. Drag between tracks to change their heights. Untick **Trajectory**, **Distance** or **Field of view** to hide a track. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
 
 ## Saving
 
-The movie (length, trajectory timing, camera keys including what they look at, look parameter keys, overlays and follow target) is saved in the workspace (`.via`) under `[Movie]`. Workspaces from earlier versions load and are converted.
+The movie (length, trajectory timing, camera keys including what they look at, look parameter keys, representation keys, overlays and follow target) is saved in the workspace (`.via`) under `[Movie]`. Workspaces from earlier versions load and are converted.
 
 ## Tips
 

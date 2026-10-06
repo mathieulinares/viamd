@@ -4,6 +4,7 @@
 #include <movie_overlay.h>
 
 #include <stddef.h>
+#include <stdint.h>
 #include <vector>
 
 // What is keyed on a movie's timeline besides the camera: look parameters (background, depth of field,
@@ -20,10 +21,36 @@ struct ParamKey {
 // false if there are none. Passes through every key and holds outside the first and last.
 bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t count, int param, double time);
 
+// What can be keyed on a representation. The numbers are saved in workspaces: never renumber, add at the end.
+// Scale0..2 are the components of the representation's scale (what each is depends on its type).
+enum class RepProp : int {
+    Visible = 0,
+    Scale0,
+    Scale1,
+    Scale2,
+    TintScale,
+    Saturation,
+    Count,
+};
+
+// One key of one property of one representation, which is named by its id (not its place in the list)
+struct RepKey {
+    uint32_t rep = 0;
+    int      prop = 0;               // A RepProp
+    double   time = 0.0;
+    float    value = 0.0f;           // Visible is 0 or 1
+    KeyEase  ease = KeyEase::Smooth; // Shapes the stretch leading to this key
+};
+
+// The value of a property of a representation at 'time' from the keys for it, which need not be sorted.
+// Returns false if there are none. Visible is held: it changes at its keys, it is not blended between them.
+bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t rep, int prop, double time);
+
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;
     std::vector<ParamKey> params;
+    std::vector<RepKey> reps;
     std::vector<MovieOverlay> overlays;
     bool loop = false;
     // The timing, which is scaled together with the keys
@@ -73,3 +100,6 @@ void movie_scaled_size(int* w, int* h, int percent);
 // How long a recording has left from its pace so far: 'done' of 'total' frames in 'active_seconds'. False
 // until there is enough to go on.
 bool movie_time_left(int done, int total, double active_seconds, double* seconds);
+
+// A time moved to the nearest frame of the movie (at 'fps'), kept within 0 .. duration
+double movie_snap_to_frame(double time, double fps, double duration);
