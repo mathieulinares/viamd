@@ -1,11 +1,11 @@
 # Movie feature: status and remaining work
 
-Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text is `PR_DESCRIPTION.md`.
+Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual (also the text for the GitHub wiki, which is a separate repository and is not updated from here) is `docs/movie_maker.md`, the pull request text is `PR_DESCRIPTION.md`, and `docs/examples/aspirin_phospholipase_movie.via` is a finished example that is updated with the features (its trajectory files are not in the repository).
 
 ## How to build and test
 
 - Build: `cmake --build build --target viamd -j8` and `--target viamd_test`
-- Tests: `./build/bin/viamd_test` (106 tests, all passing in a Release build)
+- Tests: `./build/bin/viamd_test` (117 tests, all passing in a Release build)
 - ffmpeg is not installed in the dev environment; the frame sink tests use a fake script.
 - The GUI could not be run while the code was written, so everything under "Untested in the GUI" needs a manual check.
 
@@ -15,7 +15,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Movie state: `src/viamd.h` (`ApplicationState::movie`)
 - Async frame writer: `src/frame_sink.{h,cpp}`
 - Keyed look parameters and representation keys, undo history, render range, frame scaling, snapping, time left: `src/movie_keys.{h,cpp}`
-- Overlay maths (fade, scale bar): `src/movie_overlay.{h,cpp}`
+- Overlay maths (fade, scale bar, the default logo overlay): `src/movie_overlay.{h,cpp}`; the logo is `icon/viamd_logo.png`, baked into `gen/viamd_logo.inl` by CMake and decoded with `src/image.{h,cpp}`
 - Camera path evaluation: `src/gfx/camera_utils.{h,cpp}`
 - Workspace save/load: `src/viamd.cpp` (`[Movie]`, `[MovieOverlay]`, `[Representation]` sections)
 - Parameter ids in `movie_param_table` (main.cpp) and the numbers of `RepProp` (movie_keys.h) are saved in workspaces: never renumber, add at the end.
@@ -34,6 +34,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Strip comfort (plan item 5): **Snap to frames** for dragged times, **Copy** / **Paste Keyframe**, **Key on Selection** (frames the selected atoms, periodic images placed together).
 - Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (grows in / shrinks away over **Transition (s)**, 2 s by default, from the key; solid representations cannot fade), the scales, **Tint scale**, **Saturation**, **Base color** and **Tint color**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
 - Logo overlay: the VIAMD logo (`icon/viamd_logo.png`, baked into the executable) in the top left corner by default for the whole movie; **Add Logo** adds more. A workspace remembers that it was removed (`Overlays=1`).
+- Follow / Unfollow in the keyframe table, for a key that already exists.
 - Output formats H.265 (mp4) and VP9 (webm) besides H.264, with their own quality ranges; Ctrl+C / Ctrl+V for keyframes; a background plate for overlays.
 - The Representations window is locked while recording (the cheap form of plan item 7).
 - Representation keys on the timeline: a lane for the chosen representation and property, keys dragged, added by double-click and removed by right-click, like the look parameter lane.
@@ -67,7 +68,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - The camera path drawn in the viewport does not show the follow motion.
 - The follow target itself is not part of undo.
 - Where a frame curve turns around, the trajectory slows to a stop. For a hard reversal, add a key at the turn-around frame with Linear easing.
-- Overlay text is single style (no background plate, only a shadow).
+- Overlay text is single style (a shadow and an optional background plate).
 - Default view (existing code from master): a perfectly symmetric flat molecule (exact ideal benzene geometry) can settle about 10 degrees off face-on, because the visibility scores of nearby directions tie. Real coordinates are not exactly symmetric and are fine.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
 - Distance and field of view can only be moved in time on the timeline; their values are edited in the table or the viewport.
@@ -80,4 +81,4 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 ## Ideas not yet planned
 
 - Draw the follow-aware camera path in the viewport
-- Per-overlay font size in points, image/logo overlay
+- Per-overlay font size in points, other images as overlays

@@ -2,13 +2,13 @@
 
 ### Summary
 
-This adds a **movie maker** to VIAMD. You set the length of the movie, place camera keyframes and keyed visual settings on a timeline, add text overlays, and record. The output is an MP4 (frames piped into ffmpeg) or a numbered PNG sequence.
+This adds a **movie maker** to VIAMD. You set the length of the movie, place camera keyframes and keyed visual settings on a timeline, add overlays (text, time stamp, scale bar, the VIAMD logo), and record. The output is an MP4 (H.264 or H.265) or a WebM (frames piped into ffmpeg) or a numbered PNG sequence.
 
 It has two new windows, both opened from **Windows**:
 - **Movie**: output settings, timing, camera keyframes, look parameters, overlays, and record.
 - **Movie Timeline**: aligned tracks with real axes for trajectory frame, camera distance, field of view and one look parameter. Keys can be dragged and the movie scrubbed. It is closed on startup and when a workspace is loaded.
 
-The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.md).
+The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspirin_phospholipase_movie.via`](docs/examples/aspirin_phospholipase_movie.via) is a finished movie that uses most of the features (its trajectory files are not in the repository).
 
 ![Movie maker](docs/images/movie/overview.png)
 
@@ -67,8 +67,10 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 
 ### New code
 - `src/frame_sink.{h,cpp}`: asynchronous PNG/ffmpeg writer.
-- `src/movie_keys.{h,cpp}`: parameter keys, the snapshot used for undo, time scaling.
-- `src/movie_overlay.{h,cpp}`: overlay fades and scale bar length.
+- `src/movie_keys.{h,cpp}`: parameter and representation keys, the snapshot used for undo, time scaling, render range, snapping.
+- `src/movie_overlay.{h,cpp}`: overlay fades, scale bar length and the default logo overlay.
+- `src/image.{h,cpp}`: decoding of an image in memory (the logo); `icon/viamd_logo.png` is baked into the executable by CMake.
+- `Representation::id` (`viamd.h`): a stable id for each representation, saved in workspaces, which representation keys refer to.
 - `src/gfx/camera_utils.{h,cpp}` and `camera.h`: keyframe evaluation, anchors, keyed curves, `camera_aim_at`.
 - Most of the UI is in `src/main.cpp`. State and workspace I/O are in `viamd.{h,cpp}`.
 
@@ -78,12 +80,13 @@ New tests are in:
 - `test_movie_keys`: scaling and undo, render range, frame scaling, time left, snapping, representation keys.
 - `test_frame_sink`.
 - `test_movie_overlay`.
+- `test_image`.
 - `test_serialization`.
 
 All 117 tests pass in a Release build on Linux.
 
 ### Testing done and not done
-- I recorded PNG sequences and MP4s on Linux.
+- I recorded PNG sequences and H.264 MP4s on Linux early on. Everything added since (the Look at atom, anchors and timeline, render range and scale, pause, representation keys and transitions, overlays on frames and the logo, H.265 and WebM) has not been tried by hand in the GUI by me: `MOVIE_STATUS.md` has the list to check.
 - The screenshots in the docs come from a real run with `1ALA-500.pdb`.
 - These have not been tried by hand in the GUI yet:
   - Look at / Update position.
@@ -92,5 +95,6 @@ All 117 tests pass in a Release build on Linux.
 - Not tested on Windows or macOS. The ffmpeg pipe uses `popen`/`_popen`.
 
 ### Known limits
+- Solid representations cannot fade, so they grow in and shrink away at a Visible key. Tint and saturation keys recolor the atoms every frame, which is slow for very large systems.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
 - Distance and field of view can only be moved in time on the timeline. Their values are edited through the camera or the table.

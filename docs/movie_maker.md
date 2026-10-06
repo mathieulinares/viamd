@@ -1,6 +1,6 @@
 # Making movies
 
-VIAMD can record a movie of a trajectory. You set how long the movie is, and you can place camera keyframes, key look parameters (exposure, background and so on) and add text overlays. The result is either an MP4 file (encoded by ffmpeg) or a numbered PNG sequence.
+VIAMD can record a movie of a trajectory. You set how long the movie is, and you can place camera keyframes, key look parameters (exposure, background and so on) and the properties of representations (show or hide one, change its size or color), and add overlays (text, a time stamp, a scale bar, the VIAMD logo). The result is an MP4 file (H.264 or H.265) or a WebM file, encoded by ffmpeg, or a numbered PNG sequence.
 
 ![The Movie window (right) and the Movie Timeline (bottom left), with the camera path drawn in the viewport](images/movie/overview.png)
 
@@ -177,3 +177,6 @@ It refers to `aspirin-phospholipase.gro` and `.xtc` in its own folder, which are
 
 - **Follow target** depth of field uses the global follow target, not a key's own **Look at** atom.
 - Distance and field of view are edited in the table and the viewport. In the timeline their dots only move in time.
+- Solid representations cannot fade: they grow in and shrink away instead (see **Representations**).
+- The camera path drawn in the viewport does not show the motion of a follow target.
+- The Representations window is locked while recording.
