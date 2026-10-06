@@ -131,7 +131,7 @@ Under **Visuals > Depth of Field**, **Focus** chooses what is sharp:
 
 ### Overlays
 
-**Add Text**, **Add Time Stamp** and **Add Scale Bar** add overlays that are drawn into the recorded frames. Each overlay has:
+**Add Text**, **Add Time Stamp**, **Add Scale Bar** and **Add Logo** add overlays that are drawn into the recorded frames. A new movie starts with the VIAMD logo in the top left corner, for the whole movie: remove it with its **Remove** button if you do not want it (a saved workspace remembers that). The logo is black and white lettering with colour on its molecule, so on a dark background give it a **Background** plate or tint it with its **Color**. For a logo, **Size** is its height. Each overlay has:
 
 - an on/off box and **Remove**;
 - **Shown (s)**, the times it is shown from and to, with **Start at preview time** and **End at preview time**;

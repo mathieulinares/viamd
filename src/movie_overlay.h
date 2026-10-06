@@ -7,6 +7,7 @@ enum class MovieOverlayType : int {
     Text,        // A title or a caption
     Timestamp,   // The time of the trajectory frame that is shown
     ScaleBar,    // A bar of a given length in the structure, which follows the camera
+    Logo,        // The VIAMD logo
     Count,
 };
 
@@ -25,12 +26,15 @@ struct MovieOverlay {
     float              fade_in = 0.5f;        // Seconds to appear and to go away, within begin..end
     float              fade_out = 0.5f;
     MovieOverlayAnchor anchor = MovieOverlayAnchor::BottomLeft;
-    float              size = 0.05f;          // The height of the text, as a part of the height of the frame
+    float              size = 0.05f;          // The height of the text (of the logo), as a part of the height of the frame
     float              color[4] = {1, 1, 1, 1};
     float              background[4] = {0, 0, 0, 0};  // A plate behind it, none while its alpha is 0
     char               text[128] = "";
     float              length = 0.0f;         // Scale bar: its length in Angstrom, 0 chooses one
 };
+
+// The logo in the top left corner for the whole movie, which a movie starts with
+MovieOverlay movie_overlay_default_logo();
 
 // How visible an overlay is at a time, 0..1. Zero outside begin..end, rising over fade_in and falling over
 // fade_out; where they do not both fit, they share the time in proportion.

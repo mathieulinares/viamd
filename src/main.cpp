@@ -67,6 +67,7 @@
 #include <algorithm>
 
 #include <viamd.h>
+#include <viamd_logo.inl>
 #include <script_reference.h>
 #include <viamd_event.h>
 #include <event.h>
@@ -6794,6 +6795,7 @@ static const char* movie_overlay_type_str[(int)MovieOverlayType::Count] = {
     "Text",
     "Time stamp",
     "Scale bar",
+    "Logo",
 };
 
 static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
@@ -6801,6 +6803,39 @@ static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
     "Middle left", "Center", "Middle right",
     "Bottom left", "Bottom center", "Bottom right",
 };
+
+// The logo as a texture, made the first time it is needed. 'aspect' is its width over its height. 0 if it cannot be made.
+static GLuint movie_logo_texture(float* aspect) {
+    static GLuint tex = 0;
+    static float  logo_aspect = 4.0f;
+    static bool   tried = false;
+    if (!tried) {
+        tried = true;
+        int w = 0, h = 0;
+        uint8_t* pixels = image_decode_rgba(viamd_logo_png, viamd_logo_png_size, &w, &h);
+        if (pixels) {
+            GLint prev = 0;
+            glActiveTexture(GL_TEXTURE0);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+            logo_aspect = (float)w / (float)MAX(h, 1);
+            image_free(pixels);
+        } else {
+            VIAMD_LOG_ERROR("Could not read the logo for the movie overlays");
+        }
+    }
+    *aspect = logo_aspect;
+    return tex;
+}
 
 // The overlays that are visible at a movie time, drawn into the rectangle (pos, size) of a frame. Everything scales with the
 // height of the frame, so a frame looks the same at any resolution.
@@ -6813,6 +6848,24 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
     for (const MovieOverlay& o : m.overlays) {
         const float alpha = movie_overlay_alpha(o, time);
         if (alpha <= 0.0f) continue;
+
+        if (o.type == MovieOverlayType::Logo) {
+            float aspect = 4.0f;
+            const GLuint tex = movie_logo_texture(&aspect);
+            if (!tex) continue;
+            const ImVec2 logo_size(MAX(o.size * size.y, 4.0f) * aspect, MAX(o.size * size.y, 4.0f));
+            const int la = (int)o.anchor;
+            const ImVec2 lp = ImVec2(pos.x + margin + (size.x - 2.0f * margin - logo_size.x) * 0.5f * (float)(la % 3),
+                                     pos.y + margin + (size.y - 2.0f * margin - logo_size.y) * 0.5f * (float)(la / 3));
+            if (o.background[3] > 0.0f) {
+                const float pad = logo_size.y * 0.15f;
+                const ImU32 plate = ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * alpha));
+                dl->AddRectFilled(ImVec2(lp.x - pad, lp.y - pad), ImVec2(lp.x + logo_size.x + pad, lp.y + logo_size.y + pad), plate, pad);
+            }
+            dl->AddImage((ImTextureID)(intptr_t)tex, lp, ImVec2(lp.x + logo_size.x, lp.y + logo_size.y), ImVec2(0, 0), ImVec2(1, 1),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha)));
+            continue;
+        }
 
         const float font_px = MAX(o.size * size.y, 4.0f);
         const ImU32 col    = ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha));
@@ -8165,6 +8218,7 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         case MovieOverlayType::Text:      snprintf(o.text, sizeof(o.text), "Title"); o.anchor = MovieOverlayAnchor::BottomCenter; break;
         case MovieOverlayType::Timestamp: o.anchor = MovieOverlayAnchor::TopRight; break;
         case MovieOverlayType::ScaleBar:  o.anchor = MovieOverlayAnchor::BottomLeft; break;
+        case MovieOverlayType::Logo:      o = movie_overlay_default_logo(); o.begin = (double)m.playhead; o.end = (double)MAX(movie_len, m.playhead); break;
         default: break;
         }
         m.overlays.push_back(o);
@@ -8176,6 +8230,9 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     ImGui::SetItemTooltip("The time of the trajectory frame that is shown, in the unit of the timeline");
     ImGui::SameLine();
     if (ImGui::Button("Add Scale Bar")) add(MovieOverlayType::ScaleBar);
+    ImGui::SameLine();
+    if (ImGui::Button("Add Logo")) add(MovieOverlayType::Logo);
+    ImGui::SetItemTooltip("The VIAMD logo. A movie starts with it in the top left corner for the whole movie: remove it here\nif you do not want it. Its colour tints it (white keeps its own colours), its size is its height.");
     ImGui::SetItemTooltip("A bar of a known length in the structure. It is as long on the frame as that length is at the\ndistance the camera looks at, so it follows the zoom.");
     ImGui::SameLine();
     ImGui::Checkbox("Show in viewport", &m.show_overlay_preview);

@@ -96,6 +96,7 @@ ResScale=100
 AaSamples=0
 SaveCopy=1
 RepTransition=2
+Overlays=1
 SnapFrames=1
 RenderRange=0,0,80
 Loop=0
@@ -160,6 +161,17 @@ Range=0,80,0.5,0.5
 Anchor=2
 Size=0.0399999991
 Color=0,0,0,1
+Length=0
+Text=
+
+[MovieOverlay]
+Type=3
+Enabled=1
+Range=0,3600,0,0
+Anchor=0
+Size=0.0799999982
+Color=1,1,1,1
+Background=0,0,0,0
 Length=0
 Text=
 

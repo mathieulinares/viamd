@@ -1191,7 +1191,7 @@ struct ApplicationState {
         MovieHistory history;
 
         // Text, a time stamp and a scale bar on the frames, and in the viewport while the movie is not recording
-        std::vector<MovieOverlay> overlays;
+        std::vector<MovieOverlay> overlays = { movie_overlay_default_logo() };
         bool show_overlay_preview = true;
 
         // Preview of the movie in the viewport, at the speed it will have

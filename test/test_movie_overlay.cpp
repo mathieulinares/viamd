@@ -65,3 +65,12 @@ UTEST(viamd_movie_overlay, a_scale_bar_is_one_two_or_five_of_a_power_of_ten) {
     EXPECT_NEAR(50.0f, movie_scale_bar_length(0.5, 1000.0, 0.15), 1.0e-4f);   /* 75 wanted */
     EXPECT_NEAR(0.0f, movie_scale_bar_length(0.0, 1000.0, 0.25), 1.0e-9f);
 }
+
+UTEST(viamd_movie_overlay, a_movie_starts_with_the_logo_in_the_top_left_corner_for_its_whole_length) {
+    const MovieOverlay o = movie_overlay_default_logo();
+    EXPECT_TRUE(o.type == MovieOverlayType::Logo);
+    EXPECT_TRUE(o.anchor == MovieOverlayAnchor::TopLeft);
+    EXPECT_NEAR(1.0f, movie_overlay_alpha(o, 0.0), 1.0e-6f);       /* there from the first frame */
+    EXPECT_NEAR(1.0f, movie_overlay_alpha(o, 1800.0), 1.0e-6f);
+    EXPECT_NEAR(1.0f, movie_overlay_alpha(o, 3600.0), 1.0e-6f);    /* up to the longest a movie can be */
+}

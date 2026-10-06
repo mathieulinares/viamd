@@ -1280,7 +1280,7 @@ static void workspace_reset(ApplicationState* data) {
         m.param_keys.clear();
         m.rep_keys.clear();
         m.rep_saved.clear();
-        m.overlays.clear();
+        m.overlays = { movie_overlay_default_logo() };
         md_bitfield_clear(&m.follow_mask);
         m.key_follow = false;
         m.follow_pending = false;
@@ -1715,6 +1715,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("SaveCopy")))       viamd::extract_bool(m.save_copy, arg);
                 else if (str_eq(ident, STR_LIT("RepTransition")))  viamd::extract_flt(m.rep_transition, arg);
                 else if (str_eq(ident, STR_LIT("SnapFrames")))     viamd::extract_bool(m.snap_frames, arg);
+                else if (str_eq(ident, STR_LIT("Overlays")))       m.overlays.clear();   // The overlays that follow are all of them
                 else if (str_eq(ident, STR_LIT("RenderRange"))) {
                     float r[3];
                     if (viamd::extract_flt_vec(r, 3, arg)) {
@@ -1860,6 +1861,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
             }
             o.size = CLAMP(o.size, 0.01f, 0.3f);
             data->movie.overlays.push_back(o);
+            movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("Operations"))) {
             auto& op = data->operations;
             while (viamd::next_entry(ident, arg, state)) {
@@ -2206,6 +2208,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("SaveCopy"), m.save_copy);
         viamd::write_flt (state, STR_LIT("RepTransition"), m.rep_transition);
         viamd::write_bool(state, STR_LIT("SnapFrames"), m.snap_frames);
+        viamd::write_bool(state, STR_LIT("Overlays"), true);
         const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
         viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);
         viamd::write_bool(state, STR_LIT("Loop"), m.loop);

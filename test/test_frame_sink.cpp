@@ -8,8 +8,7 @@
 // own implementation in frame_sink.cpp that these tests do not cover.
 #if !defined(_WIN32)
 
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_PNG
+// The decoder is implemented in image.cpp
 #include <stb_image.h>
 
 #include <stdio.h>

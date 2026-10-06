@@ -2,6 +2,18 @@
 
 #include <math.h>
 
+MovieOverlay movie_overlay_default_logo() {
+    MovieOverlay o;
+    o.type = MovieOverlayType::Logo;
+    o.begin = 0.0;
+    o.end = 3600.0;   // The longest a movie can be, so it follows the length of the movie
+    o.fade_in = 0.0f;
+    o.fade_out = 0.0f;
+    o.anchor = MovieOverlayAnchor::TopLeft;
+    o.size = 0.08f;
+    return o;
+}
+
 float movie_overlay_alpha(const MovieOverlay& o, double time) {
     if (!o.enabled || o.end <= o.begin || time < o.begin || time > o.end) return 0.0f;
 

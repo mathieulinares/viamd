@@ -13,6 +13,20 @@
 #pragma clang diagnostic pop
 #endif
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#include <stb_image.h>
+
+uint8_t* image_decode_rgba(const void* data, size_t size, int* width, int* height) {
+    int channels = 0;
+    return stbi_load_from_memory((const stbi_uc*)data, (int)size, width, height, &channels, 4);
+}
+
+void image_free(void* pixels) {
+    stbi_image_free(pixels);
+}
+
 static void write_func(void* context, void* data, int size) {
     ASSERT(context);
     md_file_t* file = (md_file_t*)context;

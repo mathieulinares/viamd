@@ -50,7 +50,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - New focus modes: look-at point (the previous behaviour), a fixed distance that can be keyed, or the follow target.
 
 **Overlays**
-- Text, time stamp and scale bar.
+- Text, time stamp, scale bar and the VIAMD logo. A movie starts with the logo in the top left corner; it can be removed.
 - Each has a time range, fades, nine anchor positions, a size relative to the frame height, a colour and an optional background plate.
 
 **Undo/redo** (Ctrl+Z, Ctrl+Y)
@@ -80,7 +80,7 @@ New tests are in:
 - `test_movie_overlay`.
 - `test_serialization`.
 
-All 114 tests pass in a Release build on Linux.
+All 117 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and MP4s on Linux.

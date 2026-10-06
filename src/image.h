@@ -2,8 +2,16 @@
 
 #include <core/md_str.h>
 
+#include <stdint.h>
+#include <stddef.h>
+
 // @NOTE: JPG quality is between 0-100
 // rgba: 32-bit per pixel, 8-bit per channel, rgba
 bool image_write_jpg(str_t filename, const void* rgba, int width, int height, int quality);
 bool image_write_png(str_t filename, const void* rgba, int width, int height);
 bool image_write_bmp(str_t filename, const void* rgba, int width, int height);
+
+// Decodes an image held in memory (png, jpg ...) to rgba, 8 bits per channel. The pixels are freed with image_free.
+// Returns null if it is not an image.
+uint8_t* image_decode_rgba(const void* data, size_t size, int* width, int* height);
+void image_free(void* pixels);

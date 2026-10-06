@@ -289,6 +289,10 @@ set(SCRIPT_REFERENCE_MD "${CMAKE_CURRENT_SOURCE_DIR}/ext/mdlib/docs/script_refer
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SCRIPT_REFERENCE_MD}")
 create_resources("${SCRIPT_REFERENCE_MD}" "gen/script_reference.inl")
 
+# The logo that a movie can show on its frames
+create_resources("${CMAKE_CURRENT_SOURCE_DIR}/icon/viamd_logo.png" "gen/viamd_logo.inl")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/icon/viamd_logo.png")
+
 source_group("src" FILES ${SRC_FILES})
 source_group("src/app" FILES ${APP_FILES})
 source_group("src/gfx" FILES ${GFX_FILES})
