@@ -8257,7 +8257,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableSetupColumn("Frame", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 30.0f);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 36.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
@@ -8370,6 +8370,25 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
                 if (key.use_frame) key.frame = data->animation.frame;
             }
             ImGui::SetItemTooltip("Move this keyframe's camera to the current view's position. What it looks at stays.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton(key.follow ? "Unfollow" : "Follow")) {
+                if (key.follow) {
+                    key.follow = false;
+                    key.follow_atom = -1;
+                } else {
+                    vec3_t center;
+                    if (md_bitfield_empty(&m.follow_mask)) {
+                        VIAMD_LOG_ERROR("Set a follow target first (Set Follow Target, in the Camera Keyframes section)");
+                    } else if (fabs(data->animation.frame - movie_trajectory_frame(data, key.time)) > 0.5) {
+                        VIAMD_LOG_ERROR("Press Go To on keyframe %d first: the target is taken where it is at the frame of the keyframe", i + 1);
+                    } else if (movie_follow_center(data, &center)) {
+                        key.follow = true;
+                        key.follow_center = center;
+                        key.follow_atom = -1;
+                    }
+                }
+            }
+            ImGui::SetItemTooltip("Makes this keyframe look at a point that moves with the follow target, kept where it is relative to the target\nnow. Press Go To first, so that the trajectory is at the frame of the keyframe. Unfollow makes it fixed again.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Dup")) dup_idx = i;
             ImGui::SetItemTooltip("Copy it to one second later");

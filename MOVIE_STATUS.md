@@ -41,6 +41,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 
 - Representation lane in the timeline: drag, add (double-click) and remove (right-click) keys; Visible turns around on double-click; hiding the lane.
 - Visible transition: a representation grows in at its key and shrinks away at the next; scrub through a transition (also with the lane); transition 0 pops; a key closer than the transition turns around; Cartoon and Ribbons at very small sizes look right; electronic structure and dipole representations vanish at the end of the transition.
+- Follow / Unfollow in the keyframe table: Go To a key, Follow, scrub through the trajectory and check the camera keeps the target in view; without Go To first an error is logged.
 - Output formats: record a few seconds as H.265 and as WebM VP9 (needs ffmpeg with libx265 and libvpx-vp9) and play the files; the workspace copy and the log name the right extension.
 - Ctrl+C / Ctrl+V on keyframes (also while a text box is not focused); the overlay Background plate over a busy picture and its fades.
 - Representation keys: key Visible at two times and scrub/preview; key a scale, a saturation and a tint color (the example workspace tints the protein blue-grey from 50 s to 60 s); remove a representation that has keys; duplicate one (the copy must not share keys); save and reload a workspace (ids and keys survive, an old workspace without ids still loads and keys can be added); the values must go back after a recording.
@@ -61,7 +62,6 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Only the properties listed above can be keyed: not the type, filter, colour mapping, the other colours (bond, secondary structure) or the electronic structure settings (those cannot be blended, or are expensive to redo every frame).
 - Tint scale and saturation recolor the atoms of the representation every frame while they change: slow for very large systems.
 - Representation ids are assigned in the order they are created; a workspace written before they existed gets ids on load.
-- An existing keyframe cannot be switched to follow the target; add a new key at the same time with the option on (it replaces the old one).
 - The camera path drawn in the viewport does not show the follow motion.
 - The follow target itself is not part of undo.
 - Where a frame curve turns around, the trajectory slows to a stop. For a hard reversal, add a key at the turn-around frame with Linear easing.
@@ -77,6 +77,5 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 
 ## Ideas not yet planned
 
-- Keyframe table column to toggle follow on an existing key
 - Draw the follow-aware camera path in the viewport
 - Per-overlay font size in points, image/logo overlay
