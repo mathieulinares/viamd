@@ -155,6 +155,12 @@ The yellow line is the playhead. Scroll to zoom the time, drag the background to
 
 The movie (length, trajectory timing, camera keys including what they look at, look parameter keys, representation keys, overlays and follow target) is saved in the workspace (`.via`) under `[Movie]`. Workspaces from earlier versions load and are converted.
 
+## Example workspace
+
+[`examples/aspirin_phospholipase_movie.via`](examples/aspirin_phospholipase_movie.via) is a finished movie of aspirin in phospholipase (80 s): camera keys that look at and track atoms, a depth of field pull, representation keys (water appears when the camera reaches the ligand, residues are shown for a while, the protein fades to grey, the ligand shrinks as the camera comes in), a title, a time stamp and a scale bar. It is kept as a worked example of the features here and is updated when they grow.
+
+It refers to `aspirin-phospholipase.gro` and `.xtc` in its own folder, which are not part of the repository. Put your copy of the two files next to the workspace, then **File > Open Workspace**, and scrub **Preview time**.
+
 ## Tips
 
 - Plan the length first, then place keys. If the movie is too fast or too slow, change **Movie length** and everything stays in proportion.
