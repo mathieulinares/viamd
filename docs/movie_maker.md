@@ -39,6 +39,12 @@ The top line has **Start Recording**, with a summary of what will be written: fr
 | **Copy ffmpeg command** | PNG only. Copies a command that encodes the PNG sequence into an MP4. |
 | **Resolution** | **Window** (the window size when recording starts), Full HD, Quad HD, 4K, 8K or **Custom** (**Res X**, **Res Y**). |
 | **Output FPS** | Frames per second of the movie. The number of frames is length × FPS. |
+| **Scale** | The size of the frames as a part of the size above (100, 75, 50 or 25 %). A small one renders much faster: use it to check a movie before making it in full. |
+| **Samples per frame** | With temporal anti-aliasing on: how many rendered images are averaged into each frame. 0 uses the length of the jitter sequence. Fewer is faster, more is smoother. |
+| **Render only a range** | Renders the frames between two times of the movie (**Range (s)**), e.g. to redo a part of it. With a PNG sequence the files keep the numbers they have in the whole movie, so they can replace the old ones. **Start at preview time** and **End at preview time** take the times from the playhead. |
+| **Save a workspace copy with the movie** | Writes `prefix.via` next to the movie, with the camera path, looks, overlays and settings it was made from. Opening it and recording again gives the same movie. |
+
+While recording, **Pause** stops the recording where it is and **Resume** carries on. The progress bar shows how many frames are done and, after a few frames, about how long is left.
 
 ### Timeline: how long the movie is and how the trajectory plays
 
@@ -143,6 +149,7 @@ The movie (length, trajectory timing, camera keys including what they look at, l
 - To slow down an interesting event, pin frames on two keys around it and move them further apart in time.
 - **Smooth** keys never stop the camera. Use **Ease in/out** or **Hold** where the camera should rest.
 - PNG sequences are safest for very long or very large movies. Encode them afterwards with **Copy ffmpeg command**.
+- Check the motion at **Scale** 25 % and with few **Samples per frame** first, then make the final movie at full size. To fix one part afterwards, use **Render only a range** with a PNG sequence and replace the files.
 
 ## Known limits
 

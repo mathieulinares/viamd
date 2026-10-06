@@ -258,3 +258,74 @@ UTEST(viamd_movie_keys, clearing_forgets_the_past) {
     h.update(cur, false);
     EXPECT_FALSE(h.can_undo());       /* what was cleared to is the present */
 }
+
+/* Which frames a recording makes, how big they are, how long it has left */
+
+UTEST(viamd_movie_keys, without_a_range_every_frame_is_rendered) {
+    int a = -1, b = -1;
+    movie_frame_range(121, 24.0, false, 2.0, 3.0, &a, &b);
+    EXPECT_EQ(0, a);
+    EXPECT_EQ(120, b);
+}
+
+UTEST(viamd_movie_keys, a_range_picks_the_frames_inside_it) {
+    int a = -1, b = -1;
+    movie_frame_range(121, 24.0, true, 1.0, 2.0, &a, &b);   /* 24 .. 48 */
+    EXPECT_EQ(24, a);
+    EXPECT_EQ(48, b);
+
+    movie_frame_range(121, 24.0, true, 1.01, 1.99, &a, &b); /* between frames: the ones inside */
+    EXPECT_EQ(25, a);
+    EXPECT_EQ(47, b);
+}
+
+UTEST(viamd_movie_keys, a_range_always_holds_a_frame_and_stays_inside_the_movie) {
+    int a = -1, b = -1;
+    movie_frame_range(121, 24.0, true, 3.0, 3.0, &a, &b);
+    EXPECT_EQ(72, a);
+    EXPECT_EQ(72, b);
+
+    movie_frame_range(121, 24.0, true, 1.01, 1.02, &a, &b); /* nothing exactly inside: the first after begin */
+    EXPECT_EQ(25, a);
+    EXPECT_GE(b, a);
+
+    movie_frame_range(121, 24.0, true, 4.0, 90.0, &a, &b);
+    EXPECT_EQ(96, a);
+    EXPECT_EQ(120, b);
+
+    movie_frame_range(121, 24.0, true, 90.0, 95.0, &a, &b);
+    EXPECT_EQ(120, a);
+    EXPECT_EQ(120, b);
+}
+
+UTEST(viamd_movie_keys, a_scaled_size_is_even_and_never_larger) {
+    int w = 1920, h = 1080;
+    movie_scaled_size(&w, &h, 100);
+    EXPECT_EQ(1920, w);
+    EXPECT_EQ(1080, h);
+
+    movie_scaled_size(&w, &h, 50);
+    EXPECT_EQ(960, w);
+    EXPECT_EQ(540, h);
+
+    w = 1001; h = 667;
+    movie_scaled_size(&w, &h, 75);
+    EXPECT_EQ(0, w % 2);
+    EXPECT_EQ(0, h % 2);
+    EXPECT_LE(w, 751);
+
+    w = 20; h = 10;
+    movie_scaled_size(&w, &h, 10);
+    EXPECT_GE(w, 2);
+    EXPECT_GE(h, 2);
+}
+
+UTEST(viamd_movie_keys, time_left_follows_the_pace_so_far) {
+    double s = 0.0;
+    EXPECT_FALSE(movie_time_left(1, 100, 5.0, &s));    /* too early to tell */
+    EXPECT_FALSE(movie_time_left(50, 100, 0.2, &s));
+    ASSERT_TRUE(movie_time_left(25, 100, 50.0, &s));   /* 2 s a frame, 75 to go */
+    EXPECT_NEAR(150.0, s, 1.0e-9);
+    ASSERT_TRUE(movie_time_left(100, 100, 50.0, &s));
+    EXPECT_NEAR(0.0, s, 1.0e-12);
+}

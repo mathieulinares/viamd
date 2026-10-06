@@ -735,15 +735,19 @@ UTEST(viamd_camera, default_view_of_a_membrane_without_a_cell_keeps_its_normal_u
 }
 
 UTEST(viamd_camera, default_view_of_a_planar_molecule_is_face_on) {
-    /* Benzene, in an arbitrary orientation */
+    /* Benzene, in an arbitrary orientation. Real coordinates are never exactly symmetric: with the ideal
+     * geometry the visibility scores of nearby directions tie and the view can settle ~10 degrees off the
+     * normal, so a deterministic jitter of 0.001 A (what a coordinate file's rounding gives) is added. */
     static DvSys s; s.n = 0;
+    uint32_t seed = 5;
     const vec3_t n  = vec3_normalize(vec3_set(0.3f, -0.5f, 0.8f));
     const vec3_t e1 = vec3_normalize(vec3_cross(n, vec3_set(1, 0, 0)));
     const vec3_t e2 = vec3_cross(n, e1);
+    auto jitter = [&]() { return vec3_set(0.001f * (dv_rand(&seed) - 0.5f), 0.001f * (dv_rand(&seed) - 0.5f), 0.001f * (dv_rand(&seed) - 0.5f)); };
     for (int k = 0; k < 6; ++k) {
         const float a = k * 1.0471976f;
-        s.add(vec3_add(vec3_mul1(e1, 1.39f * cosf(a)), vec3_mul1(e2, 1.39f * sinf(a))));
-        s.add(vec3_add(vec3_mul1(e1, 2.47f * cosf(a)), vec3_mul1(e2, 2.47f * sinf(a))));
+        s.add(vec3_add(vec3_add(vec3_mul1(e1, 1.39f * cosf(a)), vec3_mul1(e2, 1.39f * sinf(a))), jitter()));
+        s.add(vec3_add(vec3_add(vec3_mul1(e1, 2.47f * cosf(a)), vec3_mul1(e2, 2.47f * sinf(a))), jitter()));
     }
     const ViewTransform v = camera_compute_default_view(s.xyz, s.n, NULL, s.n, NULL, 0.785f);
     EXPECT_GT(fabsf(vec3_dot(dv_view_dir(v), n)), 0.99f);

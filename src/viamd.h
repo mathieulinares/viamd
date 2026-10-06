@@ -1100,6 +1100,18 @@ struct ApplicationState {
         char   ffmpeg_path[512] = "ffmpeg";      // Found on PATH unless it is a path
 
         float  fps         = 24.0f;  // Output frames per second
+
+        // What and how much is rendered, for quick tests and for redoing a part of a movie
+        bool   range_enabled = false;   // Render only the frames from range_begin to range_end (s on the movie's timeline)
+        float  range_begin   = 0.0f;
+        float  range_end     = 0.0f;
+        int    res_scale     = 100;     // Percent of the size of the frames, a small one is a fast preview of the render
+        int    aa_samples    = 0;       // Samples accumulated per frame with temporal AA, 0 for the jitter sequence's length
+        bool   save_copy     = true;    // Save a workspace next to the movie with everything it was made from
+        bool   paused        = false;   // The recording waits, resumes where it was
+        double rec_active_s  = 0.0;     // Seconds spent recording, not counting a pause
+        int    rec_first     = 0;       // The frames of the movie that the recording makes, first to last
+        int    rec_last      = 0;
         double start_frame = 0.0;    // Trajectory frame shown at the start of the trajectory's part of the movie
         double end_frame   = 0.0;    // Trajectory frame shown at the end of it
 

@@ -3,6 +3,7 @@
 #include <gfx/camera_utils.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t count, int param, double time) {
@@ -125,5 +126,27 @@ bool MovieHistory::redo(MovieKeys* state) {
     *state = redo_.back();
     redo_.pop_back();
     committed_ = *state;
+    return true;
+}
+
+void movie_frame_range(int num_frames, double fps, bool use_range, double begin, double end, int* first, int* last) {
+    const int n = num_frames < 1 ? 1 : num_frames;
+    *first = 0;
+    *last = n - 1;
+    if (!use_range) return;
+    *first = std::clamp((int)std::ceil(begin * fps - 1.0e-6), 0, n - 1);
+    *last  = std::clamp((int)std::floor(end * fps + 1.0e-6), *first, n - 1);
+}
+
+void movie_scaled_size(int* w, int* h, int percent) {
+    const int s = std::clamp(percent, 10, 100);
+    if (s >= 100) return;
+    *w = std::max(2, (*w * s / 100) & ~1);
+    *h = std::max(2, (*h * s / 100) & ~1);
+}
+
+bool movie_time_left(int done, int total, double active_seconds, double* seconds) {
+    if (done < 2 || active_seconds < 1.0) return false;
+    *seconds = active_seconds / (double)done * (double)std::max(total - done, 0);
     return true;
 }

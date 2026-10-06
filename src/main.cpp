@@ -6267,6 +6267,8 @@ static void movie_set_duration(ApplicationState* state, float new_len) {
     keys.duration = new_len;
     movie_keys_restore(state, keys);
     m.playhead = (float)(m.playhead * s);
+    m.range_begin = (float)(m.range_begin * s);
+    m.range_end = (float)(m.range_end * s);
     m.orbit_duration = (float)(m.orbit_duration * s);
 }
 
@@ -6286,6 +6288,24 @@ static void movie_clamp_anchors(ApplicationState* state) {
 
 static int movie_num_frames(const ApplicationState* state) {
     return (int)floor(movie_duration(state) * (double)state->movie.fps + 1.0e-6) + 1;
+}
+
+// The frames of the movie that are rendered, first to last. Frame i is at i / fps on the movie's timeline.
+static void movie_render_range(const ApplicationState* state, int* first, int* last) {
+    const auto& m = state->movie;
+    movie_frame_range(movie_num_frames(state), (double)m.fps, m.range_enabled, (double)m.range_begin, (double)m.range_end, first, last);
+}
+
+static void movie_format_time(char* buf, size_t cap, double seconds) {
+    const int s = (int)(seconds + 0.5);
+    if (s >= 3600)    snprintf(buf, cap, "%d h %02d min", s / 3600, (s / 60) % 60);
+    else if (s >= 60) snprintf(buf, cap, "%d min %02d s", s / 60, s % 60);
+    else              snprintf(buf, cap, "%d s", s);
+}
+
+static bool movie_time_left(const ApplicationState* state, double* seconds) {
+    const auto& m = state->movie;
+    return movie_time_left(m.frame_index - m.rec_first, m.rec_last - m.rec_first + 1, m.rec_active_s, seconds);
 }
 
 // Trajectory frame shown at a time on the movie timeline: from the keyframes that have one, otherwise
@@ -6535,6 +6555,7 @@ static void movie_frame_size(const ApplicationState* state, int* w, int* h) {
         *h = CLAMP(state->movie.res_y, 480, 16384);
         break;
     }
+    movie_scaled_size(w, h, state->movie.res_scale);
 }
 
 static void movie_pbo_free(ApplicationState* state) {
@@ -6842,11 +6863,24 @@ static void movie_recording_start(ApplicationState* state) {
     m.rec_w = w;
     m.rec_h = h;
     m.rec_output = m.output;
-    m.cur_time = 0.0;
-    m.frame_index = 0;
+    movie_render_range(state, &m.rec_first, &m.rec_last);
+    m.cur_time = (double)m.rec_first / (double)m.fps;
+    m.frame_index = m.rec_first;
     m.samples_done = 0;
-    m.sample_target = state->visuals.temporal_aa.enabled ? JITTER_SEQUENCE_SIZE : 1;
+    m.sample_target = state->visuals.temporal_aa.enabled ? (m.aa_samples > 0 ? CLAMP(m.aa_samples, 1, 256) : JITTER_SEQUENCE_SIZE) : 1;
     m.can_capture = true;
+    m.paused = false;
+    m.rec_active_s = 0.0;
+
+    if (m.save_copy) {
+        // Everything the movie was made from, so that it can be made again. Saving moves the workspace's name, which is put back.
+        char copy[2048];
+        snprintf(copy, sizeof(copy), STR_FMT "/%s." STR_FMT, STR_ARG(m.output_dir), m.filename_prefix, STR_ARG(WORKSPACE_FILE_EXTENSION));
+        char prev[sizeof(state->files.workspace)];
+        memcpy(prev, state->files.workspace, sizeof(prev));
+        save_workspace(state, str_from_cstr(copy));
+        memcpy(state->files.workspace, prev, sizeof(prev));
+    }
 
     m.prev_playback_mode = state->animation.mode;
     state->animation.mode = PlaybackMode::Stopped;
@@ -6857,7 +6891,7 @@ static void movie_recording_start(ApplicationState* state) {
 
     m.state = MovieRecordingState::Recording;
 
-    VIAMD_LOG_INFO("Recording %d movie frame(s) (%.2f s, %dx%d) to '%s'", movie_num_frames(state), movie_duration(state), w, h, m.rec_result);
+    VIAMD_LOG_INFO("Recording %d movie frame(s) of %d (%.2f s, %dx%d) to '%s'", m.rec_last - m.rec_first + 1, movie_num_frames(state), movie_duration(state), w, h, m.rec_result);
 }
 
 // Ends the recording. The frames captured so far are kept: the sink writes what it has and is
@@ -6871,13 +6905,14 @@ static void movie_recording_stop(ApplicationState* state) {
     }
 
     m.state = MovieRecordingState::Idle;
+    m.paused = false;
     movie_restore_state(state);
 
     movie_pbo_flush(state);
     movie_pbo_free(state);
     if (m.sink) frame_sink::close(m.sink);
 
-    VIAMD_LOG_INFO("Movie recording stopped after %d frame(s)", m.frame_index);
+    VIAMD_LOG_INFO("Movie recording stopped after %d frame(s)", m.frame_index - m.rec_first);
 }
 
 static void movie_shutdown(ApplicationState* state) {
@@ -6953,10 +6988,11 @@ static void update_movie_recording(ApplicationState* state) {
     state->animation.mode = PlaybackMode::Stopped;
 
     while (movie_pbo_pop(state, false)) {}
-    m.can_capture = m.pbo_count < MOVIE_RING_SIZE;
+    m.can_capture = m.pbo_count < MOVIE_RING_SIZE && !m.paused;
+    if (!m.paused) m.rec_active_s += state->app.timing.delta_s;
 
-    if (m.frame_index >= movie_num_frames(state)) {
-        const int num_frames = m.frame_index;
+    if (m.frame_index > m.rec_last) {
+        const int num_frames = m.frame_index - m.rec_first;
         movie_pbo_flush(state);
         movie_pbo_free(state);
         frame_sink::close(m.sink);
@@ -8076,6 +8112,10 @@ static void draw_movie_window(ApplicationState* data) {
 
     int frame_w = 0, frame_h = 0;
     movie_frame_size(data, &frame_w, &frame_h);
+    m.range_begin = CLAMP(m.range_begin, 0.0f, m.duration);
+    m.range_end = CLAMP(m.range_end, m.range_begin, m.duration);
+    int range_first = 0, range_last = 0;
+    movie_render_range(data, &range_first, &range_last);
 
     // --- Recording ---
     if (!recording) {
@@ -8092,14 +8132,25 @@ static void draw_movie_window(ApplicationState* data) {
             const frame_sink::Status st = frame_sink::status(m.sink);
             ImGui::TextDisabled("Still writing the previous movie, %d frame(s) left", st.queued);
         } else {
-            ImGui::TextDisabled("%d frames, %.2f s, %dx%d", movie_num_frames(data), movie_duration(data), frame_w, frame_h);
+            ImGui::TextDisabled("%d of %d frames, %.2f s, %dx%d", range_last - range_first + 1, movie_num_frames(data), movie_duration(data), frame_w, frame_h);
         }
     } else {
         if (ImGui::Button("Stop Recording")) {
             movie_recording_stop(data);
         }
         ImGui::SameLine();
-        ImGui::Text("Recording frame %d / %d (%.2f s)", m.frame_index, movie_num_frames(data), m.cur_time);
+        if (ImGui::Button(m.paused ? "Resume" : "Pause")) {
+            m.paused = !m.paused;
+        }
+        ImGui::SameLine();
+        ImGui::Text("Recording frame %d / %d (%.2f s)", m.frame_index - m.rec_first, m.rec_last - m.rec_first + 1, m.cur_time);
+        double left;
+        if (movie_time_left(data, &left)) {
+            char buf[48];
+            movie_format_time(buf, sizeof(buf), left);
+            ImGui::SameLine();
+            ImGui::TextDisabled("about %s left", buf);
+        }
     }
 
     ImGui::BeginDisabled(recording);
@@ -8180,6 +8231,47 @@ static void draw_movie_window(ApplicationState* data) {
 
         ImGui::InputFloat("Output FPS", &m.fps, 1.0f, 5.0f, "%.1f");
         m.fps = CLAMP(m.fps, 1.0f, 240.0f);
+
+        static const int scales[] = {100, 75, 50, 25};
+        char scale_label[16];
+        snprintf(scale_label, sizeof(scale_label), "%d%%", m.res_scale);
+        if (ImGui::BeginCombo("Scale", scale_label)) {
+            for (int s : scales) {
+                char label[16];
+                snprintf(label, sizeof(label), "%d%%", s);
+                if (ImGui::Selectable(label, s == m.res_scale)) m.res_scale = s;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("The size of the frames as a part of the size above. A smaller one renders much faster: use it to check\na movie before making it in full.");
+        if (m.res_scale < 100) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%dx%d", frame_w, frame_h);
+        }
+
+        ImGui::BeginDisabled(!data->visuals.temporal_aa.enabled);
+        ImGui::InputInt("Samples per frame", &m.aa_samples);
+        m.aa_samples = CLAMP(m.aa_samples, 0, 256);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("How many rendered images are averaged into each frame, for smooth edges (temporal anti-aliasing,\nso it has to be on in the render settings). 0 uses the length of the jitter sequence. Fewer is faster.");
+
+        ImGui::Checkbox("Render only a range", &m.range_enabled);
+        ImGui::SetItemTooltip("Renders the frames between two times of the movie, e.g. to redo a part of it. With a PNG sequence\nthe files keep the numbers they have in the whole movie, so they can replace the old ones.");
+        if (m.range_enabled) {
+            float r[2] = {m.range_begin, m.range_end};
+            if (ImGui::DragFloatRange2("Range (s)", &r[0], &r[1], 0.05f, 0.0f, m.duration, "from %.2f", "to %.2f")) {
+                m.range_begin = r[0];
+                m.range_end = r[1];
+            }
+            if (ImGui::SmallButton("Start at preview time")) m.range_begin = MIN(m.playhead, m.range_end);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("End at preview time")) m.range_end = MAX(m.playhead, m.range_begin);
+            ImGui::SameLine();
+            ImGui::TextDisabled("frames %d to %d", range_first, range_last);
+        }
+
+        ImGui::Checkbox("Save a workspace copy with the movie", &m.save_copy);
+        ImGui::SetItemTooltip("Writes '<prefix>.via' next to the movie, with the camera path, looks, overlays and settings it was made from.\nOpening it and recording again gives the same movie.");
     }
 
     if (ImGui::CollapsingHeader("Timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -8347,10 +8439,22 @@ static void draw_movie_recording_banner(ApplicationState* state) {
     if (ImGui::Begin("##movie_recording_banner", nullptr, flags)) {
         const float bar_width = ImGui::GetFontSize() * 22.0f;
         if (recording) {
-            const int n = movie_num_frames(state);
-            ImGui::Text("Recording movie, frame %d / %d  (%.2f s)", MIN(m.frame_index, n), n, m.cur_time);
-            ImGui::ProgressBar(n > 0 ? (float)m.frame_index / (float)n : 0.0f, ImVec2(bar_width, 0));
-            ImGui::TextDisabled("%d written, %d waiting to be written", st.written, st.queued);
+            const int n = m.rec_last - m.rec_first + 1;
+            const int done = MIN(m.frame_index - m.rec_first, n);
+            ImGui::Text("%s movie, frame %d / %d  (%.2f s)", m.paused ? "Paused" : "Recording", done, n, m.cur_time);
+            ImGui::ProgressBar(n > 0 ? (float)done / (float)n : 0.0f, ImVec2(bar_width, 0));
+            double left;
+            char eta[48] = "";
+            if (movie_time_left(state, &left)) {
+                char t[40];
+                movie_format_time(t, sizeof(t), left);
+                snprintf(eta, sizeof(eta), ", about %s left", t);
+            }
+            ImGui::TextDisabled("%d written, %d waiting to be written%s", st.written, st.queued, eta);
+            if (ImGui::Button(m.paused ? "Resume" : "Pause")) {
+                m.paused = !m.paused;
+            }
+            ImGui::SameLine();
             if (ImGui::Button("Stop (Esc)")) {
                 movie_recording_stop(state);
             }

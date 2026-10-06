@@ -62,3 +62,14 @@ private:
     MovieKeys committed_;
     bool has_committed_ = false;
 };
+
+// The frames of a movie that a recording makes, first to last (inclusive), out of 'num_frames' at 'fps'. With a
+// range, the frames between begin and end seconds, which always include at least one.
+void movie_frame_range(int num_frames, double fps, bool use_range, double begin, double end, int* first, int* last);
+
+// The size of a frame at a percentage of the full size, kept even for the video encoder
+void movie_scaled_size(int* w, int* h, int percent);
+
+// How long a recording has left from its pace so far: 'done' of 'total' frames in 'active_seconds'. False
+// until there is enough to go on.
+bool movie_time_left(int done, int total, double active_seconds, double* seconds);

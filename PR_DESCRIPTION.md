@@ -19,6 +19,9 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - Resolution can be the window size, presets up to 8K, or a custom size. Output FPS is configurable.
 - Frames are written off the render thread by a new `frame_sink`. It has a fixed pool of buffers, so memory use stays bounded.
 - When a recording finishes or is stopped, the user's view, playback state and screenshot settings are put back.
+- Quick tests: a **Scale** (100/75/50/25 %) for the frame size, a number of **Samples per frame** for temporal anti-aliasing, and **Render only a range** of the movie. PNG files keep their numbers from the whole movie, so a redone part can replace them.
+- **Pause** and **Resume**, and a time-left estimate from the pace so far.
+- Optionally saves a workspace copy (`prefix.via`) next to the movie, so it can be made again.
 
 **Timing**
 - The movie length is the master value. Changing it scales everything on the timeline: camera and parameter keys, overlays and their fades, and the trajectory's start and end.
@@ -65,12 +68,12 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 ### Tests
 New tests are in:
 - `test_camera_utils`: interpolation, easing, spin, loop, follow and anchors.
-- `test_movie_keys`: scaling and undo.
+- `test_movie_keys`: scaling and undo, render range, frame scaling, time left.
 - `test_frame_sink`.
 - `test_movie_overlay`.
 - `test_serialization`.
 
-All 97 tests pass in a Release build on Linux.
+All 102 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and MP4s on Linux.

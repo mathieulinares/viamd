@@ -1263,6 +1263,12 @@ static void workspace_reset(ApplicationState* data) {
         m.show_path = true;
         m.output = MovieOutput::Mp4;
         m.crf = 18;
+        m.res_scale = 100;
+        m.aa_samples = 0;
+        m.save_copy = true;
+        m.range_enabled = false;
+        m.range_begin = 0.0f;
+        m.range_end = 0.0f;
         md_array_shrink(m.keyframes, 0);
         m.loop = false;
         m.animate_params = true;
@@ -1693,6 +1699,17 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("ShowPath")))       viamd::extract_bool(m.show_path, arg);
                 else if (str_eq(ident, STR_LIT("Output")))         viamd::extract_enum(m.output, arg, (int)MovieOutput::Count);
                 else if (str_eq(ident, STR_LIT("Crf")))            viamd::extract_int(m.crf, arg);
+                else if (str_eq(ident, STR_LIT("ResScale")))       viamd::extract_int(m.res_scale, arg);
+                else if (str_eq(ident, STR_LIT("AaSamples")))      viamd::extract_int(m.aa_samples, arg);
+                else if (str_eq(ident, STR_LIT("SaveCopy")))       viamd::extract_bool(m.save_copy, arg);
+                else if (str_eq(ident, STR_LIT("RenderRange"))) {
+                    float r[3];
+                    if (viamd::extract_flt_vec(r, 3, arg)) {
+                        m.range_enabled = r[0] != 0.0f;
+                        m.range_begin = r[1];
+                        m.range_end = r[2];
+                    }
+                }
                 else if (str_eq(ident, STR_LIT("Keyframe")) || str_eq(ident, STR_LIT("KeyframeV2")) || str_eq(ident, STR_LIT("KeyframeV3"))) {
                     // time, fov_y, distance, position (3), orientation (4). Keyframe is what was written before there
                     // was more to a key: then use_frame, frame, spin_turns, spin_axis, spin_constant_speed and, in the
@@ -1788,6 +1805,8 @@ void load_workspace(ApplicationState* data, str_t filename) {
             m.traj_end = CLAMP(m.traj_end, m.traj_begin, m.duration);
             m.duration_init = true;
             m.crf = CLAMP(m.crf, 0, 51);
+            m.res_scale = CLAMP(m.res_scale, 10, 100);
+            m.aa_samples = CLAMP(m.aa_samples, 0, 256);
             movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("MovieOverlay"))) {
             MovieOverlay o;
@@ -2142,6 +2161,11 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("ShowPath"), m.show_path);
         viamd::write_int (state, STR_LIT("Output"), (int)m.output);
         viamd::write_int (state, STR_LIT("Crf"), m.crf);
+        viamd::write_int (state, STR_LIT("ResScale"), m.res_scale);
+        viamd::write_int (state, STR_LIT("AaSamples"), m.aa_samples);
+        viamd::write_bool(state, STR_LIT("SaveCopy"), m.save_copy);
+        const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
+        viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);
         viamd::write_bool(state, STR_LIT("Loop"), m.loop);
         viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
