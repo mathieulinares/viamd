@@ -28,6 +28,7 @@ Branch: `video`. Last commit at the time of writing: `dbbea164`. Nothing is push
 3. Overlays on recorded frames: text, time stamp, scale bar, with time range and fades. Also shown in the viewport at the preview time.
 4. Keyframe table: rows are reordered by dragging the number (times stay with their places in the list).
 5. Trajectory can play backward, both with frame keys (a key with a lower frame than the previous) and with a start frame after the end frame.
+7. Depth of field focus is separate from the camera distance: Settings > Depth of Field > Focus is "Look-at point" (as before), "Distance" (a number, keyable as the parameter "Focus distance") or "Follow target" (the middle of the follow target, wherever the camera looks). The keyframe table has a "Pose" popup to edit where a key looks at and its distance in 3D, a readout of eye / look-at / distance / focus at the preview time, and the viewport shows the focus plane (magenta). Workspace: `DofFocusMode`, `DofFocusDistance`.
 6. Timeline in its own window, legend outside the plot, look parameter lane with draggable keys.
 
 ## Untested in the GUI

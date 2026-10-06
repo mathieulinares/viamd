@@ -225,6 +225,7 @@ static void draw_movie_window(ApplicationState* state);
 static void draw_movie_timeline_window(ApplicationState* state);
 static void draw_movie_recording_banner(ApplicationState* state);
 static void movie_draw_camera_path(ApplicationState* state);
+static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view);
 static bool movie_draw_timeline_markers(ApplicationState* state);
 static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
@@ -673,7 +674,6 @@ int main(int argc, char** argv) {
         draw_context_popup(&state, hit);
 
         camera_animate(&state.view.camera, state.view.target, state.app.timing.delta_s);
-        state.visuals.dof.focus_depth = state.view.camera.distance;
 
         ImGuiWindow* win = ImGui::GetCurrentContext()->HoveredWindow;
         if (win && strcmp(win->Name, "Main interaction window") == 0) {
@@ -1454,7 +1454,25 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::BeginGroup();
             ImGui::Checkbox("Depth of Field", &data->visuals.dof.enabled);
             if (data->visuals.dof.enabled) {
-                // ImGui::SliderFloat("Focus Point", &data->visuals.dof.focus_depth, 0.001f, 200.f);
+                int mode = (int)data->visuals.dof.focus_mode;
+                if (ImGui::Combo("Focus", &mode, "Look-at point\0Distance\0Follow target\0")) {
+                    data->visuals.dof.focus_mode = (DofFocusMode)mode;
+                }
+                ImGui::SetItemTooltip("What is sharp.\n"
+                    "Look-at point: what the camera looks at (the point it orbits).\n"
+                    "Distance: a distance from the camera that you set, and can key in the Movie window.\n"
+                    "Follow target: the middle of the movie's follow target, even when the camera looks elsewhere.");
+                if (data->visuals.dof.focus_mode == DofFocusMode::Distance) {
+                    ImGui::SliderFloat("Focus distance", &data->visuals.dof.focus_distance, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("From view")) {
+                        data->visuals.dof.focus_distance = data->view.camera.distance;
+                    }
+                    ImGui::SetItemTooltip("Take the distance to what the camera looks at now");
+                } else if (data->visuals.dof.focus_mode == DofFocusMode::Target && md_bitfield_empty(&data->movie.follow_mask)) {
+                    ImGui::TextDisabled("No follow target set: using the look-at point");
+                }
+                ImGui::TextDisabled("Focus at %.2f from the camera", dof_focus_depth(data, data->view.camera));
                 ImGui::SliderFloat("Blur Strength", &data->visuals.dof.focus_scale, 0.001f, 100.f);
                 ImGui::SetItemTooltip("How strongly what is out of focus is blurred");
             }
@@ -6260,6 +6278,7 @@ enum MovieParamId : int {
     MovieParam_DofStrength,
     MovieParam_NearClip,
     MovieParam_FarClip,
+    MovieParam_FocusDistance,
 };
 
 struct MovieParamDesc {
@@ -6282,6 +6301,7 @@ static const MovieParamDesc movie_param_table[] = {
     { MovieParam_DofStrength,         "Depth of field blur",  1, false, 0.001f, 100.0f, true,  [](ApplicationState* s) { return &s->visuals.dof.focus_scale; }, "The blur strength. Depth of field has to be enabled; it focuses on what the camera looks at." },
     { MovieParam_NearClip,            "Near clipping plane",  1, false, 0.01f, 5000.0f, true,  [](ApplicationState* s) { return &s->view.camera.near_plane; }, "Distance from the camera to where things start to show. Raise it to cut into the structure." },
     { MovieParam_FarClip,             "Far clipping plane",   1, false, 1.0f, 100000.0f,true,  [](ApplicationState* s) { return &s->view.camera.far_plane; }, "Distance from the camera to where things stop showing." },
+    { MovieParam_FocusDistance,       "Focus distance",       1, false, 0.01f, 1000.0f, true,  [](ApplicationState* s) { return &s->visuals.dof.focus_distance; }, "How far from the camera depth of field is sharp, so focus can be pulled during the movie. Depth of field has to be enabled and its Focus set to Distance." },
 };
 static_assert(sizeof(movie_param_table) / sizeof(movie_param_table[0]) <= MOVIE_MAX_PARAMS, "more parameters than MOVIE_MAX_PARAMS");
 
@@ -6349,6 +6369,19 @@ static bool movie_follow_center(const ApplicationState* state, vec3_t* out) {
     md_util_deperiodize_self_vec4(xyzw, count, &state->mold.state.unitcell, &com);
     *out = mat4_mul_vec3(state->mold.unitcell_transform, com, 1.0f);
     return true;
+}
+
+// How far from the camera depth of field is sharp, for a camera, from the focus mode
+static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view) {
+    const auto& dof = state->visuals.dof;
+    float depth = view.distance;
+    if (dof.focus_mode == DofFocusMode::Distance) {
+        depth = dof.focus_distance;
+    } else if (dof.focus_mode == DofFocusMode::Target) {
+        vec3_t center;
+        if (movie_follow_center(state, &center)) depth = camera_depth_of_point(view, center);
+    }
+    return MAX(depth, 1.0e-3f);
 }
 
 static bool movie_keys_follow(const CameraKeyframe* keys, size_t num_keys) {
@@ -7124,6 +7157,24 @@ static void movie_draw_camera_path(ApplicationState* state) {
     float fov_y;
     camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop);
     movie_draw_frustum(q, vt, fov_y, aspect, vt.distance * 0.18f, col_head);
+
+    if (state->visuals.dof.enabled) {
+        // Where depth of field is sharp: a frame the size of the view at that depth, and a cross where the camera looks
+        const uint32_t col_focus = IM_COL32(255, 90, 220, 255);
+        const float depth = dof_focus_depth(state, vt);
+        const vec3_t fwd   = vt.orientation * vec3_t{0, 0, -1};
+        const vec3_t right = vt.orientation * vec3_t{1, 0, 0};
+        const vec3_t up    = vt.orientation * vec3_t{0, 1, 0};
+        const vec3_t c = vt.position + fwd * depth;
+        const float hh = depth * tanf(fov_y * 0.5f);
+        const float hw = hh * aspect;
+        const vec3_t p[4] = { c - right * hw - up * hh, c + right * hw - up * hh, c + right * hw + up * hh, c - right * hw + up * hh };
+        for (int i = 0; i < 4; ++i) immediate::line(q, p[i], p[(i + 1) % 4], col_focus);
+        const float s = hh * 0.1f;
+        immediate::line(q, c - right * s, c + right * s, col_focus);
+        immediate::line(q, c - up * s,    c + up * s,    col_focus);
+        immediate::line(q, vt.position, c, col_dim);
+    }
 }
 
 // Keyframes in the Timelines plots, which are in trajectory time. A keyframe is at a time of the movie,
@@ -7644,7 +7695,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         ImGui::TableSetupColumn("Ease");
         ImGui::TableSetupColumn("Frame");
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 7.0f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 13.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 17.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
@@ -7743,6 +7794,34 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             if (ImGui::SmallButton("Go To")) movie_goto_keyframe(data, (size_t)i);
             ImGui::SetItemTooltip("Move the view to this keyframe");
             ImGui::SameLine();
+            if (ImGui::SmallButton("Pose")) ImGui::OpenPopup("##pose");
+            ImGui::SetItemTooltip("Edit where this keyframe looks from and at, in 3D");
+            if (ImGui::BeginPopup("##pose")) {
+                ImGui::Text("Keyframe %d at %.2f s", i + 1, key.time);
+                vec3_t look = camera_get_look_at(key.transform);
+                ImGui::TextDisabled("Eye (%.2f, %.2f, %.2f)", key.transform.position.x, key.transform.position.y, key.transform.position.z);
+                if (ImGui::DragFloat3("Looks at", look.elem, 0.05f, 0.0f, 0.0f, "%.2f")) {
+                    // The camera keeps its direction and distance, so the eye moves with the point
+                    key.transform.position = camera_position_from_look_at(look, key.transform.orientation, key.transform.distance);
+                }
+                float dist = key.transform.distance;
+                if (ImGui::DragFloat("Distance", &dist, 0.05f, 0.01f, 100000.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
+                    // The point it looks at stays, the eye moves along the line of sight
+                    key.transform.distance = MAX(dist, 0.01f);
+                    key.transform.position = camera_position_from_look_at(look, key.transform.orientation, key.transform.distance);
+                }
+                vec3_t center;
+                if (movie_follow_center(data, &center)) {
+                    if (ImGui::Button("Look at follow target")) {
+                        key.transform.position = camera_position_from_look_at(center, key.transform.orientation, key.transform.distance);
+                    }
+                }
+                if (data->visuals.dof.enabled) {
+                    ImGui::TextDisabled("Focus at %.2f from the eye", dof_focus_depth(data, key.transform));
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             if (ImGui::SmallButton("Update")) {
                 key.transform = data->view.target;
                 key.fov_y = data->view.camera.fov_y;
@@ -7757,6 +7836,19 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             ImGui::PopID();
         }
         ImGui::EndTable();
+    }
+
+    if (md_array_size(m.keyframes) > 0) {
+        // The camera in 3D at the preview time, which is what the distance alone does not say
+        ViewTransform vt;
+        float fov_y;
+        camera_keyframes_evaluate(&vt, &fov_y, m.keyframes, md_array_size(m.keyframes), (double)m.playhead, m.loop);
+        const vec3_t look = camera_get_look_at(vt);
+        ImGui::TextDisabled("At %.2f s: eye (%.2f, %.2f, %.2f)  looks at (%.2f, %.2f, %.2f)  distance %.2f",
+            m.playhead, vt.position.x, vt.position.y, vt.position.z, look.x, look.y, look.z, vt.distance);
+        if (data->visuals.dof.enabled) {
+            ImGui::TextDisabled("Focus at %.2f from the eye", dof_focus_depth(data, vt));
+        }
     }
 
     if (locked) return;
@@ -8502,6 +8594,7 @@ static void render(ApplicationState* state) {
     settings.tonemap.gamma = state->visuals.tonemapping.gamma;
 
     settings.dof.enabled = state->visuals.dof.enabled;
+    state->visuals.dof.focus_depth = dof_focus_depth(state, state->view.camera);
     settings.dof.focus_depth = state->visuals.dof.focus_depth;
     settings.dof.focus_scale = state->visuals.dof.focus_scale;
 

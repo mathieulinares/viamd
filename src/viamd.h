@@ -375,6 +375,14 @@ inline const char* movie_output_str[(int)MovieOutput::Count] = {
     "PNG sequence",
 };
 
+// What depth of field keeps sharp
+enum class DofFocusMode : int {
+    LookAt,    // What the camera looks at (the orbit pivot)
+    Distance,  // A distance from the camera, which can be keyed
+    Target,    // The movie's follow target, wherever the camera is
+    Count,
+};
+
 enum class BondColorMode {
     NearestAtom,
 	SmoothAtom,
@@ -1408,7 +1416,10 @@ struct ApplicationState {
 
         struct {
             bool enabled = false;
-            float focus_depth = 10.0f;
+            // What is in focus. The depth is derived from the mode every frame, see dof_focus_depth
+            DofFocusMode focus_mode = DofFocusMode::LookAt;
+            float focus_distance = 10.0f;   // DofFocusMode::Distance: from the camera, along the view direction
+            float focus_depth = 10.0f;      // What was used last: the result of the mode
             float focus_scale = 10.0f;
         } dof;
 

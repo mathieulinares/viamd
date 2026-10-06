@@ -1625,6 +1625,8 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("TonemapGamma")))         viamd::extract_flt(v.tonemapping.gamma, arg);
                 else if (str_eq(ident, STR_LIT("DofEnabled")))           viamd::extract_bool(v.dof.enabled, arg);
                 else if (str_eq(ident, STR_LIT("DofFocusScale")))        viamd::extract_flt(v.dof.focus_scale, arg);
+                else if (str_eq(ident, STR_LIT("DofFocusMode")))         viamd::extract_enum(v.dof.focus_mode, arg, (int)DofFocusMode::Count);
+                else if (str_eq(ident, STR_LIT("DofFocusDistance")))     viamd::extract_flt(v.dof.focus_distance, arg);
                 else if (str_eq(ident, STR_LIT("FxaaEnabled")))          viamd::extract_bool(v.fxaa.enabled, arg);
                 else if (str_eq(ident, STR_LIT("TaaEnabled")))           viamd::extract_bool(v.temporal_aa.enabled, arg);
                 else if (str_eq(ident, STR_LIT("TaaJitter")))            viamd::extract_bool(v.temporal_aa.jitter, arg);
@@ -2049,6 +2051,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_flt(state,  STR_LIT("TonemapGamma"), v.tonemapping.gamma);
         viamd::write_bool(state, STR_LIT("DofEnabled"), v.dof.enabled);
         viamd::write_flt(state,  STR_LIT("DofFocusScale"), v.dof.focus_scale);
+        viamd::write_int(state,  STR_LIT("DofFocusMode"), (int)v.dof.focus_mode);
+        viamd::write_flt(state,  STR_LIT("DofFocusDistance"), v.dof.focus_distance);
         viamd::write_bool(state, STR_LIT("FxaaEnabled"), v.fxaa.enabled);
         viamd::write_bool(state, STR_LIT("TaaEnabled"), v.temporal_aa.enabled);
         viamd::write_bool(state, STR_LIT("TaaJitter"), v.temporal_aa.jitter);

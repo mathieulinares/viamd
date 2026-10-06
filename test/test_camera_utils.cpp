@@ -197,6 +197,19 @@ static void kf_make3(CameraKeyframe* k) {
     kf_set(k[2], 3.0, vec3_set(0.3f, 1.0f, 0.1f), 1.8f, vec3_set(30, -5, 12),  15.0f, 1.0f);
 }
 
+UTEST(viamd_camera, depth_of_point_is_measured_along_the_view_direction) {
+    const Camera c = test_camera();
+    /* The look-at point is `distance` in front of the eye, however the camera is turned */
+    EXPECT_NEAR(c.distance, camera_depth_of_point(c, camera_get_look_at(c)), 1.0e-3f);
+
+    /* A sideways offset does not change the depth, a move along the view direction does */
+    const vec3_t fwd   = quat_mul_vec3(c.orientation, vec3_set(0, 0, -1));
+    const vec3_t right = quat_mul_vec3(c.orientation, vec3_set(1, 0, 0));
+    const vec3_t p = c.position + fwd * 7.0f + right * 3.0f;
+    EXPECT_NEAR(7.0f, camera_depth_of_point(c, p), 1.0e-3f);
+    EXPECT_LT(camera_depth_of_point(c, c.position - fwd * 2.0f), 0.0f);
+}
+
 UTEST(viamd_camera, keyframes_hit_their_poses_and_hold_outside) {
     CameraKeyframe k[3];
     kf_make3(k);

@@ -138,6 +138,11 @@ vec3_t camera_get_look_at(const ViewTransform& transform) {
     return transform.position - transform.orientation * vec3_t{0, 0, transform.distance};
 }
 
+float camera_depth_of_point(const ViewTransform& transform, vec3_t point) {
+    const vec3_t forward = transform.orientation * vec3_t{0, 0, -1};
+    return vec3_dot(point - transform.position, forward);
+}
+
 vec3_t camera_position_from_look_at(const vec3_t& look_at, const quat_t& orientation, float distance) {
     return look_at + orientation * vec3_t{0, 0, distance};
 }
