@@ -113,6 +113,15 @@ UTEST(viamd_serialization, vector_with_wrong_length_is_rejected) {
     EXPECT_EQ(3.5f, v[2]);
 }
 
+UTEST(viamd_serialization, long_vector_parses) {
+    // Keyframes are written as 20 values
+    float out[20] = {};
+    EXPECT_TRUE(viamd::extract_flt_vec(out, 20, STR_LIT("1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20")));
+    EXPECT_EQ(1.0f, out[0]);
+    EXPECT_EQ(20.0f, out[19]);
+    EXPECT_FALSE(viamd::extract_flt_vec(out, 16, STR_LIT("1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20")));
+}
+
 UTEST(viamd_serialization, sections_are_walked_in_order) {
     md_allocator_i* alloc = md_get_heap_allocator();
     writer_t w(alloc);

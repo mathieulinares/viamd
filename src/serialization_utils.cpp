@@ -216,7 +216,7 @@ bool extract_flt (float& val, str_t arg) {
 
 bool extract_flt_vec (float* elem, size_t len, str_t arg) {
 	// Parsed into a copy and written back only when every component was there
-	float tmp[16];
+	float tmp[32];
 	if (len > ARRAY_SIZE(tmp)) return false;
 	str_t tok;
 	size_t count = 0;
