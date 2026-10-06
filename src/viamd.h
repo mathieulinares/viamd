@@ -1084,7 +1084,8 @@ struct ApplicationState {
         bool  show_window = false;
         bool  show_timeline_window = false;  // Opened explicitly from the window menu
         bool  timeline_tracks[3] = {true, true, true};
-        float timeline_row_ratios[4] = {1, 1, 1, 1};
+        bool  timeline_rep_lane = true;       // The lane of a keyed property of a representation, below the look parameter's
+        float timeline_row_ratios[5] = {1, 1, 1, 1, 1};
         double timeline_view_begin = 0.0;
         double timeline_view_end = 0.0;
         float timeline_view_duration = 0.0f;

@@ -148,6 +148,7 @@ Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **
 - **Camera distance**: how far the camera is from what it looks at, in your preferred length unit. Dots can be dragged sideways (time only).
 - **Field of view** in degrees. Dots can be dragged sideways (time only).
 - **Look parameter**: the parameter chosen in the **Look parameter** list at the top. Double-click to add a key, drag to change it, right-click to remove it.
+- **Representation lane**: the property of a representation chosen with the two lists next to **Representation lane** (untick it to hide the lane). The line is its value over the movie and the dots are its keys: drag sideways for the time and up or down for the value, double-click to add one, right-click to remove one. For **Visible** a double-click turns it around at that time (shown becomes hidden and the other way), and the first one on a representation without keys also keys what it is now at time 0, so that it holds until then.
 
 The yellow line is the playhead. Scroll to zoom the time, drag the background to pan, and use **Show whole movie** to reset. Drag between tracks to change their heights. Untick **Trajectory**, **Distance** or **Field of view** to hide a track. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
 

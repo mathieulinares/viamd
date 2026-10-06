@@ -7527,6 +7527,7 @@ static bool movie_draw_timeline_markers(ApplicationState* data) {
 }
 
 static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool locked);
+static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool locked);
 
 // Subplots align the time axes and provide draggable row splitters.
 static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
@@ -7573,11 +7574,12 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
     const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
     int rows = 0;
-    float ratios[4];
+    float ratios[5];
     for (int track = 0; track < 3; ++track) {
         if (m.timeline_tracks[track]) ratios[rows++] = m.timeline_row_ratios[track];
     }
     ratios[rows++] = m.timeline_row_ratios[3];
+    if (m.timeline_rep_lane) ratios[rows++] = m.timeline_row_ratios[4];
     const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
       for (int track = 0; track < 3; ++track) {
@@ -7678,12 +7680,14 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         if (any_moved) resort_pending = true;
       }
       draw_movie_param_lane(data, movie_len, locked);
+      if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
       ImPlot::EndSubplots();
       int row = 0;
       for (int track = 0; track < 3; ++track) {
           if (m.timeline_tracks[track]) m.timeline_row_ratios[track] = ratios[row++];
       }
-      m.timeline_row_ratios[3] = ratios[row];
+      m.timeline_row_ratios[3] = ratios[row++];
+      if (m.timeline_rep_lane) m.timeline_row_ratios[4] = ratios[row];
     }
     if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         movie_sort_keyframes(data);
@@ -7823,6 +7827,157 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
     }
 }
 
+static void movie_rep_sort(ApplicationState* state);
+
+// A property of a representation over the movie, with its keys to drag: sideways for their time, up and down for
+// their value (Visible is shown or hidden). A double click adds a key, a right click on one removes it.
+static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool locked) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const int num_reps = (int)md_array_size(data->representation.reps);
+    m.rep_selected = CLAMP(m.rep_selected, 0, MAX(num_reps - 1, 0));
+    m.rep_prop_selected = CLAMP(m.rep_prop_selected, 0, (int)RepProp::Count - 1);
+    const Representation* rep = num_reps > 0 ? &data->representation.reps[m.rep_selected] : nullptr;
+    float lo = 0.0f, hi = 1.0f;
+    const char* label = rep ? movie_rep_prop_label(*rep, m.rep_prop_selected, &lo, &hi) : nullptr;
+    if (rep && !label) {
+        m.rep_prop_selected = (int)RepProp::Visible;
+        label = movie_rep_prop_label(*rep, m.rep_prop_selected, &lo, &hi);
+    }
+    const int prop = m.rep_prop_selected;
+    const bool visible_prop = prop == (int)RepProp::Visible;
+
+    std::vector<int> mine;
+    if (rep) {
+        for (int i = 0; i < (int)m.rep_keys.size(); ++i) {
+            if (m.rep_keys[i].rep == rep->id && m.rep_keys[i].prop == prop) mine.push_back(i);
+        }
+    }
+
+    constexpr int N = 200;
+    float xs[N], ys[N];
+    if (!mine.empty()) {
+        for (int i = 0; i < N; ++i) {
+            const double t = (double)movie_len * (double)i / (double)(N - 1);
+            float v = 0.0f;
+            rep_keys_evaluate(&v, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, t);
+            xs[i] = (float)t;
+            ys[i] = v;
+        }
+    }
+
+    const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    static bool resort_pending = false;
+    bool any_moved = false, any_held = false, any_hovered = false;
+    int  remove_idx = -1;
+    bool add_key = false;
+    double add_time = 0.0, add_value = 0.0;
+
+    char axis[96];
+    if (rep) snprintf(axis, sizeof(axis), "%s: %s", rep->name, label);
+    else     snprintf(axis, sizeof(axis), "Representation");
+
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
+    if (ImPlot::BeginPlot("##rep_lane", ImVec2(-1, -1), plot_flags)) {
+        ImPlot::SetupAxes("Movie time (s)", axis, 0, ImPlotAxisFlags_Lock);
+        ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
+        const double pad = 0.1 * (double)(hi - lo);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, (double)lo - pad, (double)hi + pad, ImPlotCond_Always);
+
+        if (!rep) {
+            ImPlot::PlotText("No representation yet", 0.5 * (double)movie_len, 0.5);
+        }
+
+        const ImVec4 col(0.95f, 0.6f, 0.3f, 1.0f);
+        if (!mine.empty()) {
+            ImPlot::PushStyleColor(ImPlotCol_Line, col);
+            ImPlot::PlotLine(label, xs, ys, N);
+            ImPlot::PopStyleColor();
+        }
+
+        for (int ki : mine) {
+            RepKey& key = m.rep_keys[ki];
+            double x = key.time;
+            double y = (double)key.value;
+            bool hovered = false, held = false;
+            if (ImPlot::DragPoint(5000 + ki, &x, &y, col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
+                key.time = movie_snap_time(data, x);
+                key.value = visible_prop ? (y >= 0.5 ? 1.0f : 0.0f) : (float)CLAMP(y, (double)lo, (double)hi);
+                any_moved = true;
+            }
+            if (held && !locked) {
+                any_held = true;
+                m.playhead = (float)key.time;
+            }
+            if (hovered) {
+                any_hovered = true;
+                if (!held) {
+                    if (visible_prop) ImGui::SetTooltip("%.2f s: %s\nDrag sideways to change when. Right click to remove it", key.time, key.value >= 0.5f ? "shown" : "hidden");
+                    else              ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it", key.time, key.value);
+                }
+                if (!locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) remove_idx = ki;
+            }
+        }
+
+        if (rep && !locked && !any_hovered && ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const ImPlotPoint p = ImPlot::GetPlotMousePos();
+            add_key = true;
+            add_time = movie_snap_time(data, p.x);
+            add_value = CLAMP(p.y, (double)lo, (double)hi);
+        }
+
+        double playhead = (double)m.playhead;
+        if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
+            m.playhead = (float)movie_snap_time(data, playhead);
+            if (!locked) movie_apply_time(data, (double)m.playhead, true);
+        }
+
+        if (locked) {
+            double cur = m.cur_time;
+            ImPlot::DragLineX(1001, &cur, ImVec4(1.0f, 0.3f, 0.3f, 1), 1.5f, ImPlotDragToolFlags_NoInputs | ImPlotDragToolFlags_NoFit);
+        }
+
+        ImPlot::EndPlot();
+    }
+
+    if (any_held) movie_apply_time(data, (double)m.playhead, true);
+    if (any_moved) resort_pending = true;
+    if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        movie_rep_sort(data);
+        resort_pending = false;
+    }
+
+    if (remove_idx >= 0) {
+        m.rep_keys.erase(m.rep_keys.begin() + remove_idx);
+        movie_reps_apply(data, (double)m.playhead);
+    }
+    if (add_key && rep) {
+        RepKey key;
+        key.rep = rep->id;
+        key.prop = prop;
+        key.time = add_time;
+        if (visible_prop) {
+            // A change of state at that time: what it is there now, turned around. With no keys yet, what it is now holds up to it.
+            float now = movie_rep_prop_get(*rep, prop);
+            rep_keys_evaluate(&now, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, add_time);
+            if (mine.empty()) {
+                RepKey first = key;
+                first.time = 0.0;
+                first.value = now;
+                first.ease = KeyEase::Hold;
+                m.rep_keys.push_back(first);
+            }
+            key.value = now >= 0.5f ? 0.0f : 1.0f;
+            key.ease = KeyEase::Hold;
+        } else {
+            key.value = (float)add_value;
+        }
+        m.rep_keys.push_back(key);
+        movie_rep_sort(data);
+        movie_apply_time(data, (double)m.playhead, true);
+    }
+}
+
 // The timeline of the movie: trajectory, distance, field of view and a look parameter.
 static void draw_movie_timeline_window(ApplicationState* data) {
     auto& m = data->movie;
@@ -7892,7 +8047,36 @@ static void draw_movie_timeline_window(ApplicationState* data) {
         }
         ImGui::EndCombo();
     }
-    ImGui::TextDisabled("Drag between tracks to resize. Parameter keys: double-click to add, right-click to remove.");
+    ImGui::Checkbox("Representation lane", &m.timeline_rep_lane);
+    const int num_reps = (int)md_array_size(data->representation.reps);
+    if (m.timeline_rep_lane && num_reps > 0) {
+        m.rep_selected = CLAMP(m.rep_selected, 0, num_reps - 1);
+        const Representation& rep = data->representation.reps[m.rep_selected];
+        float lo, hi;
+        m.rep_prop_selected = CLAMP(m.rep_prop_selected, 0, (int)RepProp::Count - 1);
+        if (!movie_rep_prop_label(rep, m.rep_prop_selected, &lo, &hi)) m.rep_prop_selected = (int)RepProp::Visible;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 10.0f);
+        if (ImGui::BeginCombo("##timeline_rep", rep.name)) {
+            for (int i = 0; i < num_reps; ++i) {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(data->representation.reps[i].name, i == m.rep_selected)) m.rep_selected = i;
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 9.0f);
+        if (ImGui::BeginCombo("##timeline_rep_prop", movie_rep_prop_label(rep, m.rep_prop_selected, &lo, &hi))) {
+            for (int p = 0; p < (int)RepProp::Count; ++p) {
+                if (const char* label = movie_rep_prop_label(rep, p, &lo, &hi)) {
+                    if (ImGui::Selectable(label, p == m.rep_prop_selected)) m.rep_prop_selected = p;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::TextDisabled("Drag between tracks to resize. Keys of the look parameter and the representation: double-click to add, right-click to remove.");
     draw_movie_strip(data, movie_len, recording, ImVec2(-1, MAX(ImGui::GetContentRegionAvail().y, fs * 12.0f)));
 
     ImGui::End();
