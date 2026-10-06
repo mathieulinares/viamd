@@ -30,13 +30,15 @@ Branch: `video`. Last commit at the time of writing: `dbbea164`. Nothing is push
 5. Trajectory can play backward, both with frame keys (a key with a lower frame than the previous) and with a start frame after the end frame.
 7. Depth of field focus is separate from the camera distance: Settings > Depth of Field > Focus is "Look-at point" (as before), "Distance" (a number, keyable as the parameter "Focus distance") or "Follow target" (the middle of the follow target, wherever the camera looks). The keyframe table has a "Pose" popup to edit where a key looks at and its distance in 3D, a readout of eye / look-at / distance / focus at the preview time, and the viewport shows the focus plane (magenta). Workspace: `DofFocusMode`, `DofFocusDistance`.
 6. Timeline in its own window, legend outside the plot, look parameter lane with draggable keys.
+8. Movie length is set explicitly. The trajectory defaults to filling it; movable blue start/end anchors allow a still-frame fly-over before playback and a hold afterward. Camera keyframes with trajectory frames bend the speed between the anchors. Changing the length scales camera/parameter key times, anchors, overlays and fades, and the playhead; frame values and spin counts stay unchanged. Timing and overlays participate in undo/redo. Old workspace timing is migrated on load; new files store `Timeline=2` instead of `DurationAuto`.
 
 ## Untested in the GUI
 
 - Follow target: set a target, add keys at different frames with "with trajectory frame", play the preview. Check the camera tracks the target and that loading an old workspace still works.
 - Overlays in the recorded video: they are drawn through ImGui's OpenGL backend straight into the G-buffer before read back. Record a short clip and check that text and bar appear, are not upside down, and fade correctly. Also check with more than one anti-aliasing sample per frame.
 - Overlay positions in the viewport preview are only approximate when the viewport has a different shape from the movie.
-- Backward trajectory: a reversed frame range with "Trajectory at Animation speed" on, and reversed frame keys.
+- Movie timing: drag the blue anchors, set trajectory frames on camera keys, then double the movie length and verify the same pacing at half speed. Check undo/redo restores overlay timing too.
+- Backward trajectory: a reversed frame range and reversed frame keys.
 - Drag and drop reordering of keyframe rows.
 
 ## Known limits

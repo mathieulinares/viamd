@@ -1,6 +1,7 @@
 #pragma once
 
 #include <gfx/camera.h>
+#include <movie_overlay.h>
 
 #include <stddef.h>
 #include <vector>
@@ -23,10 +24,18 @@ bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t cou
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;
     std::vector<ParamKey> params;
+    std::vector<MovieOverlay> overlays;
     bool loop = false;
+    // The timing, which is scaled together with the keys
+    float  duration = 0.0f;
+    float  traj_begin = 0.0f;
+    float  traj_end = 0.0f;
+    double start_frame = 0.0;
+    double end_frame = 0.0;
 };
 
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b);
+void movie_keys_scale_time(MovieKeys* keys, double scale);
 
 // Undo and redo of edits to the keys. It is not told what changed: it is shown the keys every frame, and
 // whenever they differ from the last committed state and no edit is under way (a slider being dragged, a

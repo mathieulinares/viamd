@@ -1098,12 +1098,11 @@ struct ApplicationState {
         double start_frame = 0.0;    // Trajectory frame shown at the start of the trajectory's part of the movie
         double end_frame   = 0.0;    // Trajectory frame shown at the end of it
 
-        // The movie runs on its own timeline in seconds, independent of the trajectory. The trajectory
-        // plays from start_frame to end_frame between traj_begin and traj_end and is held at either
-        // frame outside of that. With duration_auto the movie is exactly the trajectory at the
-        // Animation panel's fps; otherwise the times below apply (and start_frame == end_frame holds
-        // the trajectory still, e.g. to orbit the camera around it).
-        bool   duration_auto = true;
+        // The movie runs on its own timeline in seconds, of the length set by the user. The trajectory goes
+        // through two anchors, start_frame at traj_begin and end_frame at traj_end, and through the keyframes
+        // that have a frame, which bend its speed; it is held before the first and after the last. Changing
+        // the length scales every time on the timeline, so the movie keeps its shape.
+        bool   duration_init = false;           // The length has been set up for the loaded trajectory
         float  duration      = 5.0f;
         float  traj_begin    = 0.0f;
         float  traj_end      = 5.0f;

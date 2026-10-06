@@ -6252,11 +6252,37 @@ void create_screenshot(str_t path) {
 
 // Length of the movie in seconds
 static double movie_duration(const ApplicationState* state) {
-    if (state->movie.duration_auto) {
-        const double fps = fabs((double)state->animation.fps);
-        return fps > 0.0 ? fabs(state->movie.end_frame - state->movie.start_frame) / fps : 0.0;
-    }
     return (double)state->movie.duration;
+}
+
+// Sets the length of the movie and scales every time on its timeline with it, so the movie keeps its shape
+static void movie_set_duration(ApplicationState* state, float new_len) {
+    auto& m = state->movie;
+    new_len = CLAMP(new_len, 0.01f, 3600.0f);
+    const double old_len = (double)m.duration;
+    m.duration = new_len;
+    if (old_len <= 0.0 || (double)new_len == old_len) return;
+    const double s = (double)new_len / old_len;
+    MovieKeys keys = movie_keys_snapshot(state);
+    movie_keys_scale_time(&keys, s);
+    keys.duration = new_len;
+    movie_keys_restore(state, keys);
+    m.playhead = (float)(m.playhead * s);
+    m.orbit_duration = (float)(m.orbit_duration * s);
+}
+
+// Keeps the trajectory anchors inside the movie, and moves an anchor out to a keyframe with a frame that is
+// beyond it, as that keyframe takes its place
+static void movie_clamp_anchors(ApplicationState* state) {
+    auto& m = state->movie;
+    for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+        const CameraKeyframe& k = m.keyframes[i];
+        if (!k.use_frame) continue;
+        if (k.time < m.traj_begin) m.traj_begin = (float)k.time;
+        if (k.time > m.traj_end) m.traj_end = (float)k.time;
+    }
+    m.traj_begin = CLAMP(m.traj_begin, 0.0f, m.duration);
+    m.traj_end = CLAMP(m.traj_end, m.traj_begin, m.duration);
 }
 
 static int movie_num_frames(const ApplicationState* state) {
@@ -6266,15 +6292,11 @@ static int movie_num_frames(const ApplicationState* state) {
 // Trajectory frame shown at a time on the movie timeline: from the keyframes that have one, otherwise
 // the trajectory plays linearly between the times of the movie's timeline settings
 static double movie_trajectory_frame(const ApplicationState* state, double time) {
-    double keyed;
-    if (camera_keyframes_evaluate_frame(&keyed, state->movie.keyframes, md_array_size(state->movie.keyframes), time)) {
-        const double last = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
-        return CLAMP(keyed, 0.0, last);
-    }
-    const double t0 = state->movie.duration_auto ? 0.0 : (double)state->movie.traj_begin;
-    const double t1 = state->movie.duration_auto ? movie_duration(state) : (double)state->movie.traj_end;
-    const double u = t1 > t0 ? CLAMP((time - t0) / (t1 - t0), 0.0, 1.0) : (time < t0 ? 0.0 : 1.0);
-    return state->movie.start_frame + (state->movie.end_frame - state->movie.start_frame) * u;
+    const auto& m = state->movie;
+    const double f = camera_keyframes_frame_with_anchors(m.keyframes, md_array_size(m.keyframes),
+        (double)m.traj_begin, m.start_frame, (double)m.traj_end, m.end_frame, time);
+    const double last = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
+    return CLAMP(f, 0.0, last);
 }
 
 static void movie_sort_keyframes(ApplicationState* state) {
@@ -6776,10 +6798,6 @@ static void movie_recording_start(ApplicationState* state) {
     const double max_frame = (double)(run_num_frames(state) > 0 ? run_num_frames(state) - 1 : 0);
     m.start_frame = CLAMP(m.start_frame, 0.0, max_frame);
     m.end_frame   = CLAMP(m.end_frame,   0.0, max_frame);
-    if (m.duration_auto && m.end_frame == m.start_frame) {
-        VIAMD_LOG_ERROR("Cannot start movie recording: the start and end frames are the same, so the movie has no duration");
-        return;
-    }
     if (movie_duration(state) <= 0.0) {
         VIAMD_LOG_ERROR("Cannot start movie recording: the movie has no duration");
         return;
@@ -7010,11 +7028,8 @@ static void movie_add_orbit(ApplicationState* state) {
     const double t0 = (double)m.playhead;
     const double t1 = t0 + (double)MAX(m.orbit_duration, 0.1f);
     if (t1 > movie_duration(state) + 1.0e-6) {
-        if (m.duration_auto) {
-            VIAMD_LOG_ERROR("The orbit ends at %.2f s, after the end of the movie. Move the preview time earlier, shorten the orbit or set a duration of your own", t1);
-            return;
-        }
-        m.duration = (float)MIN(t1, 3600.0);
+        VIAMD_LOG_ERROR("The orbit ends at %.2f s, after the movie. Move the preview time earlier, shorten the orbit or increase the movie length", t1);
+        return;
     }
 
     movie_add_keyframe(state);
@@ -7341,9 +7356,6 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         tx[i] = (float)t;
         frm[i] = 0.15f + 0.7f * (float)(movie_trajectory_frame(data, t) / frame_scale);
     }
-    double unused_frame;
-    const bool has_frame_keys = camera_keyframes_evaluate_frame(&unused_frame, m.keyframes, n, 0.0);
-
     const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
     static bool resort_pending = false;
 
@@ -7354,19 +7366,32 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.12, 1.15, ImPlotCond_Always);
         ImPlot::SetupLegend(ImPlotLocation_North, ImPlotLegendFlags_Outside | ImPlotLegendFlags_Horizontal);
 
+        bool anchors_held = false;
         {
-            // When the trajectory plays, if the keyframes do not say
-            const double tb = m.duration_auto ? 0.0 : (double)m.traj_begin;
-            const double te = m.duration_auto ? (double)movie_len : (double)m.traj_end;
-            if (!has_frame_keys) {
-                const ImVec2 p0 = ImPlot::PlotToPixels(tb, -0.12);
-                const ImVec2 p1 = ImPlot::PlotToPixels(MAX(te, tb), 0.0);
-                ImPlot::PushPlotClipRect();
-                ImPlot::GetPlotDrawList()->AddRectFilled(p0, ImVec2(MAX(p1.x, p0.x + 1.0f), p1.y), IM_COL32(90, 160, 255, 90));
-                ImPlot::PopPlotClipRect();
-                const bool held = m.start_frame == m.end_frame;
-                ImPlot::PlotText(held ? "trajectory (held)" : "trajectory", 0.5 * (tb + te), -0.06);
+            // Where the trajectory plays, between its two anchors, which can be dragged in time
+            const double tb = (double)m.traj_begin;
+            const double te = (double)m.traj_end;
+            const ImVec2 p0 = ImPlot::PlotToPixels(tb, -0.12);
+            const ImVec2 p1 = ImPlot::PlotToPixels(MAX(te, tb), 0.0);
+            ImPlot::PushPlotClipRect();
+            ImPlot::GetPlotDrawList()->AddRectFilled(p0, ImVec2(MAX(p1.x, p0.x + 1.0f), p1.y), IM_COL32(90, 160, 255, 90));
+            ImPlot::PopPlotClipRect();
+            const bool held = m.start_frame == m.end_frame;
+            ImPlot::PlotText(held ? "trajectory (held)" : "trajectory", 0.5 * (tb + te), -0.06);
+
+            const ImVec4 anchor_col(0.3f, 0.6f, 1.0f, 1.0f);
+            double ab = tb, ae = te;
+            bool clicked = false, hov = false, hld = false;
+            if (ImPlot::DragLineX(1100, &ab, anchor_col, 2.0f, drag_flags, &clicked, &hov, &hld)) {
+                m.traj_begin = (float)CLAMP(ab, 0.0, (double)m.traj_end);
             }
+            if (hov && !hld) ImGui::SetTooltip("Trajectory starts at frame %.0f, at %.2f s\nDrag to change when. Before it, the trajectory is held.", m.start_frame, m.traj_begin);
+            anchors_held |= hld;
+            if (ImPlot::DragLineX(1101, &ae, anchor_col, 2.0f, drag_flags, &clicked, &hov, &hld)) {
+                m.traj_end = (float)CLAMP(ae, (double)m.traj_begin, (double)movie_len);
+            }
+            if (hov && !hld) ImGui::SetTooltip("Trajectory ends at frame %.0f, at %.2f s\nDrag to change when. After it, the trajectory is held.", m.end_frame, m.traj_end);
+            anchors_held |= hld;
         }
 
         ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.4f, 0.9f, 0.4f, 1.0f));
@@ -7445,7 +7470,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 
         ImPlot::EndPlot();
 
-        if (any_held) {
+        if (any_held || anchors_held) {
             movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
         }
         if (any_moved) resort_pending = true;
@@ -8029,8 +8054,16 @@ static void draw_movie_window(ApplicationState* data) {
     }
 
     const double max_frame = (double)(run_num_frames(data) > 0 ? run_num_frames(data) - 1 : 0);
-    if (m.end_frame <= 0.0 && m.start_frame <= 0.0) {
+    if (!m.duration_init && max_frame > 0.0) {
+        // To begin with the trajectory fills the movie, which is as long as it takes at the Animation panel's speed
+        m.start_frame = 0.0;
         m.end_frame = max_frame;
+        const double fps = fabs((double)data->animation.fps);
+        m.duration = (float)CLAMP(fps > 0.0 ? max_frame / fps : 10.0, 1.0, 3600.0);
+        m.traj_begin = 0.0f;
+        m.traj_end = m.duration;
+        m.duration_init = true;
+        movie_history_reset(data);
     }
 
     int frame_w = 0, frame_h = 0;
@@ -8153,28 +8186,36 @@ static void draw_movie_window(ApplicationState* data) {
             m.end_frame   = CLAMP(frame_range[1], 0.0, max_frame);
         }
 
-        double unused_frame;
-        if (camera_keyframes_evaluate_frame(&unused_frame, m.keyframes, md_array_size(m.keyframes), 0.0)) {
-            ImGui::TextWrapped("Keyframes with a frame decide how the trajectory plays, so the frames and times below are not used. "
-                "Only the length of the movie is: turn off 'Trajectory at Animation speed' to set it.");
+        float len = m.duration;
+        if (ImGui::InputFloat("Movie length (s)", &len, 1.0f, 10.0f, "%.2f", ImGuiInputTextFlags_EnterReturnsTrue)) {
+            movie_set_duration(data, len);
         }
+        ImGui::SetItemTooltip("Everything on the timeline (keyframes, the trajectory, looks and overlays) is scaled with it,\nso the movie keeps its shape. Press Enter to apply.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d frames", movie_num_frames(data));
 
-        ImGui::Checkbox("Trajectory at Animation speed", &m.duration_auto);
-        ImGui::SetItemTooltip("On: the movie lasts as long as the trajectory takes to play at the Animation panel's speed.\n"
-            "Off: set the duration yourself and choose when the trajectory plays within it.\n"
-            "Set both trajectory frames equal to hold the trajectory still while the camera moves.");
-        if (m.duration_auto) {
-            ImGui::TextDisabled("%.2f s, %d frames", movie_duration(data), movie_num_frames(data));
-        } else {
-            ImGui::InputFloat("Duration (s)", &m.duration, 0.5f, 5.0f, "%.2f");
-            m.duration = CLAMP(m.duration, 0.01f, 3600.0f);
-            ImGui::SliderFloat("Trajectory starts (s)", &m.traj_begin, 0.0f, m.duration, "%.2f");
-            ImGui::SliderFloat("Trajectory ends (s)", &m.traj_end, 0.0f, m.duration, "%.2f");
-            m.traj_begin = CLAMP(m.traj_begin, 0.0f, m.duration);
-            m.traj_end   = CLAMP(m.traj_end,   m.traj_begin, m.duration);
-            ImGui::TextDisabled("%d frames", movie_num_frames(data));
+        float span[2] = { m.traj_begin, m.traj_end };
+        if (ImGui::SliderFloat2("Trajectory plays (s)", span, 0.0f, m.duration, "%.2f")) {
+            m.traj_begin = CLAMP(span[0], 0.0f, m.duration);
+            m.traj_end   = CLAMP(span[1], m.traj_begin, m.duration);
+        }
+        ImGui::SetItemTooltip("When the trajectory is at its first and at its last frame. Before and after, it is held,\ne.g. to fly over the structure first. They can also be dragged on the timeline.\nKeyframes with a frame in between change its speed.");
+
+        const double span_s = (double)(m.traj_end - m.traj_begin);
+        const double anim_fps = fabs((double)data->animation.fps);
+        if (span_s > 0.0 && m.end_frame != m.start_frame && anim_fps > 0.0) {
+            const double fps_traj = fabs(m.end_frame - m.start_frame) / span_s;
+            ImGui::TextDisabled("On average %.1f trajectory frames per second, %.2fx the Animation speed", fps_traj, fps_traj / anim_fps);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Match Animation speed")) {
+                // The whole movie is scaled so that the trajectory's part of it plays at the Animation panel's speed
+                const double want = fabs(m.end_frame - m.start_frame) / anim_fps;
+                movie_set_duration(data, (float)(m.duration * want / span_s));
+            }
+            ImGui::SetItemTooltip("Changes the length of the movie so that the trajectory plays at the Animation panel's speed.");
         }
     }
+    movie_clamp_anchors(data);
 
     const float movie_len = (float)movie_duration(data);
     m.playhead = CLAMP(m.playhead, 0.0f, movie_len);

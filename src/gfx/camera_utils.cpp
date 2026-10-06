@@ -432,6 +432,31 @@ bool camera_keyframes_evaluate_frame(double* out_frame, const CameraKeyframe* ke
     return true;
 }
 
+double camera_keyframes_frame_with_anchors(const CameraKeyframe* keys, size_t count, double t_begin, double f_begin, double t_end, double f_end, double time) {
+    struct Point { double t, f; KeyEase e; };
+    std::vector<Point> pts;
+    for (size_t i = 0; i < count; ++i) {
+        if (keys[i].use_frame) pts.push_back({keys[i].time, keys[i].frame, keys[i].ease});
+    }
+    std::stable_sort(pts.begin(), pts.end(), [](const Point& a, const Point& b) { return a.t < b.t; });
+
+    const double eps = 1.0e-6;
+    if (t_end < t_begin) t_end = t_begin;
+    if (pts.empty() && t_end <= t_begin) return time < t_begin ? f_begin : f_end;
+    if (pts.empty() || t_begin < pts.front().t - eps) pts.insert(pts.begin(), {t_begin, f_begin, KeyEase::Smooth});
+    if (t_end > pts.back().t + eps) pts.push_back({t_end, f_end, KeyEase::Smooth});
+
+    std::vector<double> times, frames;
+    std::vector<KeyEase> eases;
+    for (const Point& q : pts) {
+        if (!times.empty() && q.t <= times.back() + eps) continue;
+        times.push_back(q.t);
+        frames.push_back(q.f);
+        eases.push_back(q.e);
+    }
+    return keyed_curve_evaluate(times.data(), frames.data(), eases.data(), times.size(), time);
+}
+
 // We want to interpolate along an arc which is formed by maintaining a distance to the look_at position and smoothly interpolating the orientation,
 // We linearly interpolate a look_at position which is implicitly defined by position, orientation and distance
 // There is some precision errors creeping into the posision because we transform back and forth to look at using the orientation

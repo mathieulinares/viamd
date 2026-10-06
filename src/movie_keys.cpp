@@ -3,6 +3,7 @@
 #include <gfx/camera_utils.h>
 
 #include <algorithm>
+#include <cstring>
 
 bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t count, int param, double time) {
     std::vector<const ParamKey*> mine;
@@ -49,14 +50,40 @@ static bool equal(const ParamKey& a, const ParamKey& b) {
 }
 
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
-    if (a.loop != b.loop || a.camera.size() != b.camera.size() || a.params.size() != b.params.size()) return false;
+    if (a.loop != b.loop || a.duration != b.duration || a.traj_begin != b.traj_begin || a.traj_end != b.traj_end ||
+        a.start_frame != b.start_frame || a.end_frame != b.end_frame || a.camera.size() != b.camera.size() ||
+        a.params.size() != b.params.size() || a.overlays.size() != b.overlays.size()) return false;
     for (size_t i = 0; i < a.camera.size(); ++i) {
         if (!equal(a.camera[i], b.camera[i])) return false;
     }
     for (size_t i = 0; i < a.params.size(); ++i) {
         if (!equal(a.params[i], b.params[i])) return false;
     }
+    for (size_t i = 0; i < a.overlays.size(); ++i) {
+        const MovieOverlay& x = a.overlays[i];
+        const MovieOverlay& y = b.overlays[i];
+        if (x.type != y.type || x.enabled != y.enabled || x.begin != y.begin || x.end != y.end ||
+            x.fade_in != y.fade_in || x.fade_out != y.fade_out || x.anchor != y.anchor ||
+            x.size != y.size || x.length != y.length || strcmp(x.text, y.text) != 0) return false;
+        for (int c = 0; c < 4; ++c) {
+            if (x.color[c] != y.color[c]) return false;
+        }
+    }
     return true;
+}
+
+void movie_keys_scale_time(MovieKeys* keys, double scale) {
+    for (CameraKeyframe& k : keys->camera) k.time *= scale;
+    for (ParamKey& k : keys->params) k.time *= scale;
+    for (MovieOverlay& o : keys->overlays) {
+        o.begin *= scale;
+        o.end *= scale;
+        o.fade_in *= (float)scale;
+        o.fade_out *= (float)scale;
+    }
+    keys->duration = (float)(keys->duration * scale);
+    keys->traj_begin = (float)(keys->traj_begin * scale);
+    keys->traj_end = (float)(keys->traj_end * scale);
 }
 
 void MovieHistory::clear(const MovieKeys& current) {

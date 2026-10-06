@@ -1185,7 +1185,13 @@ MovieKeys movie_keys_snapshot(const ApplicationState* app) {
     const CameraKeyframe* keys = app->movie.keyframes;
     k.camera.assign(keys, keys + md_array_size(app->movie.keyframes));
     k.params = app->movie.param_keys;
+    k.overlays = app->movie.overlays;
     k.loop = app->movie.loop;
+    k.duration = app->movie.duration;
+    k.traj_begin = app->movie.traj_begin;
+    k.traj_end = app->movie.traj_end;
+    k.start_frame = app->movie.start_frame;
+    k.end_frame = app->movie.end_frame;
     return k;
 }
 
@@ -1196,7 +1202,13 @@ void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
         md_array_push(m.keyframes, k, app->allocator.persistent);
     }
     m.param_keys = keys.params;
+    m.overlays = keys.overlays;
     m.loop = keys.loop;
+    m.duration = keys.duration;
+    m.traj_begin = keys.traj_begin;
+    m.traj_end = keys.traj_end;
+    m.start_frame = keys.start_frame;
+    m.end_frame = keys.end_frame;
 }
 
 void movie_history_reset(ApplicationState* app) {
@@ -1238,7 +1250,7 @@ static void workspace_reset(ApplicationState* data) {
         m.fps = 24.0f;
         m.start_frame = 0.0;
         m.end_frame = 0.0;
-        m.duration_auto = true;
+        m.duration_init = false;
         m.duration = 5.0f;
         m.traj_begin = 0.0f;
         m.traj_end = 5.0f;
@@ -1657,6 +1669,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
             }
         } else if (str_eq(section, STR_LIT("Movie"))) {
             auto& m = data->movie;
+            // Workspaces from before the timeline had a set length may have had it follow the trajectory
+            // (DurationAuto), and their keys with a frame alone decided how the trajectory played
+            bool legacy_auto = false;
+            int  timeline_version = 1;
             while (viamd::next_entry(ident, arg, state)) {
                 if      (str_eq(ident, STR_LIT("Resolution")))     viamd::extract_enum(m.resolution, arg, (int)ScreenshotResolution::Count);
                 else if (str_eq(ident, STR_LIT("ResX")))           viamd::extract_int(m.res_x, arg);
@@ -1664,7 +1680,8 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Fps")))            viamd::extract_flt(m.fps, arg);
                 else if (str_eq(ident, STR_LIT("StartFrame")))     viamd::extract_dbl(m.start_frame, arg);
                 else if (str_eq(ident, STR_LIT("EndFrame")))       viamd::extract_dbl(m.end_frame, arg);
-                else if (str_eq(ident, STR_LIT("DurationAuto")))   viamd::extract_bool(m.duration_auto, arg);
+                else if (str_eq(ident, STR_LIT("DurationAuto")))   viamd::extract_bool(legacy_auto, arg);
+                else if (str_eq(ident, STR_LIT("Timeline")))       viamd::extract_int(timeline_version, arg);
                 else if (str_eq(ident, STR_LIT("Duration")))       viamd::extract_flt(m.duration, arg);
                 else if (str_eq(ident, STR_LIT("TrajectoryBegin"))) viamd::extract_flt(m.traj_begin, arg);
                 else if (str_eq(ident, STR_LIT("TrajectoryEnd")))  viamd::extract_flt(m.traj_end, arg);
@@ -1740,10 +1757,35 @@ void load_workspace(ApplicationState* data, str_t filename) {
             m.res_x = CLAMP(m.res_x, 640, 16384);
             m.res_y = CLAMP(m.res_y, 480, 16384);
             m.fps = CLAMP(m.fps, 1.0f, 240.0f);
-            m.duration = CLAMP(m.duration, 0.01f, 3600.0f);
-            m.crf = CLAMP(m.crf, 0, 51);
             std::stable_sort(m.keyframes, m.keyframes + md_array_size(m.keyframes),
                 [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+            if (timeline_version < 2) {
+                if (legacy_auto) {
+                    const double fps = fabs((double)data->animation.fps);
+                    const double len = fps > 0.0 ? fabs(m.end_frame - m.start_frame) / fps : 0.0;
+                    if (len > 0.0) m.duration = (float)len;
+                    m.traj_begin = 0.0f;
+                    m.traj_end = m.duration;
+                }
+                // The keys with a frame were all there was to it: the anchors go to the first and the last of them
+                int first = -1, last = -1;
+                for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
+                    if (!m.keyframes[i].use_frame) continue;
+                    if (first < 0) first = i;
+                    last = i;
+                }
+                if (first >= 0) {
+                    m.traj_begin = (float)m.keyframes[first].time;
+                    m.start_frame = m.keyframes[first].frame;
+                    m.traj_end = (float)m.keyframes[last].time;
+                    m.end_frame = m.keyframes[last].frame;
+                }
+            }
+            m.duration = CLAMP(m.duration, 0.01f, 3600.0f);
+            m.traj_begin = CLAMP(m.traj_begin, 0.0f, m.duration);
+            m.traj_end = CLAMP(m.traj_end, m.traj_begin, m.duration);
+            m.duration_init = true;
+            m.crf = CLAMP(m.crf, 0, 51);
             movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("MovieOverlay"))) {
             MovieOverlay o;
@@ -2088,7 +2130,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_flt (state, STR_LIT("Fps"), m.fps);
         viamd::write_dbl (state, STR_LIT("StartFrame"), m.start_frame);
         viamd::write_dbl (state, STR_LIT("EndFrame"), m.end_frame);
-        viamd::write_bool(state, STR_LIT("DurationAuto"), m.duration_auto);
+        viamd::write_int (state, STR_LIT("Timeline"), 2);
         viamd::write_flt (state, STR_LIT("Duration"), m.duration);
         viamd::write_flt (state, STR_LIT("TrajectoryBegin"), m.traj_begin);
         viamd::write_flt (state, STR_LIT("TrajectoryEnd"), m.traj_end);

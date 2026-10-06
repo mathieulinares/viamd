@@ -819,3 +819,30 @@ UTEST(viamd_camera, keys_that_track_their_own_atoms_each_follow_their_atom) {
         EXPECT_NEAR(k[i].transform.position.z + shifts[i].z, v.position.z, 1.0e-3f);
     }
 }
+
+UTEST(viamd_camera, trajectory_frame_goes_through_the_anchors_and_the_keys) {
+    /* No keys: linear between the anchors, held outside */
+    EXPECT_NEAR(0.0,   camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 12.0, 100.0, 0.0), 1.0e-9);
+    EXPECT_NEAR(0.0,   camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 12.0, 100.0, 2.0), 1.0e-9);
+    EXPECT_NEAR(50.0,  camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 12.0, 100.0, 7.0), 1.0e-9);
+    EXPECT_NEAR(100.0, camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 12.0, 100.0, 20.0), 1.0e-9);
+
+    /* A key in between is hit and the trajectory still reaches the end anchor */
+    CameraKeyframe k = {};
+    k.time = 4.0; k.use_frame = true; k.frame = 80.0;
+    EXPECT_NEAR(80.0,  camera_keyframes_frame_with_anchors(&k, 1, 2.0, 0.0, 12.0, 100.0, 4.0), 1.0e-9);
+    EXPECT_NEAR(100.0, camera_keyframes_frame_with_anchors(&k, 1, 2.0, 0.0, 12.0, 100.0, 12.0), 1.0e-9);
+    const double mid = camera_keyframes_frame_with_anchors(&k, 1, 2.0, 0.0, 12.0, 100.0, 8.0);
+    EXPECT_GT(mid, 80.0);
+    EXPECT_LT(mid, 100.0);
+
+    /* A key before the begin anchor takes its place */
+    k.time = 1.0; k.frame = 30.0;
+    EXPECT_NEAR(30.0, camera_keyframes_frame_with_anchors(&k, 1, 2.0, 0.0, 12.0, 100.0, 0.5), 1.0e-9);
+    EXPECT_NEAR(30.0, camera_keyframes_frame_with_anchors(&k, 1, 2.0, 0.0, 12.0, 100.0, 1.0), 1.0e-9);
+    k.time = 12.0; k.frame = 60.0;
+    EXPECT_NEAR(60.0, camera_keyframes_frame_with_anchors(&k, 1, 2.0, 0.0, 12.0, 100.0, 14.0), 1.0e-9);
+    EXPECT_NEAR(75.0, camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 100.0, 12.0, 0.0, 4.5), 1.0e-9);
+    EXPECT_NEAR(0.0, camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 2.0, 100.0, 1.0), 1.0e-9);
+    EXPECT_NEAR(100.0, camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 2.0, 100.0, 2.0), 1.0e-9);
+}

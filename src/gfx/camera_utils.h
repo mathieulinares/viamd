@@ -123,6 +123,11 @@ double keyed_curve_evaluate(const double* times, const double* values, const Key
 // monotone cubic, so it never overshoots a key, and it stops where it turns around).
 bool camera_keyframes_evaluate_frame(double* out_frame, const CameraKeyframe* keys, size_t count, double time);
 
+// Trajectory frame at 'time' through two anchors, (t_begin, f_begin) and (t_end, f_end), and the keys that
+// have a frame. The anchors always take part, so a key in between bends the speed of the trajectory; a key
+// at or beyond an anchor takes its place. Before the first point and after the last the frame is held.
+double camera_keyframes_frame_with_anchors(const CameraKeyframe* keys, size_t count, double t_begin, double f_begin, double t_end, double f_end, double time);
+
 mat4_t camera_world_to_view_matrix(const ViewTransform& transform);
 mat4_t camera_view_to_world_matrix(const ViewTransform& transform);
 

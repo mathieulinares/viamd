@@ -5,6 +5,57 @@
 
 #include <math.h>
 
+UTEST(viamd_movie_keys, changing_length_scales_all_timing_and_can_be_undone) {
+    MovieKeys keys;
+    keys.duration = 20.0f;
+    keys.traj_begin = 4.0f;
+    keys.traj_end = 18.0f;
+    keys.start_frame = 0.0;
+    keys.end_frame = 600.0;
+    CameraKeyframe camera;
+    camera.time = 10.0;
+    camera.use_frame = true;
+    camera.frame = 300.0;
+    camera.spin_turns = 2;
+    keys.camera.push_back(camera);
+    ParamKey param;
+    param.time = 12.0;
+    param.value[0] = 7.0f;
+    keys.params.push_back(param);
+    MovieOverlay overlay;
+    overlay.begin = 2.0;
+    overlay.end = 16.0;
+    overlay.fade_in = 1.0f;
+    overlay.fade_out = 2.0f;
+    keys.overlays.push_back(overlay);
+    const MovieKeys original = keys;
+    MovieHistory history;
+    history.clear(keys);
+
+    movie_keys_scale_time(&keys, 2.0);
+    EXPECT_EQ(40.0f, keys.duration);
+    EXPECT_EQ(8.0f, keys.traj_begin);
+    EXPECT_EQ(36.0f, keys.traj_end);
+    EXPECT_EQ(20.0, keys.camera[0].time);
+    EXPECT_EQ(300.0, keys.camera[0].frame);
+    EXPECT_EQ(2, keys.camera[0].spin_turns);
+    EXPECT_EQ(24.0, keys.params[0].time);
+    EXPECT_EQ(7.0f, keys.params[0].value[0]);
+    EXPECT_EQ(4.0, keys.overlays[0].begin);
+    EXPECT_EQ(32.0, keys.overlays[0].end);
+    EXPECT_EQ(2.0f, keys.overlays[0].fade_in);
+    EXPECT_EQ(4.0f, keys.overlays[0].fade_out);
+    EXPECT_EQ(600.0, keys.end_frame);
+    const MovieKeys doubled = keys;
+    history.update(keys, false);
+    ASSERT_TRUE(history.undo(&keys));
+    EXPECT_TRUE(movie_keys_equal(original, keys));
+    ASSERT_TRUE(history.redo(&keys));
+    EXPECT_TRUE(movie_keys_equal(doubled, keys));
+    movie_keys_scale_time(&keys, 0.5);
+    EXPECT_TRUE(movie_keys_equal(original, keys));
+}
+
 /* Curve through keyed values with the easing of the key a segment leads to */
 
 UTEST(viamd_movie_keys, a_keyed_curve_passes_through_its_keys_and_holds_outside) {
