@@ -92,6 +92,9 @@ vec3_t camera_get_look_at(const ViewTransform& transform);
 // How far in front of the camera a point is, along the viewing direction (negative behind it).
 // This is the depth that depth of field focuses at, and for the look-at point it equals the distance.
 float camera_depth_of_point(const ViewTransform& transform, vec3_t point);
+// Turns the camera to look at 'point' with the eye fixed, keeping its roll. The distance becomes the eye-to-point distance.
+// Returns false (leaving the transform unchanged) if the point is on top of the eye.
+bool camera_aim_at(ViewTransform* transform, vec3_t point);
 vec3_t camera_position_from_look_at(const vec3_t& look_at, const quat_t& orientation, float distance);
 
 void camera_interpolate_look_at(vec3_t* out_pos, quat_t* out_ori, float* out_dist, vec3_t in_pos[2], quat_t in_ori[2], float in_dist[2], double t);

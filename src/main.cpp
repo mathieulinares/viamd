@@ -660,15 +660,17 @@ int main(int argc, char** argv) {
             view_result = interaction_surface_view_transform_apply(&state.view.target, surface_state, view_args);
         }
         if (view_result.reset_requested) {
-            ViewTransform reset_transform = {};
             if (hit.depth < 1.0f) {
-                reset_transform.distance = state.view.target.distance;
-                reset_transform.orientation = state.view.camera.orientation;
-                reset_transform.position = hit.world_pos + state.view.camera.orientation * vec3_set(0, 0, state.view.target.distance);
+                // Aim at the clicked point with the eye fixed; depth of field focus follows unless it is set explicitly
+                camera_aim_at(&state.view.target, hit.world_pos);
+                if (state.visuals.dof.focus_mode == DofFocusMode::Distance && !ImGui::GetIO().KeyShift) {
+                    state.visuals.dof.focus_distance = state.view.target.distance;
+                }
             } else {
+                ViewTransform reset_transform = {};
                 reset_view(&reset_transform, state.mold.state, &state.representation.visibility_mask);
+                state.view.target = reset_transform;
             }
-            state.view.target = reset_transform;
         }
 
         draw_context_popup(&state, hit);

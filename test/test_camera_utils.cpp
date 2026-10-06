@@ -782,3 +782,19 @@ UTEST(viamd_camera, default_view_is_independent_of_the_structure_sign) {
     EXPECT_GT(vec3_dot(dv_view_up(a), dv_view_up(b)), 0.99f);
     EXPECT_GT(vec3_dot(dv_view_dir(a), dv_view_dir(b)), 0.99f);
 }
+
+UTEST(viamd_camera, aim_at_keeps_the_eye_and_looks_at_the_point) {
+    Camera c = test_camera();
+    const vec3_t eye = c.position;
+    const vec3_t p = eye + vec3_set(4.0f, -2.0f, -9.0f);
+    ASSERT_TRUE(camera_aim_at(&c, p));
+    EXPECT_NEAR(eye.x, c.position.x, 1.0e-6f);
+    EXPECT_NEAR(eye.y, c.position.y, 1.0e-6f);
+    EXPECT_NEAR(eye.z, c.position.z, 1.0e-6f);
+    const vec3_t l = camera_get_look_at(c);
+    EXPECT_NEAR(p.x, l.x, 1.0e-3f);
+    EXPECT_NEAR(p.y, l.y, 1.0e-3f);
+    EXPECT_NEAR(p.z, l.z, 1.0e-3f);
+    EXPECT_NEAR(vec3_length(p - eye), c.distance, 1.0e-3f);
+    EXPECT_FALSE(camera_aim_at(&c, eye));
+}

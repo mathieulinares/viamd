@@ -143,6 +143,30 @@ float camera_depth_of_point(const ViewTransform& transform, vec3_t point) {
     return vec3_dot(point - transform.position, forward);
 }
 
+bool camera_aim_at(ViewTransform* transform, vec3_t point) {
+    const vec3_t d = point - transform->position;
+    const float len = vec3_length(d);
+    if (len < 1.0e-4f) return false;
+    const vec3_t f = d / len;
+    const vec3_t old_up    = transform->orientation * vec3_t{0, 1, 0};
+    const vec3_t old_right = transform->orientation * vec3_t{1, 0, 0};
+    vec3_t r = vec3_cross(f, old_up);
+    // Looking straight along the old up axis leaves the roll undefined, so keep the old right axis instead
+    if (vec3_length_squared(r) < 1.0e-6f) r = old_right;
+    r = vec3_normalize(r);
+    const vec3_t u = vec3_cross(r, f);
+    mat3_t M;
+    M.col[0] = r;
+    M.col[1] = u;
+    M.col[2] = -f;
+    // quat_from_mat3 reads the matrix transposed relative to the column layout used here, so take the inverse
+    quat_t q = quat_from_mat3(M);
+    q.x = -q.x; q.y = -q.y; q.z = -q.z;
+    transform->orientation = quat_normalize(q);
+    transform->distance = len;
+    return true;
+}
+
 vec3_t camera_position_from_look_at(const vec3_t& look_at, const quat_t& orientation, float distance) {
     return look_at + orientation * vec3_t{0, 0, distance};
 }
