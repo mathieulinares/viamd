@@ -127,6 +127,10 @@ RepKey=1,5,60,0.3,0
 RepKey=3,1,0,2.5,0
 RepKey=3,1,50,2.5,0
 RepKey=3,1,60,1.523,0
+RepKey=1,4,0,0,0
+RepKey=1,4,50,0,0
+RepKey=1,4,60,0.35,0
+RepKey=1,7,0,0.2,0,0.45,1
 
 [MovieOverlay]
 Type=2

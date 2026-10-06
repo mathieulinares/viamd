@@ -6432,6 +6432,8 @@ static const char* movie_rep_prop_label(const Representation& rep, int prop, flo
     case RepProp::Visible:    return "Visible";
     case RepProp::TintScale:  return "Tint scale";
     case RepProp::Saturation: return "Saturation";
+    case RepProp::BaseColor:  return "Base color";
+    case RepProp::TintColor:  return "Tint color";
     case RepProp::Scale0:
     case RepProp::Scale1:
     case RepProp::Scale2: {
@@ -6451,32 +6453,47 @@ static const char* movie_rep_prop_label(const Representation& rep, int prop, flo
     }
 }
 
-static float movie_rep_prop_get(const Representation& rep, int prop) {
+// out has rep_prop_comps(prop) numbers
+static void movie_rep_prop_get(const Representation& rep, int prop, float* out) {
     switch ((RepProp)prop) {
-    case RepProp::Visible:    return rep.enabled ? 1.0f : 0.0f;
-    case RepProp::Scale0:     return rep.scale.elem[0];
-    case RepProp::Scale1:     return rep.scale.elem[1];
-    case RepProp::Scale2:     return rep.scale.elem[2];
-    case RepProp::TintScale:  return rep.tint_scale;
-    case RepProp::Saturation: return rep.saturation;
-    default: return 0.0f;
+    case RepProp::Visible:    out[0] = rep.enabled ? 1.0f : 0.0f; break;
+    case RepProp::Scale0:     out[0] = rep.scale.elem[0]; break;
+    case RepProp::Scale1:     out[0] = rep.scale.elem[1]; break;
+    case RepProp::Scale2:     out[0] = rep.scale.elem[2]; break;
+    case RepProp::TintScale:  out[0] = rep.tint_scale; break;
+    case RepProp::Saturation: out[0] = rep.saturation; break;
+    case RepProp::BaseColor:  for (int c = 0; c < 3; ++c) out[c] = rep.base_color.elem[c]; break;
+    case RepProp::TintColor:  for (int c = 0; c < 3; ++c) out[c] = rep.tint_color.elem[c]; break;
+    default: out[0] = 0.0f; break;
     }
 }
 
 // The scales are used as they are when drawing; what changes the colours of the atoms has to be updated
-static void movie_rep_prop_set(ApplicationState* state, Representation* rep, int prop, float v) {
-    if (fabsf(movie_rep_prop_get(*rep, prop) - v) < 1.0e-6f) return;
+static void movie_rep_prop_set(ApplicationState* state, Representation* rep, int prop, const float* v) {
+    float now[3] = {};
+    movie_rep_prop_get(*rep, prop, now);
+    bool same = true;
+    for (int c = 0; c < rep_prop_comps(prop); ++c) same &= fabsf(now[c] - v[c]) < 1.0e-6f;
+    if (same) return;
     switch ((RepProp)prop) {
     case RepProp::Visible:
-        rep->enabled = v >= 0.5f;
+        rep->enabled = v[0] >= 0.5f;
         state->representation.atom_visibility_mask_dirty = true;
         if (rep->enabled) flag_representation_as_dirty(rep);
         break;
-    case RepProp::Scale0: rep->scale.elem[0] = v; break;
-    case RepProp::Scale1: rep->scale.elem[1] = v; break;
-    case RepProp::Scale2: rep->scale.elem[2] = v; break;
-    case RepProp::TintScale:  rep->tint_scale = v; flag_representation_as_dirty(rep); break;
-    case RepProp::Saturation: rep->saturation = v; flag_representation_as_dirty(rep); break;
+    case RepProp::Scale0: rep->scale.elem[0] = v[0]; break;
+    case RepProp::Scale1: rep->scale.elem[1] = v[0]; break;
+    case RepProp::Scale2: rep->scale.elem[2] = v[0]; break;
+    case RepProp::TintScale:  rep->tint_scale = v[0]; flag_representation_as_dirty(rep); break;
+    case RepProp::Saturation: rep->saturation = v[0]; flag_representation_as_dirty(rep); break;
+    case RepProp::BaseColor:
+        for (int c = 0; c < 3; ++c) rep->base_color.elem[c] = v[c];
+        if (rep->color_mapping == ColorMapping::Uniform) flag_representation_as_dirty(rep);
+        break;
+    case RepProp::TintColor:
+        for (int c = 0; c < 3; ++c) rep->tint_color.elem[c] = v[c];
+        if (rep->tint_scale > 0.0f) flag_representation_as_dirty(rep);
+        break;
     default: break;
     }
 }
@@ -6498,12 +6515,16 @@ static void movie_reps_apply(ApplicationState* state, double time) {
             bool seen = false;
             for (size_t j = 0; j < i && !seen; ++j) seen = m.rep_keys[j].rep == k.rep && m.rep_keys[j].prop == k.prop;
             Representation* rep = seen ? nullptr : movie_find_rep(state, k.rep);
-            float v;
-            if (!rep || !rep_keys_evaluate(&v, m.rep_keys.data(), m.rep_keys.size(), k.rep, k.prop, time)) continue;
+            float v[3] = {};
+            if (!rep || !rep_keys_evaluate(v, m.rep_keys.data(), m.rep_keys.size(), k.rep, k.prop, time)) continue;
 
             bool saved = false;
             for (const auto& s : m.rep_saved) saved |= s.rep == k.rep && s.prop == k.prop;
-            if (!saved) m.rep_saved.push_back({k.rep, k.prop, movie_rep_prop_get(*rep, k.prop)});
+            if (!saved) {
+                decltype(m.rep_saved)::value_type entry = {k.rep, k.prop, {}};
+                movie_rep_prop_get(*rep, k.prop, entry.value);
+                m.rep_saved.push_back(entry);
+            }
             movie_rep_prop_set(state, rep, k.prop, v);
         }
     }
@@ -7846,6 +7867,7 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
     }
     const int prop = m.rep_prop_selected;
     const bool visible_prop = prop == (int)RepProp::Visible;
+    const bool color_prop = rep_prop_comps(prop) == 3;
 
     std::vector<int> mine;
     if (rep) {
@@ -7856,13 +7878,13 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
 
     constexpr int N = 200;
     float xs[N], ys[N];
-    if (!mine.empty()) {
+    if (!mine.empty() && !color_prop) {
         for (int i = 0; i < N; ++i) {
             const double t = (double)movie_len * (double)i / (double)(N - 1);
-            float v = 0.0f;
-            rep_keys_evaluate(&v, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, t);
+            float v[3] = {};
+            rep_keys_evaluate(v, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, t);
             xs[i] = (float)t;
-            ys[i] = v;
+            ys[i] = v[0];
         }
     }
 
@@ -7874,22 +7896,24 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
     double add_time = 0.0, add_value = 0.0;
 
     char axis[96];
-    if (rep) snprintf(axis, sizeof(axis), "%s: %s", rep->name, label);
+    if (rep && color_prop) axis[0] = '\0';
+    else if (rep) snprintf(axis, sizeof(axis), "%s: %s", rep->name, label);
     else     snprintf(axis, sizeof(axis), "Representation");
 
     const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
     if (ImPlot::BeginPlot("##rep_lane", ImVec2(-1, -1), plot_flags)) {
-        ImPlot::SetupAxes("Movie time (s)", axis, 0, ImPlotAxisFlags_Lock);
+        ImPlot::SetupAxes("Movie time (s)", color_prop ? nullptr : axis, 0, ImPlotAxisFlags_Lock | (color_prop ? ImPlotAxisFlags_NoDecorations : 0));
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         const double pad = 0.1 * (double)(hi - lo);
         ImPlot::SetupAxisLimits(ImAxis_Y1, (double)lo - pad, (double)hi + pad, ImPlotCond_Always);
+        if (rep && color_prop) ImPlot::PlotText(axis[0] ? axis : (std::string(rep->name) + ": " + label).c_str(), 0.02 * (double)movie_len, 0.95, ImVec2(0, 0));
 
         if (!rep) {
             ImPlot::PlotText("No representation yet", 0.5 * (double)movie_len, 0.5);
         }
 
         const ImVec4 col(0.95f, 0.6f, 0.3f, 1.0f);
-        if (!mine.empty()) {
+        if (!mine.empty() && !color_prop) {
             ImPlot::PushStyleColor(ImPlotCol_Line, col);
             ImPlot::PlotLine(label, xs, ys, N);
             ImPlot::PopStyleColor();
@@ -7898,11 +7922,12 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
         for (int ki : mine) {
             RepKey& key = m.rep_keys[ki];
             double x = key.time;
-            double y = (double)key.value;
+            double y = color_prop ? 0.5 : (double)key.value[0];
+            const ImVec4 point_col = color_prop ? ImVec4(key.value[0], key.value[1], key.value[2], 1.0f) : col;
             bool hovered = false, held = false;
-            if (ImPlot::DragPoint(5000 + ki, &x, &y, col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
+            if (ImPlot::DragPoint(5000 + ki, &x, &y, point_col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
                 key.time = movie_snap_time(data, x);
-                key.value = visible_prop ? (y >= 0.5 ? 1.0f : 0.0f) : (float)CLAMP(y, (double)lo, (double)hi);
+                if (!color_prop) key.value[0] = visible_prop ? (y >= 0.5 ? 1.0f : 0.0f) : (float)CLAMP(y, (double)lo, (double)hi);
                 any_moved = true;
             }
             if (held && !locked) {
@@ -7912,8 +7937,9 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
             if (hovered) {
                 any_hovered = true;
                 if (!held) {
-                    if (visible_prop) ImGui::SetTooltip("%.2f s: %s\nDrag sideways to change when. Right click to remove it", key.time, key.value >= 0.5f ? "shown" : "hidden");
-                    else              ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it", key.time, key.value);
+                    if (visible_prop) ImGui::SetTooltip("%.2f s: %s\nDrag sideways to change when. Right click to remove it", key.time, key.value[0] >= 0.5f ? "shown" : "hidden");
+                    else if (color_prop) ImGui::SetTooltip("%.2f s\nDrag to change its time, right click to remove it. Its color is edited in the table of the Movie window.", key.time);
+                    else              ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it", key.time, key.value[0]);
                 }
                 if (!locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) remove_idx = ki;
             }
@@ -7958,19 +7984,25 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
         key.time = add_time;
         if (visible_prop) {
             // A change of state at that time: what it is there now, turned around. With no keys yet, what it is now holds up to it.
-            float now = movie_rep_prop_get(*rep, prop);
-            rep_keys_evaluate(&now, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, add_time);
+            float cur[3] = {};
+            movie_rep_prop_get(*rep, prop, cur);
+            rep_keys_evaluate(cur, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, add_time);
+            const float now = cur[0];
             if (mine.empty()) {
                 RepKey first = key;
                 first.time = 0.0;
-                first.value = now;
+                first.value[0] = now;
                 first.ease = KeyEase::Hold;
                 m.rep_keys.push_back(first);
             }
-            key.value = now >= 0.5f ? 0.0f : 1.0f;
+            key.value[0] = now >= 0.5f ? 0.0f : 1.0f;
             key.ease = KeyEase::Hold;
+        } else if (color_prop) {
+            // The colour it has at that time, or as it is now if there are no keys yet
+            movie_rep_prop_get(*rep, prop, key.value);
+            rep_keys_evaluate(key.value, m.rep_keys.data(), m.rep_keys.size(), rep->id, prop, add_time);
         } else {
-            key.value = (float)add_value;
+            key.value[0] = (float)add_value;
         }
         m.rep_keys.push_back(key);
         movie_rep_sort(data);
@@ -8471,7 +8503,7 @@ static void movie_key_rep(ApplicationState* state, const Representation& rep, in
     key.rep = rep.id;
     key.prop = prop;
     key.time = movie_snap_time(state, (double)m.playhead);
-    key.value = movie_rep_prop_get(rep, prop);
+    movie_rep_prop_get(rep, prop, key.value);
     if (prop == (int)RepProp::Visible) key.ease = KeyEase::Hold;
 
     for (RepKey& k : m.rep_keys) {
@@ -8571,10 +8603,12 @@ static void draw_movie_rep_section(ApplicationState* data, float movie_len) {
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (key.prop == (int)RepProp::Visible) {
-                bool visible = key.value >= 0.5f;
-                if (ImGui::Checkbox("##visible", &visible)) key.value = visible ? 1.0f : 0.0f;
+                bool visible = key.value[0] >= 0.5f;
+                if (ImGui::Checkbox("##visible", &visible)) key.value[0] = visible ? 1.0f : 0.0f;
+            } else if (rep_prop_comps(key.prop) == 3) {
+                ImGui::ColorEdit3("##value", key.value, ImGuiColorEditFlags_NoInputs);
             } else {
-                ImGui::DragFloat("##value", &key.value, (hi - lo) * 0.005f, lo, hi, "%.3g");
+                ImGui::DragFloat("##value", &key.value[0], (hi - lo) * 0.005f, lo, hi, "%.3g");
             }
 
             ImGui::TableNextColumn();

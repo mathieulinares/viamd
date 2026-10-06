@@ -1770,14 +1770,16 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("FollowTarget")))  pending.has_follow_target = deserialize_mask(&pending.follow_target, arg);
                 else if (str_eq(ident, STR_LIT("AnimateParams"))) viamd::extract_bool(m.animate_params, arg);
                 else if (str_eq(ident, STR_LIT("RepKey"))) {
-                    // representation id, property, time, value, ease
-                    float v[5];
-                    if (viamd::extract_flt_vec(v, 5, arg)) {
+                    // representation id, property, time, value, ease, then the other two numbers of a colour
+                    float v[7] = {};
+                    if (viamd::extract_flt_vec(v, 7, arg) || viamd::extract_flt_vec(v, 5, arg)) {
                         RepKey key;
                         key.rep = (uint32_t)MAX(lroundf(v[0]), 0L);
                         key.prop = (int)lroundf(v[1]);
                         key.time = v[2];
-                        key.value = v[3];
+                        key.value[0] = v[3];
+                        key.value[1] = v[5];
+                        key.value[2] = v[6];
                         key.ease = (KeyEase)CLAMP((int)lroundf(v[4]), 0, (int)KeyEase::Count - 1);
                         if (key.rep > 0 && 0 <= key.prop && key.prop < (int)RepProp::Count) m.rep_keys.push_back(key);
                     }
@@ -2224,8 +2226,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("ParamKey"), v, 6);
         }
         for (const RepKey& k : m.rep_keys) {
-            const float v[5] = { (float)k.rep, (float)k.prop, (float)k.time, k.value, (float)(int)k.ease };
-            viamd::write_flt_vec(state, STR_LIT("RepKey"), v, 5);
+            const float v[7] = { (float)k.rep, (float)k.prop, (float)k.time, k.value[0], (float)(int)k.ease, k.value[1], k.value[2] };
+            viamd::write_flt_vec(state, STR_LIT("RepKey"), v, 7);
         }
         for (const MovieOverlay& o : m.overlays) {
             viamd::write_section_header(state, STR_LIT("MovieOverlay"));

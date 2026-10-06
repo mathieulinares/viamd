@@ -58,20 +58,27 @@ bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t re
     if (mine.empty()) return false;
     std::stable_sort(mine.begin(), mine.end(), [](const RepKey* a, const RepKey* b) { return a->time < b->time; });
 
-    std::vector<double> times, values;
+    std::vector<double> times;
     std::vector<KeyEase> eases;
+    std::vector<const RepKey*> unique;
     for (const RepKey* k : mine) {
         if (!times.empty() && k->time <= times.back()) continue;
         times.push_back(k->time);
-        values.push_back(k->value);
         eases.push_back(prop == (int)RepProp::Visible ? KeyEase::Hold : k->ease);
+        unique.push_back(k);
     }
-    *out = (float)keyed_curve_evaluate(times.data(), values.data(), eases.data(), times.size(), time);
+
+    std::vector<double> values(unique.size());
+    for (int c = 0; c < rep_prop_comps(prop); ++c) {
+        for (size_t i = 0; i < unique.size(); ++i) values[i] = unique[i]->value[c];
+        out[c] = (float)keyed_curve_evaluate(times.data(), values.data(), eases.data(), times.size(), time);
+    }
     return true;
 }
 
 static bool equal(const RepKey& a, const RepKey& b) {
-    return a.rep == b.rep && a.prop == b.prop && a.time == b.time && a.value == b.value && a.ease == b.ease;
+    return a.rep == b.rep && a.prop == b.prop && a.time == b.time && a.ease == b.ease &&
+           a.value[0] == b.value[0] && a.value[1] == b.value[1] && a.value[2] == b.value[2];
 }
 
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {

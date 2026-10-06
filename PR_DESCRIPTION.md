@@ -42,7 +42,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - These can be keyed over time: background colour and intensity, ambient occlusion and its radius, exposure, depth of field blur, near and far clipping, and focus distance.
 
 **Representation keys**
-- Show or hide a representation at a time (changes at its keys), and key its scales, tint scale and saturation (smooth between keys).
+- Show or hide a representation at a time (changes at its keys), and key its scales, tint scale, saturation, base colour and tint colour (smooth between keys).
 - Representations now have a stable `id` (saved in the workspace, never reused), which keys refer to, so reordering, duplicating or removing representations does not break them. Removing one removes its keys.
 - The Representations window is locked while a recording is running.
 
@@ -80,7 +80,7 @@ New tests are in:
 - `test_movie_overlay`.
 - `test_serialization`.
 
-All 106 tests pass in a Release build on Linux.
+All 107 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and MP4s on Linux.

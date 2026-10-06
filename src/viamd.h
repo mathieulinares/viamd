@@ -1173,7 +1173,7 @@ struct ApplicationState {
         bool  param_saved_valid[MOVIE_MAX_PARAMS] = {};
 
         // Properties of representations keyed over time (shown or hidden, scale, tint), by the id of the representation
-        struct RepSaved { uint32_t rep; int prop; float value; };
+        struct RepSaved { uint32_t rep; int prop; float value[3]; };
         std::vector<RepKey> rep_keys;
         std::vector<RepSaved> rep_saved;      // What they were before the keys took hold of them, put back when they let go
         int rep_selected = 0;                 // Index in representation.reps, what 'Key Now' keys

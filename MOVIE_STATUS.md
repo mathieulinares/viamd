@@ -32,14 +32,14 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 - Movie Timeline window with aligned tracks and real axes, linked zoom and pan, opened from the Windows menu.
 - Render ergonomics: frame **Scale**, **Samples per frame**, **Render only a range**, **Pause/Resume**, time-left estimate, optional workspace copy next to the movie.
 - Strip comfort (plan item 5): **Snap to frames** for dragged times, **Copy** / **Paste Keyframe**, **Key on Selection** (frames the selected atoms, periodic images placed together).
-- Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (held, changes at the key), the scales, **Tint scale** and **Saturation**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
+- Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (held, changes at the key), the scales, **Tint scale**, **Saturation**, **Base color** and **Tint color**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
 - The Representations window is locked while recording (the cheap form of plan item 7).
 - Representation keys on the timeline: a lane for the chosen representation and property, keys dragged, added by double-click and removed by right-click, like the look parameter lane.
 
 ## Untested in the GUI
 
 - Representation lane in the timeline: drag, add (double-click) and remove (right-click) keys; Visible turns around on double-click; hiding the lane.
-- Representation keys: key Visible at two times and scrub/preview; key a scale and a saturation; remove a representation that has keys; duplicate one (the copy must not share keys); save and reload a workspace (ids and keys survive, an old workspace without ids still loads and keys can be added); the values must go back after a recording.
+- Representation keys: key Visible at two times and scrub/preview; key a scale, a saturation and a tint color (the example workspace tints the protein blue-grey from 50 s to 60 s); remove a representation that has keys; duplicate one (the copy must not share keys); save and reload a workspace (ids and keys survive, an old workspace without ids still loads and keys can be added); the values must go back after a recording.
 - Key on Selection: select a molecule split over the periodic boundary and check it is framed whole; check the result with another viewing direction.
 - Snap to frames: drag keys, anchors and the playhead; add a key with the playhead between frames; Add Orbit with snapping on (the orbit's end key must be where expected).
 - Copy / Paste Keyframe (a pasted key replaces one at the same time, and keeps its spin, ease and follow settings).
@@ -54,7 +54,7 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 
 ## Known limits
 
-- Only the properties listed above can be keyed: not the type, filter, colour mapping, base colour or the electronic structure settings (those cannot be blended, or are expensive to redo every frame).
+- Only the properties listed above can be keyed: not the type, filter, colour mapping, the other colours (bond, secondary structure) or the electronic structure settings (those cannot be blended, or are expensive to redo every frame).
 - Tint scale and saturation recolor the atoms of the representation every frame while they change: slow for very large systems.
 - Representation ids are assigned in the order they are created; a workspace written before they existed gets ids on load.
 - An existing keyframe cannot be switched to follow the target; add a new key at the same time with the option on (it replaces the old one).
@@ -70,7 +70,6 @@ Branch: `video`. The user manual is `docs/movie_maker.md`, the pull request text
 
 - Plan item 7, the real fix: allow editing representations during a recording (large; the lock covers the need for now).
 - Optional output: H.265 and WebM presets, transparent background (lowest value for MD movies).
-- Keys for colours of representations (base colour, tint colour).
 - Keyboard shortcuts for copy and paste of keys.
 
 ## Ideas not yet planned

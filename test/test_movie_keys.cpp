@@ -346,7 +346,7 @@ static RepKey rk(uint32_t rep, RepProp prop, double time, float value, KeyEase e
     k.rep = rep;
     k.prop = (int)prop;
     k.time = time;
-    k.value = value;
+    k.value[0] = value;
     k.ease = ease;
     return k;
 }
@@ -394,4 +394,24 @@ UTEST(viamd_movie_keys, rep_keys_are_part_of_the_undo_state_and_scale_with_time)
 
     movie_keys_scale_time(&a, 2.0);
     EXPECT_NEAR(4.0, a.reps[0].time, 1.0e-12);
+}
+
+UTEST(viamd_movie_keys, a_color_key_blends_all_three_components) {
+    RepKey a = rk(1, RepProp::BaseColor, 0.0, 0.0f, KeyEase::Linear);
+    RepKey b = rk(1, RepProp::BaseColor, 2.0, 1.0f, KeyEase::Linear);
+    a.value[1] = 1.0f; a.value[2] = 0.5f;
+    b.value[1] = 0.0f; b.value[2] = 0.5f;
+    const RepKey keys[] = {a, b};
+    EXPECT_EQ(3, rep_prop_comps((int)RepProp::BaseColor));
+    EXPECT_EQ(3, rep_prop_comps((int)RepProp::TintColor));
+    EXPECT_EQ(1, rep_prop_comps((int)RepProp::Saturation));
+
+    float v[3] = {};
+    ASSERT_TRUE(rep_keys_evaluate(v, keys, 2, 1, (int)RepProp::BaseColor, 1.0));
+    EXPECT_NEAR(0.5f, v[0], 1.0e-6f);
+    EXPECT_NEAR(0.5f, v[1], 1.0e-6f);
+    EXPECT_NEAR(0.5f, v[2], 1.0e-6f);
+    ASSERT_TRUE(rep_keys_evaluate(v, keys, 2, 1, (int)RepProp::BaseColor, 9.0));
+    EXPECT_NEAR(1.0f, v[0], 1.0e-6f);
+    EXPECT_NEAR(0.0f, v[1], 1.0e-6f);
 }

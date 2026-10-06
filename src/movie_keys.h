@@ -30,20 +30,26 @@ enum class RepProp : int {
     Scale2,
     TintScale,
     Saturation,
+    BaseColor,   // Shown where the colour mapping is Uniform
+    TintColor,   // Shown where the tint scale is above zero
     Count,
 };
+
+// How many numbers a property has: a colour has three
+inline int rep_prop_comps(int prop) { return prop == (int)RepProp::BaseColor || prop == (int)RepProp::TintColor ? 3 : 1; }
 
 // One key of one property of one representation, which is named by its id (not its place in the list)
 struct RepKey {
     uint32_t rep = 0;
     int      prop = 0;               // A RepProp
     double   time = 0.0;
-    float    value = 0.0f;           // Visible is 0 or 1
+    float    value[3] = {0, 0, 0};   // A colour uses all three, the others the first; Visible is 0 or 1
     KeyEase  ease = KeyEase::Smooth; // Shapes the stretch leading to this key
 };
 
 // The value of a property of a representation at 'time' from the keys for it, which need not be sorted.
 // Returns false if there are none. Visible is held: it changes at its keys, it is not blended between them.
+// 'out' has rep_prop_comps(prop) numbers.
 bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t rep, int prop, double time);
 
 // Everything on the timeline that the user edits, so that it can be undone as one
