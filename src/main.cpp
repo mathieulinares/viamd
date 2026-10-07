@@ -8452,10 +8452,14 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     for (int track = 0; track < 3; ++track) {
         if (m.timeline_tracks[track]) ratios[rows++] = m.timeline_row_ratios[track];
     }
-    ratios[rows++] = m.timeline_row_ratios[3];
+    if (m.timeline_param_lane) ratios[rows++] = m.timeline_row_ratios[3];
     if (m.timeline_rep_lane) ratios[rows++] = m.timeline_row_ratios[4];
     if (m.timeline_overlay_lane) ratios[rows++] = m.timeline_row_ratios[5];
     const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
+    if (rows == 0) {
+        ImGui::TextDisabled("No lane is ticked.");
+        return;
+    }
     if (size.y < 0.0f) {
         // Every lane has its height, more for the overlays when they have many rows, and the window scrolls
         float sum = 0.0f;
@@ -8565,7 +8569,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         }
         if (any_moved) resort_pending = true;
       }
-      draw_movie_param_lane(data, movie_len, locked);
+      if (m.timeline_param_lane) draw_movie_param_lane(data, movie_len, locked);
       if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
       if (m.timeline_overlay_lane) draw_movie_overlay_lane(data, movie_len, locked);
       ImPlot::EndSubplots();
@@ -8573,7 +8577,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
       for (int track = 0; track < 3; ++track) {
           if (m.timeline_tracks[track]) m.timeline_row_ratios[track] = ratios[row++];
       }
-      m.timeline_row_ratios[3] = ratios[row++];
+      if (m.timeline_param_lane) m.timeline_row_ratios[3] = ratios[row++];
       if (m.timeline_rep_lane) m.timeline_row_ratios[4] = ratios[row++];
       if (m.timeline_overlay_lane) m.timeline_row_ratios[5] = ratios[row];
     }
@@ -9027,12 +9031,16 @@ static void draw_movie_timeline_window(ApplicationState* data) {
     ImGui::SetItemTooltip("Keys, the playhead and the trajectory's start and end that are dragged here land on a frame of the movie (at the Output FPS).");
     const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
-    ImGui::SetNextItemWidth(fs * 14.0f);
-    if (ImGui::BeginCombo("Look parameter", movie_param_table[m.param_selected].label)) {
-        for (int i = 0; i < num_params; ++i) {
-            if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
+    ImGui::Checkbox("Look parameter lane", &m.timeline_param_lane);
+    if (m.timeline_param_lane) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 14.0f);
+        if (ImGui::BeginCombo("Look parameter", movie_param_table[m.param_selected].label)) {
+            for (int i = 0; i < num_params; ++i) {
+                if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
+            }
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
     }
     ImGui::Checkbox("Representation lane", &m.timeline_rep_lane);
     ImGui::SameLine();

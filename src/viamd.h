@@ -1092,6 +1092,7 @@ struct ApplicationState {
         bool  show_window = false;
         bool  show_timeline_window = false;  // Opened explicitly from the window menu
         bool  timeline_tracks[3] = {true, true, true};
+        bool  timeline_param_lane = true;     // The lane of a keyed look parameter
         bool  timeline_rep_lane = true;       // The lane of a keyed property of a representation, below the look parameter's
         float timeline_row_ratios[6] = {1, 1, 1, 1, 1, 0.6f};
         float timeline_lane_height = 150.0f;  // The least height of a lane, in pixels: the window scrolls when they do not fit
