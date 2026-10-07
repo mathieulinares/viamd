@@ -6854,7 +6854,8 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             float aspect = 4.0f;
             const GLuint tex = movie_logo_texture(&aspect);
             if (!tex) continue;
-            const ImVec2 logo_size(MAX(o.size * size.y, 4.0f) * aspect, MAX(o.size * size.y, 4.0f));
+            const float logo_h = MAX(movie_overlay_size_px(o, size.y), 4.0f);
+            const ImVec2 logo_size(logo_h * aspect, logo_h);
             const int la = (int)o.anchor;
             const ImVec2 lp = ImVec2(pos.x + margin + (size.x - 2.0f * margin - logo_size.x) * 0.5f * (float)(la % 3),
                                      pos.y + margin + (size.y - 2.0f * margin - logo_size.y) * 0.5f * (float)(la / 3));
@@ -6868,7 +6869,7 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             continue;
         }
 
-        const float font_px = MAX(o.size * size.y, 4.0f);
+        const float font_px = MAX(movie_overlay_size_px(o, size.y), 4.0f);
         const ImU32 col    = ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha));
         const ImU32 shadow = IM_COL32(0, 0, 0, (int)(160.0f * o.color[3] * alpha));
         const float soff   = MAX(font_px * 0.05f, 1.0f);
@@ -8406,8 +8407,28 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
 
             int anchor = (int)o.anchor;
             if (ImGui::Combo("Position", &anchor, movie_overlay_anchor_str, (int)MovieOverlayAnchor::Count)) o.anchor = (MovieOverlayAnchor)anchor;
-            ImGui::SliderFloat("Size", &o.size, 0.01f, 0.3f, "%.3f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SetItemTooltip("The height of the text, as a part of the height of the frame");
+            {
+                float lo, hi;
+                int unit = (int)o.size_unit;
+                const char* unit_names[] = {"% of frame height", "points"};
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+                if (ImGui::Combo("##size_unit", &unit, unit_names, (int)MovieOverlaySizeUnit::Count)) {
+                    // The size is kept as it is, written in the other unit
+                    o.size = movie_overlay_convert_size(o.size, o.size_unit, (MovieOverlaySizeUnit)unit);
+                    o.size_unit = (MovieOverlaySizeUnit)unit;
+                }
+                ImGui::SetItemTooltip("Percent: the height is a part of the height of the frame.\nPoints: a point is a pixel of a frame that is 1080 pixels high, scaled with the frame, so a size looks the same at any resolution.");
+                ImGui::SameLine();
+                movie_overlay_size_range(o.size_unit, &lo, &hi);
+                if (o.size_unit == MovieOverlaySizeUnit::Points) {
+                    ImGui::SliderFloat("Size", &o.size, lo, hi, "%.0f pt", ImGuiSliderFlags_Logarithmic);
+                } else {
+                    float percent = o.size * 100.0f;
+                    if (ImGui::SliderFloat("Size", &percent, lo * 100.0f, hi * 100.0f, "%.1f %%", ImGuiSliderFlags_Logarithmic)) o.size = percent * 0.01f;
+                }
+                o.size = CLAMP(o.size, lo, hi);
+                ImGui::SetItemTooltip("The height of the text (of the logo)");
+            }
             ImGui::ColorEdit4("Color", o.color, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs);
             ImGui::ColorEdit4("Background", o.background, ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs);
             ImGui::SetItemTooltip("A plate behind it, to read it over a busy picture. None while its opacity is 0.");

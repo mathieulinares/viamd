@@ -1854,12 +1854,17 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 }
                 else if (str_eq(ident, STR_LIT("Anchor"))) viamd::extract_enum(o.anchor, arg, (int)MovieOverlayAnchor::Count);
                 else if (str_eq(ident, STR_LIT("Size")))   viamd::extract_flt(o.size, arg);
+                else if (str_eq(ident, STR_LIT("SizeUnit"))) viamd::extract_enum(o.size_unit, arg, (int)MovieOverlaySizeUnit::Count);
                 else if (str_eq(ident, STR_LIT("Color")))  viamd::extract_flt_vec(o.color, 4, arg);
                 else if (str_eq(ident, STR_LIT("Background"))) viamd::extract_flt_vec(o.background, 4, arg);
                 else if (str_eq(ident, STR_LIT("Length"))) viamd::extract_flt(o.length, arg);
                 else if (str_eq(ident, STR_LIT("Text")))   viamd::extract_to_char_buf(o.text, sizeof(o.text), arg);
             }
-            o.size = CLAMP(o.size, 0.01f, 0.3f);
+            {
+                float lo, hi;
+                movie_overlay_size_range(o.size_unit, &lo, &hi);
+                o.size = CLAMP(o.size, lo, hi);
+            }
             data->movie.overlays.push_back(o);
             movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("Operations"))) {
@@ -2245,6 +2250,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("Range"), range, 4);
             viamd::write_int (state, STR_LIT("Anchor"), (int)o.anchor);
             viamd::write_flt (state, STR_LIT("Size"), o.size);
+            viamd::write_int (state, STR_LIT("SizeUnit"), (int)o.size_unit);
             viamd::write_flt_vec(state, STR_LIT("Color"), o.color, 4);
             viamd::write_flt_vec(state, STR_LIT("Background"), o.background, 4);
             viamd::write_flt (state, STR_LIT("Length"), o.length);

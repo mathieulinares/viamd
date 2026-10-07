@@ -14,6 +14,26 @@ MovieOverlay movie_overlay_default_logo() {
     return o;
 }
 
+float movie_overlay_size_px(const MovieOverlay& o, float frame_height_px) {
+    return o.size_unit == MovieOverlaySizeUnit::Points ? o.size * frame_height_px / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT
+                                                       : o.size * frame_height_px;
+}
+
+float movie_overlay_convert_size(float size, MovieOverlaySizeUnit from, MovieOverlaySizeUnit to) {
+    if (from == to) return size;
+    return to == MovieOverlaySizeUnit::Points ? size * MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT : size / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT;
+}
+
+void movie_overlay_size_range(MovieOverlaySizeUnit unit, float* lo, float* hi) {
+    if (unit == MovieOverlaySizeUnit::Points) {
+        *lo = 6.0f;
+        *hi = 400.0f;
+    } else {
+        *lo = 0.01f;
+        *hi = 0.3f;
+    }
+}
+
 float movie_overlay_alpha(const MovieOverlay& o, double time) {
     if (!o.enabled || o.end <= o.begin || time < o.begin || time > o.end) return 0.0f;
 

@@ -74,3 +74,28 @@ UTEST(viamd_movie_overlay, a_movie_starts_with_the_logo_in_the_top_left_corner_f
     EXPECT_NEAR(1.0f, movie_overlay_alpha(o, 1800.0), 1.0e-6f);
     EXPECT_NEAR(1.0f, movie_overlay_alpha(o, 3600.0), 1.0e-6f);    /* up to the longest a movie can be */
 }
+
+UTEST(viamd_movie_overlay, a_size_in_points_scales_with_the_frame_and_in_percent_with_its_height) {
+    MovieOverlay o;
+    o.size = 0.05f;
+    EXPECT_NEAR(54.0f, movie_overlay_size_px(o, 1080.0f), 1.0e-4f);
+    EXPECT_NEAR(108.0f, movie_overlay_size_px(o, 2160.0f), 1.0e-4f);
+
+    o.size_unit = MovieOverlaySizeUnit::Points;
+    o.size = 24.0f;
+    EXPECT_NEAR(24.0f, movie_overlay_size_px(o, 1080.0f), 1.0e-4f);     /* a point is a pixel at 1080 */
+    EXPECT_NEAR(48.0f, movie_overlay_size_px(o, 2160.0f), 1.0e-4f);     /* and the same look at 4K */
+    EXPECT_NEAR(8.0f, movie_overlay_size_px(o, 360.0f), 1.0e-4f);
+}
+
+UTEST(viamd_movie_overlay, changing_the_unit_keeps_the_size) {
+    const float pt = movie_overlay_convert_size(0.05f, MovieOverlaySizeUnit::FrameHeight, MovieOverlaySizeUnit::Points);
+    EXPECT_NEAR(54.0f, pt, 1.0e-4f);
+    EXPECT_NEAR(0.05f, movie_overlay_convert_size(pt, MovieOverlaySizeUnit::Points, MovieOverlaySizeUnit::FrameHeight), 1.0e-6f);
+    EXPECT_NEAR(0.07f, movie_overlay_convert_size(0.07f, MovieOverlaySizeUnit::FrameHeight, MovieOverlaySizeUnit::FrameHeight), 1.0e-9f);
+
+    float lo, hi;
+    movie_overlay_size_range(MovieOverlaySizeUnit::Points, &lo, &hi);
+    EXPECT_LT(lo, hi);
+    EXPECT_GT(lo, 1.0f);
+}

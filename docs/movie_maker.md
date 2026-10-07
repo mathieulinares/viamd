@@ -136,7 +136,7 @@ Under **Visuals > Depth of Field**, **Focus** chooses what is sharp:
 - an on/off box and **Remove**;
 - **Shown (s)**, the times it is shown from and to, with **Start at preview time** and **End at preview time**;
 - **Fade in (s)** and **Fade out (s)**;
-- a **Position** (nine anchors), **Size** (relative to the frame height, so it looks the same at any resolution), **Color** and a **Background** plate to read it over a busy picture (none while its opacity is 0).
+- a **Position** (nine anchors), **Size** (a part of the frame height, or in points: a point is a pixel of a frame that is 1080 pixels high, scaled with the frame, so a size looks the same at any resolution; changing the unit keeps the size as it is), **Color** and a **Background** plate to read it over a busy picture (none while its opacity is 0).
 
 A scale bar picks a round length unless you set one. **Show in viewport** previews the overlays at the preview time. Their placement is exact only when the viewport has the same proportions as the movie.
 

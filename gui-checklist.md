@@ -17,6 +17,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] **Remove** the logo, save, open the file again: the logo is still gone.
 - [ ] **Add Logo** adds another one. **Position**, **Size** (its height), **Color** (tint) and **Background** work.
 - [ ] **Add Text**, **Add Time Stamp** and **Add Scale Bar**: each shows in the viewport. The scale bar follows the zoom of the camera. The time stamp shows the time of the trajectory frame and counts back when the trajectory plays backward.
+- [ ] Overlay **Size**: switch the unit between % and points, the size does not jump. Record at 1920x1080 and at 3840x2160: text of the same size in points looks the same in both. A saved workspace keeps the unit.
 - [ ] **Fade in** and **Fade out** work when scrubbing across the start and end of an overlay.
 - [ ] **Background** plate of a text overlay: rounded, sized to the text, fades with it.
 - [ ] Undo and redo (Ctrl+Z, Ctrl+Y) restore overlay edits, also **Background**.
