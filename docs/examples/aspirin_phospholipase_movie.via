@@ -29,10 +29,55 @@ Tension=0
 Interpolation=2
 
 [Timeline]
-NumSubplots=1
+NumSubplots=2
+
+[TimelineSeries]
+Subplot=0
+Source=script
+Variant=values
+Path=script/d
+Color=0.258823544,0.807843208,0.890196145,1
+PlotType=line
+Marker=1
+MarkerSize=1
+BarWidth=1
+NumBins=128
+UseColormap=0
+Colormap=5
+ColormapAlpha=1
+
+[TimelineSeries]
+Subplot=1
+Source=script
+Variant=values
+Path=script/nb
+Color=0.121568635,0.470588267,0.70588237,1
+PlotType=line
+Marker=1
+MarkerSize=1
+BarWidth=1
+NumBins=128
+UseColormap=0
+Colormap=5
+ColormapAlpha=1
 
 [Distributions]
 NumSubplots=1
+
+[DistributionSeries]
+Subplot=0
+Source=script
+Variant=values
+Path=script/dih1
+Color=0.698039234,0.874509871,0.541176498,1
+PlotType=line
+Marker=1
+MarkerSize=1
+BarWidth=1
+NumBins=128
+UseColormap=0
+Colormap=5
+ColormapAlpha=1
 
 [TimelineView]
 FilterEnabled=0
@@ -53,7 +98,7 @@ Tonemapper=3
 TonemapExposure=1
 TonemapGamma=2.20000005
 DofEnabled=1
-DofFocusScale=1.31314266
+DofFocusScale=6.62265491
 DofFocusMode=0
 DofFocusDistance=10
 FxaaEnabled=1
@@ -69,11 +114,11 @@ SimulationBoxEnabled=0
 SimulationBoxColor=0,0,0,0.5
 
 [Camera]
-Position=-23.7012062,28.9270248,72.4373779
-Orientation=0.101738773,0.246264607,0.426704556,-0.864248872
-Distance=83.3191681
+Position=16.9716339,15.079257,14.6736536
+Orientation=0.21002242,0.533741295,0.762263,0.299943119
+Distance=22.7815723
 Mode=0
-FovY=0.52359879
+FovY=0.785398185
 
 [Movie]
 Resolution=0
@@ -86,7 +131,7 @@ Timeline=2
 Duration=80
 TrajectoryBegin=0
 TrajectoryEnd=80
-Playhead=0
+Playhead=33.3333321
 FilenamePrefix=frame
 AnimateCamera=1
 ShowPath=1
@@ -96,43 +141,43 @@ ResScale=100
 AaSamples=0
 SaveCopy=1
 RepTransition=2
-Overlays=1
 SnapFrames=1
+Overlays=1
 RenderRange=0,0,80
 Loop=0
 AnimateParams=1
 KeyframeV3=0,0.785398185,22.7016335,12.1641417,16.4069672,-10.8746223,0.173237815,0.890601158,0.382237017,0.175251439,1,600,0,0,0,0,0,0,0,0,-1
-KeyframeV3=10,0.785398185,47.4843407,16.6908836,23.5341816,-36.0931664,0.308586925,0.90820086,0.272039562,0.077069886,1,520,0,0,0,0,0,0,0,0,-1
-KeyframeV3=20,0.785398185,30.465641,-25.2729359,-12.5324497,44.0485764,0.342492908,-0.233820245,-0.429873496,0.802019536,1,441.003571,0,0,0,0,1,-4.87575912,-1.91987228,24.0614891,1197
-KeyframeV3=25,0.785398185,25.9191952,-27.3314571,-5.07360983,39.3944702,0.291442752,-0.231575236,-0.461512715,0.805257738,1,419,0,0,0,0,1,-10.6922474,1.55194092,20.6583138,1206
-KeyframeV3=30,0.785398185,31.0833836,-30.2758656,11.3596954,28.514061,0.195751831,-0.465324372,-0.630622387,0.589465559,1,388.743622,0,0,0,0,0,0,0,0,-1
-KeyframeV3=35,0.785398185,32.3631706,-27.0947533,23.4614239,14.8517475,0.15801008,-0.657220066,-0.625851452,0.389106989,1,344.828979,0,0,0,0,0,0,0,0,-1
-KeyframeV3=57,0.785398185,7.48665142,5.13289165,9.10312271,2.91028595,-0.0815942287,-0.743429422,-0.631117046,-0.20578219,1,112,0,0,0,0,0,0,0,0,-1
-KeyframeV3=61,0.785398185,7.48665142,5.13289165,9.10312271,2.91028595,-0.0815942287,-0.743429422,-0.631117046,-0.20578219,1,72.4728851,0,0,0,0,0,0,0,0,-1
-KeyframeV3=65,0.785398185,13.279664,7.63079357,14.3415308,2.72941399,0.0690201595,0.731780708,0.639350533,0.225752145,1,43.2233849,0,0,0,0,0,0,0,0,-1
+KeyframeV3=10,0.785398185,47.4843407,16.6908836,23.5341816,-36.0931664,0.308586955,0.908200979,0.272039592,0.0770698935,1,520,0,0,0,0,0,0,0,0,-1
+KeyframeV3=20,0.785398185,30.465641,-25.2729359,-12.5324497,44.0485764,0.342492938,-0.233820274,-0.429873556,0.802019656,1,441.003571,0,0,0,0,1,-4.87575912,-1.91987228,24.0614891,1197
+KeyframeV3=25,0.785398185,25.9191952,-27.3314571,-5.07360983,39.3944702,0.291442782,-0.231575266,-0.461512774,0.805257857,1,419,0,0,0,0,1,-10.6922474,1.55194092,20.6583138,1206
+KeyframeV3=30,0.785398185,31.0833836,-30.2758656,11.3596954,28.514061,0.195751861,-0.465324432,-0.630622447,0.589465618,1,388.743622,0,0,0,0,0,0,0,0,-1
+KeyframeV3=35,0.785398185,32.3631706,-27.0947533,23.4614239,14.8517475,0.158010125,-0.657220244,-0.625851631,0.389107078,1,344.828979,0,0,0,0,0,0,0,0,-1
+KeyframeV3=57,0.785398185,7.48665142,5.13289165,9.10312271,2.91028595,-0.0815942362,-0.743429482,-0.631117105,-0.20578222,1,112,0,0,0,0,0,0,0,0,-1
+KeyframeV3=61,0.785398185,7.48665142,5.13289165,9.10312271,2.91028595,-0.0815942362,-0.743429482,-0.631117105,-0.20578222,1,72.4728851,0,0,0,0,0,0,0,0,-1
+KeyframeV3=65,0.785398185,13.279664,7.63079357,14.3415308,2.72941399,0.069020167,0.731780767,0.639350593,0.225752175,1,43.2233849,0,0,0,0,0,0,0,0,-1
 KeyframeV3=70,0.785398185,26.485796,7.48416901,-5.02088547,27.1905308,-0.0349881649,-0.0868612602,0.256600261,-0.961970568,1,24.8642979,0,0,0,0,0,0,0,0,-1
 KeyframeV3=75,0.785398185,31.4734917,-6.13366032,8.91358662,27.953474,0.101738691,0.246264577,0.426704586,-0.864248991,1,10,0,0,0,0,0,0,0,0,-1
-KeyframeV3=79.1003876,0.52359879,83.3191681,-23.7012062,28.927021,72.4373779,-0.101738766,-0.246264607,-0.426704556,0.864248872,1,0,0,0,0,0,0,0,0,0,-1
+KeyframeV3=79.1003876,0.52359879,83.3191681,-23.7012062,28.927021,72.4373779,-0.101738781,-0.246264637,-0.426704615,0.864248991,1,0,0,0,0,0,0,0,0,0,-1
 ParamKey=0,0,1,1,1,0
 ParamKey=5,17.5212708,0.558887959,0,0,0
 ParamKey=5,20.4444447,70.727005,0,0,0
 ParamKey=5,30.793705,11.111681,0,0,0
 ParamKey=5,37.4580879,1.31314266,0,0,0
-RepKey=4,0,0,0,3
-RepKey=4,0,55,1,3
-RepKey=5,0,0,0,3
-RepKey=5,0,15,1,3
-RepKey=5,0,50,0,3
-RepKey=1,5,0,1,0
-RepKey=1,5,50,1,0
-RepKey=1,5,60,0.3,0
-RepKey=3,1,0,2.5,0
-RepKey=3,1,50,2.5,0
-RepKey=3,1,60,1.523,0
-RepKey=1,4,0,0,0
-RepKey=1,4,50,0,0
-RepKey=1,4,60,0.35,0
-RepKey=1,7,0,0.2,0,0.45,1
+RepKey=4,0,0,0,3,0,0
+RepKey=4,0,55,1,3,0,0
+RepKey=5,0,0,0,3,0,0
+RepKey=5,0,15,1,3,0,0
+RepKey=5,0,50,0,3,0,0
+RepKey=1,5,0,1,0,0,0
+RepKey=1,5,50,1,0,0,0
+RepKey=1,5,60,0.300000012,0,0,0
+RepKey=3,1,0,2.5,0,0,0
+RepKey=3,1,50,2.5,0,0,0
+RepKey=3,1,60,1.523,0,0,0
+RepKey=1,4,0,0,0,0,0
+RepKey=1,4,50,0,0,0,0
+RepKey=1,4,60,0.349999994,0,0,0
+RepKey=1,7,0,0.200000003,0,0.449999988,1
 
 [MovieOverlay]
 Type=2
@@ -140,7 +185,9 @@ Enabled=1
 Range=6.52102709,80,0.666666687,0.666666687
 Anchor=6
 Size=0.0500000007
+SizeUnit=0
 Color=0,0,0,1
+Background=0,0,0,0
 Length=0
 Text=
 
@@ -150,19 +197,11 @@ Enabled=1
 Range=0.5,6,1,1
 Anchor=1
 Size=0.0599999987
+SizeUnit=0
 Color=0,0,0,1
+Background=0,0,0,0
 Length=0
 Text=Aspirin in phospholipase
-
-[MovieOverlay]
-Type=1
-Enabled=1
-Range=0,80,0.5,0.5
-Anchor=2
-Size=0.0399999991
-Color=0,0,0,1
-Length=0
-Text=
 
 [MovieOverlay]
 Type=3
@@ -170,10 +209,67 @@ Enabled=1
 Range=0,3600,0,0
 Anchor=0
 Size=0.0799999982
+SizeUnit=0
 Color=1,1,1,1
 Background=0,0,0,0
 Length=0
 Text=
+
+[MovieOverlay]
+Type=5
+Enabled=1
+Range=0,80,0.5,0.5
+Anchor=1
+Size=0.0329999998
+SizeUnit=0
+Color=0.378636211,0.107269354,0.467532456,1
+Background=0,0,0,0
+Length=0
+Text=
+Width=0.400000006
+TimeBarLabels=1
+
+[MovieOverlay]
+Type=7
+Enabled=1
+Range=0,80,0.5,0.5
+Anchor=8
+Size=0.25
+SizeUnit=0
+Color=1,1,1,1
+Background=0,0,0,0.5
+Length=0
+Text=
+Width=0.300000012
+Subplot=0
+PlotFlags=3
+
+[MovieOverlay]
+Type=6
+Enabled=1
+Range=0,80,0.5,0.5
+Anchor=7
+Size=0.25
+SizeUnit=0
+Color=1,1,1,1
+Background=0,0,0,0.5
+Length=0
+Text=
+Width=0.300000012
+Subplot=0
+PlotFlags=3
+
+[MovieOverlay]
+Type=8
+Enabled=1
+Range=31.1499996,80,0.5,0.5
+Anchor=6
+Size=0.0500000007
+SizeUnit=0
+Color=1,1,1,1
+Background=0,0,0,0
+Length=0
+Text=d
 
 [Operations]
 Recenter=0
@@ -193,7 +289,7 @@ Type=4
 ColorMapping=8
 BaseColor=1,1,1,1
 Saturation=1
-TintColor=1,0,0,1
+TintColor=0.200000003,0.449999988,1,1
 TintScale=0
 SecondaryStructureColorUnknown=0.5,0.5,0.5,1
 SecondaryStructureColorCoil=0.860000014,0.860000014,0.860000014,1
@@ -244,14 +340,14 @@ SecondaryStructureColorSheet=0.119999997,0.119999997,0.860000014,1
 BondColor=1
 BondSharpness=0.5
 BondBaseColor=1,1,1,1
-Param=1.523,1.19500005,1,1
+Param=2.5,1.19500005,1,1
 DynamicEval=0
 
 [Representation]
 Id=4
 Name=water
 Filter=residue(resname("SOL") and within(4.0,resname("AIN")))
-Enabled=1
+Enabled=0
 Type=2
 ColorMapping=1
 BaseColor=1,1,1,1
@@ -290,22 +386,20 @@ Param=0.888000011,1,1,1
 DynamicEval=0
 
 [Script]
-Text="""s1 = resname("ALA")[2:8];
-d1 = distance(10,30);
-a1 = angle(2,1,3) in resname("ALA");
-r = rdf(element('C'), element('H'), 10.0);
-v = sdf(s1, element('H'), 10.0);
-{lin,plan,iso} = shape_weights(all);
+Text="""
 sel1 = residue({5,9,18,21:23,27:31,44,47:48,63,100});
+d = distance(sel1,residue("AIN"));
+nb = count(resname("SOL") and within(4.0,resname("AIN")),'residue');
+dih1 = dihedral(1192, 1197, 1198, 1207);
 """
 
 [ActiveSelection]
-Granularity=1
+Granularity=0
 
 [Windows]
-Timelines=0
+Timelines=1
 Distributions=0
-Representations=1
+Representations=0
 ScriptEditor=0
 Animation=1
 Movie=1

@@ -166,7 +166,7 @@ The movie (length, trajectory timing, camera keys including what they look at, l
 
 ## Example workspace
 
-[`examples/aspirin_phospholipase_movie.via`](examples/aspirin_phospholipase_movie.via) is a finished movie of aspirin in phospholipase (80 s): camera keys that look at and track atoms, a depth of field pull, representation keys (water appears when the camera reaches the ligand, residues are shown for a while, the protein fades to grey, the ligand shrinks as the camera comes in), a title, a time stamp and a scale bar. It is kept as a worked example of the features here and is updated when they grow.
+[`examples/aspirin_phospholipase_movie.via`](examples/aspirin_phospholipase_movie.via) is a finished movie of aspirin in phospholipase (80 s): camera keys that look at and track atoms, a depth of field pull, representation keys (water appears when the camera reaches the ligand, residues are shown for a while, the protein fades to grey, the ligand shrinks as the camera comes in), a title, a time stamp, a scale bar, a time bar, a timeline and a distribution of script properties that grow as the movie plays, and the visualization of a distance in the viewport. It is kept as a worked example of the features here and is updated when they grow.
 
 It refers to `aspirin-phospholipase.gro` and `.xtc` in its own folder, which are not part of the repository. Put your copy of the two files next to the workspace, then **File > Open Workspace**, and scrub **Preview time**.
 
