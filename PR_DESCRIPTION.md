@@ -75,7 +75,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - `src/movie_keys.{h,cpp}`: parameter and representation keys, the snapshot used for undo, time scaling, render range, snapping.
 - `src/movie_overlay.{h,cpp}`: overlay fades, sizes, scale bar length, the time bar and elapsed-curve maths, ticks and histogram counts of the plot overlays, the times of their subplots, the frame guide maths, the migration of older overlays and the default logo overlay.
 - `src/plot_series.{h,cpp}`: the subplots of the Timelines and Distributions windows get a stable id and a name.
-- `src/image.{h,cpp}`: decoding of an image in memory (the logo), the bounds of its visible part and a fix for dark edges of transparent images; `icon/viamd.png` is baked into the executable by CMake and is the logo.
+- `src/image.{h,cpp}`: decoding of an image in memory (the logo), the bounds of its visible part a fix for dark edges of transparent images and the light grey of the icon made black for the logo; `icon/viamd.png` is baked into the executable by CMake and is the logo.
 - `Representation::id` (`viamd.h`): a stable id for each representation, saved in workspaces, which representation keys refer to.
 - `src/gfx/camera_utils.{h,cpp}` and `camera.h`: keyframe evaluation, anchors, keyed curves, `camera_aim_at`.
 - Most of the UI is in `src/main.cpp`. State and workspace I/O are in `viamd.{h,cpp}`.

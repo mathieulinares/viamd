@@ -6881,6 +6881,8 @@ static GLuint movie_logo_texture(float* aspect) {
             const int cw = x1 - x0, ch = y1 - y0;
             std::vector<uint8_t> cropped((size_t)cw * (size_t)ch * 4);
             for (int y = 0; y < ch; ++y) memcpy(&cropped[(size_t)y * (size_t)cw * 4], &pixels[((size_t)(y0 + y) * (size_t)w + (size_t)x0) * 4], (size_t)cw * 4);
+            // The lettering of the icon is light grey, for a dark picture: black reads on a light one
+            image_replace_light_grey(cropped.data(), cw, ch, 128, 24, 0, 0, 0);
             image_bleed_transparent(cropped.data(), cw, ch);
             tex = movie_upload_texture(cropped.data(), cw, ch);
             logo_aspect = (float)cw / (float)MAX(ch, 1);

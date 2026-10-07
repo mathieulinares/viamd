@@ -88,3 +88,23 @@ UTEST(viamd_image, an_image_with_nothing_visible_is_left_as_it_is) {
     EXPECT_EQ(5, (int)img[0]);
     EXPECT_EQ(9, (int)img[5]);
 }
+
+UTEST(viamd_image, light_grey_becomes_the_colour_asked_for_and_keeps_its_alpha) {
+    uint8_t img[4 * 4] = {
+        224, 224, 224, 255,     /* light grey: replaced */
+        226, 222, 224, 90,      /* nearly grey, partly transparent: replaced, alpha kept */
+        200, 40, 90, 255,       /* coloured: kept */
+        60, 60, 60, 255,        /* dark grey: kept */
+    };
+    image_replace_light_grey(img, 4, 1, 128, 24, 0, 0, 0);
+    EXPECT_EQ(0, (int)img[0]); EXPECT_EQ(0, (int)img[1]); EXPECT_EQ(0, (int)img[2]); EXPECT_EQ(255, (int)img[3]);
+    EXPECT_EQ(0, (int)img[4]); EXPECT_EQ(0, (int)img[6]); EXPECT_EQ(90, (int)img[7]);
+    EXPECT_EQ(200, (int)img[8]); EXPECT_EQ(40, (int)img[9]); EXPECT_EQ(90, (int)img[10]);
+    EXPECT_EQ(60, (int)img[12]); EXPECT_EQ(60, (int)img[13]);
+}
+
+UTEST(viamd_image, transparent_pixels_are_not_recoloured) {
+    uint8_t img[4] = {230, 230, 230, 0};
+    image_replace_light_grey(img, 1, 1, 128, 24, 0, 0, 0);
+    EXPECT_EQ(230, (int)img[0]);
+}

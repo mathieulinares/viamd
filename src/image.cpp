@@ -108,3 +108,18 @@ void image_bleed_transparent(uint8_t* rgba, int width, int height) {
         }
     }
 }
+
+void image_replace_light_grey(uint8_t* rgba, int width, int height, uint8_t min_value, uint8_t tolerance, uint8_t r, uint8_t g, uint8_t b) {
+    const size_t n = (size_t)width * (size_t)height;
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t* p = &rgba[i * 4];
+        if (p[3] == 0) continue;
+        const uint8_t hi = p[0] > p[1] ? (p[0] > p[2] ? p[0] : p[2]) : (p[1] > p[2] ? p[1] : p[2]);
+        const uint8_t lo = p[0] < p[1] ? (p[0] < p[2] ? p[0] : p[2]) : (p[1] < p[2] ? p[1] : p[2]);
+        if (hi - lo <= tolerance && lo >= min_value) {
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+        }
+    }
+}
