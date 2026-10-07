@@ -6,7 +6,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 
 ## 1. Workspace
 
-- [ ] Open the example. It loads without errors in the log, and the playhead is at 0.
+- [ ] Open the example. It loads without errors in the log, the movie is 80 s long and the playhead is at its end. Drag the playhead to 0 and play the preview.
 - [ ] Save it under another name and open that. Keys, overlays (with the subplots and the in and out times of their plots), markers, representation keys, **Transition (s)**, **Scale**, **Samples per frame**, the range settings and the lanes of the Movie Timeline are all there.
 - [ ] Open an older workspace that has no `Id` on its representations, no overlays and no `Overlays` entry (for example `~/Desktop/try.via`). It loads, the logo is in the top left, and a representation key can be added.
 - [ ] Open a workspace with keyframes from before the follow target existed. The keys are unchanged.
@@ -94,7 +94,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] In the Movie window, **Representations**: pick `water`, **Visible**, **Key Now** at two times. Scrub across them: it grows in or shrinks away over **Transition (s)** (2 s), it does not pop.
 - [ ] **Transition (s)** 0: it appears and vanishes at once. 10: a slow change. Two keys closer together than the transition: it turns around from where it was.
 - [ ] A cartoon and a ribbon at very small sizes look right while they grow in and shrink away. A dipole or electronic-structure representation stays full size and vanishes at the end of the transition.
-- [ ] Key a scale, **Saturation**, **Tint scale** and **Tint color**: scrubbing changes the picture. The example tints the protein blue-grey from 50 s to 60 s.
+- [ ] Key a scale, **Saturation**, **Tint scale** and **Tint color**: scrubbing changes the picture. The example shrinks the ball scale of the ligand from 30 s to 38 s.
 - [ ] **Base color** is seen on a representation with **Uniform** color mapping.
 - [ ] Representation lane in the Movie Timeline: pick a representation and a property with the lists. Drag a key in time and value, double-click to add, right-click to remove. For **Visible** a double-click turns it around, and the first one also keys the state at time 0.
 - [ ] Duplicate a representation that has keys: the copy has none. Remove one that has keys: its keys are gone from the table.
