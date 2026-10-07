@@ -7062,7 +7062,7 @@ struct MoviePlotContext {
     float alpha;
     double time;
     double q;                        // The trajectory time (frame) that is shown
-    double axis_begin, axis_end;     // The movie times the overlay covers: its horizontal axis starts and ends there
+    double axis_begin, axis_end;     // The movie times that the horizontal axis covers: the whole movie, whenever the overlay is shown
     float thick;                     // Width of the lines
     int color_index = 0;             // How many series have been drawn, for the colours of a palette
 };
@@ -7080,7 +7080,7 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, co
     const bool elapsed = timeline && o.plot_axis == MoviePlotAxis::Elapsed;
     const int ns = MIN(sp.count, 6);
 
-    // A subplot that comes in later is drawn from the start of the overlay, with what happened before it came in
+    // Whenever a subplot comes in, it is drawn from the start of the movie, with what happened before it came in
     const double pt0 = c.axis_begin, pt1 = c.axis_end;
     const double tnow = CLAMP(c.time, pt0, pt1);
     double full_lo = 0.0, full_hi = 0.0, vis_lo = 0.0, vis_hi = 0.0;
@@ -7363,8 +7363,7 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
     // The panels come in and go at times of their own; a panel that is not there yet keeps its place, so the others do not move
     const MovieTimeBarProfile& prof = movie_time_bar_profile_for(state);
     const float thick = o.line_points > 0.0f ? MAX(o.line_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 1.0f) : MAX(fpx * 0.16f, 1.5f);
-    const double axis_begin = CLAMP(o.begin, 0.0, prof.duration);
-    MoviePlotContext c = { dl, font, &o, state, &prof, fpx, alpha, time, movie_trajectory_quantity(state, time), axis_begin, CLAMP(o.end, axis_begin, prof.duration), thick, 0 };
+    MoviePlotContext c = { dl, font, &o, state, &prof, fpx, alpha, time, movie_trajectory_quantity(state, time), 0.0, prof.duration, thick, 0 };
 
     float panel_alpha[2 * PLOT_MAX_SUBPLOTS];
     MoviePlotView seen_views[2 * PLOT_MAX_SUBPLOTS];
@@ -7505,13 +7504,14 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             snprintf(buf, sizeof(buf), "%s", o.text);
             break;
         case MovieOverlayType::Timestamp: {
-            const double frame = movie_trajectory_frame(state, time);
+            // The time that has gone since the movie started, which only grows whichever way the trajectory plays
+            const double elapsed = movie_time_bar_moved(movie_time_bar_profile_for(state), time);
             if (md_array_size(state->timeline.x_values) > 0) {
                 char unit_buf[32] = "";
                 if (!md_unit_is_none(state->timeline.time_unit)) md_unit_print(unit_buf, sizeof(unit_buf), state->timeline.time_unit);
-                snprintf(buf, sizeof(buf), "%.1f %s", frame_to_time(frame, *state), unit_buf);
+                snprintf(buf, sizeof(buf), "%.1f %s", elapsed, unit_buf);
             } else {
-                snprintf(buf, sizeof(buf), "Frame %d", (int)(frame + 0.5));
+                snprintf(buf, sizeof(buf), "%d frames", (int)(elapsed + 0.5));
             }
             break;
         }

@@ -560,3 +560,32 @@ UTEST(viamd_movie_overlay, the_guide_never_widens_the_view_past_170_degrees) {
     EXPECT_NEAR(170.0f * 3.14159265f / 180.0f, movie_guide_fov_y(1.5f, 1000.0f, 10.0f), 1e-5);
     EXPECT_NEAR(1.0f, movie_guide_fov_y(1.0f, 1000.0f, 0.0f), 1e-6);
 }
+
+/* The time stamp is the time that has gone since the movie started */
+
+UTEST(viamd_movie_overlay, the_elapsed_time_starts_at_zero_and_only_grows_whichever_way_the_trajectory_plays) {
+    MovieTimeBarProfile down, there_and_back;
+    movie_time_bar_profile(&down, 10.0, 200, ramp_down);
+    movie_time_bar_profile(&there_and_back, 10.0, 200, [](double t) { return t < 5.0 ? 10.0 * t : 100.0 - 10.0 * t; });
+    for (const MovieTimeBarProfile* p : {&down, &there_and_back}) {
+        EXPECT_NEAR(0.0, movie_time_bar_moved(*p, 0.0), 1e-12);
+        double prev = 0.0;
+        for (double t = 0.0; t <= 10.0; t += 0.25) {
+            const double now = movie_time_bar_moved(*p, t);
+            EXPECT_GE(now, prev - 1e-12);
+            prev = now;
+        }
+    }
+    EXPECT_NEAR(100.0, movie_time_bar_moved(down, 10.0), 1e-6);
+    EXPECT_NEAR(100.0, movie_time_bar_moved(there_and_back, 10.0), 1e-6);
+}
+
+UTEST(viamd_movie_overlay, the_elapsed_time_does_not_depend_on_where_an_overlay_is_shown) {
+    /* It is a function of the movie time alone: the same at 6 s whether read first there or after 0..5 s */
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 10.0, 200, ramp_down);
+    const double first = movie_time_bar_moved(p, 6.0);
+    for (double t = 0.0; t < 6.0; t += 0.5) (void)movie_time_bar_moved(p, t);
+    EXPECT_NEAR(first, movie_time_bar_moved(p, 6.0), 1e-12);
+    EXPECT_NEAR(60.0, first, 1e-6);
+}
