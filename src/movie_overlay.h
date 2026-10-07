@@ -8,6 +8,7 @@ enum class MovieOverlayType : int {
     Timestamp,   // The time of the trajectory frame that is shown
     ScaleBar,    // A bar of a given length in the structure, which follows the camera
     Logo,        // The VIAMD logo
+    Image,       // An image file (png or jpg)
     Count,
 };
 
@@ -42,6 +43,7 @@ struct MovieOverlay {
     float              background[4] = {0, 0, 0, 0};  // A plate behind it, none while its alpha is 0
     char               text[128] = "";
     float              length = 0.0f;         // Scale bar: its length in Angstrom, 0 chooses one
+    char               path[512] = "";         // Image: the file
 };
 
 // The logo in the top left corner for the whole movie, which a movie starts with

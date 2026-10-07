@@ -33,6 +33,7 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 - Render ergonomics: frame **Scale**, **Samples per frame**, **Render only a range**, **Pause/Resume**, time-left estimate, optional workspace copy next to the movie.
 - Strip comfort (plan item 5): **Snap to frames** for dragged times, **Copy** / **Paste Keyframe**, **Key on Selection** (frames the selected atoms, periodic images placed together).
 - Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (grows in / shrinks away over **Transition (s)**, 2 s by default, from the key; solid representations cannot fade), the scales, **Tint scale**, **Saturation**, **Base color** and **Tint color**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
+- Image overlays (png or jpg from a file, path saved relative to the workspace, **Reload**, red message when it cannot be read).
 - Overlay size in percent of the frame height or in points (1 pt = 1 px at 1080p, scaled), per overlay.
 - The camera path in the viewport follows the target or atom of keys that follow (sampled along the movie, a few points per frame, cached).
 - Logo overlay: the VIAMD logo (`icon/viamd_logo.png`, baked into the executable) in the top left corner by default for the whole movie; **Add Logo** adds more. A workspace remembers that it was removed (`Overlays=1`).
@@ -45,6 +46,7 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 
 - Representation lane in the timeline: drag, add (double-click) and remove (right-click) keys; Visible turns around on double-click; hiding the lane.
 - Visible transition: a representation grows in at its key and shrinks away at the next; scrub through a transition (also with the lane); transition 0 pops; a key closer than the transition turns around; Cartoon and Ribbons at very small sizes look right; electronic structure and dipole representations vanish at the end of the transition.
+- Image overlay: **Add Image...** with a png that has transparency and with a jpg; it shows in the viewport and in a recording; **Browse...** and **Reload** work; save the workspace, move the workspace and the image together to another folder and open it: the image is found; a missing file turns the message red and does not crash.
 - Overlay size in points: switch an overlay to points, the look is kept; 24 pt looks the same at 1080p and 4K; a saved workspace keeps the unit.
 - Follow-aware camera path: with a follow target and keys that follow, the blue and yellow paths bend with the target and match what the preview does; the green camera at the playhead too; moving a key or the target restarts it without the old path vanishing; no stall while it is being made.
 - Follow / Unfollow in the keyframe table: Go To a key, Follow, scrub through the trajectory and check the camera keeps the target in view; without Go To first an error is logged.
@@ -83,4 +85,4 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 
 ## Ideas not yet planned
 
-- Other images as overlays
+- Per-overlay font in another typeface

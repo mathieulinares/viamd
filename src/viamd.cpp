@@ -1858,6 +1858,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Color")))  viamd::extract_flt_vec(o.color, 4, arg);
                 else if (str_eq(ident, STR_LIT("Background"))) viamd::extract_flt_vec(o.background, 4, arg);
                 else if (str_eq(ident, STR_LIT("Length"))) viamd::extract_flt(o.length, arg);
+                else if (str_eq(ident, STR_LIT("Path"))) {
+                    const str_t file = workspace_file_path(folder, arg, temp_alloc);
+                    str_copy_to_char_buf(o.path, sizeof(o.path), file);
+                }
                 else if (str_eq(ident, STR_LIT("Text")))   viamd::extract_to_char_buf(o.text, sizeof(o.text), arg);
             }
             {
@@ -2255,6 +2259,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("Background"), o.background, 4);
             viamd::write_flt (state, STR_LIT("Length"), o.length);
             viamd::write_str (state, STR_LIT("Text"), str_from_cstr(o.text));
+            if (o.type == MovieOverlayType::Image) viamd::write_str(state, STR_LIT("Path"), workspace_relative_path(str_from_cstr(o.path)));
         }
     }
 

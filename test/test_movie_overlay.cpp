@@ -99,3 +99,12 @@ UTEST(viamd_movie_overlay, changing_the_unit_keeps_the_size) {
     EXPECT_LT(lo, hi);
     EXPECT_GT(lo, 1.0f);
 }
+
+UTEST(viamd_movie_overlay, an_image_overlay_is_a_picture_like_the_logo_but_with_a_file) {
+    MovieOverlay o;
+    o.type = MovieOverlayType::Image;
+    EXPECT_EQ('\0', o.path[0]);
+    EXPECT_TRUE((int)MovieOverlayType::Image > (int)MovieOverlayType::Logo);   /* the numbers are saved: Logo stays 3 */
+    EXPECT_EQ(3, (int)MovieOverlayType::Logo);
+    EXPECT_EQ(4, (int)MovieOverlayType::Image);
+}

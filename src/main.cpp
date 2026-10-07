@@ -6797,6 +6797,7 @@ static const char* movie_overlay_type_str[(int)MovieOverlayType::Count] = {
     "Time stamp",
     "Scale bar",
     "Logo",
+    "Image",
 };
 
 static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
@@ -6804,6 +6805,25 @@ static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
     "Middle left", "Center", "Middle right",
     "Bottom left", "Bottom center", "Bottom right",
 };
+
+// Makes a texture of rgba pixels, with mipmaps so that a small picture of a large image is smooth
+static GLuint movie_upload_texture(const uint8_t* pixels, int w, int h) {
+    GLint prev = 0;
+    GLuint tex = 0;
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+    return tex;
+}
 
 // The logo as a texture, made the first time it is needed. 'aspect' is its width over its height. 0 if it cannot be made.
 static GLuint movie_logo_texture(float* aspect) {
@@ -6815,19 +6835,7 @@ static GLuint movie_logo_texture(float* aspect) {
         int w = 0, h = 0;
         uint8_t* pixels = image_decode_rgba(viamd_logo_png, viamd_logo_png_size, &w, &h);
         if (pixels) {
-            GLint prev = 0;
-            glActiveTexture(GL_TEXTURE0);
-            glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
-            glGenTextures(1, &tex);
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-            glGenerateMipmap(GL_TEXTURE_2D);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+            tex = movie_upload_texture(pixels, w, h);
             logo_aspect = (float)w / (float)MAX(h, 1);
             image_free(pixels);
         } else {
@@ -6836,6 +6844,58 @@ static GLuint movie_logo_texture(float* aspect) {
     }
     *aspect = logo_aspect;
     return tex;
+}
+
+// The images of image overlays, read once per file. A file that cannot be read is remembered as such, so it is not tried every frame.
+struct MovieImageTexture {
+    std::string path;
+    GLuint tex = 0;
+    float  aspect = 1.0f;
+};
+static std::vector<MovieImageTexture> movie_image_cache;
+
+static GLuint movie_image_texture(const char* path, float* aspect) {
+    if (!path || !path[0]) return 0;
+    for (const MovieImageTexture& c : movie_image_cache) {
+        if (c.path == path) {
+            *aspect = c.aspect;
+            return c.tex;
+        }
+    }
+    MovieImageTexture entry;
+    entry.path = path;
+    if (FILE* f = fopen(path, "rb")) {
+        std::vector<uint8_t> bytes;
+        uint8_t buf[65536];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) bytes.insert(bytes.end(), buf, buf + n);
+        fclose(f);
+        int w = 0, h = 0;
+        uint8_t* pixels = image_decode_rgba(bytes.data(), bytes.size(), &w, &h);
+        if (pixels) {
+            entry.tex = movie_upload_texture(pixels, w, h);
+            entry.aspect = (float)w / (float)MAX(h, 1);
+            image_free(pixels);
+        } else {
+            VIAMD_LOG_ERROR("Movie overlay: '%s' is not a png or jpg image", path);
+        }
+    } else {
+        VIAMD_LOG_ERROR("Movie overlay: could not open '%s'", path);
+    }
+    movie_image_cache.push_back(entry);
+    *aspect = entry.aspect;
+    return entry.tex;
+}
+
+// Reads the file again the next time it is needed
+static void movie_image_forget(const char* path) {
+    for (size_t i = 0; i < movie_image_cache.size(); ++i) {
+        if (movie_image_cache[i].path == path) {
+            if (movie_image_cache[i].tex) glDeleteTextures(1, &movie_image_cache[i].tex);
+            movie_image_cache.erase(movie_image_cache.begin() + i);
+            return;
+        }
+    }
 }
 
 // The overlays that are visible at a movie time, drawn into the rectangle (pos, size) of a frame. Everything scales with the
@@ -6850,9 +6910,9 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
         const float alpha = movie_overlay_alpha(o, time);
         if (alpha <= 0.0f) continue;
 
-        if (o.type == MovieOverlayType::Logo) {
+        if (o.type == MovieOverlayType::Logo || o.type == MovieOverlayType::Image) {
             float aspect = 4.0f;
-            const GLuint tex = movie_logo_texture(&aspect);
+            const GLuint tex = o.type == MovieOverlayType::Logo ? movie_logo_texture(&aspect) : movie_image_texture(o.path, &aspect);
             if (!tex) continue;
             const float logo_h = MAX(movie_overlay_size_px(o, size.y), 4.0f);
             const ImVec2 logo_size(logo_h * aspect, logo_h);
@@ -8348,6 +8408,7 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         case MovieOverlayType::Text:      snprintf(o.text, sizeof(o.text), "Title"); o.anchor = MovieOverlayAnchor::BottomCenter; break;
         case MovieOverlayType::Timestamp: o.anchor = MovieOverlayAnchor::TopRight; break;
         case MovieOverlayType::ScaleBar:  o.anchor = MovieOverlayAnchor::BottomLeft; break;
+        case MovieOverlayType::Image:     o.anchor = MovieOverlayAnchor::BottomRight; o.size = 0.1f; break;
         case MovieOverlayType::Logo:      o = movie_overlay_default_logo(); o.begin = (double)m.playhead; o.end = (double)MAX(movie_len, m.playhead); break;
         default: break;
         }
@@ -8360,6 +8421,15 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     ImGui::SetItemTooltip("The time of the trajectory frame that is shown, in the unit of the timeline");
     ImGui::SameLine();
     if (ImGui::Button("Add Scale Bar")) add(MovieOverlayType::ScaleBar);
+    ImGui::SameLine();
+    if (ImGui::Button("Add Image...")) {
+        char path_buf[2048] = "";
+        if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Open, STR_LIT("png,jpg,jpeg"))) {
+            add(MovieOverlayType::Image);
+            snprintf(m.overlays.back().path, sizeof(m.overlays.back().path), "%s", path_buf);
+        }
+    }
+    ImGui::SetItemTooltip("An image from a file (png or jpg), e.g. the logo of a group or a figure. It is kept as a path in the workspace,\nrelative to it.");
     ImGui::SameLine();
     if (ImGui::Button("Add Logo")) add(MovieOverlayType::Logo);
     ImGui::SetItemTooltip("The VIAMD logo. A movie starts with it in the top left corner for the whole movie: remove it here\nif you do not want it. Its colour tints it (white keeps its own colours), its size is its height.");
@@ -8386,6 +8456,22 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
             if (ImGui::Combo("Type", &type, movie_overlay_type_str, (int)MovieOverlayType::Count)) o.type = (MovieOverlayType)type;
             if (o.type == MovieOverlayType::Text) {
                 ImGui::InputText("Text", o.text, sizeof(o.text));
+            }
+            if (o.type == MovieOverlayType::Image) {
+                ImGui::InputText("File", o.path, sizeof(o.path));
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Browse...")) {
+                    char path_buf[2048] = "";
+                    if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Open, STR_LIT("png,jpg,jpeg"))) {
+                        snprintf(o.path, sizeof(o.path), "%s", path_buf);
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Reload")) movie_image_forget(o.path);
+                ImGui::SetItemTooltip("Reads the file again, after it was changed");
+                float aspect = 1.0f;
+                if (o.path[0] == '\0')                            ImGui::TextDisabled("No file chosen");
+                else if (movie_image_texture(o.path, &aspect) == 0) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Could not read this file (a png or jpg image is needed)");
             }
             if (o.type == MovieOverlayType::ScaleBar) {
                 ImGui::DragFloat("Length (\xC3\x85)", &o.length, 0.1f, 0.0f, 10000.0f, o.length > 0.0f ? "%.2f" : "automatic");

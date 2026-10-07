@@ -488,3 +488,13 @@ UTEST(viamd_movie_keys, an_overlay_background_is_part_of_the_undo_state) {
     b.overlays[0].background[3] = 0.5f;
     EXPECT_FALSE(movie_keys_equal(a, b));
 }
+
+UTEST(viamd_movie_keys, an_overlay_image_file_is_part_of_the_undo_state) {
+    MovieKeys a, b;
+    a.overlays.push_back(MovieOverlay{});
+    b.overlays.push_back(MovieOverlay{});
+    snprintf(b.overlays[0].path, sizeof(b.overlays[0].path), "/pics/group.png");
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    snprintf(a.overlays[0].path, sizeof(a.overlays[0].path), "/pics/group.png");
+    EXPECT_TRUE(movie_keys_equal(a, b));
+}
