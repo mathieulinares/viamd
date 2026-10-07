@@ -7029,21 +7029,27 @@ static void script_vis_text_draw(ImDrawList* dl, ImVec2 res, float scale, const 
 // movie is previewed or recorded. What it makes (highlight, geometry, labels) is drawn as if the property were hovered.
 static void movie_property_vis_apply(ApplicationState* state) {
     auto& m = state->movie;
-    if (m.overlays.empty() || !state->script.eval_ir) return;
-    const bool recording = m.state == MovieRecordingState::Recording;
-    if (!recording && !(m.show_overlay_preview && (m.show_window || m.show_timeline_window))) return;
-    const double time = recording ? m.cur_time : (double)m.playhead;
     float fade = 0.0f;
-    for (const MovieOverlay& o : m.overlays) {
-        const float alpha = movie_overlay_alpha(o, time);
-        if (o.type != MovieOverlayType::PropertyVis || o.text[0] == '\0' || alpha <= 0.0f) continue;
-        const md_script_vis_payload_o* payload = md_script_ir_property_vis_payload(state->script.eval_ir, str_from_cstr(o.text));
-        if (payload) {
-            script_visualize_payload(state, payload, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
-            fade = MAX(fade, alpha);
+    bool highlighted = false;
+    const bool recording = m.state == MovieRecordingState::Recording;
+    if (!m.overlays.empty() && state->script.eval_ir && (recording || (m.show_overlay_preview && (m.show_window || m.show_timeline_window)))) {
+        const double time = recording ? m.cur_time : (double)m.playhead;
+        for (const MovieOverlay& o : m.overlays) {
+            const float alpha = movie_overlay_alpha(o, time);
+            if (o.type != MovieOverlayType::PropertyVis || o.text[0] == '\0' || alpha <= 0.0f) continue;
+            const md_script_vis_payload_o* payload = md_script_ir_property_vis_payload(state->script.eval_ir, str_from_cstr(o.text));
+            if (payload) {
+                script_visualize_payload(state, payload, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+                highlighted |= !md_bitfield_empty(&state->script.vis.atom_mask);
+                fade = MAX(fade, alpha);
+            }
         }
     }
     if (fade > 0.0f) m.vis_fade = fade;
+
+    // The highlight is state that stays until something clears it: when the overlay that set it is not shown any more it goes too
+    if (!highlighted && m.vis_highlight) md_bitfield_clear(&state->selection.highlight_mask);
+    m.vis_highlight = highlighted;
 }
 
 // The value of a temporal series at a position on its axis, in the display unit
@@ -7727,6 +7733,10 @@ static void movie_recording_start(ApplicationState* state) {
     } else {
         snprintf(m.rec_result, sizeof(m.rec_result), STR_FMT, STR_ARG(m.output_dir));
     }
+
+    // Nothing is highlighted in the frames but what an overlay of the movie shows
+    md_bitfield_clear(&state->selection.highlight_mask);
+    m.vis_highlight = false;
 
     m.rec_w = w;
     m.rec_h = h;

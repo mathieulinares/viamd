@@ -1211,6 +1211,7 @@ struct ApplicationState {
         // Text, a time stamp and a scale bar on the frames, and in the viewport while the movie is not recording
         std::vector<MovieOverlay> overlays = { movie_overlay_default_logo() };
         bool show_overlay_preview = true;
+        bool  vis_highlight = false;          // The highlight of the atoms was set by a property overlay last frame, and is taken away when none is shown
         float vis_fade = 1.0f;                // How visible the property visualization of an overlay is this frame (0..1)
         bool show_frame = true;               // The frame of the movie in the viewport, while the movie is edited (not saved)
         std::vector<MovieMarker> markers;     // Notes on the movie's timeline, shown on the timelines of figures

@@ -44,6 +44,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 ### 2.3 Property visualization
 
 - [ ] **Add Property** and pick a script property (a distance, an angle): its visualization (highlight, lines, labels) is in the viewport at the preview time and not outside the range of the overlay. The warning shows for a name the script does not have.
+- [ ] When a property overlay ends (play past it, or scrub out of its range, with the mouse over a Movie window), its highlighted atoms go with it: nothing stays highlighted, not in the viewport and not in a recording. Atoms you highlight by hovering or select yourself are not cleared by it.
 - [ ] In a recording the geometry and the labels are in the frames, in the right places and of a similar size.
 - [ ] With **Fade in** and **Fade out** at 1 s the highlighted atoms, the lines or points and the labels fade in and out, in the preview and in the recording, and nothing is left behind after it ends.
 
