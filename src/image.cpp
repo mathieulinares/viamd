@@ -70,3 +70,41 @@ bool image_write_bmp(str_t filename, const void* rgba, int width, int height) {
     }
     return result;
 }
+
+bool image_alpha_bounds(const uint8_t* rgba, int width, int height, uint8_t threshold, int* x0, int* y0, int* x1, int* y1) {
+    int minx = width, miny = height, maxx = -1, maxy = -1;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (rgba[((size_t)y * (size_t)width + (size_t)x) * 4 + 3] > threshold) {
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
+            }
+        }
+    }
+    if (maxx < 0) return false;
+    *x0 = minx;
+    *y0 = miny;
+    *x1 = maxx + 1;
+    *y1 = maxy + 1;
+    return true;
+}
+
+void image_bleed_transparent(uint8_t* rgba, int width, int height) {
+    double sum[3] = {0.0, 0.0, 0.0}, weight = 0.0;
+    const size_t n = (size_t)width * (size_t)height;
+    for (size_t i = 0; i < n; ++i) {
+        const double a = (double)rgba[i * 4 + 3];
+        for (int c = 0; c < 3; ++c) sum[c] += a * (double)rgba[i * 4 + c];
+        weight += a;
+    }
+    if (weight <= 0.0) return;
+    uint8_t avg[3];
+    for (int c = 0; c < 3; ++c) avg[c] = (uint8_t)(sum[c] / weight + 0.5);
+    for (size_t i = 0; i < n; ++i) {
+        if (rgba[i * 4 + 3] == 0) {
+            for (int c = 0; c < 3; ++c) rgba[i * 4 + c] = avg[c];
+        }
+    }
+}

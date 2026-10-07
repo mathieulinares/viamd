@@ -290,8 +290,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SCRIPT_REFEREN
 create_resources("${SCRIPT_REFERENCE_MD}" "gen/script_reference.inl")
 
 # The logo that a movie can show on its frames
-create_resources("${CMAKE_CURRENT_SOURCE_DIR}/icon/viamd_logo.png" "gen/viamd_logo.inl")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/icon/viamd_logo.png")
+create_resources("${CMAKE_CURRENT_SOURCE_DIR}/icon/viamd.png" "gen/viamd_icon.inl")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/icon/viamd.png")
 
 source_group("src" FILES ${SRC_FILES})
 source_group("src/app" FILES ${APP_FILES})

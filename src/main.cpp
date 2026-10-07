@@ -68,7 +68,7 @@
 #include <chrono>
 
 #include <viamd.h>
-#include <viamd_logo.inl>
+#include <viamd_icon.inl>
 #include <script_reference.h>
 #include <viamd_event.h>
 #include <event.h>
@@ -6871,10 +6871,19 @@ static GLuint movie_logo_texture(float* aspect) {
     if (!tried) {
         tried = true;
         int w = 0, h = 0;
-        uint8_t* pixels = image_decode_rgba(viamd_logo_png, viamd_logo_png_size, &w, &h);
+        uint8_t* pixels = image_decode_rgba(viamd_png, viamd_png_size, &w, &h);
         if (pixels) {
-            tex = movie_upload_texture(pixels, w, h);
-            logo_aspect = (float)w / (float)MAX(h, 1);
+            // The icon is a small drawing in the middle of a transparent square: the logo is only that drawing, with a little room
+            int x0 = 0, y0 = 0, x1 = w, y1 = h;
+            image_alpha_bounds(pixels, w, h, 8, &x0, &y0, &x1, &y1);
+            const int pad = MAX((x1 - x0), (y1 - y0)) / 50;
+            x0 = MAX(x0 - pad, 0); y0 = MAX(y0 - pad, 0); x1 = MIN(x1 + pad, w); y1 = MIN(y1 + pad, h);
+            const int cw = x1 - x0, ch = y1 - y0;
+            std::vector<uint8_t> cropped((size_t)cw * (size_t)ch * 4);
+            for (int y = 0; y < ch; ++y) memcpy(&cropped[(size_t)y * (size_t)cw * 4], &pixels[((size_t)(y0 + y) * (size_t)w + (size_t)x0) * 4], (size_t)cw * 4);
+            image_bleed_transparent(cropped.data(), cw, ch);
+            tex = movie_upload_texture(cropped.data(), cw, ch);
+            logo_aspect = (float)cw / (float)MAX(ch, 1);
             image_free(pixels);
         } else {
             VIAMD_LOG_ERROR("Could not read the logo for the movie overlays");
@@ -6911,6 +6920,7 @@ static GLuint movie_image_texture(const char* path, float* aspect) {
         int w = 0, h = 0;
         uint8_t* pixels = image_decode_rgba(bytes.data(), bytes.size(), &w, &h);
         if (pixels) {
+            image_bleed_transparent(pixels, w, h);
             entry.tex = movie_upload_texture(pixels, w, h);
             entry.aspect = (float)w / (float)MAX(h, 1);
             image_free(pixels);

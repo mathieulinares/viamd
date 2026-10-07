@@ -44,3 +44,47 @@ UTEST(viamd_image, something_that_is_not_an_image_is_refused) {
     int w = 0, h = 0;
     EXPECT_TRUE(image_decode_rgba(text, sizeof(text), &w, &h) == nullptr);
 }
+
+UTEST(viamd_image, the_bounds_of_the_visible_part_leave_out_a_transparent_margin) {
+    const int W = 5, H = 4;
+    std::vector<uint8_t> img((size_t)W * H * 4, 0);
+    auto set = [&](int x, int y, uint8_t a) { img[((size_t)y * W + x) * 4 + 3] = a; };
+    set(1, 1, 255);
+    set(3, 2, 100);
+    int x0, y0, x1, y1;
+    ASSERT_TRUE(image_alpha_bounds(img.data(), W, H, 8, &x0, &y0, &x1, &y1));
+    EXPECT_EQ(1, x0);
+    EXPECT_EQ(1, y0);
+    EXPECT_EQ(4, x1);
+    EXPECT_EQ(3, y1);
+}
+
+UTEST(viamd_image, an_alpha_at_or_below_the_threshold_is_not_visible) {
+    std::vector<uint8_t> img(4 * 4, 0);
+    img[3] = 8;
+    int x0, y0, x1, y1;
+    EXPECT_FALSE(image_alpha_bounds(img.data(), 2, 2, 8, &x0, &y0, &x1, &y1));
+    img[3] = 9;
+    EXPECT_TRUE(image_alpha_bounds(img.data(), 2, 2, 8, &x0, &y0, &x1, &y1));
+}
+
+UTEST(viamd_image, transparent_pixels_take_the_average_colour_of_the_visible_ones) {
+    uint8_t img[3 * 4] = {
+        200, 100, 0, 255,
+        0, 0, 0, 0,
+        100, 200, 40, 255,
+    };
+    image_bleed_transparent(img, 3, 1);
+    EXPECT_EQ(150, (int)img[4]);
+    EXPECT_EQ(150, (int)img[5]);
+    EXPECT_EQ(20, (int)img[6]);
+    EXPECT_EQ(0, (int)img[7]);       /* it stays transparent */
+    EXPECT_EQ(200, (int)img[0]);     /* the visible ones are not touched */
+}
+
+UTEST(viamd_image, an_image_with_nothing_visible_is_left_as_it_is) {
+    uint8_t img[8] = {5, 6, 7, 0, 8, 9, 10, 0};
+    image_bleed_transparent(img, 2, 1);
+    EXPECT_EQ(5, (int)img[0]);
+    EXPECT_EQ(9, (int)img[5]);
+}

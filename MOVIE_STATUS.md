@@ -15,7 +15,7 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 - Workspace save and load: `src/viamd.cpp` (`[Movie]`, `[MovieOverlay]`, `[MovieMarker]`, `[Representation]`); the plot windows' own sections with subplot ids and names: `src/plot_series.cpp`
 - Async frame writer: `src/frame_sink.{h,cpp}`
 - Keyed look parameters and representation keys, undo history, render range, frame scaling, snapping, time left: `src/movie_keys.{h,cpp}`
-- Overlay maths (fades, sizes, scale bar, time bar and elapsed curves, ticks, histograms, subplot panels and their times, the frame fit and the widened view, migration of older overlays): `src/movie_overlay.{h,cpp}`; the logo is `icon/viamd_logo.png`, baked into `gen/viamd_logo.inl` by CMake and decoded with `src/image.{h,cpp}`
+- Overlay maths (fades, sizes, scale bar, time bar and elapsed curves, ticks, histograms, subplot panels and their times, the frame fit and the widened view, migration of older overlays): `src/movie_overlay.{h,cpp}`; the logo is `icon/viamd.png` (cropped to its visible part when it is loaded), baked into `gen/viamd_icon.inl` by CMake and decoded with `src/image.{h,cpp}`
 - Camera path evaluation: `src/gfx/camera_utils.{h,cpp}`
 - Numbers that are saved and must never be renumbered, only added to: the parameter ids in `movie_param_table` (main.cpp), `RepProp` (movie_keys.h) and `MovieOverlayType` (movie_overlay.h; 6 and 7 are the timeline and the distribution, 9 is the old one-figure version that is split when read).
 

@@ -15,3 +15,10 @@ bool image_write_bmp(str_t filename, const void* rgba, int width, int height);
 // Returns null if it is not an image.
 uint8_t* image_decode_rgba(const void* data, size_t size, int* width, int* height);
 void image_free(void* pixels);
+
+// The smallest rectangle [x0, x1) x [y0, y1) that holds every pixel with an alpha above 'threshold'. False when there is none.
+bool image_alpha_bounds(const uint8_t* rgba, int width, int height, uint8_t threshold, int* x0, int* y0, int* x1, int* y1);
+
+// Gives the pixels that are fully transparent the colour that the rest has on average, so that smoothing between them and
+// the visible pixels (a texture drawn smaller, or with mipmaps) does not leave a dark fringe.
+void image_bleed_transparent(uint8_t* rgba, int width, int height);

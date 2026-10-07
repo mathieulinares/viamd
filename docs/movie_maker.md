@@ -150,7 +150,7 @@ Overlays are drawn into the recorded frames, and into the viewport while you edi
 
 #### Logo and images
 
-The logo is black and white lettering with colour on its molecule, so on a dark background give it a **Background** plate or tint it with its **Color** (white keeps its own colours). **Add Image...** asks for a png or jpg file (a group's logo, a figure) and shows it like the logo, with its transparency kept. The file is saved in the workspace as a path relative to it, so keep it with the workspace. **Reload** reads it again after it was changed, and the box turns red when it cannot be read.
+The logo is the VIAMD icon (`icon/viamd.png`) on a transparent background. Its lettering is light, so it reads on a dark picture as it is; on a light picture tint it dark with its **Color** (the colour multiplies the picture, white keeps it as it is) or give it a **Background** plate. **Add Image...** asks for a png or jpg file (a group's logo, a figure) and shows it like the logo, with its transparency kept. The file is saved in the workspace as a path relative to it, so keep it with the workspace. **Reload** reads it again after it was changed, and the box turns red when it cannot be read.
 
 #### Time bar
 
