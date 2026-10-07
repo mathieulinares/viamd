@@ -1172,6 +1172,20 @@ struct ApplicationState {
         double follow_time    = 0.0;
         std::vector<CameraKeyframe> follow_keys;
 
+        // The camera path of keys that follow something is sampled along the movie, as where the target is depends on
+        // the trajectory frame. 'build' is being made, a few samples each frame, and replaces 'shown' when it is done.
+        struct PathSamples {
+            uint64_t signature = 0;          // What it was made from
+            int      num_keys = 0;
+            std::vector<double> time;
+            std::vector<vec3_t> eye, look;   // The path of the eye and of what it looks at
+            std::vector<vec3_t> center;      // Where the follow target was
+            std::vector<vec3_t> atoms;       // Where the atom of each key was, per sample then per key
+            int      done = 0;
+            bool     complete = false;
+        };
+        PathSamples path_shown, path_build;
+
         // Look parameters (background, depth of field, clipping ...) keyed over time
         std::vector<ParamKey> param_keys;
         bool animate_params = true;

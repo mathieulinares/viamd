@@ -33,6 +33,7 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 - Render ergonomics: frame **Scale**, **Samples per frame**, **Render only a range**, **Pause/Resume**, time-left estimate, optional workspace copy next to the movie.
 - Strip comfort (plan item 5): **Snap to frames** for dragged times, **Copy** / **Paste Keyframe**, **Key on Selection** (frames the selected atoms, periodic images placed together).
 - Representation keys (plan item 6): representations have a stable `id` (saved, never reused); keys for **Visible** (grows in / shrinks away over **Transition (s)**, 2 s by default, from the key; solid representations cannot fade), the scales, **Tint scale**, **Saturation**, **Base color** and **Tint color**; removing a representation removes its keys; the values go back when keys let go or a recording ends.
+- The camera path in the viewport follows the target or atom of keys that follow (sampled along the movie, a few points per frame, cached).
 - Logo overlay: the VIAMD logo (`icon/viamd_logo.png`, baked into the executable) in the top left corner by default for the whole movie; **Add Logo** adds more. A workspace remembers that it was removed (`Overlays=1`).
 - Follow / Unfollow in the keyframe table, for a key that already exists.
 - Output formats H.265 (mp4) and VP9 (webm) besides H.264, with their own quality ranges; Ctrl+C / Ctrl+V for keyframes; a background plate for overlays.
@@ -43,6 +44,7 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 
 - Representation lane in the timeline: drag, add (double-click) and remove (right-click) keys; Visible turns around on double-click; hiding the lane.
 - Visible transition: a representation grows in at its key and shrinks away at the next; scrub through a transition (also with the lane); transition 0 pops; a key closer than the transition turns around; Cartoon and Ribbons at very small sizes look right; electronic structure and dipole representations vanish at the end of the transition.
+- Follow-aware camera path: with a follow target and keys that follow, the blue and yellow paths bend with the target and match what the preview does; the green camera at the playhead too; moving a key or the target restarts it without the old path vanishing; no stall while it is being made.
 - Follow / Unfollow in the keyframe table: Go To a key, Follow, scrub through the trajectory and check the camera keeps the target in view; without Go To first an error is logged.
 - Logo overlay: appears top left in the viewport preview and in a recording (not upside down, not stretched, sharp at small sizes, fades with its range if edited); removing it and saving keeps it removed after loading; an older workspace without overlays gets it.
 - Output formats: record a few seconds as H.265 and as WebM VP9 (needs ffmpeg with libx265 and libvpx-vp9) and play the files; the workspace copy and the log name the right extension.
@@ -65,7 +67,6 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 - Only the properties listed above can be keyed: not the type, filter, colour mapping, the other colours (bond, secondary structure) or the electronic structure settings (those cannot be blended, or are expensive to redo every frame).
 - Tint scale and saturation recolor the atoms of the representation every frame while they change: slow for very large systems.
 - Representation ids are assigned in the order they are created; a workspace written before they existed gets ids on load.
-- The camera path drawn in the viewport does not show the follow motion.
 - The follow target itself is not part of undo.
 - Where a frame curve turns around, the trajectory slows to a stop. For a hard reversal, add a key at the turn-around frame with Linear easing.
 - Overlay text is single style (a shadow and an optional background plate).
@@ -80,5 +81,4 @@ Branch: `video`, pushed to `origin/video`; no pull request yet. The user manual 
 
 ## Ideas not yet planned
 
-- Draw the follow-aware camera path in the viewport
 - Per-overlay font size in points, other images as overlays

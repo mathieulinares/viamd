@@ -65,6 +65,7 @@
 #include <cmath>
 #include <string>
 #include <algorithm>
+#include <chrono>
 
 #include <viamd.h>
 #include <viamd_logo.inl>
@@ -7492,6 +7493,104 @@ static void movie_draw_frustum(immediate::Queue* q, const ViewTransform& vt, flo
 
 // The camera path of the keyframes in the viewport: the eye, what it looks at, and the camera at each key.
 // Not part of what is recorded, which is why this is not called for frames that are captured.
+// What the path of the camera depends on, apart from the trajectory itself
+static uint64_t movie_path_signature(const ApplicationState* state) {
+    const auto& m = state->movie;
+    uint64_t h = md_hash64(m.keyframes, md_array_size(m.keyframes) * sizeof(CameraKeyframe), 1);
+    const double scalars[] = {
+        (double)m.loop, (double)m.duration, (double)m.traj_begin, (double)m.traj_end, m.start_frame, m.end_frame,
+        (double)run_num_frames(state), (double)md_bitfield_popcount(&m.follow_mask),
+    };
+    h = md_hash64_combine(h, md_hash64(scalars, sizeof(scalars), 2));
+    h = md_hash64_combine(h, md_bitfield_hash64(&m.follow_mask, 3));
+    h = md_hash64_combine(h, md_hash64(&state->mold.unitcell_transform, sizeof(state->mold.unitcell_transform), 4));
+    return h;
+}
+
+// Makes the path of the camera for keys that follow a target or an atom: at times along the movie, where the target
+// is at the trajectory frame of that time. A few samples each call so that the interface keeps going.
+static void movie_path_update(ApplicationState* state) {
+    auto& m = state->movie;
+    const size_t n = md_array_size(m.keyframes);
+    const bool atoms = movie_keys_track_atoms(m.keyframes, n);
+    const bool center = movie_keys_follow(m.keyframes, n) && !md_bitfield_empty(&m.follow_mask);
+    const size_t num_atoms = state->mold.sys.atom.count;
+    if (n < 2 || (!atoms && !center) || run_num_frames(state) == 0 || num_atoms == 0) return;
+
+    const uint64_t sig = movie_path_signature(state);
+    auto& b = m.path_build;
+    if (b.signature != sig || b.num_keys != (int)n) {
+        if (m.path_shown.signature == sig && m.path_shown.complete) return;
+        const int samples = CLAMP((int)n * 24, 64, 300);
+        b = {};
+        b.signature = sig;
+        b.num_keys = (int)n;
+        b.time.resize(samples + 1);
+        b.eye.resize(samples + 1);
+        b.look.resize(samples + 1);
+        b.center.resize(samples + 1);
+        b.atoms.resize((size_t)(samples + 1) * n);
+        const double t0 = m.keyframes[0].time, t1 = m.keyframes[n - 1].time;
+        for (int i = 0; i <= samples; ++i) b.time[i] = t0 + (t1 - t0) * (double)i / (double)samples;
+    }
+    if (b.complete) return;
+
+    const auto begin = std::chrono::steady_clock::now();
+    md_allocator_i* alloc = state->allocator.frame;
+    vec3_t* temp_xyz = (vec3_t*)md_vm_arena_push(alloc, sizeof(vec3_t) * ALIGN_TO(num_atoms, 16));
+    vec4_t* xyzw = center ? (vec4_t*)md_vm_arena_push(alloc, sizeof(vec4_t) * md_bitfield_popcount(&m.follow_mask)) : nullptr;
+    int64_t loaded = -1;
+    md_system_state_t temp_state = {};
+    temp_state.num_atoms = num_atoms;
+    temp_state.xyz = temp_xyz;
+
+    const int total = (int)b.time.size();
+    while (b.done < total) {
+        if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count() > 4.0) break;
+        const int i = b.done;
+        const int64_t frame = (int64_t)(movie_trajectory_frame(state, b.time[i]) + 0.5);
+        if (frame != loaded) {
+            if (!extract_frame(state, frame, &temp_state)) { b.done = total; break; }
+            loaded = frame;
+        }
+
+        vec3_t c = {};
+        bool have_center = false;
+        if (center) {
+            uint64_t first = 0, last = 0;
+            const size_t count = md_bitfield_popcount(&m.follow_mask);
+            if (md_bitfield_get_range(&first, &last, &m.follow_mask) && last < num_atoms) {
+                md_util_system_extract_xyzw_from_mask(xyzw, &m.follow_mask, &state->mold.sys, &temp_state);
+                vec3_t com = vec3_zero();
+                md_util_deperiodize_self_vec4(xyzw, count, &temp_state.unitcell, &com);
+                c = mat4_mul_vec3(state->mold.unitcell_transform, com, 1.0f);
+                have_center = true;
+            }
+        }
+        b.center[i] = c;
+
+        vec3_t* row = &b.atoms[(size_t)i * n];
+        for (size_t k = 0; k < n; ++k) {
+            row[k] = m.keyframes[k].follow_center;
+            const int32_t atom = m.keyframes[k].follow_atom;
+            if (m.keyframes[k].follow && atom >= 0 && (size_t)atom < num_atoms) {
+                row[k] = mat4_mul_vec3(state->mold.unitcell_transform, temp_xyz[atom], 1.0f);
+            }
+        }
+
+        ViewTransform vt;
+        float fov_y;
+        camera_keyframes_evaluate(&vt, &fov_y, m.keyframes, n, b.time[i], m.loop, have_center ? &c : nullptr, atoms ? row : nullptr);
+        b.eye[i] = vt.position;
+        b.look[i] = camera_get_look_at(vt);
+        b.done += 1;
+    }
+    if (b.done >= total) {
+        b.complete = true;
+        m.path_shown = b;
+    }
+}
+
 static void movie_draw_camera_path(ApplicationState* state) {
     auto& m = state->movie;
     const size_t n = md_array_size(m.keyframes);
@@ -7512,7 +7611,19 @@ static void movie_draw_camera_path(ApplicationState* state) {
     immediate::Queue* q = scope;
     const CameraKeyframe* keys = m.keyframes;
 
-    if (n >= 2) {
+    // With keys that follow something, the path is where the target takes the camera through the trajectory
+    const bool following = n >= 2 && (movie_keys_track_atoms(keys, n) || (movie_keys_follow(keys, n) && !md_bitfield_empty(&m.follow_mask)));
+    if (following) movie_path_update(state);
+
+    if (following) {
+        // An older path stays until the new one is done
+        const auto& sp = m.path_shown.complete && m.path_shown.num_keys == (int)n ? m.path_shown : m.path_build;
+        const int count = sp.complete ? (int)sp.time.size() : sp.done;
+        for (int i = 1; i < count; ++i) {
+            immediate::line(q, sp.eye[i - 1],  sp.eye[i],  col_eye);
+            immediate::line(q, sp.look[i - 1], sp.look[i], col_look);
+        }
+    } else if (n >= 2) {
         const int samples = CLAMP((int)n * 48, 64, 1024);
         const double t0 = keys[0].time;
         const double t1 = keys[n - 1].time;
@@ -7549,7 +7660,25 @@ static void movie_draw_camera_path(ApplicationState* state) {
     // The camera at the playhead
     ViewTransform vt;
     float fov_y;
-    camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop);
+    {
+        // For keys that follow, with the target where it was at the nearest sample
+        const auto& sp = m.path_shown.complete && m.path_shown.num_keys == (int)n ? m.path_shown : m.path_build;
+        int j = -1;
+        if (following && sp.done > 0) {
+            double best = 1.0e30;
+            for (int i = 0; i < (sp.complete ? (int)sp.time.size() : sp.done); ++i) {
+                const double d = fabs(sp.time[i] - (double)m.playhead);
+                if (d < best) { best = d; j = i; }
+            }
+        }
+        if (j >= 0) {
+            const bool atoms = movie_keys_track_atoms(keys, n);
+            const bool center = movie_keys_follow(keys, n) && !md_bitfield_empty(&m.follow_mask);
+            camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop, center ? &sp.center[j] : nullptr, atoms ? &sp.atoms[(size_t)j * n] : nullptr);
+        } else {
+            camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop);
+        }
+    }
     movie_draw_frustum(q, vt, fov_y, aspect, vt.distance * 0.18f, col_head);
 
     if (state->visuals.dof.enabled) {

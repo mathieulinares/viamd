@@ -62,7 +62,7 @@ To make the trajectory play faster or slower in parts of the movie, pin frames o
 A keyframe is a camera (where the eye is, where it looks, its distance and its field of view) at a time in the movie. Between keyframes the camera moves smoothly. Before the first and after the last keyframe it holds still.
 
 - **Animate camera**: while previewing or recording, the camera follows the keyframes. When it is off, the camera stays where you leave it and only the trajectory plays.
-- **Show path in viewport**: draws the path of the eye (blue), the path of the look-at point (yellow), a camera at each keyframe, and a green camera at the preview time.
+- **Show path in viewport**: draws the path of the eye (blue), the path of the look-at point (yellow), a camera at each keyframe, and a green camera at the preview time. With keys that follow a target or an atom, the path is the one the camera takes as the target moves through the trajectory: it is computed a few points at a time (the trajectory frames have to be read), so it appears from the start and grows for a moment, and the old path stays until the new one is done.
 - **Seamless loop** and **Close Loop**: makes the camera path cyclic, so a movie played on repeat has no jump. **Close Loop** adds a final key in the first key's pose and turns the loop on.
 - **Play Preview**, **Repeat** and **Preview time (s)**: play or scrub the movie in the viewport at its real speed, without recording.
 - **Add Keyframe (current view)** (shortcut **K** while a movie window is open): adds a key of the current view at the preview time. A key at the same time is replaced. Tick **with trajectory frame** to also pin the trajectory frame shown now.
@@ -178,5 +178,4 @@ It refers to `aspirin-phospholipase.gro` and `.xtc` in its own folder, which are
 - **Follow target** depth of field uses the global follow target, not a key's own **Look at** atom.
 - Distance and field of view are edited in the table and the viewport. In the timeline their dots only move in time.
 - Solid representations cannot fade: they grow in and shrink away instead (see **Representations**).
-- The camera path drawn in the viewport does not show the motion of a follow target.
 - The Representations window is locked while recording.

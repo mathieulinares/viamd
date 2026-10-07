@@ -30,6 +30,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] **Copy** on a row, move the preview time, **Paste Keyframe**. Also Ctrl+C at a key's time and Ctrl+V somewhere else. A pasted key replaces one at that time and keeps its spin, ease and follow settings.
 - [ ] Drag a row by its number onto another row. The pose moves, the times stay.
 - [ ] **Set Follow Target** from a selection, tick **keys follow target**, add two keys at different trajectory frames (tick **with trajectory frame**), play the preview: the camera stays on the target.
+- [ ] With a follow target and keys that follow, **Show path in viewport**: the blue (eye) and yellow (look-at) paths bend with the target through the trajectory and match what **Play Preview** does. The path grows for a moment and the interface does not stall. Moving a key or changing the target restarts it, and the old path stays until the new one is done. The green camera at the playhead is where the preview camera is.
 - [ ] **Follow** on an existing key: **Go To** it first, then **Follow**. Without Go To an error is logged and nothing changes. **Unfollow** makes it fixed again.
 - [ ] **Look at** on a key, click an atom: the key tracks that atom through the trajectory. **Update position** moves the eye and keeps what it looks at.
 - [ ] Double-click on the viewport aims the camera at the clicked point with the eye fixed.
