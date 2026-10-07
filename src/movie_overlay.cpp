@@ -35,6 +35,29 @@ void movie_overlay_size_range(MovieOverlaySizeUnit unit, float* lo, float* hi) {
     }
 }
 
+const char* movie_plot_palette_name(int palette) {
+    static const char* names[MOVIE_PLOT_PALETTE_COUNT] = {"Colours of the plots", "Deep", "Dark", "Pastel", "Paired"};
+    return names[palette < 0 || palette >= MOVIE_PLOT_PALETTE_COUNT ? 0 : palette];
+}
+
+bool movie_figure_x_labels(const MoviePlotView* views, size_t n, size_t i) {
+    if (i + 1 >= n || views[i] == MoviePlotView::Distribution) return true;
+    return views[i + 1] != MoviePlotView::Timeline;
+}
+
+void movie_overlay_make_figure(MovieOverlay* o, const uint32_t* timeline_ids, int num_timeline, const uint32_t* distribution_ids, int num_distribution) {
+    if (o->type != MovieOverlayType::Timeline && o->type != MovieOverlayType::Distribution) return;
+    const bool timeline = o->type == MovieOverlayType::Timeline;
+    const uint32_t* ids = timeline ? timeline_ids : distribution_ids;
+    const int n = timeline ? num_timeline : num_distribution;
+    o->panels.clear();
+    for (int i = 0; i < n && i < 31; ++i) {
+        if ((o->legacy_subplot_mask >> i) & 1) o->panels.push_back({timeline ? MoviePlotView::Timeline : MoviePlotView::Distribution, ids[i]});
+    }
+    o->legacy_subplot_mask = 0;
+    o->type = MovieOverlayType::Figure;
+}
+
 float movie_overlay_alpha(const MovieOverlay& o, double time) {
     if (!o.enabled || o.end <= o.begin || time < o.begin || time > o.end) return 0.0f;
 

@@ -4280,6 +4280,15 @@ static void draw_timeline_window(ApplicationState* data) {
                 if (ImGui::Button("Clear All")) {
                     plot_clear(data->timeline.subplots, PLOT_MAX_SUBPLOTS);
                 }
+                ImGui::SeparatorText("Names");
+                for (int s = 0; s < num_subplots; ++s) {
+                    char hint[32];
+                    snprintf(hint, sizeof(hint), "Subplot %d", s + 1);
+                    ImGui::PushID(s);
+                    ImGui::InputTextWithHint("##name", hint, data->timeline.subplots[s].name, sizeof(data->timeline.subplots[s].name));
+                    ImGui::PopID();
+                }
+                ImGui::SetItemTooltip("Names the subplots, e.g. for the figures of the movie, which find a subplot by its identity and not by its position.");
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
@@ -4786,6 +4795,15 @@ static void draw_distribution_window(ApplicationState* data) {
                 if (ImGui::Button("Clear All")) {
                     plot_clear(data->distributions.subplots, PLOT_MAX_SUBPLOTS);
                 }
+                ImGui::SeparatorText("Names");
+                for (int s = 0; s < num_subplots; ++s) {
+                    char hint[32];
+                    snprintf(hint, sizeof(hint), "Subplot %d", s + 1);
+                    ImGui::PushID(s);
+                    ImGui::InputTextWithHint("##name", hint, data->distributions.subplots[s].name, sizeof(data->distributions.subplots[s].name));
+                    ImGui::PopID();
+                }
+                ImGui::SetItemTooltip("Names the subplots, e.g. for the figures of the movie, which find a subplot by its identity and not by its position.");
                 ImGui::EndMenu();
             }
             ImGui::EndMenuBar();
@@ -6762,9 +6780,10 @@ static const char* movie_overlay_type_str[(int)MovieOverlayType::Count] = {
     "Logo",
     "Image",
     "Time bar",
-    "Timeline plot",
-    "Distribution plot",
+    "Timeline plot (old)",
+    "Distribution plot (old)",
     "Property visualization",
+    "Figure",
 };
 
 static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
@@ -6983,20 +7002,27 @@ struct MoviePlotContext {
     double q;                        // The trajectory time (frame) that is shown
     double full_lo, full_hi;         // The stretch of the trajectory that the movie covers
     double vis_lo, vis_hi;           // The part of it that has been played by now (all of it without 'reveal')
+    float thick;                     // Width of the lines
+    int color_index = 0;             // How many series have been drawn, for the colours of a palette
 };
 
 // One subplot as a panel of 'w' by 'h' at 'p0': its legend with the value at the frame that is shown, the axes and the
 // curves (or the bars). The labels of the horizontal axis are left out of a timeline panel that has another below it.
-static void movie_plot_panel_draw(const MoviePlotContext& c, const PlotSubplot& sp, ImVec2 p0, float w, float h, bool x_labels) {
+static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
     ImDrawList* dl = c.dl;
     ImFont* font = c.font;
     const MovieOverlay& o = *c.o;
     ApplicationState* state = c.state;
     const MovieTimeBarProfile& prof = *c.prof;
     const float fpx = c.fpx;
-    const bool timeline = o.type == MovieOverlayType::Timeline;
+    const bool timeline = view == MoviePlotView::Timeline;
     const bool elapsed = timeline && o.plot_axis == MoviePlotAxis::Elapsed;
     const int ns = MIN(sp.count, 6);
+    const int color_base = c.color_index;
+    c.color_index += ns;
+    auto series_color = [&](int s) -> ImVec4 {
+        return o.palette > 0 ? ImPlot::GetColormapColor(color_base + s, o.palette - 1) : sp.series[s].color;
+    };
 
     const float legend_h = (float)ns * fpx * 1.2f;
     const float axis_h   = x_labels ? fpx * 2.6f : fpx * 0.6f;
@@ -7126,8 +7152,8 @@ static void movie_plot_panel_draw(const MoviePlotContext& c, const PlotSubplot& 
     const double s_now = movie_time_bar_moved(prof, c.time);
     for (int s = 0; s < ns; ++s) {
         const PlotSeries& ps = sp.series[s];
-        const ImVec4 sc = ps.color;
-        const float thick = MAX(fpx * 0.16f, 1.5f);
+        const ImVec4 sc = series_color(s);
+        const float thick = c.thick;
         if (timeline) {
             if (!has_t[s] || tv[s].num_samples < 2) continue;
             const SeriesTemporalView& v = tv[s];
@@ -7196,12 +7222,26 @@ static void movie_plot_panel_draw(const MoviePlotContext& c, const PlotSubplot& 
             }
         }
     }
+    // The markers of the movie, where the movie gets to them
+    if (timeline && o.show_markers) {
+        for (const MovieMarker& mk : state->movie.markers) {
+            if (o.reveal && mk.time > c.time) continue;
+            const float x = sx(elapsed ? movie_time_bar_moved(prof, mk.time) : movie_trajectory_quantity(state, mk.time));
+            if (x < ix0 || x > ix1) continue;
+            dl->AddLine(ImVec2(x, iy0), ImVec2(x, iy1), col(oc, 0.7f), MAX(fpx * 0.08f, 1.0f));
+            if (marker_labels && mk.label[0]) {
+                const float tw = font->CalcTextSizeA(fpx, FLT_MAX, 0.0f, mk.label).x;
+                const bool left = x + fpx * 0.3f + tw > ix1;
+                text(ImVec2(left ? x - fpx * 0.3f - tw : x + fpx * 0.3f, iy0 + fpx * 0.1f), col(oc), mk.label);
+            }
+        }
+    }
     dl->PopClipRect();
 
     // The legend, with the value at the frame that is shown
     for (int s = 0; s < ns; ++s) {
         const float y = p0.y + (float)s * fpx * 1.2f;
-        dl->AddRectFilled(ImVec2(p0.x, y + fpx * 0.2f), ImVec2(p0.x + fpx * 0.7f, y + fpx * 0.9f), col(sp.series[s].color));
+        dl->AddRectFilled(ImVec2(p0.x, y + fpx * 0.2f), ImVec2(p0.x + fpx * 0.7f, y + fpx * 0.9f), col(series_color(s)));
         char b[160];
         const int n = snprintf(b, sizeof(b), "%s", tv[s].label[0] ? tv[s].label : hv[s].label);
         if (o.show_value && has_t[s] && tv[s].num_samples > 0) {
@@ -7214,24 +7254,31 @@ static void movie_plot_panel_draw(const MoviePlotContext& c, const PlotSubplot& 
     }
 }
 
-// The subplots of the Timelines or the Distributions window that an overlay shows, stacked, with one horizontal axis for a
-// timeline. They fill a block of the overlay's width and height at its anchor; the font follows the height.
-static void movie_plot_overlay_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& o, ImVec2 pos, ImVec2 size, float margin, float alpha, double time, const ApplicationState* cstate) {
+// A figure: the subplots of the Timelines and the Distributions windows that it holds, stacked, with one horizontal axis for
+// timelines that are above each other. They fill a block of the overlay's width and height at its anchor.
+static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& o, ImVec2 pos, ImVec2 size, float margin, float alpha, double time, const ApplicationState* cstate) {
     // Resolving a series fills the caches of the application, which is why it takes it mutable
     ApplicationState* state = const_cast<ApplicationState*>(cstate);
-    const bool timeline = o.type == MovieOverlayType::Timeline;
-    const PlotSubplot* subs = timeline ? state->timeline.subplots : state->distributions.subplots;
 
-    int shown[PLOT_MAX_SUBPLOTS];
-    int k = 0;
-    for (int i = 0; i < PLOT_MAX_SUBPLOTS; ++i) {
-        if ((o.subplot_mask >> i) & 1 && subs[i].count > 0) shown[k++] = i;
+    // The panels whose subplot is there and has series in it
+    const PlotSubplot* shown[2 * PLOT_MAX_SUBPLOTS];
+    MoviePlotView views[2 * PLOT_MAX_SUBPLOTS];
+    size_t k = 0;
+    for (const MoviePlotPanel& panel : o.panels) {
+        const bool tl = panel.view == MoviePlotView::Timeline;
+        const PlotSubplot* subs = tl ? state->timeline.subplots : state->distributions.subplots;
+        const int idx = plot_find_subplot(subs, tl ? state->timeline.num_subplots : state->distributions.num_subplots, panel.subplot);
+        if (idx < 0 || subs[idx].count == 0 || k >= ARRAY_SIZE(shown)) continue;
+        shown[k] = &subs[idx];
+        views[k] = panel.view;
+        k += 1;
     }
     if (k == 0) return;
 
     const float plot_h = MAX(movie_overlay_size_px(o, size.y), 40.0f);
     const float plot_w = MAX(o.width * size.x, 80.0f);
-    const float fpx    = CLAMP(plot_h * 0.085f / sqrtf((float)k), 6.0f, 64.0f);
+    const float fpx    = o.font_points > 0.0f ? CLAMP(o.font_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 4.0f, 400.0f)
+                                              : CLAMP(plot_h * 0.085f / sqrtf((float)k), 6.0f, 64.0f);
     const float pad    = fpx * 0.4f;
 
     const int ai = (int)o.anchor;
@@ -7244,7 +7291,8 @@ static void movie_plot_overlay_draw(ImDrawList* dl, ImFont* font, const MovieOve
 
     // How far the movie has taken the trajectory: all of the stretch it covers, and what it has visited by now
     const MovieTimeBarProfile& prof = movie_time_bar_profile_for(state);
-    MoviePlotContext c = { dl, font, &o, state, &prof, fpx, alpha, time, movie_trajectory_quantity(state, time), 0.0, 0.0, 0.0, 0.0 };
+    const float thick = o.line_points > 0.0f ? MAX(o.line_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 1.0f) : MAX(fpx * 0.16f, 1.5f);
+    MoviePlotContext c = { dl, font, &o, state, &prof, fpx, alpha, time, movie_trajectory_quantity(state, time), 0.0, 0.0, 0.0, 0.0, thick, 0 };
     if (!prof.lo.empty()) {
         c.full_lo = prof.lo.back();
         c.full_hi = prof.hi.back();
@@ -7253,8 +7301,11 @@ static void movie_plot_overlay_draw(ImDrawList* dl, ImFont* font, const MovieOve
     if (!o.reveal) { c.vis_lo = c.full_lo; c.vis_hi = c.full_hi; }
 
     const float panel_h = plot_h / (float)k;
-    for (int i = 0; i < k; ++i) {
-        movie_plot_panel_draw(c, subs[shown[i]], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, !timeline || i == k - 1);
+    bool labelled_markers = false;
+    for (size_t i = 0; i < k; ++i) {
+        const bool first_timeline = views[i] == MoviePlotView::Timeline && !labelled_markers;
+        labelled_markers |= first_timeline;
+        movie_plot_panel_draw(c, *shown[i], views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(views, k, i), first_timeline);
     }
 }
 
@@ -7324,10 +7375,11 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             continue;
         }
 
-        if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
-            movie_plot_overlay_draw(dl, font, o, pos, size, margin, alpha, time, state);
+        if (o.type == MovieOverlayType::Figure) {
+            movie_figure_draw(dl, font, o, pos, size, margin, alpha, time, state);
             continue;
         }
+        if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) continue;   // Becomes a Figure when it is read
         if (o.type == MovieOverlayType::PropertyVis) continue;   // In the viewport, not on the plane of the frame
 
         if (o.type == MovieOverlayType::Logo || o.type == MovieOverlayType::Image) {
@@ -8837,14 +8889,15 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         case MovieOverlayType::ScaleBar:  o.anchor = MovieOverlayAnchor::BottomLeft; break;
         case MovieOverlayType::Image:     o.anchor = MovieOverlayAnchor::BottomRight; o.size = 0.1f; break;
         case MovieOverlayType::TimeBar:   o.anchor = MovieOverlayAnchor::BottomCenter; o.size = 0.025f; break;
-        case MovieOverlayType::Timeline:
-        case MovieOverlayType::Distribution:
+        case MovieOverlayType::Figure:
             o.anchor = MovieOverlayAnchor::BottomRight; o.size = 0.25f; o.width = 0.3f;
-            o.subplot_mask = 0;
-            for (int s = 0, n = type == MovieOverlayType::Timeline ? data->timeline.num_subplots : data->distributions.num_subplots; s < n && s < PLOT_MAX_SUBPLOTS; ++s) {
-                if ((type == MovieOverlayType::Timeline ? data->timeline.subplots[s].count : data->distributions.subplots[s].count) > 0) o.subplot_mask |= 1 << s;
+            // The subplots that have series, timelines first
+            for (int s = 0; s < data->timeline.num_subplots && s < PLOT_MAX_SUBPLOTS; ++s) {
+                if (data->timeline.subplots[s].count > 0) o.panels.push_back({MoviePlotView::Timeline, data->timeline.subplots[s].id});
             }
-            if (o.subplot_mask == 0) o.subplot_mask = 1;
+            for (int s = 0; s < data->distributions.num_subplots && s < PLOT_MAX_SUBPLOTS; ++s) {
+                if (data->distributions.subplots[s].count > 0) o.panels.push_back({MoviePlotView::Distribution, data->distributions.subplots[s].id});
+            }
             o.background[0] = 0.0f; o.background[1] = 0.0f; o.background[2] = 0.0f; o.background[3] = 0.5f;
             break;
         case MovieOverlayType::Logo:      o = movie_overlay_default_logo(); o.begin = (double)m.playhead; o.end = (double)MAX(movie_len, m.playhead); break;
@@ -8873,11 +8926,8 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     if (ImGui::Button("Add Time Bar")) add(MovieOverlayType::TimeBar);
     ImGui::SetItemTooltip("How far the trajectory has gone. It fills from left to right whichever way the trajectory is played, fast where the\ntrajectory is played fast, slowly where it is slowed down and not at all where it is held, so it shows the pace.");
     ImGui::SameLine();
-    if (ImGui::Button("Add Timeline")) add(MovieOverlayType::Timeline);
-    ImGui::SetItemTooltip("A subplot of the Timelines window, drawn as the movie plays: the curve grows with the trajectory and its legend\nshows the value at the frame that is shown.");
-    ImGui::SameLine();
-    if (ImGui::Button("Add Distribution")) add(MovieOverlayType::Distribution);
-    ImGui::SetItemTooltip("A subplot of the Distributions window, filled as the movie plays: the bars grow with the frames that have been\nplayed and a line marks the value at the frame that is shown.");
+    if (ImGui::Button("Add Figure")) add(MovieOverlayType::Figure);
+    ImGui::SetItemTooltip("Subplots of the Timelines and the Distributions windows (the ones that have series), stacked and drawn as the movie plays:\nthe curves grow with the trajectory and the bars with the frames that have been played, and the legend shows the\nvalue at the frame that is shown. Choose and order the subplots in the figure.");
     ImGui::SameLine();
     if (ImGui::Button("Add Property")) add(MovieOverlayType::PropertyVis);
     ImGui::SetItemTooltip("The visualization of a script property in the viewport (the atoms, the geometry and the labels that hovering its\nplot shows), for as long as the overlay is shown.");
@@ -8903,39 +8953,93 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         if (ImGui::SmallButton("Remove")) remove_idx = i;
         if (open) {
             int type = (int)o.type;
-            if (ImGui::Combo("Type", &type, movie_overlay_type_str, (int)MovieOverlayType::Count)) o.type = (MovieOverlayType)type;
+            if (ImGui::BeginCombo("Type", movie_overlay_type_str[type])) {
+                for (int t = 0; t < (int)MovieOverlayType::Count; ++t) {
+                    // The two kinds from before figures only exist in old workspaces, which turn them into figures
+                    if (t == (int)MovieOverlayType::Timeline || t == (int)MovieOverlayType::Distribution) continue;
+                    if (ImGui::Selectable(movie_overlay_type_str[t], t == type)) o.type = (MovieOverlayType)t;
+                }
+                ImGui::EndCombo();
+            }
             if (o.type == MovieOverlayType::Text) {
                 ImGui::InputText("Text", o.text, sizeof(o.text));
             }
-            if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
-                const bool tl = o.type == MovieOverlayType::Timeline;
-                const PlotSubplot* subs = tl ? data->timeline.subplots : data->distributions.subplots;
-                const int nsub = MAX(tl ? data->timeline.num_subplots : data->distributions.num_subplots, 1);
-                ImGui::TextUnformatted("Subplots");
-                int drawn = 0;
-                for (int s = 0; s < nsub; ++s) {
+            if (o.type == MovieOverlayType::Figure) {
+                // The subplots in the stack, top first. A subplot is found by its id, so moving or renaming the subplots in the
+                // windows does not change what is drawn.
+                int remove_panel = -1, move_up = -1;
+                for (int pi = 0; pi < (int)o.panels.size(); ++pi) {
+                    const MoviePlotPanel& panel = o.panels[pi];
+                    const bool tl = panel.view == MoviePlotView::Timeline;
+                    const PlotSubplot* subs = tl ? data->timeline.subplots : data->distributions.subplots;
+                    const int idx = plot_find_subplot(subs, tl ? data->timeline.num_subplots : data->distributions.num_subplots, panel.subplot);
+                    char name[48] = "";
+                    if (idx >= 0) plot_subplot_label(name, sizeof(name), subs[idx], idx);
+                    ImGui::PushID(pi);
+                    if (ImGui::SmallButton("Up") && pi > 0) move_up = pi;
                     ImGui::SameLine();
-                    char name[48];
-                    snprintf(name, sizeof(name), "%d  (%d)###sub%d", s + 1, subs[s].count, s);
-                    bool on = (o.subplot_mask >> s) & 1;
-                    if (ImGui::Checkbox(name, &on)) o.subplot_mask = on ? (o.subplot_mask | (1 << s)) : (o.subplot_mask & ~(1 << s));
-                    if (on && subs[s].count > 0) drawn += 1;
+                    if (ImGui::SmallButton("Remove")) remove_panel = pi;
+                    ImGui::SameLine();
+                    if (idx < 0) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s: the subplot is not there any more", tl ? "Timelines" : "Distributions");
+                    else if (subs[idx].count == 0) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s: %s (no series, not drawn)", tl ? "Timelines" : "Distributions", name);
+                    else ImGui::Text("%s: %s (%d series)", tl ? "Timelines" : "Distributions", name, subs[idx].count);
+                    ImGui::PopID();
                 }
-                ImGui::SetItemTooltip("The subplots of the %s window that are drawn, stacked in this order (the number of series in each in brackets).\nAt most six series of each are drawn.", tl ? "Timelines" : "Distributions");
-                if (drawn == 0) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Nothing to draw: choose a subplot that has series (drag some into it in the window).");
-                if (tl) {
-                    const char* axes[] = {"Elapsed time", "Trajectory time"};
-                    int axis = (int)o.plot_axis;
-                    if (ImGui::Combo("Horizontal axis", &axis, axes, (int)MoviePlotAxis::Count)) o.plot_axis = (MoviePlotAxis)axis;
-                    ImGui::SetItemTooltip("Elapsed time: the trajectory time that the movie has covered, like the time bar, so the curve always grows to the right,\nalso where the trajectory is played backward.\nTrajectory time: the time of the trajectory itself, turned around when the movie plays it backward.");
+                if (remove_panel >= 0) o.panels.erase(o.panels.begin() + remove_panel);
+                if (move_up > 0 && move_up < (int)o.panels.size()) std::swap(o.panels[move_up], o.panels[move_up - 1]);
+                if (o.panels.empty()) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "No subplot: add one below (drag series into subplots in the Timelines and Distributions windows).");
+
+                if (ImGui::BeginCombo("Add subplot", "Choose...")) {
+                    for (int v = 0; v < (int)MoviePlotView::Count; ++v) {
+                        const bool tl = v == (int)MoviePlotView::Timeline;
+                        const PlotSubplot* subs = tl ? data->timeline.subplots : data->distributions.subplots;
+                        const int nsub = MAX(tl ? data->timeline.num_subplots : data->distributions.num_subplots, 1);
+                        for (int s = 0; s < nsub; ++s) {
+                            char name[48], item[96];
+                            plot_subplot_label(name, sizeof(name), subs[s], s);
+                            snprintf(item, sizeof(item), "%s: %s (%d series)###add%d_%d", tl ? "Timelines" : "Distributions", name, subs[s].count, v, s);
+                            if (ImGui::Selectable(item)) o.panels.push_back({(MoviePlotView)v, subs[s].id});
+                        }
+                    }
+                    ImGui::EndCombo();
                 }
+                ImGui::SetItemTooltip("Adds a subplot of one of the windows at the bottom of the stack. At most six series of each are drawn.");
+
+                const char* axes[] = {"Elapsed time", "Trajectory time"};
+                int axis = (int)o.plot_axis;
+                if (ImGui::Combo("Horizontal axis", &axis, axes, (int)MoviePlotAxis::Count)) o.plot_axis = (MoviePlotAxis)axis;
+                ImGui::SetItemTooltip("Of the timelines.\nElapsed time: the trajectory time that the movie has covered, like the time bar, so the curve always grows to the right,\nalso where the trajectory is played backward.\nTrajectory time: the time of the trajectory itself, turned around when the movie plays it backward.");
                 ImGui::SliderFloat("Width", &o.width, 0.1f, 1.0f, "%.2f of the frame");
                 ImGui::Checkbox("As the movie plays", &o.reveal);
-                ImGui::SetItemTooltip(tl ? "Only the part of the trajectory that the movie has played is drawn, and it grows."
-                                         : "Only the frames that the movie has played are counted, and the bars grow.\nA script distribution (not over frames) is drawn as it is.");
+                ImGui::SetItemTooltip("Only the part of the trajectory that the movie has played is drawn, and it grows (a timeline), and only the frames\nthat have been played are counted, so the bars grow (a distribution). A script distribution (not over frames) is drawn as it is.");
                 ImGui::SameLine();
                 ImGui::Checkbox("Value", &o.show_value);
                 ImGui::SetItemTooltip("The value at the frame that is shown, in the legend");
+                ImGui::SameLine();
+                ImGui::Checkbox("Markers", &o.show_markers);
+                ImGui::SetItemTooltip("The markers of the movie (below), on the timelines, where the movie gets to them");
+
+                ImGui::DragFloat("Text (points)", &o.font_points, 0.5f, 0.0f, 200.0f, o.font_points > 0.0f ? "%.0f pt" : "follows the height");
+                ImGui::SetItemTooltip("The size of the text. A point is a pixel of a frame that is 1080 pixels high, scaled with the frame.");
+                o.font_points = MAX(o.font_points, 0.0f);
+                ImGui::DragFloat("Lines (points)", &o.line_points, 0.1f, 0.0f, 20.0f, o.line_points > 0.0f ? "%.1f pt" : "follows the text");
+                o.line_points = MAX(o.line_points, 0.0f);
+                if (ImGui::BeginCombo("Colours", movie_plot_palette_name(o.palette))) {
+                    for (int pal = 0; pal < MOVIE_PLOT_PALETTE_COUNT; ++pal) {
+                        if (ImGui::Selectable(movie_plot_palette_name(pal), pal == o.palette)) o.palette = pal;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SetItemTooltip("The colours of the series: the ones they have in the plots, or a set of its own, in the order of the stack.");
+                if (ImGui::SmallButton("Light text on a dark plate")) {
+                    const float c[4] = {1, 1, 1, 1}, b[4] = {0, 0, 0, 0.5f};
+                    memcpy(o.color, c, sizeof(c)); memcpy(o.background, b, sizeof(b));
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Dark text on a light plate")) {
+                    const float c[4] = {0.1f, 0.1f, 0.1f, 1}, b[4] = {1, 1, 1, 0.7f};
+                    memcpy(o.color, c, sizeof(c)); memcpy(o.background, b, sizeof(b));
+                }
             }
             if (o.type == MovieOverlayType::PropertyVis) {
                 ImGui::InputText("Property", o.text, sizeof(o.text));
@@ -9035,6 +9139,39 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         ImGui::PopID();
     }
     if (remove_idx >= 0) m.overlays.erase(m.overlays.begin() + remove_idx);
+
+    ImGui::SeparatorText("Markers");
+    ImGui::TextDisabled("Notes on the timeline of the movie, e.g. 'water appears'. A figure draws them on its timelines where the movie gets to them.");
+    if (ImGui::Button("Add marker at the preview time")) {
+        MovieMarker k;
+        k.time = (double)m.playhead;
+        snprintf(k.label, sizeof(k.label), "Marker");
+        m.markers.push_back(k);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Add one at each camera key")) {
+        for (size_t i = 0; i < md_array_size(data->movie.keyframes); ++i) {
+            MovieMarker k;
+            k.time = (double)data->movie.keyframes[i].time;
+            snprintf(k.label, sizeof(k.label), "Key %d", (int)i + 1);
+            m.markers.push_back(k);
+        }
+    }
+    int remove_marker = -1;
+    for (int i = 0; i < (int)m.markers.size(); ++i) {
+        MovieMarker& k = m.markers[i];
+        ImGui::PushID(i);
+        float t = (float)k.time;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+        if (ImGui::DragFloat("##time", &t, 0.05f, 0.0f, movie_len, "%.2f s")) k.time = (double)CLAMP(t, 0.0f, movie_len);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+        ImGui::InputText("##label", k.label, sizeof(k.label));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) remove_marker = i;
+        ImGui::PopID();
+    }
+    if (remove_marker >= 0) m.markers.erase(m.markers.begin() + remove_marker);
 }
 
 static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, bool locked) {

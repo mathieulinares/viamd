@@ -31,6 +31,16 @@ Interpolation=2
 [Timeline]
 NumSubplots=2
 
+[TimelineSubplot]
+Subplot=0
+Id=1
+Name=Distance
+
+[TimelineSubplot]
+Subplot=1
+Id=2
+Name=Waters
+
 [TimelineSeries]
 Subplot=0
 Source=script
@@ -63,6 +73,11 @@ ColormapAlpha=1
 
 [Distributions]
 NumSubplots=1
+
+[DistributionSubplot]
+Subplot=0
+Id=11
+Name=Dihedral
 
 [DistributionSeries]
 Subplot=0
@@ -230,35 +245,25 @@ Width=0.400000006
 TimeBarLabels=1
 
 [MovieOverlay]
-Type=7
+Type=9
 Enabled=1
 Range=0,80,0.5,0.5
 Anchor=8
-Size=0.25
+Size=0.4
 SizeUnit=0
 Color=1,1,1,1
 Background=0,0,0,0.5
 Length=0
 Text=
 Width=0.300000012
-Subplots=1
-PlotFlags=3
-
-[MovieOverlay]
-Type=6
-Enabled=1
-Range=0,80,0.5,0.5
-Anchor=7
-Size=0.25
-SizeUnit=0
-Color=1,1,1,1
-Background=0,0,0,0.5
-Length=0
-Text=
-Width=0.300000012
-Subplots=3
 PlotAxis=0
-PlotFlags=3
+PlotFlags=7
+FontPoints=0
+LinePoints=0
+Palette=0
+Panel=0,1
+Panel=0,2
+Panel=1,11
 
 [MovieOverlay]
 Type=8
@@ -271,6 +276,14 @@ Color=1,1,1,1
 Background=0,0,0,0
 Length=0
 Text=d
+
+[MovieMarker]
+Time=15
+Label=residues shown
+
+[MovieMarker]
+Time=55
+Label=water appears
 
 [Operations]
 Recenter=0

@@ -314,5 +314,72 @@ UTEST(viamd_movie_overlay, a_hold_adds_nothing_to_the_curve) {
 UTEST(viamd_movie_overlay, the_plot_axis_comes_with_a_default_that_follows_the_movie) {
     MovieOverlay o;
     EXPECT_EQ((int)MoviePlotAxis::Elapsed, (int)o.plot_axis);
-    EXPECT_EQ(1, o.subplot_mask);
+}
+
+/* Figures refer to subplots by id */
+
+UTEST(viamd_movie_overlay, the_figure_comes_after_the_property_overlay_in_the_saved_numbers) {
+    EXPECT_EQ(9, (int)MovieOverlayType::Figure);
+}
+
+UTEST(viamd_movie_overlay, an_old_timeline_overlay_becomes_a_figure_of_the_ids_of_the_subplots_it_had) {
+    MovieOverlay o;
+    o.type = MovieOverlayType::Timeline;
+    o.legacy_subplot_mask = 0b101;
+    const uint32_t t[] = {11, 12, 13};
+    const uint32_t d[] = {21, 22};
+    movie_overlay_make_figure(&o, t, 3, d, 2);
+    EXPECT_EQ((int)MovieOverlayType::Figure, (int)o.type);
+    ASSERT_EQ(2, (int)o.panels.size());
+    EXPECT_EQ((int)MoviePlotView::Timeline, (int)o.panels[0].view);
+    EXPECT_EQ(11u, o.panels[0].subplot);
+    EXPECT_EQ(13u, o.panels[1].subplot);
+    EXPECT_EQ(0, o.legacy_subplot_mask);
+}
+
+UTEST(viamd_movie_overlay, an_old_distribution_overlay_takes_the_ids_of_the_distributions_window) {
+    MovieOverlay o;
+    o.type = MovieOverlayType::Distribution;
+    o.legacy_subplot_mask = 0b10;
+    const uint32_t t[] = {11, 12};
+    const uint32_t d[] = {21, 22};
+    movie_overlay_make_figure(&o, t, 2, d, 2);
+    ASSERT_EQ(1, (int)o.panels.size());
+    EXPECT_EQ((int)MoviePlotView::Distribution, (int)o.panels[0].view);
+    EXPECT_EQ(22u, o.panels[0].subplot);
+}
+
+UTEST(viamd_movie_overlay, positions_of_hidden_subplots_are_not_taken_into_a_figure) {
+    MovieOverlay o;
+    o.type = MovieOverlayType::Timeline;
+    o.legacy_subplot_mask = 0b110;
+    const uint32_t t[] = {11, 12, 13};
+    const uint32_t d[] = {21};
+    movie_overlay_make_figure(&o, t, 2, d, 1);   /* only two are shown */
+    ASSERT_EQ(1, (int)o.panels.size());
+    EXPECT_EQ(12u, o.panels[0].subplot);
+}
+
+UTEST(viamd_movie_overlay, other_overlays_are_not_made_into_figures) {
+    MovieOverlay o;
+    o.type = MovieOverlayType::TimeBar;
+    const uint32_t t[] = {1};
+    movie_overlay_make_figure(&o, t, 1, t, 1);
+    EXPECT_EQ((int)MovieOverlayType::TimeBar, (int)o.type);
+    EXPECT_TRUE(o.panels.empty());
+}
+
+UTEST(viamd_movie_overlay, timelines_over_timelines_share_the_axis_and_a_distribution_has_its_own) {
+    const MoviePlotView v[] = {MoviePlotView::Timeline, MoviePlotView::Timeline, MoviePlotView::Distribution, MoviePlotView::Timeline};
+    EXPECT_FALSE(movie_figure_x_labels(v, 4, 0));   /* the timeline below is a timeline */
+    EXPECT_TRUE(movie_figure_x_labels(v, 4, 1));    /* a distribution is below */
+    EXPECT_TRUE(movie_figure_x_labels(v, 4, 2));    /* a distribution */
+    EXPECT_TRUE(movie_figure_x_labels(v, 4, 3));    /* the last */
+    EXPECT_TRUE(movie_figure_x_labels(v, 1, 0));
+}
+
+UTEST(viamd_movie_overlay, a_palette_that_does_not_exist_has_the_name_of_the_plots_colours) {
+    EXPECT_STREQ("Colours of the plots", movie_plot_palette_name(0));
+    EXPECT_STREQ("Colours of the plots", movie_plot_palette_name(99));
+    for (int i = 1; i < MOVIE_PLOT_PALETTE_COUNT; ++i) EXPECT_TRUE(movie_plot_palette_name(i)[0] != 0);
 }

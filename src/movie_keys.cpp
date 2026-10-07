@@ -134,10 +134,17 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
         const MovieOverlay& y = b.overlays[i];
         if (x.type != y.type || x.enabled != y.enabled || x.begin != y.begin || x.end != y.end ||
             x.fade_in != y.fade_in || x.fade_out != y.fade_out || x.anchor != y.anchor ||
-            x.size != y.size || x.size_unit != y.size_unit || x.width != y.width || x.show_elapsed != y.show_elapsed || x.show_speed != y.show_speed || x.subplot_mask != y.subplot_mask || x.plot_axis != y.plot_axis || x.reveal != y.reveal || x.show_value != y.show_value || x.length != y.length || strcmp(x.text, y.text) != 0 || strcmp(x.path, y.path) != 0) return false;
+            x.size != y.size || x.size_unit != y.size_unit || x.width != y.width || x.show_elapsed != y.show_elapsed || x.show_speed != y.show_speed || x.legacy_subplot_mask != y.legacy_subplot_mask || x.plot_axis != y.plot_axis || x.font_points != y.font_points || x.line_points != y.line_points || x.palette != y.palette || x.show_markers != y.show_markers || x.panels.size() != y.panels.size() || x.reveal != y.reveal || x.show_value != y.show_value || x.length != y.length || strcmp(x.text, y.text) != 0 || strcmp(x.path, y.path) != 0) return false;
         for (int c = 0; c < 4; ++c) {
             if (x.color[c] != y.color[c] || x.background[c] != y.background[c]) return false;
         }
+        for (size_t p = 0; p < x.panels.size(); ++p) {
+            if (x.panels[p].view != y.panels[p].view || x.panels[p].subplot != y.panels[p].subplot) return false;
+        }
+    }
+    if (a.markers.size() != b.markers.size()) return false;
+    for (size_t i = 0; i < a.markers.size(); ++i) {
+        if (a.markers[i].time != b.markers[i].time || strcmp(a.markers[i].label, b.markers[i].label) != 0) return false;
     }
     return true;
 }
@@ -152,6 +159,7 @@ void movie_keys_scale_time(MovieKeys* keys, double scale) {
         o.fade_in *= (float)scale;
         o.fade_out *= (float)scale;
     }
+    for (MovieMarker& k : keys->markers) k.time *= scale;
     keys->duration = (float)(keys->duration * scale);
     keys->traj_begin = (float)(keys->traj_begin * scale);
     keys->traj_end = (float)(keys->traj_end * scale);

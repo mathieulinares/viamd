@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <functional>
 #include <vector>
@@ -13,9 +14,10 @@ enum class MovieOverlayType : int {
     Logo,        // The VIAMD logo
     Image,       // An image file (png or jpg)
     TimeBar,     // How far the trajectory has gone, counted forward even when it is played backward
-    Timeline,    // A subplot of the Timelines window, drawn as the movie plays
-    Distribution,// A subplot of the Distributions window, filled as the movie plays
+    Timeline,    // Only in workspaces from before figures: subplots of the Timelines window. Becomes a Figure when it is read.
+    Distribution,// Only in workspaces from before figures: subplots of the Distributions window. Becomes a Figure when it is read.
     PropertyVis, // The visualization of a script property in the viewport, with its labels
+    Figure,      // Subplots of the Timelines and Distributions windows stacked, drawn as the movie plays
     Count,
 };
 
@@ -35,6 +37,25 @@ enum class MovieOverlaySizeUnit : int {
 };
 
 constexpr float MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT = 1080.0f;
+
+// Which window a panel of a figure takes its subplot from
+enum class MoviePlotView : int {
+    Timeline,
+    Distribution,
+    Count,
+};
+
+// One subplot of a figure, by the id the subplot has (not its position, which changes)
+struct MoviePlotPanel {
+    MoviePlotView view = MoviePlotView::Timeline;
+    uint32_t      subplot = 0;
+};
+
+// A note on the timeline of the movie, drawn on the timelines of a figure where the movie gets to it
+struct MovieMarker {
+    double time = 0.0;      // Movie time, in seconds
+    char   label[48] = "";
+};
 
 // What the horizontal axis of a timeline overlay is
 enum class MoviePlotAxis : int {
@@ -61,11 +82,28 @@ struct MovieOverlay {
     float              width = 0.4f;          // Time bar: its width, as a part of the width of the frame
     bool               show_elapsed = true;   // Time bar: the time that has gone, over the whole
     bool               show_speed = false;    // Time bar: how fast the trajectory plays, relative to the Animation panel
-    int                subplot_mask = 1;      // Timeline, Distribution: the subplots of the window that are drawn, stacked (bit i is subplot i)
-    MoviePlotAxis      plot_axis = MoviePlotAxis::Elapsed;   // Timeline: what the horizontal axis is
-    bool               reveal = true;         // Timeline, Distribution: only what the movie has played so far
-    bool               show_value = true;     // Timeline, Distribution: the value at the frame that is shown, in the legend
+    std::vector<MoviePlotPanel> panels;       // Figure: the subplots that are drawn, stacked in this order
+    int                legacy_subplot_mask = 0;   // Timeline, Distribution (old workspaces): bit i is the subplot at position i
+    MoviePlotAxis      plot_axis = MoviePlotAxis::Elapsed;   // Figure: what the horizontal axis of its timelines is
+    float              font_points = 0.0f;    // Figure: the text, in points (see MovieOverlaySizeUnit), 0 follows the height
+    float              line_points = 0.0f;    // Figure: the width of the lines, in points, 0 follows the text
+    int                palette = 0;           // Figure: 0 the colours of the plots, else a colour set of its own (movie_plot_palette_name)
+    bool               show_markers = true;   // Figure: the markers of the movie, on its timelines
+    bool               reveal = true;         // Figure: only what the movie has played so far
+    bool               show_value = true;     // Figure: the value at the frame that is shown, in the legend
 };
+
+// Names of the colour sets a figure can have of its own (index 0 is the colours of the plots themselves)
+constexpr int MOVIE_PLOT_PALETTE_COUNT = 5;
+const char* movie_plot_palette_name(int palette);
+
+// Whether the horizontal axis is labelled under panel 'i' of a stack of 'n': under the last, under a distribution (which has
+// an axis of its own) and under a timeline that has a distribution below it. Timelines above timelines share the axis.
+bool movie_figure_x_labels(const MoviePlotView* views, size_t n, size_t i);
+
+// An overlay from before figures (a Timeline or a Distribution that holds a mask of the positions of subplots) becomes a
+// Figure of the subplots that had those positions, given the ids of the subplots of each window by position. Any other overlay is left.
+void movie_overlay_make_figure(MovieOverlay* o, const uint32_t* timeline_ids, int num_timeline, const uint32_t* distribution_ids, int num_distribution);
 
 // The logo in the top left corner for the whole movie, which a movie starts with
 MovieOverlay movie_overlay_default_logo();

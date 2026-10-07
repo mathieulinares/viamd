@@ -1187,6 +1187,7 @@ MovieKeys movie_keys_snapshot(const ApplicationState* app) {
     k.params = app->movie.param_keys;
     k.reps = app->movie.rep_keys;
     k.overlays = app->movie.overlays;
+    k.markers = app->movie.markers;
     k.loop = app->movie.loop;
     k.duration = app->movie.duration;
     k.traj_begin = app->movie.traj_begin;
@@ -1205,6 +1206,7 @@ void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
     m.param_keys = keys.params;
     m.rep_keys = keys.reps;
     m.overlays = keys.overlays;
+    m.markers = keys.markers;
     m.loop = keys.loop;
     m.duration = keys.duration;
     m.traj_begin = keys.traj_begin;
@@ -1234,6 +1236,10 @@ static void workspace_reset(ApplicationState* data) {
 
     plot_clear(data->timeline.subplots, PLOT_MAX_SUBPLOTS);
     plot_clear(data->distributions.subplots, PLOT_MAX_SUBPLOTS);
+    for (int i = 0; i < PLOT_MAX_SUBPLOTS; ++i) {
+        data->timeline.subplots[i].name[0] = '\0';
+        data->distributions.subplots[i].name[0] = '\0';
+    }
     data->timeline.num_subplots = 1;
     data->distributions.num_subplots = 1;
     data->timeline.filter.enabled = false;
@@ -1281,6 +1287,7 @@ static void workspace_reset(ApplicationState* data) {
         m.rep_keys.clear();
         m.rep_saved.clear();
         m.overlays = { movie_overlay_default_logo() };
+        m.markers.clear();
         md_bitfield_clear(&m.follow_mask);
         m.key_follow = false;
         m.follow_pending = false;
@@ -1861,11 +1868,23 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Width")))  viamd::extract_flt(o.width, arg);
                 else if (str_eq(ident, STR_LIT("Subplot"))) {   // Older workspaces: one subplot
                     int v = 0;
-                    if (viamd::extract_int(v, arg)) o.subplot_mask = 1 << CLAMP(v, 0, PLOT_MAX_SUBPLOTS - 1);
+                    if (viamd::extract_int(v, arg)) o.legacy_subplot_mask = 1 << CLAMP(v, 0, PLOT_MAX_SUBPLOTS - 1);
                 }
                 else if (str_eq(ident, STR_LIT("Subplots"))) {
                     int v = 0;
-                    if (viamd::extract_int(v, arg)) o.subplot_mask = v & ((1 << PLOT_MAX_SUBPLOTS) - 1);
+                    if (viamd::extract_int(v, arg)) o.legacy_subplot_mask = v & ((1 << PLOT_MAX_SUBPLOTS) - 1);
+                }
+                else if (str_eq(ident, STR_LIT("Panel"))) {
+                    int v[2];
+                    if (viamd::extract_int_vec(v, 2, arg) && 0 <= v[0] && v[0] < (int)MoviePlotView::Count && v[1] > 0) {
+                        o.panels.push_back({(MoviePlotView)v[0], (uint32_t)v[1]});
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("FontPoints"))) viamd::extract_flt(o.font_points, arg);
+                else if (str_eq(ident, STR_LIT("LinePoints"))) viamd::extract_flt(o.line_points, arg);
+                else if (str_eq(ident, STR_LIT("Palette"))) {
+                    int v = 0;
+                    if (viamd::extract_int(v, arg)) o.palette = CLAMP(v, 0, MOVIE_PLOT_PALETTE_COUNT - 1);
                 }
                 else if (str_eq(ident, STR_LIT("PlotAxis"))) viamd::extract_enum(o.plot_axis, arg, (int)MoviePlotAxis::Count);
                 else if (str_eq(ident, STR_LIT("PlotFlags"))) {
@@ -1873,6 +1892,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     if (viamd::extract_int(bits, arg)) {
                         o.reveal = (bits & 1) != 0;
                         o.show_value = (bits & 2) != 0;
+                        o.show_markers = (bits & 4) != 0;
                     }
                 }
                 else if (str_eq(ident, STR_LIT("TimeBarLabels"))) {
@@ -1894,6 +1914,16 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 o.size = CLAMP(o.size, lo, hi);
             }
             data->movie.overlays.push_back(o);
+            movie_history_reset(data);
+        } else if (str_eq(section, STR_LIT("MovieMarker"))) {
+            MovieMarker k;
+            float t = 0.0f;
+            while (viamd::next_entry(ident, arg, state)) {
+                if (str_eq(ident, STR_LIT("Time"))) viamd::extract_flt(t, arg);
+                else if (str_eq(ident, STR_LIT("Label"))) viamd::extract_to_char_buf(k.label, sizeof(k.label), arg);
+            }
+            k.time = (double)t;
+            data->movie.markers.push_back(k);
             movie_history_reset(data);
         } else if (str_eq(section, STR_LIT("Operations"))) {
             auto& op = data->operations;
@@ -1964,8 +1994,8 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     }
                 }
             }
-        } else if (plot_layout_deserialize(state, STR_LIT("Timeline"), STR_LIT("TimelineSeries"), data, data->timeline.subplots, &data->timeline.num_subplots)) {
-        } else if (plot_layout_deserialize(state, STR_LIT("Distributions"), STR_LIT("DistributionSeries"), data, data->distributions.subplots, &data->distributions.num_subplots)) {
+        } else if (plot_layout_deserialize(state, STR_LIT("Timeline"), STR_LIT("TimelineSeries"), STR_LIT("TimelineSubplot"), data, data->timeline.subplots, &data->timeline.num_subplots)) {
+        } else if (plot_layout_deserialize(state, STR_LIT("Distributions"), STR_LIT("DistributionSeries"), STR_LIT("DistributionSubplot"), data, data->distributions.subplots, &data->distributions.num_subplots)) {
         } else {
             const char* before = state.text.ptr;
             viamd::event_system_broadcast_event(viamd::EventType_ViamdDeserialize, viamd::EventPayloadType_DeserializationState, &state);
@@ -1974,6 +2004,19 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 MD_LOG_DEBUG("Workspace: nothing reads the section [" STR_FMT "], it is skipped", STR_ARG(section));
             }
         }
+    }
+
+    // Overlays from before figures hold positions of subplots, which become the ids those subplots have
+    {
+        uint32_t timeline_ids[PLOT_MAX_SUBPLOTS], distribution_ids[PLOT_MAX_SUBPLOTS];
+        for (int i = 0; i < PLOT_MAX_SUBPLOTS; ++i) {
+            timeline_ids[i] = data->timeline.subplots[i].id;
+            distribution_ids[i] = data->distributions.subplots[i].id;
+        }
+        for (MovieOverlay& o : data->movie.overlays) {
+            movie_overlay_make_figure(&o, timeline_ids, data->timeline.num_subplots, distribution_ids, data->distributions.num_subplots);
+        }
+        movie_history_reset(data);
     }
 
     // ## 3. Load the files, then apply what refers to them
@@ -2159,8 +2202,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
     viamd::write_flt(state, STR_LIT("Tension"), app_state->animation.tension);
     viamd::write_int(state, STR_LIT("Interpolation"), (int)app_state->animation.interpolation);
 
-    plot_layout_serialize(state, STR_LIT("Timeline"), STR_LIT("TimelineSeries"), app_state->timeline.subplots, app_state->timeline.num_subplots);
-    plot_layout_serialize(state, STR_LIT("Distributions"), STR_LIT("DistributionSeries"), app_state->distributions.subplots, app_state->distributions.num_subplots);
+    plot_layout_serialize(state, STR_LIT("Timeline"), STR_LIT("TimelineSeries"), STR_LIT("TimelineSubplot"), app_state->timeline.subplots, app_state->timeline.num_subplots);
+    plot_layout_serialize(state, STR_LIT("Distributions"), STR_LIT("DistributionSeries"), STR_LIT("DistributionSubplot"), app_state->distributions.subplots, app_state->distributions.num_subplots);
 
     {
         // In frames: a time is in whatever unit it happens to be shown in
@@ -2283,17 +2326,28 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("Background"), o.background, 4);
             viamd::write_flt (state, STR_LIT("Length"), o.length);
             viamd::write_str (state, STR_LIT("Text"), str_from_cstr(o.text));
-            if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
+            if (o.type == MovieOverlayType::Figure) {
                 viamd::write_flt(state, STR_LIT("Width"), o.width);
-                viamd::write_int(state, STR_LIT("Subplots"), o.subplot_mask);
                 viamd::write_int(state, STR_LIT("PlotAxis"), (int)o.plot_axis);
-                viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0));
+                viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0) | (o.show_markers ? 4 : 0));
+                viamd::write_flt(state, STR_LIT("FontPoints"), o.font_points);
+                viamd::write_flt(state, STR_LIT("LinePoints"), o.line_points);
+                viamd::write_int(state, STR_LIT("Palette"), o.palette);
+                for (const MoviePlotPanel& p : o.panels) {
+                    const int v[2] = {(int)p.view, (int)p.subplot};
+                    viamd::write_int_vec(state, STR_LIT("Panel"), v, 2);
+                }
             }
             if (o.type == MovieOverlayType::TimeBar) {
                 viamd::write_flt(state, STR_LIT("Width"), o.width);
                 viamd::write_int(state, STR_LIT("TimeBarLabels"), (o.show_elapsed ? 1 : 0) | (o.show_speed ? 2 : 0));
             }
             if (o.type == MovieOverlayType::Image) viamd::write_str(state, STR_LIT("Path"), workspace_relative_path(str_from_cstr(o.path)));
+        }
+        for (const MovieMarker& k : m.markers) {
+            viamd::write_section_header(state, STR_LIT("MovieMarker"));
+            viamd::write_flt(state, STR_LIT("Time"), (float)k.time);
+            viamd::write_str(state, STR_LIT("Label"), str_from_cstr(k.label));
         }
     }
 

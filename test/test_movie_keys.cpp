@@ -498,3 +498,35 @@ UTEST(viamd_movie_keys, an_overlay_image_file_is_part_of_the_undo_state) {
     snprintf(a.overlays[0].path, sizeof(a.overlays[0].path), "/pics/group.png");
     EXPECT_TRUE(movie_keys_equal(a, b));
 }
+
+UTEST(viamd_movie_keys, the_panels_and_the_look_of_a_figure_are_part_of_the_undo_state) {
+    MovieKeys a, b;
+    a.overlays.push_back(MovieOverlay{});
+    b.overlays.push_back(MovieOverlay{});
+    b.overlays[0].panels.push_back({MoviePlotView::Timeline, 3});
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    a.overlays[0].panels.push_back({MoviePlotView::Timeline, 4});
+    EXPECT_FALSE(movie_keys_equal(a, b));   /* another subplot */
+    a.overlays[0].panels[0].subplot = 3;
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    a.overlays[0].panels[0].view = MoviePlotView::Distribution;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    a.overlays[0].panels[0].view = MoviePlotView::Timeline;
+    b.overlays[0].font_points = 24.0f;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    b.overlays[0].font_points = 0.0f;
+    b.overlays[0].palette = 2;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+}
+
+UTEST(viamd_movie_keys, markers_are_part_of_the_undo_state_and_scale_with_the_length) {
+    MovieKeys a, b;
+    a.markers.push_back({10.0, "water"});
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    b.markers.push_back({10.0, "water"});
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    b.markers[0].label[0] = 'W';
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    movie_keys_scale_time(&a, 2.0);
+    EXPECT_NEAR(20.0, a.markers[0].time, 1e-9);
+}

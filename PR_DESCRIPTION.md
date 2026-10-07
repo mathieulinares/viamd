@@ -52,7 +52,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 **Overlays**
 - Text, time stamp, scale bar, time bar, images (png or jpg), timeline and distribution plots, a script property's visualization, and the VIAMD logo. A movie starts with the logo in the top left corner; it can be removed.
 - The time bar fills forward whichever way the trajectory is played, so it shows the pace of the movie; it can show the time that has gone and the speed.
-- A timeline or a distribution overlay draws subplots of the Timelines or Distributions window, stacked, as the movie plays (the curve and the bars grow with the part of the trajectory that has been played), with the value at the frame that is shown in the legend. A timeline's axis is the elapsed trajectory time like the time bar, so it grows to the right whichever way the trajectory is played.
+- A figure overlay draws subplots of the Timelines and Distributions windows, stacked, as the movie plays (the curves and the bars grow with the part of the trajectory that has been played), with the value at the frame that is shown in the legend. A timeline's axis is the elapsed trajectory time like the time bar, so it grows to the right whichever way the trajectory is played. Subplots have saved ids and names, so a figure finds its subplots when others are added or renamed. Text and lines in points, a colour set of its own and light/dark plate presets. Markers on the movie's timeline are drawn on the timelines of a figure.
 - A property overlay shows the visualization of a script property (atoms, geometry, labels) in the viewport and in the recording.
 - Sizes are in percent of the frame height or in points (a point is a pixel of a 1080 pixel high frame, scaled with the frame).
 - Each has a time range, fades, nine anchor positions, a size relative to the frame height, a colour and an optional background plate.
@@ -87,7 +87,7 @@ New tests are in:
 - `test_image`.
 - `test_serialization`.
 
-All 139 tests pass in a Release build on Linux.
+All 148 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on. Everything added since (the Look at atom, anchors and timeline, render range and scale, pause, representation keys and transitions, overlays on frames and the logo, H.265 and WebM) has not been tried by hand in the GUI by me: `MOVIE_STATUS.md` has the list to check.

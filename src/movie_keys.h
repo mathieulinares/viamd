@@ -64,6 +64,7 @@ struct MovieKeys {
     std::vector<ParamKey> params;
     std::vector<RepKey> reps;
     std::vector<MovieOverlay> overlays;
+    std::vector<MovieMarker> markers;
     bool loop = false;
     // The timing, which is scaled together with the keys
     float  duration = 0.0f;
