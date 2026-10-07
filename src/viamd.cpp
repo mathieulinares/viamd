@@ -2013,9 +2013,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
             timeline_ids[i] = data->timeline.subplots[i].id;
             distribution_ids[i] = data->distributions.subplots[i].id;
         }
-        for (MovieOverlay& o : data->movie.overlays) {
-            movie_overlay_make_figure(&o, timeline_ids, data->timeline.num_subplots, distribution_ids, data->distributions.num_subplots);
-        }
+        movie_overlays_migrate(&data->movie.overlays, timeline_ids, data->timeline.num_subplots, distribution_ids, data->distributions.num_subplots);
         movie_history_reset(data);
     }
 
@@ -2326,7 +2324,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("Background"), o.background, 4);
             viamd::write_flt (state, STR_LIT("Length"), o.length);
             viamd::write_str (state, STR_LIT("Text"), str_from_cstr(o.text));
-            if (o.type == MovieOverlayType::Figure) {
+            if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
                 viamd::write_flt(state, STR_LIT("Width"), o.width);
                 viamd::write_int(state, STR_LIT("PlotAxis"), (int)o.plot_axis);
                 viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0) | (o.show_markers ? 4 : 0));

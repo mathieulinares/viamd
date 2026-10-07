@@ -316,57 +316,118 @@ UTEST(viamd_movie_overlay, the_plot_axis_comes_with_a_default_that_follows_the_m
     EXPECT_EQ((int)MoviePlotAxis::Elapsed, (int)o.plot_axis);
 }
 
-/* Figures refer to subplots by id */
+/* Timelines and distributions are separate overlays that refer to subplots by id */
 
-UTEST(viamd_movie_overlay, the_figure_comes_after_the_property_overlay_in_the_saved_numbers) {
+UTEST(viamd_movie_overlay, the_saved_numbers_of_the_plot_overlays_are_kept) {
+    EXPECT_EQ(6, (int)MovieOverlayType::Timeline);
+    EXPECT_EQ(7, (int)MovieOverlayType::Distribution);
     EXPECT_EQ(9, (int)MovieOverlayType::Figure);
 }
 
-UTEST(viamd_movie_overlay, an_old_timeline_overlay_becomes_a_figure_of_the_ids_of_the_subplots_it_had) {
+UTEST(viamd_movie_overlay, a_timeline_is_wide_at_the_bottom_and_a_distribution_narrow_at_the_right) {
+    MovieOverlay t, d;
+    t.type = MovieOverlayType::Timeline;
+    d.type = MovieOverlayType::Distribution;
+    movie_overlay_plot_defaults(&t);
+    movie_overlay_plot_defaults(&d);
+    EXPECT_EQ((int)MovieOverlayAnchor::BottomCenter, (int)t.anchor);
+    EXPECT_EQ((int)MovieOverlayAnchor::MiddleRight, (int)d.anchor);
+    EXPECT_GT(t.width, 2.0f * d.width);          /* elongated */
+    EXPECT_GT(d.size, t.size);                   /* the distribution is taller */
+}
+
+UTEST(viamd_movie_overlay, other_overlays_keep_their_place_when_the_plot_defaults_are_asked_for) {
     MovieOverlay o;
-    o.type = MovieOverlayType::Timeline;
-    o.legacy_subplot_mask = 0b101;
+    o.type = MovieOverlayType::TimeBar;
+    o.anchor = MovieOverlayAnchor::TopLeft;
+    movie_overlay_plot_defaults(&o);
+    EXPECT_EQ((int)MovieOverlayAnchor::TopLeft, (int)o.anchor);
+}
+
+UTEST(viamd_movie_overlay, an_old_timeline_overlay_gets_the_ids_of_the_subplots_it_had) {
+    std::vector<MovieOverlay> v(1);
+    v[0].type = MovieOverlayType::Timeline;
+    v[0].legacy_subplot_mask = 0b101;
     const uint32_t t[] = {11, 12, 13};
     const uint32_t d[] = {21, 22};
-    movie_overlay_make_figure(&o, t, 3, d, 2);
-    EXPECT_EQ((int)MovieOverlayType::Figure, (int)o.type);
-    ASSERT_EQ(2, (int)o.panels.size());
-    EXPECT_EQ((int)MoviePlotView::Timeline, (int)o.panels[0].view);
-    EXPECT_EQ(11u, o.panels[0].subplot);
-    EXPECT_EQ(13u, o.panels[1].subplot);
-    EXPECT_EQ(0, o.legacy_subplot_mask);
+    movie_overlays_migrate(&v, t, 3, d, 2);
+    ASSERT_EQ(1, (int)v.size());
+    EXPECT_EQ((int)MovieOverlayType::Timeline, (int)v[0].type);
+    ASSERT_EQ(2, (int)v[0].panels.size());
+    EXPECT_EQ((int)MoviePlotView::Timeline, (int)v[0].panels[0].view);
+    EXPECT_EQ(11u, v[0].panels[0].subplot);
+    EXPECT_EQ(13u, v[0].panels[1].subplot);
+    EXPECT_EQ(0, v[0].legacy_subplot_mask);
 }
 
 UTEST(viamd_movie_overlay, an_old_distribution_overlay_takes_the_ids_of_the_distributions_window) {
-    MovieOverlay o;
-    o.type = MovieOverlayType::Distribution;
-    o.legacy_subplot_mask = 0b10;
+    std::vector<MovieOverlay> v(1);
+    v[0].type = MovieOverlayType::Distribution;
+    v[0].legacy_subplot_mask = 0b10;
     const uint32_t t[] = {11, 12};
     const uint32_t d[] = {21, 22};
-    movie_overlay_make_figure(&o, t, 2, d, 2);
-    ASSERT_EQ(1, (int)o.panels.size());
-    EXPECT_EQ((int)MoviePlotView::Distribution, (int)o.panels[0].view);
-    EXPECT_EQ(22u, o.panels[0].subplot);
+    movie_overlays_migrate(&v, t, 2, d, 2);
+    ASSERT_EQ(1, (int)v[0].panels.size());
+    EXPECT_EQ((int)MoviePlotView::Distribution, (int)v[0].panels[0].view);
+    EXPECT_EQ(22u, v[0].panels[0].subplot);
 }
 
-UTEST(viamd_movie_overlay, positions_of_hidden_subplots_are_not_taken_into_a_figure) {
-    MovieOverlay o;
-    o.type = MovieOverlayType::Timeline;
-    o.legacy_subplot_mask = 0b110;
+UTEST(viamd_movie_overlay, positions_of_hidden_subplots_are_not_taken) {
+    std::vector<MovieOverlay> v(1);
+    v[0].type = MovieOverlayType::Timeline;
+    v[0].legacy_subplot_mask = 0b110;
     const uint32_t t[] = {11, 12, 13};
     const uint32_t d[] = {21};
-    movie_overlay_make_figure(&o, t, 2, d, 1);   /* only two are shown */
-    ASSERT_EQ(1, (int)o.panels.size());
-    EXPECT_EQ(12u, o.panels[0].subplot);
+    movie_overlays_migrate(&v, t, 2, d, 1);   /* only two are shown */
+    ASSERT_EQ(1, (int)v[0].panels.size());
+    EXPECT_EQ(12u, v[0].panels[0].subplot);
 }
 
-UTEST(viamd_movie_overlay, other_overlays_are_not_made_into_figures) {
-    MovieOverlay o;
-    o.type = MovieOverlayType::TimeBar;
+UTEST(viamd_movie_overlay, a_figure_is_split_into_a_timeline_and_a_distribution_with_the_place_of_their_kind) {
+    std::vector<MovieOverlay> v(1);
+    v[0].type = MovieOverlayType::Figure;
+    v[0].anchor = MovieOverlayAnchor::BottomRight;
+    v[0].begin = 3.0;
+    v[0].end = 40.0;
+    v[0].font_points = 18.0f;
+    v[0].panels = {{MoviePlotView::Timeline, 1}, {MoviePlotView::Distribution, 11}, {MoviePlotView::Timeline, 2}};
+    const uint32_t ids[] = {1};
+    movie_overlays_migrate(&v, ids, 1, ids, 1);
+    ASSERT_EQ(2, (int)v.size());
+    EXPECT_EQ((int)MovieOverlayType::Timeline, (int)v[0].type);
+    EXPECT_EQ((int)MovieOverlayType::Distribution, (int)v[1].type);
+    ASSERT_EQ(2, (int)v[0].panels.size());
+    ASSERT_EQ(1, (int)v[1].panels.size());
+    EXPECT_EQ(11u, v[1].panels[0].subplot);
+    EXPECT_EQ((int)MovieOverlayAnchor::BottomCenter, (int)v[0].anchor);
+    EXPECT_EQ((int)MovieOverlayAnchor::MiddleRight, (int)v[1].anchor);
+    for (const MovieOverlay& o : v) {
+        EXPECT_NEAR(3.0, o.begin, 1e-9);        /* everything else is kept */
+        EXPECT_NEAR(40.0, o.end, 1e-9);
+        EXPECT_NEAR(18.0f, o.font_points, 1e-6);
+    }
+}
+
+UTEST(viamd_movie_overlay, a_figure_of_one_kind_becomes_one_overlay_and_an_empty_one_a_timeline) {
+    std::vector<MovieOverlay> v(2);
+    v[0].type = MovieOverlayType::Figure;
+    v[0].panels = {{MoviePlotView::Distribution, 11}};
+    v[1].type = MovieOverlayType::Figure;
+    const uint32_t ids[] = {1};
+    movie_overlays_migrate(&v, ids, 1, ids, 1);
+    ASSERT_EQ(2, (int)v.size());
+    EXPECT_EQ((int)MovieOverlayType::Distribution, (int)v[0].type);
+    EXPECT_EQ((int)MovieOverlayType::Timeline, (int)v[1].type);
+}
+
+UTEST(viamd_movie_overlay, other_overlays_are_not_touched_by_the_migration) {
+    std::vector<MovieOverlay> v(1);
+    v[0].type = MovieOverlayType::TimeBar;
     const uint32_t t[] = {1};
-    movie_overlay_make_figure(&o, t, 1, t, 1);
-    EXPECT_EQ((int)MovieOverlayType::TimeBar, (int)o.type);
-    EXPECT_TRUE(o.panels.empty());
+    movie_overlays_migrate(&v, t, 1, t, 1);
+    ASSERT_EQ(1, (int)v.size());
+    EXPECT_EQ((int)MovieOverlayType::TimeBar, (int)v[0].type);
+    EXPECT_TRUE(v[0].panels.empty());
 }
 
 UTEST(viamd_movie_overlay, timelines_over_timelines_share_the_axis_and_a_distribution_has_its_own) {

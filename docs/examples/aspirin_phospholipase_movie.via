@@ -245,17 +245,17 @@ Width=0.400000006
 TimeBarLabels=1
 
 [MovieOverlay]
-Type=9
+Type=6
 Enabled=1
 Range=0,80,0.5,0.5
-Anchor=8
-Size=0.4
+Anchor=7
+Size=0.2
 SizeUnit=0
 Color=1,1,1,1
 Background=0,0,0,0.5
 Length=0
 Text=
-Width=0.300000012
+Width=0.6
 PlotAxis=0
 PlotFlags=7
 FontPoints=0
@@ -263,6 +263,24 @@ LinePoints=0
 Palette=0
 Panel=0,1
 Panel=0,2
+
+[MovieOverlay]
+Type=7
+Enabled=1
+Range=0,80,0.5,0.5
+Anchor=5
+Size=0.4
+SizeUnit=0
+Color=1,1,1,1
+Background=0,0,0,0.5
+Length=0
+Text=
+Width=0.22
+PlotAxis=0
+PlotFlags=7
+FontPoints=0
+LinePoints=0
+Palette=0
 Panel=1,11
 
 [MovieOverlay]

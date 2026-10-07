@@ -45,17 +45,47 @@ bool movie_figure_x_labels(const MoviePlotView* views, size_t n, size_t i) {
     return views[i + 1] != MoviePlotView::Timeline;
 }
 
-void movie_overlay_make_figure(MovieOverlay* o, const uint32_t* timeline_ids, int num_timeline, const uint32_t* distribution_ids, int num_distribution) {
-    if (o->type != MovieOverlayType::Timeline && o->type != MovieOverlayType::Distribution) return;
-    const bool timeline = o->type == MovieOverlayType::Timeline;
-    const uint32_t* ids = timeline ? timeline_ids : distribution_ids;
-    const int n = timeline ? num_timeline : num_distribution;
-    o->panels.clear();
-    for (int i = 0; i < n && i < 31; ++i) {
-        if ((o->legacy_subplot_mask >> i) & 1) o->panels.push_back({timeline ? MoviePlotView::Timeline : MoviePlotView::Distribution, ids[i]});
+void movie_overlay_plot_defaults(MovieOverlay* o) {
+    o->size_unit = MovieOverlaySizeUnit::FrameHeight;
+    if (o->type == MovieOverlayType::Timeline) {
+        o->anchor = MovieOverlayAnchor::BottomCenter;
+        o->width = 0.6f;
+        o->size = 0.2f;
+    } else if (o->type == MovieOverlayType::Distribution) {
+        o->anchor = MovieOverlayAnchor::MiddleRight;
+        o->width = 0.22f;
+        o->size = 0.4f;
     }
-    o->legacy_subplot_mask = 0;
-    o->type = MovieOverlayType::Figure;
+}
+
+void movie_overlays_migrate(std::vector<MovieOverlay>* overlays, const uint32_t* timeline_ids, int num_timeline, const uint32_t* distribution_ids, int num_distribution) {
+    std::vector<MovieOverlay> out;
+    for (MovieOverlay o : *overlays) {
+        if ((o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) && o.legacy_subplot_mask != 0) {
+            const bool timeline = o.type == MovieOverlayType::Timeline;
+            const uint32_t* ids = timeline ? timeline_ids : distribution_ids;
+            const int n = timeline ? num_timeline : num_distribution;
+            for (int i = 0; i < n && i < 31; ++i) {
+                if ((o.legacy_subplot_mask >> i) & 1) o.panels.push_back({timeline ? MoviePlotView::Timeline : MoviePlotView::Distribution, ids[i]});
+            }
+            o.legacy_subplot_mask = 0;
+        }
+        if (o.type != MovieOverlayType::Figure) {
+            out.push_back(o);
+            continue;
+        }
+        MovieOverlay t = o, d = o;
+        t.type = MovieOverlayType::Timeline;
+        d.type = MovieOverlayType::Distribution;
+        t.panels.clear();
+        d.panels.clear();
+        for (const MoviePlotPanel& p : o.panels) (p.view == MoviePlotView::Timeline ? t : d).panels.push_back(p);
+        movie_overlay_plot_defaults(&t);
+        movie_overlay_plot_defaults(&d);
+        if (!t.panels.empty() || d.panels.empty()) out.push_back(t);
+        if (!d.panels.empty()) out.push_back(d);
+    }
+    *overlays = out;
 }
 
 float movie_overlay_alpha(const MovieOverlay& o, double time) {
