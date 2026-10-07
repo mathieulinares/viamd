@@ -7007,7 +7007,7 @@ struct MoviePlotContext {
 
 // One subplot as a panel of 'w' by 'h' at 'p0': its legend with the value at the frame that is shown, the axes and the
 // curves (or the bars). The labels of the horizontal axis are left out of a timeline panel that has another below it.
-static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, const MoviePlotPanel& panel, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
+static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
     ImDrawList* dl = c.dl;
     ImFont* font = c.font;
     const MovieOverlay& o = *c.o;
@@ -7018,17 +7018,13 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, co
     const bool elapsed = timeline && o.plot_axis == MoviePlotAxis::Elapsed;
     const int ns = MIN(sp.count, 6);
 
-    // The movie times this panel is there for, what the trajectory has been through in them, and where it starts on the axis
-    double pt0, pt1;
-    movie_panel_span(panel, o.begin, o.end, &pt0, &pt1);
-    pt0 = CLAMP(pt0, 0.0, prof.duration);
-    pt1 = CLAMP(pt1, pt0, prof.duration);
+    // A subplot that comes in later is drawn from the start of the overlay, with what happened before it came in
+    const double pt0 = c.axis_begin, pt1 = c.axis_end;
     const double tnow = CLAMP(c.time, pt0, pt1);
     double full_lo = 0.0, full_hi = 0.0, vis_lo = 0.0, vis_hi = 0.0;
     movie_time_bar_visited_between(prof, pt0, pt1, &full_lo, &full_hi);
     movie_time_bar_visited_between(prof, pt0, o.reveal ? tnow : pt1, &vis_lo, &vis_hi);
     const double d_axis0 = movie_time_bar_moved(prof, c.axis_begin);
-    const double offset = movie_time_bar_moved(prof, pt0) - d_axis0;
 
     const int color_base = c.color_index;
     c.color_index += ns;
@@ -7175,8 +7171,8 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, co
                 movie_elapsed_curve_between(&curve, prof, pt0, o.reveal ? tnow : pt1, v.x, v.num_samples,
                     [&](int i) { return (double)v.y[(size_t)i * v.stride] * v.y_scale; }, [&](double x) { return movie_series_value_at(v, x); });
                 const size_t step = MAX(curve.size() / (size_t)(4.0f * MAX(ix1 - ix0, 1.0f)), (size_t)1);
-                for (size_t i = 0; i < curve.size(); i += step) pts.push_back(ImVec2(sx(offset + curve[i].s), sy(curve[i].v)));
-                if (step > 1 && !curve.empty()) pts.push_back(ImVec2(sx(offset + curve.back().s), sy(curve.back().v)));
+                for (size_t i = 0; i < curve.size(); i += step) pts.push_back(ImVec2(sx(curve[i].s), sy(curve[i].v)));
+                if (step > 1 && !curve.empty()) pts.push_back(ImVec2(sx(curve.back().s), sy(curve.back().v)));
                 cursor_x = s_now;
             } else {
                 if (!(vis_hi >= vis_lo)) continue;
@@ -7298,11 +7294,6 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
     const int ai = (int)o.anchor;
     const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - plot_w) * 0.5f * (float)(ai % 3),
                              pos.y + margin + (size.y - 2.0f * margin - plot_h) * 0.5f * (float)(ai / 3));
-    if (o.background[3] > 0.0f) {
-        dl->AddRectFilled(ImVec2(p0.x - pad, p0.y - pad), ImVec2(p0.x + plot_w + pad, p0.y + plot_h + pad),
-            ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * alpha)), fpx * 0.4f);
-    }
-
     // The panels come in and go at times of their own; a panel that is not there yet keeps its place, so the others do not move
     const MovieTimeBarProfile& prof = movie_time_bar_profile_for(state);
     const float thick = o.line_points > 0.0f ? MAX(o.line_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 1.0f) : MAX(fpx * 0.16f, 1.5f);
@@ -7318,6 +7309,21 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
     }
 
     const float panel_h = plot_h / (float)k;
+
+    // The plate is behind the panels that are there, so it grows when another comes in (with its fade) instead of showing an empty slot
+    if (o.background[3] > 0.0f) {
+        const float round = fpx * 0.4f;
+        for (size_t i = 0; i < k; ++i) {
+            if (panel_alpha[i] <= 0.0f) continue;
+            const bool above = i > 0 && panel_alpha[i - 1] > 0.0f, below = i + 1 < k && panel_alpha[i + 1] > 0.0f;
+            const float y0 = p0.y + (float)i * panel_h - (above ? 0.0f : pad);
+            const float y1 = p0.y + (float)(i + 1) * panel_h + (below ? 0.0f : pad);
+            const ImDrawFlags flags = (above ? 0 : ImDrawFlags_RoundCornersTop) | (below ? 0 : ImDrawFlags_RoundCornersBottom);
+            dl->AddRectFilled(ImVec2(p0.x - pad, y0), ImVec2(p0.x + plot_w + pad, y1),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * panel_alpha[i])), flags ? round : 0.0f, flags ? flags : ImDrawFlags_RoundCornersNone);
+        }
+    }
+
     bool labelled_markers = false;
     size_t seen_index = 0;
     for (size_t i = 0; i < k; ++i) {
@@ -7325,7 +7331,7 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
         const bool first_timeline = views[i] == MoviePlotView::Timeline && !labelled_markers;
         labelled_markers |= first_timeline;
         c.alpha = panel_alpha[i];   // Already inside the fades of the overlay
-        movie_plot_panel_draw(c, *shown[i], *shown_panel[i], views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(seen_views, seen, seen_index), first_timeline);
+        movie_plot_panel_draw(c, *shown[i], views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(seen_views, seen, seen_index), first_timeline);
         seen_index += 1;
     }
 }
