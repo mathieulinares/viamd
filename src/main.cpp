@@ -8387,6 +8387,7 @@ static bool movie_draw_timeline_markers(ApplicationState* data) {
 
 static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool locked);
 static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool locked);
+static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, bool locked);
 
 // Subplots align the time axes and provide draggable row splitters.
 static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
@@ -8433,12 +8434,13 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
     const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
     int rows = 0;
-    float ratios[5];
+    float ratios[6];
     for (int track = 0; track < 3; ++track) {
         if (m.timeline_tracks[track]) ratios[rows++] = m.timeline_row_ratios[track];
     }
     ratios[rows++] = m.timeline_row_ratios[3];
     if (m.timeline_rep_lane) ratios[rows++] = m.timeline_row_ratios[4];
+    if (m.timeline_overlay_lane) ratios[rows++] = m.timeline_row_ratios[5];
     const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
       for (int track = 0; track < 3; ++track) {
@@ -8540,13 +8542,15 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
       }
       draw_movie_param_lane(data, movie_len, locked);
       if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
+      if (m.timeline_overlay_lane) draw_movie_overlay_lane(data, movie_len, locked);
       ImPlot::EndSubplots();
       int row = 0;
       for (int track = 0; track < 3; ++track) {
           if (m.timeline_tracks[track]) m.timeline_row_ratios[track] = ratios[row++];
       }
       m.timeline_row_ratios[3] = ratios[row++];
-      if (m.timeline_rep_lane) m.timeline_row_ratios[4] = ratios[row];
+      if (m.timeline_rep_lane) m.timeline_row_ratios[4] = ratios[row++];
+      if (m.timeline_overlay_lane) m.timeline_row_ratios[5] = ratios[row];
     }
     if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         movie_sort_keyframes(data);
@@ -8848,6 +8852,94 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
     }
 }
 
+// The overlays as bars, one row each: drag a bar for when it is shown, its ends for when it starts and stops. A bar that is
+// moved takes the times of the subplots of a plot overlay with it. Fills the space that is left.
+static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, bool locked) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const int n = (int)m.overlays.size();
+    const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
+    static const ImVec4 type_colors[(int)MovieOverlayType::Count] = {
+        ImVec4(0.90f, 0.90f, 0.90f, 1), ImVec4(0.65f, 0.65f, 1.00f, 1), ImVec4(0.55f, 0.90f, 0.55f, 1), ImVec4(1.00f, 0.80f, 0.40f, 1),
+        ImVec4(1.00f, 0.60f, 0.40f, 1), ImVec4(0.80f, 0.50f, 1.00f, 1), ImVec4(0.40f, 0.80f, 1.00f, 1), ImVec4(0.40f, 1.00f, 0.80f, 1),
+        ImVec4(1.00f, 0.50f, 0.70f, 1), ImVec4(0.80f, 0.80f, 0.80f, 1),
+    };
+
+    if (ImPlot::BeginPlot("##overlay_lane", ImVec2(-1, -1), plot_flags)) {
+        ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations | ImPlotAxisFlags_Invert);
+        ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.7, (double)MAX(n, 1) - 0.3, ImPlotCond_Always);
+        if (n == 0) ImPlot::PlotText("No overlay: add one in the Movie window", 0.5 * (double)movie_len, 0.0);
+
+        for (int i = 0; i < n; ++i) {
+            MovieOverlay& o = m.overlays[i];
+            ImVec4 col = type_colors[CLAMP((int)o.type, 0, (int)MovieOverlayType::Count - 1)];
+            if (!o.enabled) col.w = 0.35f;
+            double x0 = o.begin, x1 = o.end, y0 = (double)i - 0.38, y1 = (double)i + 0.38;
+            bool clicked = false, hovered = false, held = false;
+            if (ImPlot::DragRect(7000 + i, &x0, &y0, &x1, &y1, col, drag_flags, &clicked, &hovered, &held)) {
+                double b = movie_snap_time(data, MIN(x0, x1)), e = movie_snap_time(data, MAX(x0, x1));
+                const bool moved_only = fabs((x1 - x0) - (o.end - o.begin)) < 1.0e-6;
+                b = CLAMP(b, 0.0, (double)movie_len);
+                e = CLAMP(e, b + 0.05, (double)movie_len);
+                if (moved_only) {
+                    // The whole bar was moved, so what is timed inside it moves too
+                    const double d = b - o.begin;
+                    for (MoviePlotPanel& panel : o.panels) {
+                        panel.begin = MAX(panel.begin + d, 0.0);
+                        if (panel.end > 0.0) panel.end = MAX(panel.end + d, 0.0);
+                    }
+                    e = b + (o.end - o.begin);
+                }
+                o.begin = b;
+                o.end = e;
+            }
+            if (hovered && !held) {
+                ImGui::SetTooltip("%d  %s%s%s\n%.2f s to %.2f s\nDrag to move it, its ends to change when it starts and stops", i + 1,
+                    movie_overlay_type_str[(int)o.type], o.type == MovieOverlayType::Text ? ": " : "", o.type == MovieOverlayType::Text ? o.text : "", o.begin, o.end);
+            }
+
+            char label[96];
+            snprintf(label, sizeof(label), "%d %s%s%s", i + 1, movie_overlay_type_str[(int)o.type], o.type == MovieOverlayType::Text ? ": " : "", o.type == MovieOverlayType::Text ? o.text : "");
+            ImPlot::PlotText(label, o.begin, (double)i, ImVec2(ImGui::CalcTextSize(label).x * 0.5f + 6.0f, 0));
+
+            // When the subplots of a plot overlay come in
+            if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
+                ImPlot::PushPlotClipRect();
+                ImDrawList* dl = ImPlot::GetPlotDrawList();
+                for (const MoviePlotPanel& panel : o.panels) {
+                    if (panel.begin <= o.begin) continue;
+                    dl->AddLine(ImPlot::PlotToPixels(panel.begin, (double)i - 0.38), ImPlot::PlotToPixels(panel.begin, (double)i + 0.38), ImGui::ColorConvertFloat4ToU32(col), 2.0f);
+                }
+                ImPlot::PopPlotClipRect();
+            }
+        }
+
+        // The notes of the movie, at the bottom
+        {
+            ImPlot::PushPlotClipRect();
+            ImDrawList* dl = ImPlot::GetPlotDrawList();
+            for (const MovieMarker& mk : m.markers) {
+                const ImVec2 p = ImPlot::PlotToPixels(mk.time, (double)n - 0.35);
+                dl->AddTriangleFilled(ImVec2(p.x - 4.0f, p.y), ImVec2(p.x + 4.0f, p.y), ImVec2(p.x, p.y - 7.0f), IM_COL32(255, 220, 90, 230));
+            }
+            ImPlot::PopPlotClipRect();
+        }
+
+        double playhead = (double)m.playhead;
+        if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
+            m.playhead = (float)movie_snap_time(data, playhead);
+            if (!locked) movie_apply_time(data, (double)m.playhead, true);
+        }
+        if (locked) {
+            double cur = m.cur_time;
+            ImPlot::DragLineX(1001, &cur, ImVec4(1.0f, 0.3f, 0.3f, 1), 1.5f, ImPlotDragToolFlags_NoInputs | ImPlotDragToolFlags_NoFit);
+        }
+        ImPlot::EndPlot();
+    }
+}
+
 // The timeline of the movie: trajectory, distance, field of view and a look parameter.
 static void draw_movie_timeline_window(ApplicationState* data) {
     auto& m = data->movie;
@@ -8918,6 +9010,9 @@ static void draw_movie_timeline_window(ApplicationState* data) {
         ImGui::EndCombo();
     }
     ImGui::Checkbox("Representation lane", &m.timeline_rep_lane);
+    ImGui::SameLine();
+    ImGui::Checkbox("Overlay lane", &m.timeline_overlay_lane);
+    ImGui::SetItemTooltip("The overlays as bars below the other lanes, one row each: drag a bar to move it, its ends to change when it is shown.");
     const int num_reps = (int)md_array_size(data->representation.reps);
     if (m.timeline_rep_lane && num_reps > 0) {
         m.rep_selected = CLAMP(m.rep_selected, 0, num_reps - 1);
@@ -9023,7 +9118,7 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     ImGui::Checkbox("Show in viewport", &m.show_overlay_preview);
     ImGui::SetItemTooltip("Shows them at the preview time. The recorded frames have the proportions of the movie's size,\nso where they sit is only exact when the viewport has them too.");
 
-    int remove_idx = -1;
+    int remove_idx = -1, duplicate_idx = -1;
     for (int i = 0; i < (int)m.overlays.size(); ++i) {
         MovieOverlay& o = m.overlays[i];
         ImGui::PushID(i);
@@ -9031,9 +9126,12 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         snprintf(label, sizeof(label), "%d  %s%s%s###overlay", i + 1, movie_overlay_type_str[(int)o.type],
             o.type == MovieOverlayType::Text ? ": " : "", o.type == MovieOverlayType::Text ? o.text : "");
         const bool open = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
-        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 6.0f);
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 11.5f);
         ImGui::Checkbox("##enabled", &o.enabled);
         ImGui::SetItemTooltip("Shown in the movie");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Duplicate")) duplicate_idx = i;
+        ImGui::SetItemTooltip("Another overlay just like this one, below it: change when it is shown, or where, or which subplots");
         ImGui::SameLine();
         if (ImGui::SmallButton("Remove")) remove_idx = i;
         if (open) {
@@ -9254,6 +9352,10 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         ImGui::PopID();
     }
     if (remove_idx >= 0) m.overlays.erase(m.overlays.begin() + remove_idx);
+    if (duplicate_idx >= 0 && duplicate_idx < (int)m.overlays.size()) {
+        const MovieOverlay copy = m.overlays[duplicate_idx];
+        m.overlays.insert(m.overlays.begin() + duplicate_idx + 1, copy);
+    }
 
     ImGui::SeparatorText("Markers");
     ImGui::TextDisabled("Notes on the timeline of the movie, e.g. 'water appears'. A figure draws them on its timelines where the movie gets to them.");

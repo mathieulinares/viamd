@@ -149,7 +149,7 @@ The look: **Width** is a part of the width of the frame and **Size** the height 
 
 **Add Image...** asks for a png or jpg file (a group's logo, a figure) and shows it like the logo; **Size** is its height and its transparency is kept. The file is saved in the workspace as a path relative to it, so keep it with the workspace; **Reload** reads it again after it was changed, and the box turns red when it cannot be read. For a logo or an image, **Size** is its height. Each overlay has:
 
-- an on/off box and **Remove**;
+- an on/off box, **Duplicate** (another overlay just like it, below it, e.g. to show something else at another time or place) and **Remove**;
 - **Shown (s)**, the times it is shown from and to, with **Start at preview time** and **End at preview time**;
 - **Fade in (s)** and **Fade out (s)**;
 - a **Position** (nine anchors), **Size** (a part of the frame height, or in points: a point is a pixel of a frame that is 1080 pixels high, scaled with the frame, so a size looks the same at any resolution; changing the unit keeps the size as it is), **Color** and a **Background** plate to read it over a busy picture (none while its opacity is 0).
@@ -167,6 +167,7 @@ Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **
 - **Field of view** in degrees. Dots can be dragged sideways (time only).
 - **Look parameter**: the parameter chosen in the **Look parameter** list at the top. Double-click to add a key, drag to change it, right-click to remove it.
 - **Representation lane**: the property of a representation chosen with the two lists next to **Representation lane** (untick it to hide the lane). The line is its value over the movie and the dots are its keys: drag sideways for the time and up or down for the value, double-click to add one, right-click to remove one. For **Visible** a double-click turns it around at that time (shown becomes hidden and the other way), and the first one on a representation without keys also keys what it is now at time 0, so that it holds until then.
+- **Overlay lane** (tick **Overlay lane**): the overlays as bars, one row each and a colour for each kind, with the notes of the movie (markers) as small yellow triangles at the bottom. Drag a bar to move when the overlay is shown, or one of its ends to change when it starts and stops (it lands on frames with **Snap to frames**). Moving a whole bar moves the in and out times of the subplots of a timeline or a distribution with it, and the small ticks in such a bar are where subplots come in later. Hover a bar for its name and times.
 
 The yellow line is the playhead. Scroll to zoom the time, drag the background to pan, and use **Show whole movie** to reset. Drag between tracks to change their heights. Untick **Trajectory**, **Distance** or **Field of view** to hide a track. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
 
