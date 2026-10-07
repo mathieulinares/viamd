@@ -29,7 +29,8 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] **Fade in** and **Fade out** work when scrubbing across the start and end of an overlay.
 - [ ] **Background** plate of a text overlay: rounded, sized to the text, fades with it.
 - [ ] Undo and redo (Ctrl+Z, Ctrl+Y) restore overlay edits, also **Background**.
-- [ ] Record a few seconds. In the video the text, the bar and the logo are the right way up, not stretched, sharp at 1920x1080 and at **Scale** 25 %, and where the viewport showed them (the proportions can differ).
+- [ ] Record a few seconds. In the video the text, the bar and the logo are the right way up, not stretched, sharp at 1920x1080 and at **Scale** 25 %, and where the frame in the viewport showed them.
+- [ ] **Show frame**: with the Movie window open the viewport shows the frame of the movie (a box with the size above it, the outside dimmed) and the view is a little wider; set the resolution to 1920x1080, then to a tall size (e.g. a custom 1080x1920) and back: the box follows the proportions; the overlays are laid out in the box, and a recording matches what the box showed (camera, the placement of the title, the logo, the timeline and the distribution, the labels of a property overlay and their size); the scale bar length is right; switching **Show frame** off restores the plain view; the dimming and the wider view are gone while recording and when the Movie window is closed; clicking atoms in the viewport still selects the right one.
 - [ ] Record with **Samples per frame** above 1: the overlays are not smeared or doubled.
 
 ## 3. Camera keys

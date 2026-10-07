@@ -132,6 +132,14 @@ float movie_overlay_alpha(const MovieOverlay& o, double time);
 // or 5 times a power of ten. units_per_pixel is how much of the structure one pixel covers.
 float movie_scale_bar_length(double units_per_pixel, double span_px, double target);
 
+// The rectangle that a frame of fw x fh takes in a viewport of vw x vh: as large as fits, in its proportions, centered, using
+// the part 'fill' (0..1) of the room
+void movie_frame_fit(float vw, float vh, float fw, float fh, float fill, float* x, float* y, float* w, float* h);
+
+// The vertical field of view that makes a rectangle 'guide_h' high, in a viewport 'view_h' high, show what 'fov_y' shows in a whole frame
+// (never wider than 170 degrees)
+float movie_guide_fov_y(float fov_y, float view_h, float guide_h);
+
 // How much of the structure one pixel of the frame covers, at the distance the camera looks at
 double movie_units_per_pixel(float distance, float fov_y, float frame_height_px);
 

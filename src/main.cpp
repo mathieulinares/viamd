@@ -236,6 +236,8 @@ static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
 static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state);
 static void movie_sort_keyframes(ApplicationState* state);
+static bool movie_frame_guide(const ApplicationState* state, ImVec2* pos, ImVec2* size);
+static void movie_frame_size(const ApplicationState* state, int* w, int* h);
 static void movie_property_vis_apply(ApplicationState* state);
 static void script_vis_text_draw(ImDrawList* dl, ImVec2 res, float scale, const ApplicationState& state);
 static void movie_apply_time(ApplicationState* state, double time, bool apply_camera);
@@ -1057,18 +1059,42 @@ int main(int argc, char** argv) {
             PUSH_CPU_SECTION("Draw vis text");
             ImGuiWindow* window = ImGui::FindWindowByName("Main interaction window");
             if (window) {
-                script_vis_text_draw(window->DrawList, ImVec2((float)state.app.window.width, (float)state.app.window.height), 1.0f, state);
+                // The text is as large relative to the frame as it will be in the recording
+                ImVec2 guide_pos, guide_size;
+                const bool guided = movie_frame_guide(&state, &guide_pos, &guide_size);
+                script_vis_text_draw(window->DrawList, ImVec2((float)state.app.window.width, (float)state.app.window.height),
+                    guided ? guide_size.y / (float)state.app.window.height : 1.0f, state);
             }
             POP_CPU_SECTION();
         }
 
-        if (state.movie.show_overlay_preview && !state.movie.overlays.empty() && state.movie.state != MovieRecordingState::Recording &&
-            (state.movie.show_window || state.movie.show_timeline_window)) {
-            // The movie's overlays at the preview time, laid out for the viewport
+        {
             ImGuiWindow* window = ImGui::FindWindowByName("Main interaction window");
-            if (window) {
-                movie_overlays_draw(window->DrawList, ImVec2(0, 0), ImVec2((float)state.app.window.width, (float)state.app.window.height),
-                    (double)state.movie.playhead, &state);
+            ImVec2 guide_pos, guide_size;
+            const bool guided = movie_frame_guide(&state, &guide_pos, &guide_size);
+            if (window && guided) {
+                // What is outside the frame is dimmed, and the frame is outlined
+                const ImVec2 view(0, 0), end((float)state.app.window.width, (float)state.app.window.height);
+                const ImVec2 g1(guide_pos.x + guide_size.x, guide_pos.y + guide_size.y);
+                const ImU32 dim = IM_COL32(0, 0, 0, 120);
+                ImDrawList* dl = window->DrawList;
+                dl->AddRectFilled(view, ImVec2(end.x, guide_pos.y), dim);
+                dl->AddRectFilled(ImVec2(view.x, g1.y), end, dim);
+                dl->AddRectFilled(ImVec2(view.x, guide_pos.y), ImVec2(guide_pos.x, g1.y), dim);
+                dl->AddRectFilled(ImVec2(g1.x, guide_pos.y), ImVec2(end.x, g1.y), dim);
+                dl->AddRect(guide_pos, g1, IM_COL32(255, 255, 255, 170), 0.0f, 0, 1.5f);
+                int fw, fh;
+                movie_frame_size(&state, &fw, &fh);
+                char label[48];
+                snprintf(label, sizeof(label), "%d x %d", fw, fh);
+                dl->AddText(ImVec2(guide_pos.x + 4.0f, guide_pos.y - ImGui::GetFontSize() - 2.0f), IM_COL32(255, 255, 255, 190), label);
+            }
+            if (window && state.movie.show_overlay_preview && !state.movie.overlays.empty() && state.movie.state != MovieRecordingState::Recording &&
+                (state.movie.show_window || state.movie.show_timeline_window)) {
+                // The movie's overlays at the preview time, laid out in the frame of the movie (the viewport while the frame is not shown)
+                const ImVec2 pos = guided ? guide_pos : ImVec2(0, 0);
+                const ImVec2 size = guided ? guide_size : ImVec2((float)state.app.window.width, (float)state.app.window.height);
+                movie_overlays_draw(window->DrawList, pos, size, (double)state.movie.playhead, &state);
             }
         }
 
@@ -1246,19 +1272,30 @@ int main(int argc, char** argv) {
 // #misc
 static void update_view_param(ApplicationState* data) {
     ViewParam& param = data->view.param;
+
+    // While the frame of the movie is shown in the viewport, the camera looks at it through the frame: the field of view is
+    // widened so that the frame, and not the whole viewport, has the vertical field of view that the recording will have
+    Camera cam = data->view.camera;
+    {
+        ImVec2 guide_pos, guide_size;
+        if (movie_frame_guide(data, &guide_pos, &guide_size) && guide_size.y > 0.0f) {
+            cam.fov_y = movie_guide_fov_y(cam.fov_y, (float)data->app.window.height, guide_size.y);
+        }
+    }
+
     param.matrix.prev = param.matrix.curr;
     param.jitter.prev = param.jitter.curr;
 
-    param.clip_planes.near = data->view.camera.near_plane;
-    param.clip_planes.far = data->view.camera.far_plane;
-    param.fov_y = data->view.camera.fov_y;
+    param.clip_planes.near = cam.near_plane;
+    param.clip_planes.far = cam.far_plane;
+    param.fov_y = cam.fov_y;
     param.resolution = {(float)data->gbuffer.width, (float)data->gbuffer.height};
 
-    param.matrix.curr.view = camera_world_to_view_matrix(data->view.camera) * data->mold.unitcell_transform;
-    param.matrix.inv.view  = mat4_inverse(data->mold.unitcell_transform) * camera_view_to_world_matrix(data->view.camera);
+    param.matrix.curr.view = camera_world_to_view_matrix(cam) * data->mold.unitcell_transform;
+    param.matrix.inv.view  = mat4_inverse(data->mold.unitcell_transform) * camera_view_to_world_matrix(cam);
 
-    const float n = data->view.camera.near_plane;
-    const float f = data->view.camera.far_plane;
+    const float n = cam.near_plane;
+    const float f = cam.far_plane;
     const float aspect_ratio = (float)data->gbuffer.width / (float)data->gbuffer.height;
 
     if (data->visuals.temporal_aa.enabled && data->visuals.temporal_aa.jitter) {
@@ -1267,11 +1304,11 @@ static void update_view_param(ApplicationState* data) {
         param.jitter.curr = data->view.jitter.sequence[i] - 0.5f;
         if (data->view.mode == CameraMode::Perspective) {
             const vec2_t j = param.jitter.curr;
-            param.matrix.curr.proj = camera_view_to_clip_matrix_persp(data->view.camera, data->gbuffer.width, data->gbuffer.height, j.x, j.y);
-            param.matrix.inv.proj  = camera_clip_to_view_matrix_persp(data->view.camera, data->gbuffer.width, data->gbuffer.height, j.x, j.y);
-            param.matrix.curr.proj_no_jitter = camera_view_to_clip_matrix_persp(data->view.camera, aspect_ratio);
+            param.matrix.curr.proj = camera_view_to_clip_matrix_persp(cam, data->gbuffer.width, data->gbuffer.height, j.x, j.y);
+            param.matrix.inv.proj  = camera_clip_to_view_matrix_persp(cam, data->gbuffer.width, data->gbuffer.height, j.x, j.y);
+            param.matrix.curr.proj_no_jitter = camera_view_to_clip_matrix_persp(cam, aspect_ratio);
         } else {
-            const float h = data->view.camera.distance * tanf(data->view.camera.fov_y * 0.5f);
+            const float h = cam.distance * tanf(cam.fov_y * 0.5f);
             const float w = aspect_ratio * h;
             const vec2_t scl = {w / data->gbuffer.width * 2.0f, h / data->gbuffer.height * 2.0f};
             const vec2_t j = param.jitter.curr * scl;
@@ -1283,10 +1320,10 @@ static void update_view_param(ApplicationState* data) {
     } else {
         param.jitter.curr = {0,0};
         if (data->view.mode == CameraMode::Perspective) {
-            param.matrix.curr.proj = camera_view_to_clip_matrix_persp(data->view.camera, aspect_ratio);
-            param.matrix.inv.proj = camera_clip_to_view_matrix_persp(data->view.camera, (float)data->gbuffer.width / (float)data->gbuffer.height);
+            param.matrix.curr.proj = camera_view_to_clip_matrix_persp(cam, aspect_ratio);
+            param.matrix.inv.proj = camera_clip_to_view_matrix_persp(cam, (float)data->gbuffer.width / (float)data->gbuffer.height);
         } else {
-            const float h = data->view.camera.distance * tanf(data->view.camera.fov_y * 0.5f);
+            const float h = cam.distance * tanf(cam.fov_y * 0.5f);
             const float w = aspect_ratio * h;
             param.matrix.curr.proj = camera_view_to_clip_matrix_ortho(-w, w, -h, h, n, f);
             param.matrix.inv.proj = camera_clip_to_view_matrix_ortho(-w, w, -h, h, n, f);
@@ -6704,6 +6741,20 @@ static void movie_frame_size(const ApplicationState* state, int* w, int* h) {
     movie_scaled_size(w, h, state->movie.res_scale);
 }
 
+// Where the frame of the movie is in the viewport, fitted into it with a little room: the preview shows the movie as it will be
+// recorded, in the proportions of the frame. False while there is nothing to show (not editing the movie, recording, a screenshot).
+static bool movie_frame_guide(const ApplicationState* state, ImVec2* pos, ImVec2* size) {
+    const auto& m = state->movie;
+    if (!m.show_frame || m.state == MovieRecordingState::Recording || !(m.show_window || m.show_timeline_window)) return false;
+    if (!str_empty(state->screenshot.path_to_file)) return false;
+    int fw = 0, fh = 0;
+    movie_frame_size(state, &fw, &fh);
+    const float vw = (float)state->app.window.width, vh = (float)state->app.window.height;
+    if (fw <= 0 || fh <= 0 || vw <= 0.0f || vh <= 0.0f) return false;
+    movie_frame_fit(vw, vh, (float)fw, (float)fh, 0.92f, &pos->x, &pos->y, &size->x, &size->y);
+    return true;
+}
+
 static void movie_pbo_free(ApplicationState* state) {
     auto& m = state->movie;
     for (int i = 0; i < MOVIE_RING_SIZE; ++i) {
@@ -8965,6 +9016,9 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     ImGui::SameLine();
     if (ImGui::Button("Add Logo")) add(MovieOverlayType::Logo);
     ImGui::SetItemTooltip("The VIAMD logo. A movie starts with it in the top left corner for the whole movie: remove it here\nif you do not want it. Its colour tints it (white keeps its own colours), its size is its height.");
+    ImGui::SameLine();
+    ImGui::Checkbox("Show frame", &m.show_frame);
+    ImGui::SetItemTooltip("Shows the frame of the movie in the viewport, with what is outside it dimmed. The view is widened so that the frame\nshows what will be recorded, in its proportions, and the overlays are laid out in it. The recording is not changed.");
     ImGui::SameLine();
     ImGui::Checkbox("Show in viewport", &m.show_overlay_preview);
     ImGui::SetItemTooltip("Shows them at the preview time. The recorded frames have the proportions of the movie's size,\nso where they sit is only exact when the viewport has them too.");

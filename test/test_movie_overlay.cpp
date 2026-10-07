@@ -520,3 +520,43 @@ UTEST(viamd_movie_overlay, a_panel_that_comes_in_later_is_not_there_before_it_an
     EXPECT_NEAR(1.0, movie_panel_alpha(p, o, 45.0), 1e-9);
     EXPECT_NEAR(0.0, movie_panel_alpha(p, o, 61.0), 1e-9);
 }
+
+/* The frame of the movie in the viewport */
+
+UTEST(viamd_movie_overlay, a_wide_frame_in_a_square_viewport_is_fitted_by_its_width_and_centered) {
+    float x, y, w, h;
+    movie_frame_fit(1000.0f, 1000.0f, 1920.0f, 1080.0f, 1.0f, &x, &y, &w, &h);
+    EXPECT_NEAR(1000.0f, w, 1e-3);
+    EXPECT_NEAR(562.5f, h, 1e-3);
+    EXPECT_NEAR(0.0f, x, 1e-3);
+    EXPECT_NEAR(218.75f, y, 1e-3);
+}
+
+UTEST(viamd_movie_overlay, a_tall_frame_in_a_wide_viewport_is_fitted_by_its_height_with_room_left) {
+    float x, y, w, h;
+    movie_frame_fit(1600.0f, 900.0f, 1080.0f, 1920.0f, 0.9f, &x, &y, &w, &h);
+    EXPECT_NEAR(810.0f, h, 1e-3);
+    EXPECT_NEAR(455.625f, w, 1e-3);
+    EXPECT_NEAR(1080.0f / 1920.0f, w / h, 1e-5);
+    EXPECT_NEAR((1600.0f - w) * 0.5f, x, 1e-3);
+    EXPECT_NEAR(45.0f, y, 1e-3);
+}
+
+UTEST(viamd_movie_overlay, a_frame_without_a_size_takes_no_room) {
+    float x, y, w, h;
+    movie_frame_fit(800.0f, 600.0f, 0.0f, 0.0f, 1.0f, &x, &y, &w, &h);
+    EXPECT_NEAR(0.0f, w, 1e-6);
+    EXPECT_NEAR(0.0f, h, 1e-6);
+}
+
+UTEST(viamd_movie_overlay, the_guide_shows_what_the_whole_frame_will_show) {
+    const float fov = 0.785398f;
+    EXPECT_NEAR(fov, movie_guide_fov_y(fov, 900.0f, 900.0f), 1e-6);   /* the frame is the viewport */
+    /* A frame half as high shows the same half-height in half the pixels: the viewport sees twice the extent */
+    EXPECT_NEAR(2.0f * tanf(fov * 0.5f), tanf(movie_guide_fov_y(fov, 900.0f, 450.0f) * 0.5f), 1e-5);
+}
+
+UTEST(viamd_movie_overlay, the_guide_never_widens_the_view_past_170_degrees) {
+    EXPECT_NEAR(170.0f * 3.14159265f / 180.0f, movie_guide_fov_y(1.5f, 1000.0f, 10.0f), 1e-5);
+    EXPECT_NEAR(1.0f, movie_guide_fov_y(1.0f, 1000.0f, 0.0f), 1e-6);
+}

@@ -117,6 +117,20 @@ float movie_scale_bar_length(double units_per_pixel, double span_px, double targ
     return (float)(step * mag);
 }
 
+void movie_frame_fit(float vw, float vh, float fw, float fh, float fill, float* x, float* y, float* w, float* h) {
+    const float s = (fw > 0.0f && fh > 0.0f) ? fill * fminf(vw / fw, vh / fh) : 0.0f;
+    *w = fw * s;
+    *h = fh * s;
+    *x = (vw - *w) * 0.5f;
+    *y = (vh - *h) * 0.5f;
+}
+
+float movie_guide_fov_y(float fov_y, float view_h, float guide_h) {
+    if (guide_h <= 0.0f) return fov_y;
+    const float wide = 2.0f * atanf(tanf(fov_y * 0.5f) * view_h / guide_h);
+    return fminf(wide, 170.0f * 3.14159265358979f / 180.0f);
+}
+
 double movie_units_per_pixel(float distance, float fov_y, float frame_height_px) {
     if (frame_height_px <= 0.0f) return 0.0;
     return 2.0 * (double)distance * tan((double)fov_y * 0.5) / (double)frame_height_px;

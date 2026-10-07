@@ -154,7 +154,7 @@ The look: **Width** is a part of the width of the frame and **Size** the height 
 - **Fade in (s)** and **Fade out (s)**;
 - a **Position** (nine anchors), **Size** (a part of the frame height, or in points: a point is a pixel of a frame that is 1080 pixels high, scaled with the frame, so a size looks the same at any resolution; changing the unit keeps the size as it is), **Color** and a **Background** plate to read it over a busy picture (none while its opacity is 0).
 
-A scale bar picks a round length unless you set one. **Show in viewport** previews the overlays at the preview time. Their placement is exact only when the viewport has the same proportions as the movie.
+A scale bar picks a round length unless you set one. **Show in viewport** previews the overlays at the preview time. **Show frame** (on by default, while the Movie window is open and nothing is being recorded) draws the frame of the movie in the viewport, in its proportions, with what is outside it dimmed and its size written above it. The view is widened so that the frame shows what the recording will show, and the overlays are laid out in the frame, so what you see in it is what is recorded, whatever the shape of the viewport. It does not change the camera keys or the recording; switch it off to see the plain viewport.
 
 ## The Movie Timeline window
 
