@@ -139,7 +139,8 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
             if (x.color[c] != y.color[c] || x.background[c] != y.background[c]) return false;
         }
         for (size_t p = 0; p < x.panels.size(); ++p) {
-            if (x.panels[p].view != y.panels[p].view || x.panels[p].subplot != y.panels[p].subplot) return false;
+            if (x.panels[p].view != y.panels[p].view || x.panels[p].subplot != y.panels[p].subplot ||
+                x.panels[p].begin != y.panels[p].begin || x.panels[p].end != y.panels[p].end) return false;
         }
     }
     if (a.markers.size() != b.markers.size()) return false;
@@ -158,6 +159,10 @@ void movie_keys_scale_time(MovieKeys* keys, double scale) {
         o.end *= scale;
         o.fade_in *= (float)scale;
         o.fade_out *= (float)scale;
+        for (MoviePlotPanel& p : o.panels) {
+            p.begin *= scale;
+            p.end *= scale;
+        }
     }
     for (MovieMarker& k : keys->markers) k.time *= scale;
     keys->duration = (float)(keys->duration * scale);

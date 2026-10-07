@@ -263,6 +263,7 @@ LinePoints=0
 Palette=0
 Panel=0,1
 Panel=0,2
+PanelTime=30,0
 
 [MovieOverlay]
 Type=7

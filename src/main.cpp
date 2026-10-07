@@ -7000,15 +7000,14 @@ struct MoviePlotContext {
     float alpha;
     double time;
     double q;                        // The trajectory time (frame) that is shown
-    double full_lo, full_hi;         // The stretch of the trajectory that the movie covers
-    double vis_lo, vis_hi;           // The part of it that has been played by now (all of it without 'reveal')
+    double axis_begin, axis_end;     // The movie times the overlay covers: its horizontal axis starts and ends there
     float thick;                     // Width of the lines
     int color_index = 0;             // How many series have been drawn, for the colours of a palette
 };
 
 // One subplot as a panel of 'w' by 'h' at 'p0': its legend with the value at the frame that is shown, the axes and the
 // curves (or the bars). The labels of the horizontal axis are left out of a timeline panel that has another below it.
-static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
+static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, const MoviePlotPanel& panel, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
     ImDrawList* dl = c.dl;
     ImFont* font = c.font;
     const MovieOverlay& o = *c.o;
@@ -7018,6 +7017,19 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
     const bool timeline = view == MoviePlotView::Timeline;
     const bool elapsed = timeline && o.plot_axis == MoviePlotAxis::Elapsed;
     const int ns = MIN(sp.count, 6);
+
+    // The movie times this panel is there for, what the trajectory has been through in them, and where it starts on the axis
+    double pt0, pt1;
+    movie_panel_span(panel, o.begin, o.end, &pt0, &pt1);
+    pt0 = CLAMP(pt0, 0.0, prof.duration);
+    pt1 = CLAMP(pt1, pt0, prof.duration);
+    const double tnow = CLAMP(c.time, pt0, pt1);
+    double full_lo = 0.0, full_hi = 0.0, vis_lo = 0.0, vis_hi = 0.0;
+    movie_time_bar_visited_between(prof, pt0, pt1, &full_lo, &full_hi);
+    movie_time_bar_visited_between(prof, pt0, o.reveal ? tnow : pt1, &vis_lo, &vis_hi);
+    const double d_axis0 = movie_time_bar_moved(prof, c.axis_begin);
+    const double offset = movie_time_bar_moved(prof, pt0) - d_axis0;
+
     const int color_base = c.color_index;
     c.color_index += ns;
     auto series_color = [&](int s) -> ImVec4 {
@@ -7055,11 +7067,10 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
     bool flip = false;   // A trajectory time axis for a movie that plays the trajectory backward
     if (timeline) {
         if (elapsed) {
-            xb = prof.total();
+            xb = movie_time_bar_moved(prof, c.axis_end) - d_axis0;
         } else {
-            xa = c.full_lo;
-            xb = c.full_hi;
-            flip = !prof.q.empty() && prof.q.back() < prof.q.front();
+            movie_time_bar_visited_between(prof, c.axis_begin, c.axis_end, &xa, &xb);
+            flip = movie_trajectory_quantity(state, c.axis_end) < movie_trajectory_quantity(state, c.axis_begin);
             if (!(xb > xa)) {
                 for (int s = 0; s < ns; ++s) {
                     if (has_t[s] && tv[s].num_samples > 1) { xa = tv[s].x[0]; xb = tv[s].x[tv[s].num_samples - 1]; break; }
@@ -7070,8 +7081,8 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
         double lo = 0.0, hi = 0.0;
         for (int s = 0; s < ns; ++s) {
             if (!has_t[s] || tv[s].num_samples < 1) continue;
-            const int i0 = CLAMP((int)floor(series_temporal_index_at(tv[s], c.full_lo)), 0, tv[s].num_samples - 1);
-            const int i1 = CLAMP((int)ceil(series_temporal_index_at(tv[s], c.full_hi)), 0, tv[s].num_samples - 1);
+            const int i0 = CLAMP((int)floor(series_temporal_index_at(tv[s], full_lo)), 0, tv[s].num_samples - 1);
+            const int i1 = CLAMP((int)ceil(series_temporal_index_at(tv[s], full_hi)), 0, tv[s].num_samples - 1);
             for (int i = i0; i <= i1; ++i) {
                 const double y = (double)tv[s].y[(size_t)i * tv[s].stride] * tv[s].y_scale;
                 if (!any) { lo = hi = y; any = true; }
@@ -7149,7 +7160,7 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
     std::vector<ImVec2> pts;
     std::vector<MovieCurvePoint> curve;
     std::vector<float> counts_full, counts_vis;
-    const double s_now = movie_time_bar_moved(prof, c.time);
+    const double s_now = movie_time_bar_moved(prof, tnow) - d_axis0;
     for (int s = 0; s < ns; ++s) {
         const PlotSeries& ps = sp.series[s];
         const ImVec4 sc = series_color(s);
@@ -7161,20 +7172,20 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
             double cursor_x = c.q;
             if (elapsed) {
                 // The series along the path of the movie, to where it is (or to the end without 'reveal')
-                movie_elapsed_curve(&curve, prof, o.reveal ? c.time : prof.duration, v.x, v.num_samples,
+                movie_elapsed_curve_between(&curve, prof, pt0, o.reveal ? tnow : pt1, v.x, v.num_samples,
                     [&](int i) { return (double)v.y[(size_t)i * v.stride] * v.y_scale; }, [&](double x) { return movie_series_value_at(v, x); });
                 const size_t step = MAX(curve.size() / (size_t)(4.0f * MAX(ix1 - ix0, 1.0f)), (size_t)1);
-                for (size_t i = 0; i < curve.size(); i += step) pts.push_back(ImVec2(sx(curve[i].s), sy(curve[i].v)));
-                if (step > 1 && !curve.empty()) pts.push_back(ImVec2(sx(curve.back().s), sy(curve.back().v)));
+                for (size_t i = 0; i < curve.size(); i += step) pts.push_back(ImVec2(sx(offset + curve[i].s), sy(curve[i].v)));
+                if (step > 1 && !curve.empty()) pts.push_back(ImVec2(sx(offset + curve.back().s), sy(curve.back().v)));
                 cursor_x = s_now;
             } else {
-                if (!(c.vis_hi >= c.vis_lo)) continue;
-                const int j0 = CLAMP((int)ceil(series_temporal_index_at(v, c.vis_lo)), 0, v.num_samples - 1);
-                const int j1 = CLAMP((int)floor(series_temporal_index_at(v, c.vis_hi)), 0, v.num_samples - 1);
-                pts.push_back(ImVec2(sx(c.vis_lo), sy(movie_series_value_at(v, c.vis_lo))));
+                if (!(vis_hi >= vis_lo)) continue;
+                const int j0 = CLAMP((int)ceil(series_temporal_index_at(v, vis_lo)), 0, v.num_samples - 1);
+                const int j1 = CLAMP((int)floor(series_temporal_index_at(v, vis_hi)), 0, v.num_samples - 1);
+                pts.push_back(ImVec2(sx(vis_lo), sy(movie_series_value_at(v, vis_lo))));
                 const int step = MAX((j1 - j0) / MAX((int)(ix1 - ix0), 1), 1);
                 for (int i = j0; i <= j1; i += step) pts.push_back(ImVec2(sx((double)v.x[i]), sy((double)v.y[(size_t)i * v.stride] * v.y_scale)));
-                pts.push_back(ImVec2(sx(c.vis_hi), sy(movie_series_value_at(v, c.vis_hi))));
+                pts.push_back(ImVec2(sx(vis_hi), sy(movie_series_value_at(v, vis_hi))));
             }
             if (pts.size() < 2) continue;
             if (ps.plot_type == PlotType_Scatter) {
@@ -7197,8 +7208,8 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
             std::vector<float> own;
             if (o.reveal && has_t[s]) {
                 // Counted over the frames that have been played, in the bins of the full distribution
-                movie_histogram_counts(&counts_full, nb, hs.x_min, hs.x_max, tv[s].x, tv[s].y, tv[s].stride, tv[s].y_scale, tv[s].num_samples, c.full_lo, c.full_hi);
-                movie_histogram_counts(&counts_vis, nb, hs.x_min, hs.x_max, tv[s].x, tv[s].y, tv[s].stride, tv[s].y_scale, tv[s].num_samples, c.vis_lo, c.vis_hi);
+                movie_histogram_counts(&counts_full, nb, hs.x_min, hs.x_max, tv[s].x, tv[s].y, tv[s].stride, tv[s].y_scale, tv[s].num_samples, full_lo, full_hi);
+                movie_histogram_counts(&counts_vis, nb, hs.x_min, hs.x_max, tv[s].x, tv[s].y, tv[s].stride, tv[s].y_scale, tv[s].num_samples, vis_lo, vis_hi);
                 for (float f : counts_full) peak = MAX(peak, f);
                 heights = counts_vis.data();
             } else {
@@ -7225,8 +7236,8 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
     // The markers of the movie, where the movie gets to them
     if (timeline && o.show_markers) {
         for (const MovieMarker& mk : state->movie.markers) {
-            if (o.reveal && mk.time > c.time) continue;
-            const float x = sx(elapsed ? movie_time_bar_moved(prof, mk.time) : movie_trajectory_quantity(state, mk.time));
+            if ((o.reveal && mk.time > c.time) || mk.time < c.axis_begin || mk.time > c.axis_end) continue;
+            const float x = sx(elapsed ? movie_time_bar_moved(prof, mk.time) - d_axis0 : movie_trajectory_quantity(state, mk.time));
             if (x < ix0 || x > ix1) continue;
             dl->AddLine(ImVec2(x, iy0), ImVec2(x, iy1), col(oc, 0.7f), MAX(fpx * 0.08f, 1.0f));
             if (marker_labels && mk.label[0]) {
@@ -7262,6 +7273,7 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
 
     // The panels whose subplot is there and has series in it
     const PlotSubplot* shown[2 * PLOT_MAX_SUBPLOTS];
+    const MoviePlotPanel* shown_panel[2 * PLOT_MAX_SUBPLOTS];
     MoviePlotView views[2 * PLOT_MAX_SUBPLOTS];
     size_t k = 0;
     for (const MoviePlotPanel& panel : o.panels) {
@@ -7271,6 +7283,7 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
         const int idx = plot_find_subplot(subs, tl ? state->timeline.num_subplots : state->distributions.num_subplots, panel.subplot);
         if (idx < 0 || subs[idx].count == 0 || k >= ARRAY_SIZE(shown)) continue;
         shown[k] = &subs[idx];
+        shown_panel[k] = &panel;
         views[k] = panel.view;
         k += 1;
     }
@@ -7290,23 +7303,30 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
             ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * alpha)), fpx * 0.4f);
     }
 
-    // How far the movie has taken the trajectory: all of the stretch it covers, and what it has visited by now
+    // The panels come in and go at times of their own; a panel that is not there yet keeps its place, so the others do not move
     const MovieTimeBarProfile& prof = movie_time_bar_profile_for(state);
     const float thick = o.line_points > 0.0f ? MAX(o.line_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 1.0f) : MAX(fpx * 0.16f, 1.5f);
-    MoviePlotContext c = { dl, font, &o, state, &prof, fpx, alpha, time, movie_trajectory_quantity(state, time), 0.0, 0.0, 0.0, 0.0, thick, 0 };
-    if (!prof.lo.empty()) {
-        c.full_lo = prof.lo.back();
-        c.full_hi = prof.hi.back();
-        movie_time_bar_visited(prof, time, &c.vis_lo, &c.vis_hi);
+    const double axis_begin = CLAMP(o.begin, 0.0, prof.duration);
+    MoviePlotContext c = { dl, font, &o, state, &prof, fpx, alpha, time, movie_trajectory_quantity(state, time), axis_begin, CLAMP(o.end, axis_begin, prof.duration), thick, 0 };
+
+    float panel_alpha[2 * PLOT_MAX_SUBPLOTS];
+    MoviePlotView seen_views[2 * PLOT_MAX_SUBPLOTS];
+    size_t seen = 0;
+    for (size_t i = 0; i < k; ++i) {
+        panel_alpha[i] = movie_panel_alpha(*shown_panel[i], o, time);
+        if (panel_alpha[i] > 0.0f) seen_views[seen++] = views[i];
     }
-    if (!o.reveal) { c.vis_lo = c.full_lo; c.vis_hi = c.full_hi; }
 
     const float panel_h = plot_h / (float)k;
     bool labelled_markers = false;
+    size_t seen_index = 0;
     for (size_t i = 0; i < k; ++i) {
+        if (panel_alpha[i] <= 0.0f) continue;
         const bool first_timeline = views[i] == MoviePlotView::Timeline && !labelled_markers;
         labelled_markers |= first_timeline;
-        movie_plot_panel_draw(c, *shown[i], views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(views, k, i), first_timeline);
+        c.alpha = panel_alpha[i];   // Already inside the fades of the overlay
+        movie_plot_panel_draw(c, *shown[i], *shown_panel[i], views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(seen_views, seen, seen_index), first_timeline);
+        seen_index += 1;
     }
 }
 
@@ -8999,6 +9019,16 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
                     if (idx < 0) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s: the subplot is not there any more", tl ? "Timelines" : "Distributions");
                     else if (subs[idx].count == 0) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s: %s (no series, not drawn)", tl ? "Timelines" : "Distributions", name);
                     else ImGui::Text("%s: %s (%d series)", tl ? "Timelines" : "Distributions", name, subs[idx].count);
+                    // When it comes in and goes, inside the overlay's own range
+                    float shown_from = (float)o.panels[pi].begin, shown_to = (float)o.panels[pi].end;
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+                    if (ImGui::DragFloatRange2("##panel_time", &shown_from, &shown_to, 0.05f, 0.0f, movie_len, "in at %.2f s", shown_to > shown_from ? "out at %.2f s" : "stays to the end")) {
+                        o.panels[pi].begin = (double)shown_from;
+                        o.panels[pi].end = (double)shown_to;
+                    }
+                    ImGui::SetItemTooltip("When this subplot comes in and goes, inside the range the overlay is shown in. A property that comes in later starts to be drawn there.\nIts place stays free until then, so the others do not move. Drag the right end back to the left end to let it stay to the end.");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("In at preview time")) o.panels[pi].begin = MAX((double)m.playhead, o.begin);
                     ImGui::PopID();
                 }
                 if (remove_panel >= 0) o.panels.erase(o.panels.begin() + remove_panel);
@@ -9014,7 +9044,14 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
                             char name[48], item[96];
                             plot_subplot_label(name, sizeof(name), subs[s], s);
                             snprintf(item, sizeof(item), "%s: %s (%d series)###add%d_%d", tl ? "Timelines" : "Distributions", name, subs[s].count, v, s);
-                            if (ImGui::Selectable(item)) o.panels.push_back({(MoviePlotView)v, subs[s].id});
+                            if (ImGui::Selectable(item)) {
+                                // Added with the movie at a time inside the overlay, it comes in there
+                                MoviePlotPanel added;
+                                added.view = (MoviePlotView)v;
+                                added.subplot = subs[s].id;
+                                if ((double)m.playhead > o.begin + 1e-3) added.begin = (double)m.playhead;
+                                o.panels.push_back(added);
+                            }
                         }
                     }
                     ImGui::EndCombo();

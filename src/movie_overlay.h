@@ -49,6 +49,8 @@ enum class MoviePlotView : int {
 struct MoviePlotPanel {
     MoviePlotView view = MoviePlotView::Timeline;
     uint32_t      subplot = 0;
+    double        begin = 0.0;   // Movie time (seconds) it appears at. Inside the overlay's own range: before it, the overlay is not shown.
+    double        end = 0.0;     // ... and goes away at; not after 'begin' means it stays to the end of the overlay
 };
 
 // A note on the timeline of the movie, drawn on the timelines of a figure where the movie gets to it
@@ -170,6 +172,19 @@ struct MovieCurvePoint { double s, v; };
 // the trajectory backward the series is read backward, so s only ever grows. 'xs' are the ascending positions of the series'
 // samples in the unit of the quantity, 'value_of_sample' the value of sample i and 'value_at' the value at any position.
 void movie_elapsed_curve(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double time, const float* xs, int num_samples,
+    const std::function<double(int)>& value_of_sample, const std::function<double(double)>& value_at);
+
+// The movie times a panel is there from and to: its own range inside the range of the overlay
+void movie_panel_span(const MoviePlotPanel& p, double overlay_begin, double overlay_end, double* begin, double* end);
+
+// How visible a panel is at a time, 0..1, fading in and out over the overlay's fades at the ends of its span (zero outside it)
+float movie_panel_alpha(const MoviePlotPanel& p, const MovieOverlay& overlay, double time);
+
+// The stretch of the quantity visited from one movie time to another, from its least to its most value. False while the profile is empty.
+bool movie_time_bar_visited_between(const MovieTimeBarProfile& p, double t0, double t1, double* lo, double* hi);
+
+// The same as movie_elapsed_curve for the movie from t0 to t1: s counts from 0 at t0
+void movie_elapsed_curve_between(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double t0, double t1, const float* xs, int num_samples,
     const std::function<double(int)>& value_of_sample, const std::function<double(double)>& value_at);
 
 // How much has moved by a movie time, in the unit of the quantity

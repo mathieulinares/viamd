@@ -140,10 +140,25 @@ void movie_time_bar_profile(MovieTimeBarProfile* out, double duration, int sampl
     }
 }
 
-void movie_elapsed_curve(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double time, const float* xs, int num_samples,
+namespace {
+// Positions in the profile's samples, and what it holds between them
+double profile_pos(const MovieTimeBarProfile& p, double t) {
+    return fmin(fmax(t / p.duration, 0.0), 1.0) * (double)(p.q.size() - 1);
+}
+double profile_lerp(const std::vector<double>& v, double x) {
+    const size_t i = (size_t)floor(x);
+    if (i + 1 >= v.size()) return v.back();
+    return v[i] + (v[i + 1] - v[i]) * (x - (double)i);
+}
+bool profile_valid(const MovieTimeBarProfile& p) {
+    return p.q.size() >= 2 && p.q.size() == p.distance.size() && p.duration > 0.0;
+}
+}
+
+void movie_elapsed_curve_between(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double t0, double t1, const float* xs, int num_samples,
     const std::function<double(int)>& value_of_sample, const std::function<double(double)>& value_at) {
     out->clear();
-    if (p.q.size() < 2 || p.q.size() != p.distance.size() || p.duration <= 0.0 || num_samples < 1) return;
+    if (!profile_valid(p) || num_samples < 1) return;
 
     // One stretch of the path from qa to qb that starts at s0 on the axis
     auto stretch = [&](double qa, double qb, double s0) {
@@ -162,15 +177,53 @@ void movie_elapsed_curve(std::vector<MovieCurvePoint>* out, const MovieTimeBarPr
         if (qb != qa) out->push_back({s0 + fabs(qb - qa), value_at(qb)});
     };
 
+    const double x0 = profile_pos(p, t0);
+    const double x1 = fmax(profile_pos(p, t1), x0);
+    const double d0 = profile_lerp(p.distance, x0);
+    out->push_back({0.0, value_at(profile_lerp(p.q, x0))});
     const size_t m = p.q.size() - 1;
-    const double x = fmin(fmax(time / p.duration, 0.0), 1.0) * (double)m;
-    const size_t i_now = (size_t)floor(x);
-    out->push_back({0.0, value_at(p.q[0])});
-    for (size_t i = 0; i < i_now && i < m; ++i) stretch(p.q[i], p.q[i + 1], p.distance[i]);
-    if (i_now < m) {
-        const double qn = p.q[i_now] + (p.q[i_now + 1] - p.q[i_now]) * (x - (double)i_now);
-        stretch(p.q[i_now], qn, p.distance[i_now]);
+    for (size_t i = (size_t)floor(x0); i < m && (double)i < x1; ++i) {
+        const double a = fmax((double)i, x0), b = fmin((double)(i + 1), x1);
+        if (b <= a) continue;
+        stretch(profile_lerp(p.q, a), profile_lerp(p.q, b), profile_lerp(p.distance, a) - d0);
     }
+}
+
+void movie_elapsed_curve(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double time, const float* xs, int num_samples,
+    const std::function<double(int)>& value_of_sample, const std::function<double(double)>& value_at) {
+    movie_elapsed_curve_between(out, p, 0.0, time, xs, num_samples, value_of_sample, value_at);
+}
+
+bool movie_time_bar_visited_between(const MovieTimeBarProfile& p, double t0, double t1, double* lo, double* hi) {
+    if (!profile_valid(p)) {
+        if (p.q.empty()) return false;
+        *lo = *hi = p.q[0];
+        return true;
+    }
+    const double x0 = profile_pos(p, t0);
+    const double x1 = fmax(profile_pos(p, t1), x0);
+    *lo = *hi = profile_lerp(p.q, x0);
+    for (size_t i = (size_t)ceil(x0); i < p.q.size() && (double)i <= x1; ++i) {
+        *lo = fmin(*lo, p.q[i]);
+        *hi = fmax(*hi, p.q[i]);
+    }
+    const double qe = profile_lerp(p.q, x1);
+    *lo = fmin(*lo, qe);
+    *hi = fmax(*hi, qe);
+    return true;
+}
+
+void movie_panel_span(const MoviePlotPanel& p, double overlay_begin, double overlay_end, double* begin, double* end) {
+    *begin = fmax(p.begin, overlay_begin);
+    *end = p.end > p.begin ? fmin(p.end, overlay_end) : overlay_end;
+}
+
+float movie_panel_alpha(const MoviePlotPanel& p, const MovieOverlay& overlay, double time) {
+    MovieOverlay span;
+    movie_panel_span(p, overlay.begin, overlay.end, &span.begin, &span.end);
+    span.fade_in = overlay.fade_in;
+    span.fade_out = overlay.fade_out;
+    return movie_overlay_alpha(span, time);
 }
 
 bool movie_time_bar_visited(const MovieTimeBarProfile& p, double time, double* lo, double* hi) {

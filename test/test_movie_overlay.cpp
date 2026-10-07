@@ -444,3 +444,79 @@ UTEST(viamd_movie_overlay, a_palette_that_does_not_exist_has_the_name_of_the_plo
     EXPECT_STREQ("Colours of the plots", movie_plot_palette_name(99));
     for (int i = 1; i < MOVIE_PLOT_PALETTE_COUNT; ++i) EXPECT_TRUE(movie_plot_palette_name(i)[0] != 0);
 }
+
+/* A property that comes in later in the movie starts to be drawn there */
+
+UTEST(viamd_movie_overlay, a_curve_that_starts_later_counts_from_zero_where_it_starts) {
+    const std::vector<float> xs = samples_every(1.0f, 101);
+    auto of_sample = [&](int i) { return (double)xs[(size_t)i]; };
+    auto at = [](double x) { return x; };
+    MovieTimeBarProfile up;
+    movie_time_bar_profile(&up, 10.0, 100, ramp_up);   /* 0 -> 100 */
+    std::vector<MovieCurvePoint> c;
+    movie_elapsed_curve_between(&c, up, 3.0, 8.0, xs.data(), (int)xs.size(), of_sample, at);
+    EXPECT_NEAR(0.0, c.front().s, 1e-9);
+    EXPECT_NEAR(30.0, c.front().v, 1e-6);   /* the series at 30, where the movie is at 3 s */
+    EXPECT_NEAR(50.0, c.back().s, 1e-6);    /* 3 s to 8 s is 50 on */
+    EXPECT_NEAR(80.0, c.back().v, 1e-6);
+}
+
+UTEST(viamd_movie_overlay, the_curve_from_the_start_is_the_curve_between_zero_and_a_time) {
+    const std::vector<float> xs = samples_every(1.0f, 101);
+    auto of_sample = [&](int i) { return 3.0 * (double)xs[(size_t)i]; };
+    auto at = [](double x) { return 3.0 * x; };
+    MovieTimeBarProfile down;
+    movie_time_bar_profile(&down, 10.0, 100, ramp_down);
+    std::vector<MovieCurvePoint> a, b;
+    movie_elapsed_curve(&a, down, 6.0, xs.data(), (int)xs.size(), of_sample, at);
+    movie_elapsed_curve_between(&b, down, 0.0, 6.0, xs.data(), (int)xs.size(), of_sample, at);
+    ASSERT_EQ(a.size(), b.size());
+    for (size_t i = 0; i < a.size(); ++i) { EXPECT_NEAR(a[i].s, b[i].s, 1e-9); EXPECT_NEAR(a[i].v, b[i].v, 1e-9); }
+}
+
+UTEST(viamd_movie_overlay, the_visited_stretch_between_two_times_leaves_out_what_came_before) {
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 10.0, 100, ramp_up);   /* 0 -> 100 */
+    double lo, hi;
+    ASSERT_TRUE(movie_time_bar_visited_between(p, 3.0, 8.0, &lo, &hi));
+    EXPECT_NEAR(30.0, lo, 1e-6);
+    EXPECT_NEAR(80.0, hi, 1e-6);
+    ASSERT_TRUE(movie_time_bar_visited_between(p, 5.0, 5.0, &lo, &hi));
+    EXPECT_NEAR(50.0, lo, 1e-6);
+    EXPECT_NEAR(50.0, hi, 1e-6);
+}
+
+UTEST(viamd_movie_overlay, a_panel_is_inside_the_range_of_its_overlay) {
+    MovieOverlay o;
+    o.begin = 10.0;
+    o.end = 50.0;
+    MoviePlotPanel p;
+    double b, e;
+    movie_panel_span(p, o.begin, o.end, &b, &e);   /* no range of its own: all of the overlay's */
+    EXPECT_NEAR(10.0, b, 1e-9);
+    EXPECT_NEAR(50.0, e, 1e-9);
+    p.begin = 20.0;
+    p.end = 80.0;                                    /* leaves after the overlay */
+    movie_panel_span(p, o.begin, o.end, &b, &e);
+    EXPECT_NEAR(20.0, b, 1e-9);
+    EXPECT_NEAR(50.0, e, 1e-9);
+    p.begin = 2.0;                                   /* starts before it */
+    p.end = 30.0;
+    movie_panel_span(p, o.begin, o.end, &b, &e);
+    EXPECT_NEAR(10.0, b, 1e-9);
+    EXPECT_NEAR(30.0, e, 1e-9);
+}
+
+UTEST(viamd_movie_overlay, a_panel_that_comes_in_later_is_not_there_before_it_and_fades_in) {
+    MovieOverlay o;
+    o.begin = 0.0;
+    o.end = 60.0;
+    o.fade_in = 2.0f;
+    o.fade_out = 2.0f;
+    MoviePlotPanel p;
+    p.begin = 30.0;
+    EXPECT_NEAR(0.0, movie_panel_alpha(p, o, 29.0), 1e-9);
+    EXPECT_NEAR(0.5, movie_panel_alpha(p, o, 31.0), 1e-6);
+    EXPECT_NEAR(1.0, movie_panel_alpha(p, o, 45.0), 1e-9);
+    EXPECT_NEAR(0.0, movie_panel_alpha(p, o, 61.0), 1e-9);
+}

@@ -1880,6 +1880,13 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         o.panels.push_back({(MoviePlotView)v[0], (uint32_t)v[1]});
                     }
                 }
+                else if (str_eq(ident, STR_LIT("PanelTime"))) {
+                    float v[2];
+                    if (!o.panels.empty() && viamd::extract_flt_vec(v, 2, arg)) {
+                        o.panels.back().begin = (double)v[0];
+                        o.panels.back().end = (double)v[1];
+                    }
+                }
                 else if (str_eq(ident, STR_LIT("FontPoints"))) viamd::extract_flt(o.font_points, arg);
                 else if (str_eq(ident, STR_LIT("LinePoints"))) viamd::extract_flt(o.line_points, arg);
                 else if (str_eq(ident, STR_LIT("Palette"))) {
@@ -2334,6 +2341,10 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
                 for (const MoviePlotPanel& p : o.panels) {
                     const int v[2] = {(int)p.view, (int)p.subplot};
                     viamd::write_int_vec(state, STR_LIT("Panel"), v, 2);
+                    if (p.begin != 0.0 || p.end != 0.0) {
+                        const float t[2] = {(float)p.begin, (float)p.end};
+                        viamd::write_flt_vec(state, STR_LIT("PanelTime"), t, 2);
+                    }
                 }
             }
             if (o.type == MovieOverlayType::TimeBar) {

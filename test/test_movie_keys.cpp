@@ -530,3 +530,20 @@ UTEST(viamd_movie_keys, markers_are_part_of_the_undo_state_and_scale_with_the_le
     movie_keys_scale_time(&a, 2.0);
     EXPECT_NEAR(20.0, a.markers[0].time, 1e-9);
 }
+
+UTEST(viamd_movie_keys, the_time_of_a_panel_is_part_of_the_undo_state_and_scales_with_the_length) {
+    MovieKeys a, b;
+    a.overlays.push_back(MovieOverlay{});
+    b.overlays.push_back(MovieOverlay{});
+    a.overlays[0].panels.push_back({MoviePlotView::Timeline, 3, 0.0, 0.0});
+    b.overlays[0].panels.push_back({MoviePlotView::Timeline, 3, 0.0, 0.0});
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    b.overlays[0].panels[0].begin = 12.0;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    a.overlays[0].panels[0].begin = 12.0;
+    a.overlays[0].panels[0].end = 20.0;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    movie_keys_scale_time(&a, 2.0);
+    EXPECT_NEAR(24.0, a.overlays[0].panels[0].begin, 1e-9);
+    EXPECT_NEAR(40.0, a.overlays[0].panels[0].end, 1e-9);
+}
