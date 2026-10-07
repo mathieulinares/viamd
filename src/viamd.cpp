@@ -1729,6 +1729,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         m.timeline_param_lane   = (bits & 8) != 0;
                         m.timeline_rep_lane     = (bits & 16) != 0;
                         m.timeline_overlay_lane = (bits & 32) != 0;
+                        m.timeline_rep_overview = (bits & 64) != 0 || !(bits & 128);   // Saved without it: the lane is new
                     }
                 }
                 else if (str_eq(ident, STR_LIT("LaneHeight"))) {
@@ -2308,7 +2309,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_flt (state, STR_LIT("RepTransition"), m.rep_transition);
         viamd::write_bool(state, STR_LIT("SnapFrames"), m.snap_frames);
         viamd::write_int (state, STR_LIT("Lanes"), (m.timeline_tracks[0] ? 1 : 0) | (m.timeline_tracks[1] ? 2 : 0) | (m.timeline_tracks[2] ? 4 : 0) |
-            (m.timeline_param_lane ? 8 : 0) | (m.timeline_rep_lane ? 16 : 0) | (m.timeline_overlay_lane ? 32 : 0));
+            (m.timeline_param_lane ? 8 : 0) | (m.timeline_rep_lane ? 16 : 0) | (m.timeline_overlay_lane ? 32 : 0) |
+            (m.timeline_rep_overview ? 64 : 0) | 128);
         viamd::write_flt (state, STR_LIT("LaneHeight"), m.timeline_lane_height);
         viamd::write_bool(state, STR_LIT("FitLanes"), m.timeline_fit_window);
         viamd::write_bool(state, STR_LIT("Overlays"), true);

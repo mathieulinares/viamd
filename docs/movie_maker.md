@@ -121,6 +121,20 @@ Pick the representation and the property, set it up in the **Representations** w
 
 Changing tint or saturation recolors the atoms of that representation every frame, which is slow for very large systems. Scales and visibility are cheap.
 
+#### Seeing and editing when representations are shown
+
+The **Representation overview** lane of the Movie Timeline shows all of them at once, one row each, as bars: a bar is a stretch where the representation is shown (from the key that shows it to the key that hides it, or to the end of the movie). The bar grows in over the **Transition (s)** after its start and fades away over it after its end, as the representation does. Small white triangles on a row are the keys of its other properties (a scale, the tint, a colour).
+
+- Drag a bar to move when the representation is shown, or one of its ends to change when it starts or stops. The times land on frames with **Snap to frames**, and a bar stays between its neighbours.
+- A **double click** on an empty place of a row adds a bar there (a tenth of the movie long, up to the next bar). A **right click** on a bar removes it.
+- Clicking a bar selects the representation (and its **Visible** property) for the **Representation lane**, which shows and edits the values.
+
+*Groups.* Representations named alike up to the first hyphen are a group: `protein-cartoon` and `protein-cpk` are the group `protein`, with the members `cartoon` and `cpk`. A name without a hyphen is a group of its own (`protein` next to `protein-cpk` is a member of the group `protein` too, named `protein`). A group gets a row of its own above its members, in a colour that its members share, which shows when any of them is shown. Dragging a group's bar moves the bars of its members that are in it, by the same time; dragging its left end changes the members that start there, and its right end the ones that stop there. The buttons **+ group** and **- group** next to the lane fold and unfold a group.
+
+*Swap.* **Swap with the next of its group** hands over at the preview time from the selected representation to the next one of its group, with the transition: for example `protein-cartoon` shrinks away while `protein-cpk` grows in. A representation without keys is taken to have been shown (the one that goes) or hidden (the one that comes) until then.
+
+Tip: name the representations of one selection after it (`protein-cartoon`, `protein-cpk`, `protein-vdw`) and the overview keeps them together.
+
 ### Depth of field
 
 Under **Visuals > Depth of Field**, **Focus** chooses what is sharp:
@@ -194,9 +208,10 @@ Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **
 - **Field of view** in degrees. Dots can be dragged sideways (time only).
 - **Look parameter lane**: the parameter chosen in the **Look parameter** list at the top. Double-click to add a key, drag to change it, right-click to remove it.
 - **Representation lane**: the property of a representation chosen with the two lists next to **Representation lane**. The line is its value over the movie and the dots are its keys: drag sideways for the time and up or down for the value, double-click to add one, right-click to remove one. For **Visible** a double-click turns it around at that time (shown becomes hidden and the other way), and the first one on a representation without keys also keys what it is now at time 0, so that it holds until then.
+- **Representation overview** (tick **Representation overview**): when each representation is shown, as bars, grouped by name (see *Seeing and editing when representations are shown* above).
 - **Overlay lane** (tick **Overlay lane**): the overlays as bars, one row each and a colour for each kind, with the notes of the movie (markers) as small yellow triangles at the bottom. Drag a bar to move when the overlay is shown, or one of its ends to change when it starts and stops (it lands on frames with **Snap to frames**). Moving a whole bar moves the in and out times of the subplots of a timeline or a distribution with it, and the small ticks in such a bar are where subplots come in later. Hover a bar for its name and times.
 
-The yellow line is the playhead. Ctrl + wheel zooms the time, drag the background to pan, and use **Show whole movie** to reset. Every lane has at least the **Lane height** (a slider, 60 to 400 px), and the window scrolls with the wheel when the lanes do not fit, so many lanes stay readable; the overlay lane gets enough height for its rows. **Fit to window** instead shares the height of the window between the lanes, however small, and then the wheel zooms the time. Drag between lanes to change their heights. Untick **Trajectory**, **Distance**, **Field of view**, **Look parameter lane**, **Representation lane** or **Overlay lane** to hide a lane. Which lanes are shown, the lane height and **Fit to window** are saved in the workspace. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
+The yellow line is the playhead. Ctrl + wheel zooms the time, drag the background to pan, and use **Show whole movie** to reset. Every lane has at least the **Lane height** (a slider, 60 to 400 px), and the window scrolls with the wheel when the lanes do not fit, so many lanes stay readable; the overlay lane gets enough height for its rows. **Fit to window** instead shares the height of the window between the lanes, however small, and then the wheel zooms the time. Drag between lanes to change their heights. Untick **Trajectory**, **Distance**, **Field of view**, **Look parameter lane**, **Representation lane**, **Representation overview** or **Overlay lane** to hide a lane. Which lanes are shown, the lane height and **Fit to window** are saved in the workspace. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
 
 ## Saving
 

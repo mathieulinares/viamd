@@ -560,3 +560,212 @@ UTEST(viamd_movie_keys, the_title_of_a_panel_is_part_of_the_undo_state) {
     snprintf(a.overlays[0].panels[0].title, sizeof(a.overlays[0].panels[0].title), "Distance to the ligand");
     EXPECT_TRUE(movie_keys_equal(a, b));
 }
+
+/* Representations over time as stretches */
+
+static RepKey vis_key(uint32_t rep, double time, bool shown) {
+    RepKey k;
+    k.rep = rep;
+    k.prop = (int)RepProp::Visible;
+    k.time = time;
+    k.value[0] = shown ? 1.0f : 0.0f;
+    k.ease = KeyEase::Hold;
+    return k;
+}
+
+UTEST(viamd_movie_keys, the_stretches_a_representation_is_shown_are_read_from_its_keys) {
+    const std::vector<RepKey> keys = {vis_key(8, 0, false), vis_key(8, 2.4, true), vis_key(8, 9.6, false), vis_key(8, 60, true), vis_key(3, 0, true)};
+    const std::vector<RepInterval> iv = rep_shown_intervals(keys, 8, 80.0);
+    ASSERT_EQ(2, (int)iv.size());
+    EXPECT_NEAR(2.4, iv[0].begin, 1e-9);
+    EXPECT_NEAR(9.6, iv[0].end, 1e-9);
+    EXPECT_EQ(1, iv[0].begin_key);
+    EXPECT_EQ(2, iv[0].end_key);
+    EXPECT_NEAR(60.0, iv[1].begin, 1e-9);
+    EXPECT_NEAR(80.0, iv[1].end, 1e-9);
+    EXPECT_EQ(-1, iv[1].end_key);
+}
+
+UTEST(viamd_movie_keys, a_first_key_that_shows_it_holds_from_the_start_of_the_movie) {
+    const std::vector<RepKey> keys = {vis_key(1, 3, true), vis_key(1, 20, false)};
+    const std::vector<RepInterval> iv = rep_shown_intervals(keys, 1, 50.0);
+    ASSERT_EQ(1, (int)iv.size());
+    EXPECT_NEAR(0.0, iv[0].begin, 1e-9);
+    EXPECT_TRUE(iv[0].begin_is_start);
+    EXPECT_NEAR(20.0, iv[0].end, 1e-9);
+}
+
+UTEST(viamd_movie_keys, a_representation_without_keys_has_no_stretches) {
+    const std::vector<RepKey> keys = {vis_key(2, 5, true)};
+    EXPECT_TRUE(rep_shown_intervals(keys, 1, 50.0).empty());
+}
+
+UTEST(viamd_movie_keys, the_end_of_a_stretch_is_moved_with_its_key) {
+    std::vector<RepKey> keys = {vis_key(8, 0, false), vis_key(8, 2.4, true), vis_key(8, 9.6, false), vis_key(8, 60, true)};
+    const RepInterval first = rep_shown_intervals(keys, 8, 80.0)[0];
+    rep_move_interval(&keys, 8, first, 2.4, 12.0, 80.0);
+    const std::vector<RepInterval> iv = rep_shown_intervals(keys, 8, 80.0);
+    EXPECT_NEAR(2.4, iv[0].begin, 1e-9);
+    EXPECT_NEAR(12.0, iv[0].end, 1e-9);
+    EXPECT_EQ(4, (int)keys.size());
+}
+
+UTEST(viamd_movie_keys, starting_a_stretch_that_began_at_the_start_later_adds_a_hidden_key_before_it) {
+    std::vector<RepKey> keys = {vis_key(1, 3, true), vis_key(1, 20, false)};
+    const RepInterval iv = rep_shown_intervals(keys, 1, 50.0)[0];
+    rep_move_interval(&keys, 1, iv, 5.0, 20.0, 50.0);
+    const std::vector<RepInterval> after = rep_shown_intervals(keys, 1, 50.0);
+    ASSERT_EQ(1, (int)after.size());
+    EXPECT_NEAR(5.0, after[0].begin, 1e-9);
+    EXPECT_NEAR(20.0, after[0].end, 1e-9);
+    EXPECT_FALSE(after[0].begin_is_start);
+    EXPECT_EQ(3, (int)keys.size());
+}
+
+UTEST(viamd_movie_keys, ending_a_stretch_that_lasted_to_the_end_earlier_adds_a_hidden_key) {
+    std::vector<RepKey> keys = {vis_key(8, 0, false), vis_key(8, 60, true)};
+    const RepInterval iv = rep_shown_intervals(keys, 8, 80.0)[0];
+    rep_move_interval(&keys, 8, iv, 60.0, 70.0, 80.0);
+    const std::vector<RepInterval> after = rep_shown_intervals(keys, 8, 80.0);
+    ASSERT_EQ(1, (int)after.size());
+    EXPECT_NEAR(70.0, after[0].end, 1e-9);
+}
+
+UTEST(viamd_movie_keys, a_stretch_stays_between_its_neighbours) {
+    std::vector<RepKey> keys = {vis_key(8, 0, false), vis_key(8, 2.4, true), vis_key(8, 9.6, false), vis_key(8, 60, true), vis_key(8, 70, false)};
+    const RepInterval second = rep_shown_intervals(keys, 8, 80.0)[1];
+    rep_move_interval(&keys, 8, second, 5.0, 15.0, 80.0);    /* moved only, into the first one */
+    const std::vector<RepInterval> iv = rep_shown_intervals(keys, 8, 80.0);
+    ASSERT_EQ(2, (int)iv.size());
+    EXPECT_NEAR(9.65, iv[1].begin, 1e-9);   /* a little gap is left */
+    EXPECT_NEAR(19.65, iv[1].end, 1e-9);    /* its length of 10 s is kept */
+}
+
+UTEST(viamd_movie_keys, a_stretch_keeps_a_least_length) {
+    std::vector<RepKey> keys = {vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false)};
+    const RepInterval iv = rep_shown_intervals(keys, 1, 50.0)[0];
+    rep_move_interval(&keys, 1, iv, 10.0, 5.0, 50.0);
+    const std::vector<RepInterval> after = rep_shown_intervals(keys, 1, 50.0);
+    EXPECT_GT(after[0].end - after[0].begin, 0.0);
+}
+
+UTEST(viamd_movie_keys, a_stretch_is_added_where_it_is_hidden_and_ends_before_the_next) {
+    std::vector<RepKey> keys = {vis_key(8, 0, false), vis_key(8, 2.4, true), vis_key(8, 9.6, false), vis_key(8, 60, true)};
+    EXPECT_TRUE(rep_add_interval(&keys, 8, 20.0, 80.0, 100.0));
+    std::vector<RepInterval> iv = rep_shown_intervals(keys, 8, 100.0);
+    ASSERT_EQ(3, (int)iv.size());
+    EXPECT_NEAR(20.0, iv[1].begin, 1e-9);
+    EXPECT_NEAR(59.95, iv[1].end, 1e-9);    /* it stops a little before the next one */
+    EXPECT_FALSE(rep_add_interval(&keys, 8, 3.0, 5.0, 100.0));   /* shown there already */
+}
+
+UTEST(viamd_movie_keys, a_stretch_added_to_a_representation_without_keys_is_hidden_before_it) {
+    std::vector<RepKey> keys;
+    EXPECT_TRUE(rep_add_interval(&keys, 4, 10.0, 20.0, 50.0));
+    const std::vector<RepInterval> iv = rep_shown_intervals(keys, 4, 50.0);
+    ASSERT_EQ(1, (int)iv.size());
+    EXPECT_NEAR(10.0, iv[0].begin, 1e-9);
+    EXPECT_NEAR(20.0, iv[0].end, 1e-9);
+    float f = 1.0f;
+    ASSERT_TRUE(rep_visible_factor(&f, keys.data(), keys.size(), 4, 5.0, 0.0));
+    EXPECT_NEAR(0.0f, f, 1e-6);
+}
+
+UTEST(viamd_movie_keys, removing_a_stretch_leaves_the_others) {
+    std::vector<RepKey> keys = {vis_key(8, 0, false), vis_key(8, 2.4, true), vis_key(8, 9.6, false), vis_key(8, 60, true)};
+    rep_remove_interval(&keys, rep_shown_intervals(keys, 8, 80.0)[0]);
+    const std::vector<RepInterval> iv = rep_shown_intervals(keys, 8, 80.0);
+    ASSERT_EQ(1, (int)iv.size());
+    EXPECT_NEAR(60.0, iv[0].begin, 1e-9);
+}
+
+UTEST(viamd_movie_keys, a_swap_hides_one_and_shows_the_other_at_the_same_time) {
+    std::vector<RepKey> keys;    /* neither has keys: 'from' was shown, 'to' hidden */
+    rep_swap_at(&keys, 1, 2, 10.0);
+    const std::vector<RepInterval> a = rep_shown_intervals(keys, 1, 50.0);
+    const std::vector<RepInterval> b = rep_shown_intervals(keys, 2, 50.0);
+    ASSERT_EQ(1, (int)a.size());
+    ASSERT_EQ(1, (int)b.size());
+    EXPECT_NEAR(0.0, a[0].begin, 1e-9);
+    EXPECT_NEAR(10.0, a[0].end, 1e-9);
+    EXPECT_NEAR(10.0, b[0].begin, 1e-9);
+    EXPECT_NEAR(50.0, b[0].end, 1e-9);
+}
+
+UTEST(viamd_movie_keys, a_swap_on_a_key_that_is_there_changes_it_instead_of_adding_one) {
+    std::vector<RepKey> keys = {vis_key(1, 0, true), vis_key(1, 10, true)};
+    rep_swap_at(&keys, 1, 2, 10.0);
+    int at_ten = 0;
+    for (const RepKey& k : keys) if (k.rep == 1 && fabs(k.time - 10.0) < 1e-9) { at_ten += 1; EXPECT_NEAR(0.0f, k.value[0], 1e-9); }
+    EXPECT_EQ(1, at_ten);
+}
+
+UTEST(viamd_movie_keys, dragging_the_left_end_of_a_group_moves_the_members_that_start_there) {
+    std::vector<RepKey> keys = {vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false), vis_key(2, 0, false), vis_key(2, 10, true), vis_key(2, 30, false),
+        vis_key(3, 0, false), vis_key(3, 12, true), vis_key(3, 18, false)};
+    rep_move_group(&keys, {1, 2, 3}, 10.0, 30.0, 15.0, 30.0, 50.0);
+    EXPECT_NEAR(15.0, rep_shown_intervals(keys, 1, 50.0)[0].begin, 1e-9);
+    EXPECT_NEAR(15.0, rep_shown_intervals(keys, 2, 50.0)[0].begin, 1e-9);
+    EXPECT_NEAR(12.0, rep_shown_intervals(keys, 3, 50.0)[0].begin, 1e-9);   /* does not start at the end that moved */
+}
+
+UTEST(viamd_movie_keys, dragging_a_whole_group_moves_every_stretch_in_it_by_the_same_time) {
+    std::vector<RepKey> keys = {vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false), vis_key(2, 0, false), vis_key(2, 15, true), vis_key(2, 30, false)};
+    rep_move_group(&keys, {1, 2}, 10.0, 30.0, 14.0, 34.0, 60.0);
+    const RepInterval a = rep_shown_intervals(keys, 1, 60.0)[0];
+    const RepInterval b = rep_shown_intervals(keys, 2, 60.0)[0];
+    EXPECT_NEAR(14.0, a.begin, 1e-9);
+    EXPECT_NEAR(24.0, a.end, 1e-9);
+    EXPECT_NEAR(19.0, b.begin, 1e-9);
+    EXPECT_NEAR(34.0, b.end, 1e-9);
+}
+
+UTEST(viamd_movie_keys, stretches_that_touch_or_overlap_are_one_in_the_union) {
+    std::vector<RepInterval> in(3);
+    in[0].begin = 10; in[0].end = 20;
+    in[1].begin = 20; in[1].end = 30;
+    in[2].begin = 40; in[2].end = 50;
+    const std::vector<RepInterval> u = rep_union_intervals(in);
+    ASSERT_EQ(2, (int)u.size());
+    EXPECT_NEAR(10.0, u[0].begin, 1e-9);
+    EXPECT_NEAR(30.0, u[0].end, 1e-9);
+    EXPECT_NEAR(40.0, u[1].begin, 1e-9);
+}
+
+UTEST(viamd_movie_keys, a_name_is_split_at_its_first_hyphen) {
+    std::string g, m;
+    EXPECT_TRUE(rep_name_split("protein-cpk", &g, &m));
+    EXPECT_STREQ("protein", g.c_str());
+    EXPECT_STREQ("cpk", m.c_str());
+    EXPECT_TRUE(rep_name_split("protein-cpk-blue", &g, &m));
+    EXPECT_STREQ("protein", g.c_str());
+    EXPECT_STREQ("cpk-blue", m.c_str());
+    EXPECT_FALSE(rep_name_split("water", &g, &m));
+    EXPECT_STREQ("water", g.c_str());
+    EXPECT_TRUE(m.empty());
+    EXPECT_FALSE(rep_name_split("-odd", &g, &m));
+    EXPECT_STREQ("-odd", g.c_str());
+    EXPECT_FALSE(rep_name_split("odd-", &g, &m));
+    EXPECT_STREQ("odd-", g.c_str());
+}
+
+UTEST(viamd_movie_keys, the_rows_of_a_lane_put_a_group_together_at_the_place_of_its_first_member) {
+    const std::vector<std::string> names = {"protein-cartoon", "ligand", "protein-cpk", "water", "ligand-vdw"};
+    const std::vector<RepRow> rows = rep_group_rows(names, {});
+    ASSERT_EQ(7, (int)rows.size());
+    EXPECT_TRUE(rows[0].header);  EXPECT_STREQ("protein", rows[0].label.c_str());  EXPECT_EQ(2, rows[0].members);
+    EXPECT_STREQ("cartoon", rows[1].label.c_str());  EXPECT_TRUE(rows[1].indented);  EXPECT_EQ(0, rows[1].rep);
+    EXPECT_STREQ("cpk", rows[2].label.c_str());      EXPECT_EQ(2, rows[2].rep);
+    EXPECT_TRUE(rows[3].header);  EXPECT_STREQ("ligand", rows[3].label.c_str());
+    EXPECT_STREQ("ligand", rows[4].label.c_str());   /* a member with the name of the group alone keeps its whole name */
+    EXPECT_STREQ("vdw", rows[5].label.c_str());
+    EXPECT_FALSE(rows[6].header);  EXPECT_STREQ("water", rows[6].label.c_str());  EXPECT_FALSE(rows[6].indented);
+}
+
+UTEST(viamd_movie_keys, a_collapsed_group_keeps_only_its_row) {
+    const std::vector<std::string> names = {"protein-cartoon", "protein-cpk", "water"};
+    const std::vector<RepRow> rows = rep_group_rows(names, {"protein"});
+    ASSERT_EQ(2, (int)rows.size());
+    EXPECT_TRUE(rows[0].header);
+    EXPECT_STREQ("water", rows[1].label.c_str());
+}

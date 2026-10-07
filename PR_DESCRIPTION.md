@@ -46,6 +46,8 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - Representations now have a stable `id` (saved in the workspace, never reused), which keys refer to, so reordering, duplicating or removing representations does not break them. Removing one removes its keys.
 - The Representations window is locked while a recording is running.
 
+- The **Representation overview** lane of the Movie Timeline shows when each representation is shown as bars that can be dragged, resized, added and removed. Representations named alike up to the first hyphen (`protein-cartoon`, `protein-cpk`) are grouped under a row of their group, which can be folded and dragged, and a button swaps a representation with the next of its group.
+
 **Depth of field**
 - New focus modes: look-at point (the previous behaviour), a fixed distance that can be keyed, or the follow target.
 
@@ -89,7 +91,7 @@ New tests are in:
 - `test_image`.
 - `test_serialization`.
 
-All 164 tests pass in a Release build on Linux.
+All 191 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on, and the screenshots in the manual come from a real run with `1ALA-500.pdb`.

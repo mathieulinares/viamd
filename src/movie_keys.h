@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 #include <vector>
 
 // What is keyed on a movie's timeline besides the camera: look parameters (background, depth of field,
@@ -57,6 +58,61 @@ bool rep_keys_evaluate(float* out, const RepKey* keys, size_t count, uint32_t re
 // it was if the previous change has not finished. The first key holds from the start. With a transition of 0 it
 // is held and changes at its keys, as rep_keys_evaluate does. Returns false if there are no keys.
 bool rep_visible_factor(float* out, const RepKey* keys, size_t count, uint32_t rep, double time, double transition);
+
+// ## Representations over time as stretches
+//
+// What the Visible keys of a representation say, as the times it is shown: from the key that shows it to the key that hides
+// it, or to the end of the movie. (The transition of Visible is not part of this: it comes after the key.)
+
+struct RepInterval {
+    double begin = 0.0;
+    double end = 0.0;
+    int    begin_key = -1;            // The key (an index into the keys it was made from) that shows it
+    int    end_key = -1;              // The key that hides it again, -1 when nothing does: it lasts to the end of the movie
+    bool   begin_is_start = false;    // Shown from the start by its first key, which can be later: before it the first key holds
+};
+
+std::vector<RepInterval> rep_shown_intervals(const std::vector<RepKey>& keys, uint32_t rep, double duration);
+
+// Moves the ends of a stretch to new times, with the keys it is made of (and a hidden key at the start of the movie or at the
+// new end where there was none, so that nothing else changes). The new times are kept inside the neighbouring stretches and the
+// movie; a stretch that was only moved keeps its length. Not sorted afterwards.
+void rep_move_interval(std::vector<RepKey>* keys, uint32_t rep, const RepInterval& iv, double new_begin, double new_end, double duration);
+
+// Adds a stretch from 'begin' to 'end' where the representation is hidden, ending before the next one. False if it is shown at
+// 'begin' or there is not room (less than 'min_length').
+bool rep_add_interval(std::vector<RepKey>* keys, uint32_t rep, double begin, double end, double duration);
+
+// Takes out the keys that make a stretch: the representation is hidden there afterwards
+void rep_remove_interval(std::vector<RepKey>* keys, const RepInterval& iv);
+
+// At time t, 'from' goes and 'to' comes: a hidden key for one and a shown key for the other. A representation without keys is
+// taken to have been shown ('from') or hidden ('to') up to then.
+void rep_swap_at(std::vector<RepKey>* keys, uint32_t from, uint32_t to, double t);
+
+// Moves the stretches of several representations that lie inside [begin, end] when that group of stretches is dragged to
+// [new_begin, new_end]: all of them by the same time when it was only moved, the ones that start at 'begin' when its left end
+// was dragged, the ones that end at 'end' when its right end was.
+void rep_move_group(std::vector<RepKey>* keys, const std::vector<uint32_t>& reps, double begin, double end, double new_begin, double new_end, double duration);
+
+// The union of stretches (a group's: shown whenever any of its members is)
+std::vector<RepInterval> rep_union_intervals(std::vector<RepInterval> intervals);
+
+// "protein-cpk": the group 'protein' and the member 'cpk'. A name without a hyphen in it (or one that starts or ends with it)
+// is a group of its own: the member is empty and false is returned.
+bool rep_name_split(const char* name, std::string* group, std::string* member);
+
+// The rows of a list of representations in a lane: representations of one group together, at the place of the first of them,
+// with a row for the group above its members when it has several (the members are left out of a group that is 'collapsed').
+struct RepRow {
+    bool        header = false;   // The row of a group
+    int         rep = -1;         // The place in the list of a representation row; for a header the first member
+    std::string label;
+    std::string group;
+    int         members = 1;
+    bool        indented = false;
+};
+std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed);
 
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {

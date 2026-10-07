@@ -1093,8 +1093,10 @@ struct ApplicationState {
         bool  show_timeline_window = false;  // Opened explicitly from the window menu
         bool  timeline_tracks[3] = {true, true, true};
         bool  timeline_param_lane = true;     // The lane of a keyed look parameter
+        bool  timeline_rep_overview = true;   // When each representation is shown, as bars, grouped by name
+        std::vector<std::string> rep_groups_collapsed;   // The groups of the overview that show only their own row (not saved)
         bool  timeline_rep_lane = true;       // The lane of a keyed property of a representation, below the look parameter's
-        float timeline_row_ratios[6] = {1, 1, 1, 1, 1, 0.6f};
+        float timeline_row_ratios[7] = {1, 1, 1, 1, 1, 0.6f, 0.8f};
         float timeline_lane_height = 150.0f;  // The least height of a lane, in pixels: the window scrolls when they do not fit
         bool  timeline_fit_window = false;    // The lanes share the height of the window instead, however small
         bool  timeline_overlay_lane = true;   // The overlays as bars, below the lane of the representation

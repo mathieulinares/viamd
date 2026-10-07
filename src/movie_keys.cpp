@@ -111,6 +111,251 @@ bool rep_visible_factor(float* out, const RepKey* keys, size_t count, uint32_t r
     return true;
 }
 
+// ## Representations over time as stretches
+
+namespace {
+constexpr double REP_EPS = 1.0e-6;
+constexpr double REP_MIN_LENGTH = 0.05;
+
+// The indices of the Visible keys of a representation by time, keys on the same time being one (the first)
+std::vector<int> visible_key_order(const std::vector<RepKey>& keys, uint32_t rep) {
+    std::vector<int> idx;
+    for (int i = 0; i < (int)keys.size(); ++i) {
+        if (keys[i].rep == rep && keys[i].prop == (int)RepProp::Visible) idx.push_back(i);
+    }
+    std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) { return keys[a].time < keys[b].time; });
+    std::vector<int> unique;
+    for (int i : idx) {
+        if (unique.empty() || keys[i].time > keys[unique.back()].time) unique.push_back(i);
+    }
+    return unique;
+}
+
+RepKey hidden_key(uint32_t rep, double time) {
+    RepKey k;
+    k.rep = rep;
+    k.prop = (int)RepProp::Visible;
+    k.time = time;
+    k.value[0] = 0.0f;
+    k.ease = KeyEase::Hold;
+    return k;
+}
+
+RepKey shown_key(uint32_t rep, double time) {
+    RepKey k = hidden_key(rep, time);
+    k.value[0] = 1.0f;
+    return k;
+}
+}
+
+std::vector<RepInterval> rep_shown_intervals(const std::vector<RepKey>& keys, uint32_t rep, double duration) {
+    std::vector<RepInterval> out;
+    const std::vector<int> order = visible_key_order(keys, rep);
+    if (order.empty()) return out;
+    bool shown = keys[order[0]].value[0] >= 0.5f;
+    RepInterval cur;
+    if (shown) {
+        cur.begin = 0.0;
+        cur.begin_key = order[0];
+        cur.begin_is_start = true;
+    }
+    for (size_t i = 1; i < order.size(); ++i) {
+        const RepKey& k = keys[order[i]];
+        const bool s = k.value[0] >= 0.5f;
+        if (s && !shown) {
+            cur = RepInterval();
+            cur.begin = k.time;
+            cur.begin_key = order[i];
+            shown = true;
+        } else if (!s && shown) {
+            cur.end = k.time;
+            cur.end_key = order[i];
+            out.push_back(cur);
+            shown = false;
+        }
+    }
+    if (shown) {
+        cur.end = duration;
+        cur.end_key = -1;
+        out.push_back(cur);
+    }
+    return out;
+}
+
+void rep_move_interval(std::vector<RepKey>* keys, uint32_t rep, const RepInterval& iv, double new_begin, double new_end, double duration) {
+    // The room it has between its neighbours and the movie
+    double lo = 0.0, hi = duration;
+    const std::vector<RepInterval> all = rep_shown_intervals(*keys, rep, duration);
+    for (size_t i = 0; i < all.size(); ++i) {
+        if (all[i].begin_key != iv.begin_key || all[i].end_key != iv.end_key) continue;
+        // A gap is left between stretches: keys on the same time are one key, so they would melt together
+        if (i > 0) lo = all[i - 1].end + REP_MIN_LENGTH;
+        if (i + 1 < all.size()) hi = all[i + 1].begin - REP_MIN_LENGTH;
+    }
+    const double length = iv.end - iv.begin;
+    const bool only_moved = fabs((new_end - new_begin) - length) < 1.0e-6;
+    if (only_moved) {
+        if (new_begin < lo) { new_end += lo - new_begin; new_begin = lo; }
+        if (new_end > hi) { new_begin -= new_end - hi; new_end = hi; }
+    }
+    new_begin = std::clamp(new_begin, lo, hi - REP_MIN_LENGTH);
+    new_end = std::clamp(new_end, new_begin + REP_MIN_LENGTH, hi);
+
+    if (iv.begin_key >= 0) {
+        if (iv.begin_is_start) {
+            // Shown from the start by its first key: to start later it needs a hidden key at the start
+            if (new_begin > REP_EPS) {
+                (*keys)[iv.begin_key].time = new_begin;
+                keys->push_back(hidden_key(rep, 0.0));
+            }
+        } else {
+            (*keys)[iv.begin_key].time = new_begin;
+        }
+    }
+    if (iv.end_key >= 0) {
+        (*keys)[iv.end_key].time = new_end;
+    } else if (new_end < duration - REP_EPS) {
+        keys->push_back(hidden_key(rep, new_end));
+    }
+}
+
+bool rep_add_interval(std::vector<RepKey>* keys, uint32_t rep, double begin, double end, double duration) {
+    const std::vector<RepInterval> all = rep_shown_intervals(*keys, rep, duration);
+    double next = duration;
+    for (const RepInterval& iv : all) {
+        if (begin >= iv.begin - REP_MIN_LENGTH && begin < iv.end + REP_MIN_LENGTH) return false;
+        if (iv.begin > begin) next = std::min(next, iv.begin - REP_MIN_LENGTH);
+    }
+    end = std::min(end, next);
+    if (end - begin < REP_MIN_LENGTH) return false;
+    if (all.empty() && begin > REP_EPS) keys->push_back(hidden_key(rep, 0.0));
+    keys->push_back(shown_key(rep, begin));
+    if (end < duration - REP_EPS) keys->push_back(hidden_key(rep, end));
+    return true;
+}
+
+void rep_remove_interval(std::vector<RepKey>* keys, const RepInterval& iv) {
+    int a = iv.begin_key, b = iv.end_key;
+    if (a < b) std::swap(a, b);
+    if (a >= 0 && a < (int)keys->size()) keys->erase(keys->begin() + a);
+    if (b >= 0 && b < (int)keys->size()) keys->erase(keys->begin() + b);
+}
+
+void rep_swap_at(std::vector<RepKey>* keys, uint32_t from, uint32_t to, double t) {
+    auto put = [&](uint32_t rep, bool shown_before, bool shown_after) {
+        bool has_keys = false;
+        for (RepKey& k : *keys) {
+            if (k.rep != rep || k.prop != (int)RepProp::Visible) continue;
+            has_keys = true;
+            if (fabs(k.time - t) < REP_EPS) {
+                k.value[0] = shown_after ? 1.0f : 0.0f;
+                k.ease = KeyEase::Hold;
+                return;
+            }
+        }
+        if (!has_keys && t > REP_EPS) keys->push_back(shown_before ? shown_key(rep, 0.0) : hidden_key(rep, 0.0));
+        keys->push_back(shown_after ? shown_key(rep, t) : hidden_key(rep, t));
+    };
+    put(from, true, false);
+    put(to, false, true);
+}
+
+void rep_move_group(std::vector<RepKey>* keys, const std::vector<uint32_t>& reps, double begin, double end, double new_begin, double new_end, double duration) {
+    const double d0 = new_begin - begin, d1 = new_end - end;
+    const bool left = fabs(d1) < 1.0e-9 && fabs(d0) > 1.0e-9;
+    const bool right = fabs(d0) < 1.0e-9 && fabs(d1) > 1.0e-9;
+    for (uint32_t rep : reps) {
+        const std::vector<RepInterval> all = rep_shown_intervals(*keys, rep, duration);
+        for (const RepInterval& iv : all) {
+            if (iv.begin < begin - REP_EPS || iv.end > end + REP_EPS) continue;
+            double b = iv.begin, e = iv.end;
+            if (left) {
+                if (fabs(iv.begin - begin) > REP_EPS) continue;
+                b = new_begin;
+            } else if (right) {
+                if (fabs(iv.end - end) > REP_EPS) continue;
+                e = new_end;
+            } else {
+                b += d0;
+                e += d0;
+            }
+            rep_move_interval(keys, rep, iv, b, e, duration);
+            break;   // The keys of the others may have moved: one stretch a representation each time it is asked
+        }
+    }
+}
+
+std::vector<RepInterval> rep_union_intervals(std::vector<RepInterval> intervals) {
+    std::sort(intervals.begin(), intervals.end(), [](const RepInterval& a, const RepInterval& b) { return a.begin < b.begin; });
+    std::vector<RepInterval> out;
+    for (const RepInterval& iv : intervals) {
+        if (!out.empty() && iv.begin <= out.back().end + REP_EPS) {
+            out.back().end = std::max(out.back().end, iv.end);
+        } else {
+            RepInterval u;
+            u.begin = iv.begin;
+            u.end = iv.end;
+            out.push_back(u);
+        }
+    }
+    return out;
+}
+
+bool rep_name_split(const char* name, std::string* group, std::string* member) {
+    const char* h = strchr(name, '-');
+    if (h && h != name && h[1] != '\0') {
+        group->assign(name, (size_t)(h - name));
+        member->assign(h + 1);
+        return true;
+    }
+    group->assign(name);
+    member->clear();
+    return false;
+}
+
+std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed) {
+    struct Group { std::string name; std::vector<int> members; };
+    std::vector<Group> groups;
+    std::vector<std::string> member_names(names.size());
+    for (size_t i = 0; i < names.size(); ++i) {
+        std::string g, m;
+        rep_name_split(names[i].c_str(), &g, &m);
+        member_names[i] = m;
+        size_t gi = 0;
+        while (gi < groups.size() && groups[gi].name != g) ++gi;
+        if (gi == groups.size()) groups.push_back({g, {}});
+        groups[gi].members.push_back((int)i);
+    }
+    std::vector<RepRow> rows;
+    for (const Group& g : groups) {
+        if (g.members.size() == 1) {
+            RepRow r;
+            r.rep = g.members[0];
+            r.label = names[(size_t)g.members[0]];
+            r.group = g.name;
+            rows.push_back(r);
+            continue;
+        }
+        RepRow h;
+        h.header = true;
+        h.rep = g.members[0];
+        h.label = g.name;
+        h.group = g.name;
+        h.members = (int)g.members.size();
+        rows.push_back(h);
+        if (std::find(collapsed.begin(), collapsed.end(), g.name) != collapsed.end()) continue;
+        for (int m : g.members) {
+            RepRow r;
+            r.rep = m;
+            r.label = member_names[(size_t)m].empty() ? names[(size_t)m] : member_names[(size_t)m];
+            r.group = g.name;
+            r.indented = true;
+            rows.push_back(r);
+        }
+    }
+    return rows;
+}
+
 static bool equal(const RepKey& a, const RepKey& b) {
     return a.rep == b.rep && a.prop == b.prop && a.time == b.time && a.ease == b.ease &&
            a.value[0] == b.value[0] && a.value[1] == b.value[1] && a.value[2] == b.value[2];

@@ -8425,6 +8425,9 @@ static bool movie_draw_timeline_markers(ApplicationState* data) {
 static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool locked);
 static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool locked);
 static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, bool locked);
+static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len, bool locked);
+static void movie_reps_apply(ApplicationState* state, double time);
+static std::vector<RepRow> movie_rep_overview_rows(const ApplicationState* data);
 
 // Subplots align the time axes and provide draggable row splitters.
 static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
@@ -8471,13 +8474,15 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
     const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
     int rows = 0;
-    float ratios[6];
+    float ratios[7];
+    int overview_row = -1, overlay_row = -1;
     for (int track = 0; track < 3; ++track) {
         if (m.timeline_tracks[track]) ratios[rows++] = m.timeline_row_ratios[track];
     }
     if (m.timeline_param_lane) ratios[rows++] = m.timeline_row_ratios[3];
     if (m.timeline_rep_lane) ratios[rows++] = m.timeline_row_ratios[4];
-    if (m.timeline_overlay_lane) ratios[rows++] = m.timeline_row_ratios[5];
+    if (m.timeline_rep_overview) { overview_row = rows; ratios[rows++] = m.timeline_row_ratios[6]; }
+    if (m.timeline_overlay_lane) { overlay_row = rows; ratios[rows++] = m.timeline_row_ratios[5]; }
     const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
     if (rows == 0) {
         ImGui::TextDisabled("No lane is ticked.");
@@ -8488,9 +8493,12 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         float sum = 0.0f;
         for (int i = 0; i < rows; ++i) sum += ratios[i];
         float total = (float)rows * m.timeline_lane_height;
-        if (m.timeline_overlay_lane && sum > 0.0f && ratios[rows - 1] > 0.0f) {
-            const float needed = (float)m.overlays.size() * ImGui::GetFontSize() * 1.5f + ImGui::GetFontSize() * 4.0f;
-            total = MAX(total, needed * sum / ratios[rows - 1]);
+        // The lanes with a row for each thing in them are tall enough for their rows
+        const float fs = ImGui::GetFontSize();
+        const int list_rows[2] = {overview_row, overlay_row};
+        const float list_needed[2] = {(float)movie_rep_overview_rows(data).size() * fs * 1.5f + fs * 4.0f, (float)m.overlays.size() * fs * 1.5f + fs * 4.0f};
+        for (int i = 0; i < 2; ++i) {
+            if (list_rows[i] >= 0 && sum > 0.0f && ratios[list_rows[i]] > 0.0f) total = MAX(total, list_needed[i] * sum / ratios[list_rows[i]]);
         }
         size.y = total;
     }
@@ -8594,6 +8602,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
       }
       if (m.timeline_param_lane) draw_movie_param_lane(data, movie_len, locked);
       if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
+      if (m.timeline_rep_overview) draw_movie_rep_overview_lane(data, movie_len, locked);
       if (m.timeline_overlay_lane) draw_movie_overlay_lane(data, movie_len, locked);
       ImPlot::EndSubplots();
       int row = 0;
@@ -8602,6 +8611,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
       }
       if (m.timeline_param_lane) m.timeline_row_ratios[3] = ratios[row++];
       if (m.timeline_rep_lane) m.timeline_row_ratios[4] = ratios[row++];
+      if (m.timeline_rep_overview) m.timeline_row_ratios[6] = ratios[row++];
       if (m.timeline_overlay_lane) m.timeline_row_ratios[5] = ratios[row];
     }
     if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -8992,6 +9002,191 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
     }
 }
 
+// The representations that are in one group (named alike up to the first hyphen), by their place in the list
+static std::vector<int> movie_rep_group_members(const ApplicationState* data, const std::string& group) {
+    std::vector<int> out;
+    for (int i = 0; i < (int)md_array_size(data->representation.reps); ++i) {
+        std::string g, member;
+        rep_name_split(data->representation.reps[i].name, &g, &member);
+        if (g == group) out.push_back(i);
+    }
+    return out;
+}
+
+static std::vector<RepRow> movie_rep_overview_rows(const ApplicationState* data) {
+    std::vector<std::string> names;
+    for (size_t i = 0; i < md_array_size(data->representation.reps); ++i) names.push_back(data->representation.reps[i].name);
+    return rep_group_rows(names, data->movie.rep_groups_collapsed);
+}
+
+// When each representation is shown, one row each, the ones named alike up to the first hyphen (protein-cartoon, protein-cpk)
+// under a row of their group that shows when any of them is. A bar is a stretch where it is shown: drag it, or its ends, to
+// change when; right click removes it, a double click on an empty place adds one. Dragging the bar of a group moves the bars of
+// its members. Fills the space that is left.
+static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len, bool locked) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const double duration = (double)movie_len;
+    const double ramp = MAX((double)m.rep_transition, 0.0);
+    const std::vector<RepRow> rows = movie_rep_overview_rows(data);
+    const int n = (int)rows.size();
+    const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
+
+    std::vector<std::string> label_text((size_t)n);
+    std::vector<const char*> label_ptr((size_t)n);
+    std::vector<double> label_pos((size_t)n);
+    for (int r = 0; r < n; ++r) {
+        label_text[(size_t)r] = std::string(rows[(size_t)r].indented ? "  " : "") + rows[(size_t)r].label + (rows[(size_t)r].header ? " (" + std::to_string(rows[(size_t)r].members) + ")" : "");
+        label_pos[(size_t)r] = (double)r;
+    }
+    for (int r = 0; r < n; ++r) label_ptr[(size_t)r] = label_text[(size_t)r].c_str();
+
+    // What was dragged, done once the lane is drawn: the keys it edits are read while it is
+    struct Edit { int kind = 0; uint32_t rep = 0; RepInterval iv; double b = 0.0, e = 0.0; std::vector<uint32_t> reps; double b0 = 0.0, e0 = 0.0; } edit;   // kind: 1 move, 2 group, 3 remove, 4 add
+    bool any_hovered = false;
+
+    if (ImPlot::BeginPlot("##rep_overview", ImVec2(-1, -1), plot_flags)) {
+        ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_Invert);
+        ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.7, (double)MAX(n, 1) - 0.3, ImPlotCond_Always);
+        if (n > 0) ImPlot::SetupAxisTicks(ImAxis_Y1, label_pos.data(), n, label_ptr.data());
+        ImPlot::SetupFinish();
+        if (n == 0) ImPlot::PlotText("No representation yet", 0.5 * duration, 0.0);
+
+        ImDrawList* dl = ImPlot::GetPlotDrawList();
+        for (int r = 0; r < n; ++r) {
+            const RepRow& row = rows[(size_t)r];
+            const Representation* rep = row.header ? nullptr : &data->representation.reps[row.rep];
+            const bool selected = !row.header && row.rep == m.rep_selected;
+
+            // The group's colour, the same for all its members
+            const float hue = (float)(md_hash64(row.group.data(), row.group.size(), 3) % 360) / 360.0f;
+            ImVec4 col(1, 1, 1, 1);
+            ImGui::ColorConvertHSVtoRGB(hue, row.header ? 0.35f : 0.6f, 0.95f, col.x, col.y, col.z);
+
+            std::vector<RepInterval> intervals;
+            std::vector<uint32_t> member_ids;
+            if (row.header) {
+                std::vector<RepInterval> all;
+                const std::string group = row.group;
+                for (int i : movie_rep_group_members(data, group)) {
+                    member_ids.push_back(data->representation.reps[i].id);
+                    const std::vector<RepInterval> mine = rep_shown_intervals(m.rep_keys, data->representation.reps[i].id, duration);
+                    all.insert(all.end(), mine.begin(), mine.end());
+                }
+                intervals = rep_union_intervals(all);
+            } else {
+                intervals = rep_shown_intervals(m.rep_keys, rep->id, duration);
+            }
+
+            if (selected) {
+                const ImVec2 a = ImPlot::PlotToPixels(m.timeline_view_begin, (double)r - 0.5), b = ImPlot::PlotToPixels(m.timeline_view_end, (double)r + 0.5);
+                ImPlot::PushPlotClipRect();
+                dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 18));
+                ImPlot::PopPlotClipRect();
+            }
+
+            for (int k = 0; k < (int)intervals.size() && k < 64; ++k) {
+                const RepInterval& iv = intervals[(size_t)k];
+                double x0 = iv.begin, x1 = iv.end, y0 = (double)r - 0.38, y1 = (double)r + 0.38;
+                bool clicked = false, hovered = false, held = false;
+                const bool changed = ImPlot::DragRect(9000 + r * 64 + k, &x0, &y0, &x1, &y1, col, drag_flags, &clicked, &hovered, &held);
+                any_hovered |= hovered;
+
+                // The bar: it grows in over the transition after its start and shrinks away over it after its end
+                const double head = MIN(ramp, iv.end - iv.begin);
+                const double tail = MIN(ramp, MAX(duration - iv.end, 0.0));
+                const ImU32 strong = ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, row.header ? 0.55f : 0.8f));
+                const ImU32 faint = ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.12f));
+                const ImU32 none = ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.0f));
+                ImPlot::PushPlotClipRect();
+                auto px = [&](double t, double y) { return ImPlot::PlotToPixels(t, y); };
+                const double top = (double)r - 0.38, bottom = (double)r + 0.38;
+                if (head > 0.0) dl->AddRectFilledMultiColor(px(iv.begin, top), px(iv.begin + head, bottom), faint, strong, strong, faint);
+                dl->AddRectFilled(px(iv.begin + head, top), px(iv.end, bottom), strong);
+                if (tail > 0.0) dl->AddRectFilledMultiColor(px(iv.end, top), px(iv.end + tail, bottom), strong, none, none, strong);
+                ImPlot::PopPlotClipRect();
+
+                if (hovered && !held) {
+                    ImGui::SetTooltip("%s\n%.2f s to %.2f s%s\n%s", row.header ? row.group.c_str() : rep->name, iv.begin, iv.end,
+                        iv.end_key < 0 && !row.header ? " (to the end)" : "",
+                        row.header ? "Drag to move the bars of the group that are in it, its ends to change the ones that start or stop there" : "Drag to move it, its ends to change when it starts and stops. Right click removes it.");
+                }
+                if (!row.header && clicked) {
+                    m.rep_selected = row.rep;
+                    m.rep_prop_selected = (int)RepProp::Visible;
+                }
+                if (!locked && hovered && !held && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !row.header && edit.kind == 0) {
+                    edit.kind = 3;
+                    edit.iv = iv;
+                    edit.rep = rep->id;
+                }
+                if (changed && edit.kind == 0) {
+                    const double length = iv.end - iv.begin;
+                    const bool moved_only = fabs((x1 - x0) - length) < 1.0e-6;
+                    double nb = movie_snap_time(data, MIN(x0, x1)), ne = movie_snap_time(data, MAX(x0, x1));
+                    if (moved_only) ne = nb + length;
+                    edit.kind = row.header ? 2 : 1;
+                    edit.iv = iv;
+                    edit.rep = row.header ? 0 : rep->id;
+                    edit.reps = member_ids;
+                    edit.b = nb;
+                    edit.e = ne;
+                    edit.b0 = iv.begin;
+                    edit.e0 = iv.end;
+                }
+            }
+
+            // Where other properties of it are keyed
+            if (!row.header) {
+                ImPlot::PushPlotClipRect();
+                for (const RepKey& key : m.rep_keys) {
+                    if (key.rep != rep->id || key.prop == (int)RepProp::Visible) continue;
+                    const ImVec2 p = ImPlot::PlotToPixels(key.time, (double)r + 0.38);
+                    dl->AddTriangleFilled(ImVec2(p.x - 3.5f, p.y), ImVec2(p.x + 3.5f, p.y), ImVec2(p.x, p.y - 6.0f), IM_COL32(255, 255, 255, 220));
+                }
+                ImPlot::PopPlotClipRect();
+            }
+        }
+
+        // A stretch is added where a representation is hidden
+        if (!locked && !any_hovered && edit.kind == 0 && ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const ImPlotPoint p = ImPlot::GetPlotMousePos();
+            const int r = (int)floor(p.y + 0.5);
+            if (r >= 0 && r < n && !rows[(size_t)r].header) {
+                edit.kind = 4;
+                edit.rep = data->representation.reps[rows[(size_t)r].rep].id;
+                edit.b = movie_snap_time(data, p.x);
+                edit.e = edit.b + MAX(0.1 * duration, 1.0);
+            }
+        }
+
+        double playhead = (double)m.playhead;
+        if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
+            m.playhead = (float)movie_snap_time(data, playhead);
+            if (!locked) movie_apply_time(data, (double)m.playhead, true);
+        }
+        if (locked) {
+            double cur = m.cur_time;
+            ImPlot::DragLineX(1001, &cur, ImVec4(1.0f, 0.3f, 0.3f, 1), 1.5f, ImPlotDragToolFlags_NoInputs | ImPlotDragToolFlags_NoFit);
+        }
+        ImPlot::EndPlot();
+    }
+
+    if (edit.kind != 0 && !locked) {
+        switch (edit.kind) {
+        case 1: rep_move_interval(&m.rep_keys, edit.rep, edit.iv, edit.b, edit.e, duration); break;
+        case 2: rep_move_group(&m.rep_keys, edit.reps, edit.b0, edit.e0, edit.b, edit.e, duration); break;
+        case 3: rep_remove_interval(&m.rep_keys, edit.iv); break;
+        case 4: rep_add_interval(&m.rep_keys, edit.rep, edit.b, edit.e, duration); break;
+        default: break;
+        }
+        movie_rep_sort(data);
+        movie_reps_apply(data, (double)m.playhead);
+    }
+}
+
 // The timeline of the movie: trajectory, distance, field of view and a look parameter.
 static void draw_movie_timeline_window(ApplicationState* data) {
     auto& m = data->movie;
@@ -9067,8 +9262,49 @@ static void draw_movie_timeline_window(ApplicationState* data) {
     }
     ImGui::Checkbox("Representation lane", &m.timeline_rep_lane);
     ImGui::SameLine();
+    ImGui::Checkbox("Representation overview", &m.timeline_rep_overview);
+    ImGui::SetItemTooltip("When each representation is shown, as bars, one row each. Representations named alike up to the first hyphen\n(protein-cartoon, protein-cpk) are a group, with a row of their own that shows when any of them is: dragging it moves\nthe bars of its members. Drag a bar or its ends, right click removes a bar, double click on an empty place adds one.");
+    ImGui::SameLine();
     ImGui::Checkbox("Overlay lane", &m.timeline_overlay_lane);
     ImGui::SetItemTooltip("The overlays as bars below the other lanes, one row each: drag a bar to move it, its ends to change when it is shown.");
+    if (m.timeline_rep_overview) {
+        // The groups of the overview can be folded, and the selected representation can hand over to the next of its group
+        const std::vector<RepRow> overview_rows = movie_rep_overview_rows(data);
+        bool any_group = false;
+        for (const RepRow& row : overview_rows) {
+            if (!row.header) continue;
+            auto it = std::find(m.rep_groups_collapsed.begin(), m.rep_groups_collapsed.end(), row.group);
+            const bool folded = it != m.rep_groups_collapsed.end();
+            ImGui::PushID(row.group.c_str());
+            if (ImGui::SmallButton((std::string(folded ? "+ " : "- ") + row.group).c_str())) {
+                if (folded) m.rep_groups_collapsed.erase(it);
+                else m.rep_groups_collapsed.push_back(row.group);
+            }
+            ImGui::PopID();
+            ImGui::SetItemTooltip("Fold or unfold the group %s in the representation overview", row.group.c_str());
+            ImGui::SameLine();
+            any_group = true;
+        }
+        if (any_group) ImGui::TextDisabled("groups");
+        const int overview_reps = (int)md_array_size(data->representation.reps);
+        std::vector<int> siblings;
+        if (overview_reps > 0) {
+            m.rep_selected = CLAMP(m.rep_selected, 0, overview_reps - 1);
+            std::string g, member;
+            rep_name_split(data->representation.reps[m.rep_selected].name, &g, &member);
+            siblings = movie_rep_group_members(data, g);
+        }
+        ImGui::BeginDisabled(siblings.size() < 2 || recording);
+        if (ImGui::SmallButton("Swap with the next of its group")) {
+            const size_t at = (size_t)(std::find(siblings.begin(), siblings.end(), m.rep_selected) - siblings.begin());
+            const int next = siblings[(at + 1) % siblings.size()];
+            rep_swap_at(&m.rep_keys, data->representation.reps[m.rep_selected].id, data->representation.reps[next].id, movie_snap_time(data, (double)m.playhead));
+            movie_rep_sort(data);
+            movie_reps_apply(data, (double)m.playhead);
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("At the preview time the selected representation goes and the next one of its group (named alike up to the first hyphen) comes,\nwith the transition: e.g. protein-cartoon shrinks away while protein-cpk grows in.");
+    }
     const int num_reps = (int)md_array_size(data->representation.reps);
     if (m.timeline_rep_lane && num_reps > 0) {
         m.rep_selected = CLAMP(m.rep_selected, 0, num_reps - 1);
