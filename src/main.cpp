@@ -236,6 +236,8 @@ static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
 static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state);
 static void movie_sort_keyframes(ApplicationState* state);
+static void movie_property_vis_apply(ApplicationState* state);
+static void script_vis_text_draw(ImDrawList* dl, ImVec2 res, float scale, const ApplicationState& state);
 static void movie_apply_time(ApplicationState* state, double time, bool apply_camera);
 static void movie_follow_update(ApplicationState* state);
 static double movie_duration(const ApplicationState* state);
@@ -1048,53 +1050,14 @@ int main(int argc, char** argv) {
             state.representation.atom_visibility_mask_dirty = false;
         }
 
+        // The visualization of the script property that a movie overlay shows
+        movie_property_vis_apply(&state);
+
         if (state.script.vis.text) {
             PUSH_CPU_SECTION("Draw vis text");
             ImGuiWindow* window = ImGui::FindWindowByName("Main interaction window");
             if (window) {
-                ImDrawList* dl = window->DrawList;
-                ASSERT(dl);
-
-                const vec2_t res = { (float)state.app.window.width, (float)state.app.window.height };
-                const mat4_t mvp = state.view.param.matrix.curr.proj_no_jitter * state.view.param.matrix.curr.view;
-
-                // Script text
-                const ImU32 text_color = convert_color(state.script.text_color);
-                const ImU32 rect_color = convert_color(state.script.text_bg_color);
-                const float rect_rounding = 5.f;
-                const ImVec2 rect_padding = ImVec2(4.f, 2.f);
-
-                size_t num_text = md_array_size(state.script.vis.text);
-                for (size_t i = 0; i < num_text; ++i) {
-                    const md_script_vis_text_t& vis_text = state.script.vis.text[i];
-
-                    const vec4_t p = mat4_mul_vec4(mvp, vec4_from_vec3(vis_text.pos, 1.0f));
-                    const vec4_t c = p / p.w;
-
-                    // A label carrying a unit is a quantity, so it is shown in the same unit as the
-                    // plots and re-formatted here rather than taken as mdlib spelled it. Anything
-                    // else is drawn as it came.
-                    char buf[64];
-                    str_t str = vis_text.str;
-                    if (!md_unit_is_none(vis_text.unit)) {
-                        char unit_buf[32];
-                        const double scl = display_units::factor_print(unit_buf, sizeof(unit_buf), vis_text.unit);
-                        // The degree sign hugs the number the way the convention has it, everything else takes a space.
-                        const char* sep = strcmp(unit_buf, "\xC2\xB0") == 0 ? "" : " ";
-                        const int len = snprintf(buf, sizeof(buf), "%.2f%s%s", vis_text.value * scl, sep, unit_buf);
-                        str = {buf, (size_t)CLAMP(len, 0, (int)sizeof(buf) - 1)};
-                    }
-
-                    const ImVec2 text_size = ImGui::CalcTextSize(str.beg(), str.end());
-
-                    if (-1 < c.x && c.x < 1 && -1 < c.y && c.y < 1 && -1 < c.z && c.z < 1) {
-                        ImVec2 tc = {(c.x * 0.5f + 0.5f) * res.x, (-c.y * 0.5f + 0.5f) * res.y};
-                        ImVec2 p0 = tc - text_size * 0.5f;
-                        ImVec2 p1 = tc + text_size * 0.5f;
-                        dl->AddRectFilled(p0 - rect_padding, p1 + rect_padding, rect_color, rect_rounding);
-                        dl->AddText(p0, text_color, str.beg(), str.end());
-                    }
-                }
+                script_vis_text_draw(window->DrawList, ImVec2((float)state.app.window.width, (float)state.app.window.height), 1.0f, state);
             }
             POP_CPU_SECTION();
         }
@@ -6799,6 +6762,9 @@ static const char* movie_overlay_type_str[(int)MovieOverlayType::Count] = {
     "Logo",
     "Image",
     "Time bar",
+    "Timeline plot",
+    "Distribution plot",
+    "Property visualization",
 };
 
 static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
@@ -6926,6 +6892,309 @@ static const MovieTimeBarProfile& movie_time_bar_profile_for(const ApplicationSt
     return profile;
 }
 
+// The labels of the script's visualization (distances, angles, ...), at the places they have on the screen. 'res' is the
+// size of what is drawn into and 'scale' how much larger than the viewport's text the text is made, for a frame of another size.
+static void script_vis_text_draw(ImDrawList* dl, ImVec2 res, float scale, const ApplicationState& state) {
+    if (!state.script.vis.text) return;
+    ImFont* font = ImGui::GetFont();
+    const float font_px = ImGui::GetFontSize() * scale;
+    const mat4_t mvp = state.view.param.matrix.curr.proj_no_jitter * state.view.param.matrix.curr.view;
+
+    const ImU32 text_color = convert_color(state.script.text_color);
+    const ImU32 rect_color = convert_color(state.script.text_bg_color);
+    const float rect_rounding = 5.f * scale;
+    const ImVec2 rect_padding = ImVec2(4.f, 2.f) * scale;
+
+    const size_t num_text = md_array_size(state.script.vis.text);
+    for (size_t i = 0; i < num_text; ++i) {
+        const md_script_vis_text_t& vis_text = state.script.vis.text[i];
+
+        const vec4_t p = mat4_mul_vec4(mvp, vec4_from_vec3(vis_text.pos, 1.0f));
+        const vec4_t c = p / p.w;
+
+        // A label carrying a unit is a quantity, so it is shown in the same unit as the
+        // plots and re-formatted here rather than taken as mdlib spelled it. Anything
+        // else is drawn as it came.
+        char buf[64];
+        str_t str = vis_text.str;
+        if (!md_unit_is_none(vis_text.unit)) {
+            char unit_buf[32];
+            const double scl = display_units::factor_print(unit_buf, sizeof(unit_buf), vis_text.unit);
+            // The degree sign hugs the number the way the convention has it, everything else takes a space.
+            const char* sep = strcmp(unit_buf, "\xC2\xB0") == 0 ? "" : " ";
+            const int len = snprintf(buf, sizeof(buf), "%.2f%s%s", vis_text.value * scl, sep, unit_buf);
+            str = {buf, (size_t)CLAMP(len, 0, (int)sizeof(buf) - 1)};
+        }
+
+        const ImVec2 text_size = font->CalcTextSizeA(font_px, FLT_MAX, 0.0f, str.beg(), str.end());
+
+        if (-1 < c.x && c.x < 1 && -1 < c.y && c.y < 1 && -1 < c.z && c.z < 1) {
+            ImVec2 tc = {(c.x * 0.5f + 0.5f) * res.x, (-c.y * 0.5f + 0.5f) * res.y};
+            ImVec2 p0 = tc - text_size * 0.5f;
+            ImVec2 p1 = tc + text_size * 0.5f;
+            dl->AddRectFilled(p0 - rect_padding, p1 + rect_padding, rect_color, rect_rounding);
+            dl->AddText(font, font_px, p0, text_color, str.beg(), str.end());
+        }
+    }
+}
+
+// Evaluates the visualization of the script property of each property overlay that is shown, in the viewport while the
+// movie is previewed or recorded. What it makes (highlight, geometry, labels) is drawn as if the property were hovered.
+static void movie_property_vis_apply(ApplicationState* state) {
+    auto& m = state->movie;
+    if (m.overlays.empty() || !state->script.eval_ir) return;
+    const bool recording = m.state == MovieRecordingState::Recording;
+    if (!recording && !(m.show_overlay_preview && (m.show_window || m.show_timeline_window))) return;
+    const double time = recording ? m.cur_time : (double)m.playhead;
+    for (const MovieOverlay& o : m.overlays) {
+        if (o.type != MovieOverlayType::PropertyVis || o.text[0] == '\0' || movie_overlay_alpha(o, time) <= 0.0f) continue;
+        const md_script_vis_payload_o* payload = md_script_ir_property_vis_payload(state->script.eval_ir, str_from_cstr(o.text));
+        if (payload) script_visualize_payload(state, payload, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+    }
+}
+
+// The value of a temporal series at a position on its axis, in the display unit
+static double movie_series_value_at(const SeriesTemporalView& v, double x) {
+    if (v.num_samples <= 0) return 0.0;
+    const double idx = series_temporal_index_at(v, x);
+    const int i0 = CLAMP((int)floor(idx), 0, v.num_samples - 1);
+    const int i1 = MIN(i0 + 1, v.num_samples - 1);
+    const double f = CLAMP(idx - (double)i0, 0.0, 1.0);
+    const double a = (double)v.y[(size_t)i0 * v.stride] * v.y_scale;
+    const double b = (double)v.y[(size_t)i1 * v.stride] * v.y_scale;
+    return a + (b - a) * f;
+}
+
+// Decimals that a tick step needs
+static int movie_tick_decimals(double step) {
+    return step > 0.0 ? CLAMP((int)ceil(-log10(step) - 1e-9), 0, 6) : 0;
+}
+
+// A subplot of the Timelines or the Distributions window as an overlay: the legend with the value at the frame that is
+// shown, the axes and the curves (or the bars) as far as the movie has played them. Laid out in a block of the overlay's width
+// and height at its anchor, with the font following the height.
+static void movie_plot_overlay_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& o, ImVec2 pos, ImVec2 size, float margin, float alpha, double time, const ApplicationState* cstate) {
+    // Resolving a series fills the caches of the application, which is why it takes it mutable
+    ApplicationState* state = const_cast<ApplicationState*>(cstate);
+    const bool timeline = o.type == MovieOverlayType::Timeline;
+    const int  subplot  = CLAMP(o.subplot, 0, PLOT_MAX_SUBPLOTS - 1);
+    const PlotSubplot& sp = timeline ? state->timeline.subplots[subplot] : state->distributions.subplots[subplot];
+    const int ns = MIN(sp.count, 6);
+    if (ns <= 0) return;
+
+    const float plot_h = MAX(movie_overlay_size_px(o, size.y), 40.0f);
+    const float plot_w = MAX(o.width * size.x, 80.0f);
+    const float fpx    = CLAMP(plot_h * 0.085f, 6.0f, 64.0f);
+    const float legend_h = (float)ns * fpx * 1.2f;
+    const float axis_h   = fpx * 2.6f;
+    const float label_w  = timeline ? fpx * 3.8f : fpx * 0.6f;
+    const float pad      = fpx * 0.4f;
+
+    const int ai = (int)o.anchor;
+    const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - plot_w) * 0.5f * (float)(ai % 3),
+                             pos.y + margin + (size.y - 2.0f * margin - plot_h) * 0.5f * (float)(ai / 3));
+    const float ix0 = p0.x + label_w, ix1 = p0.x + plot_w - pad;
+    const float iy0 = p0.y + legend_h, iy1 = p0.y + plot_h - axis_h;
+    if (ix1 - ix0 < 8.0f || iy1 - iy0 < 8.0f) return;
+
+    const ImVec4 oc(o.color[0], o.color[1], o.color[2], o.color[3]);
+    auto col = [&](ImVec4 c, float a = 1.0f) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.x, c.y, c.z, c.w * a * alpha)); };
+    const ImU32 shadow = IM_COL32(0, 0, 0, (int)(160.0f * o.color[3] * alpha));
+    const float soff = MAX(fpx * 0.05f, 1.0f);
+    auto text = [&](ImVec2 p, ImU32 c, const char* s) {
+        dl->AddText(font, fpx, ImVec2(p.x + soff, p.y + soff), shadow, s);
+        dl->AddText(font, fpx, p, c, s);
+    };
+
+    if (o.background[3] > 0.0f) {
+        dl->AddRectFilled(ImVec2(p0.x - pad, p0.y - pad), ImVec2(p0.x + plot_w + pad, p0.y + plot_h + pad),
+            col(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3])), fpx * 0.4f);
+    }
+
+    // What the series hold
+    SeriesTemporalView tv[6];
+    SeriesHistogramView hv[6];
+    bool has_t[6] = {}, has_h[6] = {};
+    for (int s = 0; s < ns; ++s) {
+        has_t[s] = series_resolve_temporal(&tv[s], state, sp.series[s].key);
+        if (!timeline) has_h[s] = series_resolve_histogram(&hv[s], state, sp.series[s].key, MAX(sp.series[s].num_bins, 8));
+    }
+
+    // How far the movie has taken the trajectory: all of the stretch it covers, and what it has visited by now
+    const MovieTimeBarProfile& prof = movie_time_bar_profile_for(state);
+    double full_lo = 0.0, full_hi = 0.0, vis_lo = 0.0, vis_hi = 0.0;
+    if (!prof.lo.empty()) {
+        full_lo = prof.lo.back();
+        full_hi = prof.hi.back();
+        movie_time_bar_visited(prof, time, &vis_lo, &vis_hi);
+    }
+    const double q = movie_trajectory_quantity(state, time);
+    if (!o.reveal) { vis_lo = full_lo; vis_hi = full_hi; }
+
+    // The axes
+    double xa = 0.0, xb = 1.0, ya = 0.0, yb = 1.0;
+    if (timeline) {
+        xa = full_lo;
+        xb = full_hi;
+        if (!(xb > xa)) {
+            for (int s = 0; s < ns; ++s) {
+                if (has_t[s] && tv[s].num_samples > 1) { xa = tv[s].x[0]; xb = tv[s].x[tv[s].num_samples - 1]; break; }
+            }
+        }
+        bool any = false;
+        double lo = 0.0, hi = 0.0;
+        for (int s = 0; s < ns; ++s) {
+            if (!has_t[s] || tv[s].num_samples < 1) continue;
+            const int i0 = CLAMP((int)floor(series_temporal_index_at(tv[s], xa)), 0, tv[s].num_samples - 1);
+            const int i1 = CLAMP((int)ceil(series_temporal_index_at(tv[s], xb)), 0, tv[s].num_samples - 1);
+            for (int i = i0; i <= i1; ++i) {
+                const double y = (double)tv[s].y[(size_t)i * tv[s].stride] * tv[s].y_scale;
+                if (!any) { lo = hi = y; any = true; }
+                else { lo = fmin(lo, y); hi = fmax(hi, y); }
+            }
+        }
+        if (!any || !(xb > xa)) return;
+        const double span = hi > lo ? hi - lo : MAX(fabs(hi), 1.0) * 0.1;
+        ya = lo - 0.06 * span;
+        yb = hi + 0.06 * span;
+    } else {
+        bool any = false;
+        for (int s = 0; s < ns; ++s) {
+            if (!has_h[s] || !(hv[s].x_max > hv[s].x_min)) continue;
+            if (!any) { xa = hv[s].x_min; xb = hv[s].x_max; any = true; }
+            else { xa = fmin(xa, hv[s].x_min); xb = fmax(xb, hv[s].x_max); }
+        }
+        if (!any) return;
+        ya = 0.0;
+        yb = 1.12;
+    }
+    auto sx = [&](double x) { return ix0 + (float)((x - xa) / (xb - xa)) * (ix1 - ix0); };
+    auto sy = [&](double y) { return iy1 - (float)((y - ya) / (yb - ya)) * (iy1 - iy0); };
+
+    // Ticks and frame
+    const ImU32 col_axis = col(oc, 0.9f);
+    const ImU32 col_grid = col(oc, 0.15f);
+    {
+        double ticks[16], step = 0.0;
+        const int nt = movie_nice_ticks(xa, xb, MAX((int)((ix1 - ix0) / (fpx * 5.0f)), 2), ticks, 16, &step);
+        const int dec = movie_tick_decimals(step);
+        for (int i = 0; i < nt; ++i) {
+            char b[32];
+            snprintf(b, sizeof(b), "%.*f", dec, ticks[i]);
+            const float x = sx(ticks[i]);
+            dl->AddLine(ImVec2(x, iy0), ImVec2(x, iy1), col_grid);
+            dl->AddLine(ImVec2(x, iy1), ImVec2(x, iy1 + fpx * 0.3f), col_axis);
+            const float tw = font->CalcTextSizeA(fpx, FLT_MAX, 0.0f, b).x;
+            text(ImVec2(CLAMP(x - tw * 0.5f, p0.x, p0.x + plot_w - tw), iy1 + fpx * 0.35f), col_axis, b);
+        }
+        // What the axis is measured in
+        char u[32] = "";
+        if (timeline) {
+            if (md_array_size(state->timeline.x_values) > 0 && !md_unit_is_none(state->timeline.time_unit)) md_unit_print(u, sizeof(u), state->timeline.time_unit);
+        } else {
+            for (int s = 0; s < ns && !u[0]; ++s) if (has_h[s]) snprintf(u, sizeof(u), "%s", hv[s].x_unit_str);
+        }
+        if (u[0]) {
+            const float tw = font->CalcTextSizeA(fpx, FLT_MAX, 0.0f, u).x;
+            text(ImVec2(ix1 - tw, iy1 + fpx * 1.5f), col_axis, u);
+        }
+    }
+    if (timeline) {
+        double ticks[16], step = 0.0;
+        const int nt = movie_nice_ticks(ya, yb, MAX((int)((iy1 - iy0) / (fpx * 2.5f)), 2), ticks, 16, &step);
+        const int dec = movie_tick_decimals(step);
+        for (int i = 0; i < nt; ++i) {
+            char b[32];
+            snprintf(b, sizeof(b), "%.*f", dec, ticks[i]);
+            const float y = sy(ticks[i]);
+            dl->AddLine(ImVec2(ix0, y), ImVec2(ix1, y), col_grid);
+            const float tw = font->CalcTextSizeA(fpx, FLT_MAX, 0.0f, b).x;
+            text(ImVec2(ix0 - fpx * 0.3f - tw, y - fpx * 0.5f), col_axis, b);
+        }
+    }
+    dl->AddLine(ImVec2(ix0, iy1), ImVec2(ix1, iy1), col_axis, MAX(fpx * 0.08f, 1.0f));
+    dl->AddLine(ImVec2(ix0, iy0), ImVec2(ix0, iy1), col_axis, MAX(fpx * 0.08f, 1.0f));
+
+    dl->PushClipRect(ImVec2(ix0, iy0 - 2.0f), ImVec2(ix1 + 2.0f, iy1 + 2.0f), true);
+    std::vector<ImVec2> pts;
+    std::vector<float> counts_full, counts_vis;
+    for (int s = 0; s < ns; ++s) {
+        const PlotSeries& ps = sp.series[s];
+        const ImVec4 sc = ps.color;
+        const float thick = MAX(fpx * 0.16f, 1.5f);
+        if (timeline) {
+            if (!has_t[s] || tv[s].num_samples < 2 || !(vis_hi >= vis_lo)) continue;
+            const SeriesTemporalView& v = tv[s];
+            const int j0 = CLAMP((int)ceil(series_temporal_index_at(v, vis_lo)), 0, v.num_samples - 1);
+            const int j1 = CLAMP((int)floor(series_temporal_index_at(v, vis_hi)), 0, v.num_samples - 1);
+            pts.clear();
+            pts.push_back(ImVec2(sx(vis_lo), sy(movie_series_value_at(v, vis_lo))));
+            const int step = MAX((j1 - j0) / MAX((int)(ix1 - ix0), 1), 1);
+            for (int i = j0; i <= j1; i += step) pts.push_back(ImVec2(sx((double)v.x[i]), sy((double)v.y[(size_t)i * v.stride] * v.y_scale)));
+            pts.push_back(ImVec2(sx(vis_hi), sy(movie_series_value_at(v, vis_hi))));
+            if (ps.plot_type == PlotType_Scatter) {
+                for (const ImVec2& p : pts) dl->AddCircleFilled(p, thick, col(sc), 6);
+            } else {
+                dl->AddPolyline(pts.data(), (int)pts.size(), col(sc), ImDrawFlags_None, thick);
+            }
+            // Where the frame that is shown is
+            const float mx = sx(q), my = sy(movie_series_value_at(v, q));
+            dl->AddLine(ImVec2(mx, iy0), ImVec2(mx, iy1), col(sc, 0.35f));
+            dl->AddCircleFilled(ImVec2(mx, my), thick * 2.0f, col(ImVec4(0, 0, 0, 1), 0.7f), 12);
+            dl->AddCircleFilled(ImVec2(mx, my), thick * 1.5f, col(sc), 12);
+        } else {
+            if (!has_h[s]) continue;
+            const SeriesHistogramView& h = hv[s];
+            const int nb = h.num_bins;
+            if (nb < 1 || !(h.x_max > h.x_min)) continue;
+            const float* heights = nullptr;
+            float peak = 0.0f;
+            std::vector<float> own;
+            if (o.reveal && has_t[s]) {
+                // Counted over the frames that have been played, in the bins of the full distribution
+                movie_histogram_counts(&counts_full, nb, h.x_min, h.x_max, tv[s].x, tv[s].y, tv[s].stride, tv[s].y_scale, tv[s].num_samples, full_lo, full_hi);
+                movie_histogram_counts(&counts_vis, nb, h.x_min, h.x_max, tv[s].x, tv[s].y, tv[s].stride, tv[s].y_scale, tv[s].num_samples, vis_lo, vis_hi);
+                for (float c : counts_full) peak = MAX(peak, c);
+                heights = counts_vis.data();
+            } else {
+                own.assign(h.bins, h.bins + nb);
+                for (float c : own) peak = MAX(peak, c);
+                heights = own.data();
+            }
+            if (!(peak > 0.0f)) continue;
+            const double bw = (h.x_max - h.x_min) / (double)nb;
+            const ImU32 fill = col(sc, 0.45f), edge = col(sc);
+            for (int b = 0; b < nb; ++b) {
+                if (heights[b] <= 0.0f) continue;
+                const float x0 = sx(h.x_min + bw * b), x1 = sx(h.x_min + bw * (b + 1));
+                const float y = sy(1.0 * (double)heights[b] / (double)peak);
+                dl->AddRectFilled(ImVec2(x0, y), ImVec2(MAX(x1, x0 + 1.0f), iy1), fill);
+                dl->AddLine(ImVec2(x0, y), ImVec2(MAX(x1, x0 + 1.0f), y), edge, MAX(fpx * 0.1f, 1.0f));
+            }
+            if (has_t[s]) {
+                const float mx = sx(movie_series_value_at(tv[s], q));
+                dl->AddLine(ImVec2(mx, iy0), ImVec2(mx, iy1), edge, MAX(fpx * 0.12f, 1.0f));
+            }
+        }
+    }
+    dl->PopClipRect();
+
+    // The legend, with the value at the frame that is shown
+    for (int s = 0; s < ns; ++s) {
+        const float y = p0.y + (float)s * fpx * 1.2f;
+        dl->AddRectFilled(ImVec2(p0.x, y + fpx * 0.2f), ImVec2(p0.x + fpx * 0.7f, y + fpx * 0.9f), col(sp.series[s].color));
+        char b[160];
+        int n = snprintf(b, sizeof(b), "%s", tv[s].label[0] ? tv[s].label : hv[s].label);
+        if (o.show_value && has_t[s] && tv[s].num_samples > 0) {
+            const int i = CLAMP((int)(series_temporal_index_at(tv[s], q) + 0.5), 0, tv[s].num_samples - 1);
+            char vb[48];
+            series_temporal_print_value(vb, sizeof(vb), tv[s], i, 0);
+            snprintf(b + n, sizeof(b) - (size_t)n, "   %s %s", vb, tv[s].unit_str);
+        }
+        text(ImVec2(p0.x + fpx * 1.0f, y), col(oc), b);
+    }
+}
+
 // The overlays that are visible at a movie time, drawn into the rectangle (pos, size) of a frame. Everything scales with the
 // height of the frame, so a frame looks the same at any resolution.
 static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state) {
@@ -6991,6 +7260,12 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             if (progress > 0.0f) dl->AddRectFilled(ImVec2(p0.x, by), ImVec2(p0.x + MAX(bar_w * progress, bar_h), by + bar_h), col_fill, bar_h * 0.5f);
             continue;
         }
+
+        if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
+            movie_plot_overlay_draw(dl, font, o, pos, size, margin, alpha, time, state);
+            continue;
+        }
+        if (o.type == MovieOverlayType::PropertyVis) continue;   // In the viewport, not on the plane of the frame
 
         if (o.type == MovieOverlayType::Logo || o.type == MovieOverlayType::Image) {
             float aspect = 4.0f;
@@ -7090,6 +7365,13 @@ static void movie_overlays_render(ApplicationState* state, double time) {
     dl.PushTexture(ImGui::GetIO().Fonts->TexRef);
     dl.PushClipRect(ImVec2(0, 0), ImVec2(w, h));
     movie_overlays_draw(&dl, ImVec2(0, 0), ImVec2(w, h), time, state);
+    for (const MovieOverlay& o : state->movie.overlays) {
+        // The labels of the visualization are drawn by the viewport, which the recording does not include
+        if (o.type == MovieOverlayType::PropertyVis && movie_overlay_alpha(o, time) > 0.0f) {
+            script_vis_text_draw(&dl, ImVec2(w, h), h / MAX((float)state->app.window.height, 1.0f), *state);
+            break;
+        }
+    }
     if (dl.VtxBuffer.Size == 0) return;
 
     ImDrawData dd;
@@ -8492,6 +8774,11 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         case MovieOverlayType::ScaleBar:  o.anchor = MovieOverlayAnchor::BottomLeft; break;
         case MovieOverlayType::Image:     o.anchor = MovieOverlayAnchor::BottomRight; o.size = 0.1f; break;
         case MovieOverlayType::TimeBar:   o.anchor = MovieOverlayAnchor::BottomCenter; o.size = 0.025f; break;
+        case MovieOverlayType::Timeline:
+        case MovieOverlayType::Distribution:
+            o.anchor = MovieOverlayAnchor::BottomRight; o.size = 0.25f; o.width = 0.3f;
+            o.background[0] = 0.0f; o.background[1] = 0.0f; o.background[2] = 0.0f; o.background[3] = 0.5f;
+            break;
         case MovieOverlayType::Logo:      o = movie_overlay_default_logo(); o.begin = (double)m.playhead; o.end = (double)MAX(movie_len, m.playhead); break;
         default: break;
         }
@@ -8504,6 +8791,7 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     ImGui::SetItemTooltip("The time of the trajectory frame that is shown, in the unit of the timeline");
     ImGui::SameLine();
     if (ImGui::Button("Add Scale Bar")) add(MovieOverlayType::ScaleBar);
+    ImGui::SetItemTooltip("A bar of a known length in the structure. It is as long on the frame as that length is at the\ndistance the camera looks at, so it follows the zoom.");
     ImGui::SameLine();
     if (ImGui::Button("Add Image...")) {
         char path_buf[2048] = "";
@@ -8517,9 +8805,17 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     if (ImGui::Button("Add Time Bar")) add(MovieOverlayType::TimeBar);
     ImGui::SetItemTooltip("How far the trajectory has gone. It fills from left to right whichever way the trajectory is played, fast where the\ntrajectory is played fast, slowly where it is slowed down and not at all where it is held, so it shows the pace.");
     ImGui::SameLine();
+    if (ImGui::Button("Add Timeline")) add(MovieOverlayType::Timeline);
+    ImGui::SetItemTooltip("A subplot of the Timelines window, drawn as the movie plays: the curve grows with the trajectory and its legend\nshows the value at the frame that is shown.");
+    ImGui::SameLine();
+    if (ImGui::Button("Add Distribution")) add(MovieOverlayType::Distribution);
+    ImGui::SetItemTooltip("A subplot of the Distributions window, filled as the movie plays: the bars grow with the frames that have been\nplayed and a line marks the value at the frame that is shown.");
+    ImGui::SameLine();
+    if (ImGui::Button("Add Property")) add(MovieOverlayType::PropertyVis);
+    ImGui::SetItemTooltip("The visualization of a script property in the viewport (the atoms, the geometry and the labels that hovering its\nplot shows), for as long as the overlay is shown.");
+    ImGui::SameLine();
     if (ImGui::Button("Add Logo")) add(MovieOverlayType::Logo);
     ImGui::SetItemTooltip("The VIAMD logo. A movie starts with it in the top left corner for the whole movie: remove it here\nif you do not want it. Its colour tints it (white keeps its own colours), its size is its height.");
-    ImGui::SetItemTooltip("A bar of a known length in the structure. It is as long on the frame as that length is at the\ndistance the camera looks at, so it follows the zoom.");
     ImGui::SameLine();
     ImGui::Checkbox("Show in viewport", &m.show_overlay_preview);
     ImGui::SetItemTooltip("Shows them at the preview time. The recorded frames have the proportions of the movie's size,\nso where they sit is only exact when the viewport has them too.");
@@ -8542,6 +8838,54 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
             if (ImGui::Combo("Type", &type, movie_overlay_type_str, (int)MovieOverlayType::Count)) o.type = (MovieOverlayType)type;
             if (o.type == MovieOverlayType::Text) {
                 ImGui::InputText("Text", o.text, sizeof(o.text));
+            }
+            if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
+                const bool tl = o.type == MovieOverlayType::Timeline;
+                const PlotSubplot* subs = tl ? data->timeline.subplots : data->distributions.subplots;
+                const int nsub = tl ? data->timeline.num_subplots : data->distributions.num_subplots;
+                o.subplot = CLAMP(o.subplot, 0, PLOT_MAX_SUBPLOTS - 1);
+                char cur[64];
+                snprintf(cur, sizeof(cur), "Subplot %d  (%d series)", o.subplot + 1, subs[o.subplot].count);
+                if (ImGui::BeginCombo(tl ? "Timelines subplot" : "Distributions subplot", cur)) {
+                    for (int s = 0; s < MAX(nsub, 1); ++s) {
+                        snprintf(cur, sizeof(cur), "Subplot %d  (%d series)", s + 1, subs[s].count);
+                        if (ImGui::Selectable(cur, s == o.subplot)) o.subplot = s;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SetItemTooltip("Which subplot of the %s window is drawn: its series, in the colours they have there. At most six are drawn.", tl ? "Timelines" : "Distributions");
+                if (subs[o.subplot].count == 0) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "This subplot has no series: drag some into it in the window.");
+                ImGui::SliderFloat("Width", &o.width, 0.1f, 1.0f, "%.2f of the frame");
+                ImGui::Checkbox("As the movie plays", &o.reveal);
+                ImGui::SetItemTooltip(tl ? "Only the part of the trajectory that the movie has played is drawn, and it grows."
+                                         : "Only the frames that the movie has played are counted, and the bars grow.\nA script distribution (not over frames) is drawn as it is.");
+                ImGui::SameLine();
+                ImGui::Checkbox("Value", &o.show_value);
+                ImGui::SetItemTooltip("The value at the frame that is shown, in the legend");
+            }
+            if (o.type == MovieOverlayType::PropertyVis) {
+                ImGui::InputText("Property", o.text, sizeof(o.text));
+                ImGui::SetItemTooltip("The identifier of a script property, as it is named in the script");
+                if (ImGui::BeginCombo("##property_pick", "Pick from the script", ImGuiComboFlags_NoPreview)) {
+                    const uint32_t kinds = MD_SCRIPT_PROPERTY_FLAG_TEMPORAL | MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION | MD_SCRIPT_PROPERTY_FLAG_VOLUME | MD_SCRIPT_PROPERTY_FLAG_SDF;
+                    int listed = 0;
+                    series_for_each_script_property(data, SeriesSource_Script, kinds, [&](const SeriesKey& key) {
+                        const str_t ident = series_script_ident(key);
+                        if (str_empty(ident)) return;
+                        char name[128];
+                        snprintf(name, sizeof(name), STR_FMT, STR_ARG(ident));
+                        if (ImGui::Selectable(name, strcmp(name, o.text) == 0)) snprintf(o.text, sizeof(o.text), "%s", name);
+                        listed += 1;
+                    });
+                    if (listed == 0) ImGui::TextDisabled("The script has no evaluated property");
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("Pick");
+                if (o.text[0] != '\0' && (!data->script.eval_ir || !md_script_ir_property_vis_payload(data->script.eval_ir, str_from_cstr(o.text)))) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "The script has no such property (yet)");
+                }
+                ImGui::TextDisabled("Shown in the viewport at the preview time and in the recording, while this overlay is shown.");
             }
             if (o.type == MovieOverlayType::TimeBar) {
                 ImGui::SliderFloat("Width", &o.width, 0.05f, 1.0f, "%.2f of the frame");

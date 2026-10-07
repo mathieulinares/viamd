@@ -30,7 +30,7 @@ void movie_overlay_size_range(MovieOverlaySizeUnit unit, float* lo, float* hi) {
         *hi = 400.0f;
     } else {
         *lo = 0.01f;
-        *hi = 0.3f;
+        *hi = 0.6f;
     }
 }
 
@@ -73,10 +73,64 @@ void movie_time_bar_profile(MovieTimeBarProfile* out, double duration, int sampl
     out->distance.assign((size_t)(samples < 1 ? 2 : samples + 1), 0.0);
     const int n = (int)out->distance.size() - 1;
     double prev = quantity_at(0.0);
+    out->lo.assign(out->distance.size(), prev);
+    out->hi.assign(out->distance.size(), prev);
     for (int i = 1; i <= n; ++i) {
         const double q = quantity_at(duration * (double)i / (double)n);
         out->distance[i] = out->distance[i - 1] + fabs(q - prev);
+        out->lo[i] = fmin(out->lo[i - 1], q);
+        out->hi[i] = fmax(out->hi[i - 1], q);
         prev = q;
+    }
+}
+
+bool movie_time_bar_visited(const MovieTimeBarProfile& p, double time, double* lo, double* hi) {
+    if (p.lo.size() < 2 || p.lo.size() != p.hi.size() || p.duration <= 0.0) {
+        if (p.lo.empty()) return false;
+        *lo = p.lo[0];
+        *hi = p.hi[0];
+        return true;
+    }
+    const double x = fmin(fmax(time / p.duration, 0.0), 1.0) * (double)(p.lo.size() - 1);
+    const size_t i = (size_t)floor(x);
+    if (i + 1 >= p.lo.size()) {
+        *lo = p.lo.back();
+        *hi = p.hi.back();
+        return true;
+    }
+    const double f = x - (double)i;
+    *lo = p.lo[i] + (p.lo[i + 1] - p.lo[i]) * f;
+    *hi = p.hi[i] + (p.hi[i + 1] - p.hi[i]) * f;
+    return true;
+}
+
+int movie_nice_ticks(double lo, double hi, int max_ticks, double* out, int cap, double* step_out) {
+    if (step_out) *step_out = 0.0;
+    if (!(hi > lo) || max_ticks < 1 || cap < 1) return 0;
+    const double raw = (hi - lo) / (double)max_ticks;
+    const double mag = pow(10.0, floor(log10(raw)));
+    const double m = raw / mag;
+    const double step = (m <= 1.0 ? 1.0 : (m <= 2.0 ? 2.0 : (m <= 5.0 ? 5.0 : 10.0))) * mag;
+    if (step_out) *step_out = step;
+    int n = 0;
+    for (double t = ceil(lo / step - 1e-9) * step; t <= hi + step * 1e-9 && n < cap; t += step) {
+        out[n++] = fabs(t) < step * 1e-9 ? 0.0 : t;
+    }
+    return n;
+}
+
+void movie_histogram_counts(std::vector<float>* counts, int num_bins, double v_min, double v_max, const float* x, const float* y,
+    int stride, double y_scale, int num_samples, double x_lo, double x_hi) {
+    counts->assign((size_t)(num_bins > 0 ? num_bins : 0), 0.0f);
+    if (num_bins < 1 || !(v_max > v_min) || stride < 1) return;
+    const double inv = (double)num_bins / (v_max - v_min);
+    for (int i = 0; i < num_samples; ++i) {
+        if ((double)x[i] < x_lo || (double)x[i] > x_hi) continue;
+        const double v = (double)y[(size_t)i * (size_t)stride] * y_scale;
+        if (v < v_min || v > v_max) continue;
+        int b = (int)((v - v_min) * inv);
+        if (b >= num_bins) b = num_bins - 1;
+        (*counts)[b] += 1.0f;
     }
 }
 

@@ -1859,6 +1859,17 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Background"))) viamd::extract_flt_vec(o.background, 4, arg);
                 else if (str_eq(ident, STR_LIT("Length"))) viamd::extract_flt(o.length, arg);
                 else if (str_eq(ident, STR_LIT("Width")))  viamd::extract_flt(o.width, arg);
+                else if (str_eq(ident, STR_LIT("Subplot"))) {
+                    int v = 0;
+                    if (viamd::extract_int(v, arg)) o.subplot = CLAMP(v, 0, PLOT_MAX_SUBPLOTS - 1);
+                }
+                else if (str_eq(ident, STR_LIT("PlotFlags"))) {
+                    int bits = 0;
+                    if (viamd::extract_int(bits, arg)) {
+                        o.reveal = (bits & 1) != 0;
+                        o.show_value = (bits & 2) != 0;
+                    }
+                }
                 else if (str_eq(ident, STR_LIT("TimeBarLabels"))) {
                     int bits = 0;
                     if (viamd::extract_int(bits, arg)) {
@@ -2267,6 +2278,11 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("Background"), o.background, 4);
             viamd::write_flt (state, STR_LIT("Length"), o.length);
             viamd::write_str (state, STR_LIT("Text"), str_from_cstr(o.text));
+            if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
+                viamd::write_flt(state, STR_LIT("Width"), o.width);
+                viamd::write_int(state, STR_LIT("Subplot"), o.subplot);
+                viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0));
+            }
             if (o.type == MovieOverlayType::TimeBar) {
                 viamd::write_flt(state, STR_LIT("Width"), o.width);
                 viamd::write_int(state, STR_LIT("TimeBarLabels"), (o.show_elapsed ? 1 : 0) | (o.show_speed ? 2 : 0));

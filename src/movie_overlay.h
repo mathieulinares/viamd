@@ -13,6 +13,9 @@ enum class MovieOverlayType : int {
     Logo,        // The VIAMD logo
     Image,       // An image file (png or jpg)
     TimeBar,     // How far the trajectory has gone, counted forward even when it is played backward
+    Timeline,    // A subplot of the Timelines window, drawn as the movie plays
+    Distribution,// A subplot of the Distributions window, filled as the movie plays
+    PropertyVis, // The visualization of a script property in the viewport, with its labels
     Count,
 };
 
@@ -51,6 +54,9 @@ struct MovieOverlay {
     float              width = 0.4f;          // Time bar: its width, as a part of the width of the frame
     bool               show_elapsed = true;   // Time bar: the time that has gone, over the whole
     bool               show_speed = false;    // Time bar: how fast the trajectory plays, relative to the Animation panel
+    int                subplot = 0;           // Timeline, Distribution: which subplot of the window (0 based)
+    bool               reveal = true;         // Timeline, Distribution: only what the movie has played so far
+    bool               show_value = true;     // Timeline, Distribution: the value at the frame that is shown, in the legend
 };
 
 // The logo in the top left corner for the whole movie, which a movie starts with
@@ -81,6 +87,7 @@ double movie_units_per_pixel(float distance, float fov_y, float frame_height_px)
 // that is played fast fills it fast, a slow one slowly, a hold not at all.
 struct MovieTimeBarProfile {
     std::vector<double> distance;   // Moved by each sample, in the unit of the quantity
+    std::vector<double> lo, hi;     // The least and the most the quantity has been at by each sample (the stretch of it that has been visited)
     double duration = 0.0;          // The movie's length, the samples are even over it
     double total() const { return distance.empty() ? 0.0 : distance.back(); }
 };
@@ -90,6 +97,19 @@ void movie_time_bar_profile(MovieTimeBarProfile* out, double duration, int sampl
 
 // 0 (nothing moved yet) .. 1 (all moved) at a movie time. A trajectory that does not move at all gives 0.
 double movie_time_bar_progress(const MovieTimeBarProfile& p, double time);
+
+// The stretch of the quantity that the movie has visited by a movie time, from its least to its most value so far. At
+// time 0 it is the single value the movie starts at. False while the profile is empty.
+bool movie_time_bar_visited(const MovieTimeBarProfile& p, double time, double* lo, double* hi);
+
+// Round tick positions in [lo, hi], 1, 2 or 5 times a power of ten apart, at most 'max_ticks' of them. Returns how many
+// were written to 'out' (capacity 'cap') and the step between them.
+int movie_nice_ticks(double lo, double hi, int max_ticks, double* out, int cap, double* step);
+
+// Counts the values y[i * stride] * y_scale of the samples whose x lies in [x_lo, x_hi] into 'num_bins' bins evenly spread
+// over [v_min, v_max]. Values outside it are left out. 'counts' is resized.
+void movie_histogram_counts(std::vector<float>* counts, int num_bins, double v_min, double v_max, const float* x, const float* y,
+    int stride, double y_scale, int num_samples, double x_lo, double x_hi);
 
 // How much has moved by a movie time, in the unit of the quantity
 double movie_time_bar_moved(const MovieTimeBarProfile& p, double time);

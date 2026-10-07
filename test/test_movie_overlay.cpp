@@ -154,3 +154,93 @@ UTEST(viamd_movie_overlay, the_speed_has_no_direction) {
 UTEST(viamd_movie_overlay, the_time_bar_comes_after_the_image_in_the_saved_numbers) {
     EXPECT_EQ(5, (int)MovieOverlayType::TimeBar);
 }
+
+UTEST(viamd_movie_overlay, the_overlays_that_follow_the_time_bar_keep_their_saved_numbers) {
+    EXPECT_EQ(6, (int)MovieOverlayType::Timeline);
+    EXPECT_EQ(7, (int)MovieOverlayType::Distribution);
+    EXPECT_EQ(8, (int)MovieOverlayType::PropertyVis);
+}
+
+/* The stretch of the trajectory that has been played */
+
+UTEST(viamd_movie_overlay, the_visited_stretch_grows_forward_and_backward) {
+    MovieTimeBarProfile up, down;
+    movie_time_bar_profile(&up, 10.0, 100, ramp_up);
+    movie_time_bar_profile(&down, 10.0, 100, ramp_down);
+    double lo, hi;
+    ASSERT_TRUE(movie_time_bar_visited(up, 0.0, &lo, &hi));
+    EXPECT_NEAR(0.0, lo, 1.0e-9);
+    EXPECT_NEAR(0.0, hi, 1.0e-9);
+    ASSERT_TRUE(movie_time_bar_visited(up, 5.0, &lo, &hi));
+    EXPECT_NEAR(0.0, lo, 1.0e-9);
+    EXPECT_NEAR(50.0, hi, 1.0e-9);
+    ASSERT_TRUE(movie_time_bar_visited(down, 5.0, &lo, &hi));
+    EXPECT_NEAR(50.0, lo, 1.0e-9);
+    EXPECT_NEAR(100.0, hi, 1.0e-9);
+    ASSERT_TRUE(movie_time_bar_visited(down, 10.0, &lo, &hi));
+    EXPECT_NEAR(0.0, lo, 1.0e-9);
+    EXPECT_NEAR(100.0, hi, 1.0e-9);
+}
+
+UTEST(viamd_movie_overlay, the_visited_stretch_does_not_shrink_when_the_trajectory_turns_back) {
+    auto there_and_back = [](double t) { return t < 5.0 ? 10.0 * t : 100.0 - 10.0 * t; };
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 10.0, 200, there_and_back);
+    double lo, hi;
+    ASSERT_TRUE(movie_time_bar_visited(p, 9.0, &lo, &hi));
+    EXPECT_NEAR(0.0, lo, 1.0e-9);
+    EXPECT_NEAR(50.0, hi, 1.0e-9);
+}
+
+UTEST(viamd_movie_overlay, nothing_is_visited_without_a_profile) {
+    MovieTimeBarProfile p;
+    double lo = 1.0, hi = 2.0;
+    EXPECT_FALSE(movie_time_bar_visited(p, 1.0, &lo, &hi));
+}
+
+/* Ticks and histograms for the plot overlays */
+
+UTEST(viamd_movie_overlay, ticks_are_round_and_inside_the_range) {
+    double t[16], step = 0.0;
+    int n = movie_nice_ticks(0.0, 100.0, 5, t, 16, &step);
+    ASSERT_EQ(6, n);
+    EXPECT_NEAR(20.0, step, 1.0e-12);
+    EXPECT_NEAR(0.0, t[0], 1.0e-12);
+    EXPECT_NEAR(100.0, t[5], 1.0e-9);
+
+    n = movie_nice_ticks(0.13, 0.87, 4, t, 16, &step);
+    ASSERT_GT(n, 1);
+    EXPECT_GE(t[0], 0.13 - 1.0e-9);
+    EXPECT_LE(t[n - 1], 0.87 + 1.0e-9);
+    EXPECT_LE(n, 5);
+}
+
+UTEST(viamd_movie_overlay, no_ticks_in_an_empty_range) {
+    double t[4], step = 1.0;
+    EXPECT_EQ(0, movie_nice_ticks(3.0, 3.0, 5, t, 4, &step));
+    EXPECT_EQ(0, movie_nice_ticks(5.0, 3.0, 5, t, 4, &step));
+}
+
+UTEST(viamd_movie_overlay, a_histogram_counts_only_the_frames_that_were_played) {
+    const float x[] = {0, 1, 2, 3, 4, 5};
+    const float y[] = {0.5f, 0.5f, 1.5f, 2.5f, 2.5f, 2.5f};
+    std::vector<float> c;
+    movie_histogram_counts(&c, 3, 0.0, 3.0, x, y, 1, 1.0, 6, 0.0, 5.0);
+    ASSERT_EQ(3, (int)c.size());
+    EXPECT_NEAR(2.0, c[0], 1e-6);
+    EXPECT_NEAR(1.0, c[1], 1e-6);
+    EXPECT_NEAR(3.0, c[2], 1e-6);
+    movie_histogram_counts(&c, 3, 0.0, 3.0, x, y, 1, 1.0, 6, 0.0, 2.0);
+    EXPECT_NEAR(2.0, c[0], 1e-6);
+    EXPECT_NEAR(1.0, c[1], 1e-6);
+    EXPECT_NEAR(0.0, c[2], 1e-6);
+}
+
+UTEST(viamd_movie_overlay, a_histogram_takes_the_stride_and_the_scale_of_the_values) {
+    const float x[] = {0, 1};
+    const float y[] = {1.0f, 99.0f, 2.0f, 99.0f};   /* two values per sample, the first is read */
+    std::vector<float> c;
+    movie_histogram_counts(&c, 2, 0.0, 10.0, x, y, 2, 2.5, 2, 0.0, 1.0);   /* 2.5 and 5.0 */
+    EXPECT_NEAR(1.0, c[0], 1e-6);
+    EXPECT_NEAR(1.0, c[1], 1e-6);
+}

@@ -50,7 +50,11 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - New focus modes: look-at point (the previous behaviour), a fixed distance that can be keyed, or the follow target.
 
 **Overlays**
-- Text, time stamp, scale bar and the VIAMD logo. A movie starts with the logo in the top left corner; it can be removed.
+- Text, time stamp, scale bar, time bar, images (png or jpg), timeline and distribution plots, a script property's visualization, and the VIAMD logo. A movie starts with the logo in the top left corner; it can be removed.
+- The time bar fills forward whichever way the trajectory is played, so it shows the pace of the movie; it can show the time that has gone and the speed.
+- A timeline or a distribution overlay draws a subplot of the Timelines or Distributions window as the movie plays (the curve and the bars grow with the part of the trajectory that has been played), with the value at the frame that is shown in the legend.
+- A property overlay shows the visualization of a script property (atoms, geometry, labels) in the viewport and in the recording.
+- Sizes are in percent of the frame height or in points (a point is a pixel of a 1080 pixel high frame, scaled with the frame).
 - Each has a time range, fades, nine anchor positions, a size relative to the frame height, a colour and an optional background plate.
 
 **Undo/redo** (Ctrl+Z, Ctrl+Y)
@@ -68,7 +72,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 ### New code
 - `src/frame_sink.{h,cpp}`: asynchronous PNG/ffmpeg writer.
 - `src/movie_keys.{h,cpp}`: parameter and representation keys, the snapshot used for undo, time scaling, render range, snapping.
-- `src/movie_overlay.{h,cpp}`: overlay fades, scale bar length and the default logo overlay.
+- `src/movie_overlay.{h,cpp}`: overlay fades, sizes, scale bar length, the time bar maths, ticks and histogram counts of the plot overlays, and the default logo overlay.
 - `src/image.{h,cpp}`: decoding of an image in memory (the logo); `icon/viamd_logo.png` is baked into the executable by CMake.
 - `Representation::id` (`viamd.h`): a stable id for each representation, saved in workspaces, which representation keys refer to.
 - `src/gfx/camera_utils.{h,cpp}` and `camera.h`: keyframe evaluation, anchors, keyed curves, `camera_aim_at`.
@@ -83,7 +87,7 @@ New tests are in:
 - `test_image`.
 - `test_serialization`.
 
-All 117 tests pass in a Release build on Linux.
+All 134 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on. Everything added since (the Look at atom, anchors and timeline, render range and scale, pause, representation keys and transitions, overlays on frames and the logo, H.265 and WebM) has not been tried by hand in the GUI by me: `MOVIE_STATUS.md` has the list to check.
