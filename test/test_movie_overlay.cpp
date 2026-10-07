@@ -108,3 +108,49 @@ UTEST(viamd_movie_overlay, an_image_overlay_is_a_picture_like_the_logo_but_with_
     EXPECT_EQ(3, (int)MovieOverlayType::Logo);
     EXPECT_EQ(4, (int)MovieOverlayType::Image);
 }
+
+/* The time bar counts movement along the trajectory, forward whichever way it plays */
+
+static double ramp_up(double t) { return 10.0 * t; }                         /* 0 .. 100 over 10 s */
+static double ramp_down(double t) { return 100.0 - 10.0 * t; }               /* the same, played backward */
+
+UTEST(viamd_movie_overlay, a_trajectory_played_backward_fills_the_bar_forward) {
+    MovieTimeBarProfile up, down;
+    movie_time_bar_profile(&up, 10.0, 100, ramp_up);
+    movie_time_bar_profile(&down, 10.0, 100, ramp_down);
+    EXPECT_NEAR(100.0, up.total(), 1.0e-6);
+    EXPECT_NEAR(100.0, down.total(), 1.0e-6);
+    for (double t = 0.0; t <= 10.0; t += 1.0) {
+        EXPECT_NEAR(t / 10.0, movie_time_bar_progress(up, t), 1.0e-9);
+        EXPECT_NEAR(t / 10.0, movie_time_bar_progress(down, t), 1.0e-9);   /* not 1 - t/10 */
+    }
+}
+
+UTEST(viamd_movie_overlay, the_bar_fills_fast_where_the_trajectory_is_fast_and_stands_still_in_a_hold) {
+    /* Held for 4 s, then 100 frames in 2 s, then held again */
+    auto frame = [](double t) { return t < 4.0 ? 0.0 : (t < 6.0 ? 50.0 * (t - 4.0) : 100.0); };
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 10.0, 1000, frame);
+    EXPECT_NEAR(0.0, movie_time_bar_progress(p, 3.9), 1.0e-6);
+    EXPECT_NEAR(0.5, movie_time_bar_progress(p, 5.0), 1.0e-2);
+    EXPECT_NEAR(1.0, movie_time_bar_progress(p, 6.1), 1.0e-6);
+    EXPECT_NEAR(1.0, movie_time_bar_progress(p, 10.0), 1.0e-6);
+    EXPECT_NEAR(50.0, movie_time_bar_moved(p, 5.0), 1.0);
+}
+
+UTEST(viamd_movie_overlay, a_trajectory_that_does_not_move_gives_an_empty_bar) {
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 5.0, 50, [](double) { return 12.0; });
+    EXPECT_NEAR(0.0, movie_time_bar_progress(p, 2.5), 1.0e-12);
+    EXPECT_NEAR(0.0, movie_time_bar_progress(p, 99.0), 1.0e-12);
+}
+
+UTEST(viamd_movie_overlay, the_speed_has_no_direction) {
+    EXPECT_NEAR(10.0, movie_quantity_speed(ramp_up, 5.0, 0.1), 1.0e-9);
+    EXPECT_NEAR(10.0, movie_quantity_speed(ramp_down, 5.0, 0.1), 1.0e-9);
+    EXPECT_NEAR(0.0, movie_quantity_speed([](double) { return 3.0; }, 5.0, 0.1), 1.0e-12);
+}
+
+UTEST(viamd_movie_overlay, the_time_bar_comes_after_the_image_in_the_saved_numbers) {
+    EXPECT_EQ(5, (int)MovieOverlayType::TimeBar);
+}

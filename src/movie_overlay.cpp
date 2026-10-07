@@ -67,3 +67,33 @@ double movie_units_per_pixel(float distance, float fov_y, float frame_height_px)
     if (frame_height_px <= 0.0f) return 0.0;
     return 2.0 * (double)distance * tan((double)fov_y * 0.5) / (double)frame_height_px;
 }
+
+void movie_time_bar_profile(MovieTimeBarProfile* out, double duration, int samples, const std::function<double(double)>& quantity_at) {
+    out->duration = duration;
+    out->distance.assign((size_t)(samples < 1 ? 2 : samples + 1), 0.0);
+    const int n = (int)out->distance.size() - 1;
+    double prev = quantity_at(0.0);
+    for (int i = 1; i <= n; ++i) {
+        const double q = quantity_at(duration * (double)i / (double)n);
+        out->distance[i] = out->distance[i - 1] + fabs(q - prev);
+        prev = q;
+    }
+}
+
+double movie_time_bar_moved(const MovieTimeBarProfile& p, double time) {
+    if (p.distance.size() < 2 || p.duration <= 0.0) return 0.0;
+    const double x = fmin(fmax(time / p.duration, 0.0), 1.0) * (double)(p.distance.size() - 1);
+    const size_t i = (size_t)floor(x);
+    if (i + 1 >= p.distance.size()) return p.distance.back();
+    return p.distance[i] + (p.distance[i + 1] - p.distance[i]) * (x - (double)i);
+}
+
+double movie_time_bar_progress(const MovieTimeBarProfile& p, double time) {
+    const double total = p.total();
+    return total > 0.0 ? movie_time_bar_moved(p, time) / total : 0.0;
+}
+
+double movie_quantity_speed(const std::function<double(double)>& quantity_at, double time, double step) {
+    if (step <= 0.0) return 0.0;
+    return fabs(quantity_at(time + step) - quantity_at(time - step)) / (2.0 * step);
+}

@@ -6798,6 +6798,7 @@ static const char* movie_overlay_type_str[(int)MovieOverlayType::Count] = {
     "Scale bar",
     "Logo",
     "Image",
+    "Time bar",
 };
 
 static const char* movie_overlay_anchor_str[(int)MovieOverlayAnchor::Count] = {
@@ -6898,6 +6899,33 @@ static void movie_image_forget(const char* path) {
     }
 }
 
+// The trajectory time (or the frame, without times) at a movie time
+static double movie_trajectory_quantity(const ApplicationState* state, double time) {
+    const double frame = movie_trajectory_frame(state, time);
+    return md_array_size(state->timeline.x_values) > 0 ? frame_to_time(frame, *state) : frame;
+}
+
+// How far the movie has taken the trajectory by each time, made again when what it depends on changes
+static const MovieTimeBarProfile& movie_time_bar_profile_for(const ApplicationState* state) {
+    static MovieTimeBarProfile profile;
+    static uint64_t signature = 0;
+    const auto& m = state->movie;
+    uint64_t h = 7;
+    for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+        const double v[] = {m.keyframes[i].time, m.keyframes[i].use_frame ? m.keyframes[i].frame : -1.0, (double)(int)m.keyframes[i].ease};
+        h = md_hash64_combine(h, md_hash64(v, sizeof(v), 5));
+    }
+    const size_t nx = md_array_size(state->timeline.x_values);
+    const double s[] = {(double)m.duration, (double)m.traj_begin, (double)m.traj_end, m.start_frame, m.end_frame, (double)run_num_frames(state), (double)nx,
+        nx ? (double)state->timeline.x_values[0] : 0.0, nx ? (double)state->timeline.x_values[nx - 1] : 0.0};
+    h = md_hash64_combine(h, md_hash64(s, sizeof(s), 6));
+    if (h != signature || profile.distance.empty()) {
+        signature = h;
+        movie_time_bar_profile(&profile, (double)m.duration, 600, [state](double t) { return movie_trajectory_quantity(state, t); });
+    }
+    return profile;
+}
+
 // The overlays that are visible at a movie time, drawn into the rectangle (pos, size) of a frame. Everything scales with the
 // height of the frame, so a frame looks the same at any resolution.
 static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state) {
@@ -6909,6 +6937,60 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
     for (const MovieOverlay& o : m.overlays) {
         const float alpha = movie_overlay_alpha(o, time);
         if (alpha <= 0.0f) continue;
+
+        if (o.type == MovieOverlayType::TimeBar) {
+            const MovieTimeBarProfile& profile = movie_time_bar_profile_for(state);
+            const float font_px = MAX(movie_overlay_size_px(o, size.y), 4.0f);
+            const float bar_w = MAX(o.width * size.x, 8.0f);
+            const float bar_h = MAX(font_px * 0.3f, 3.0f);
+            const float gap = font_px * 0.25f;
+            const bool labels = o.show_elapsed || o.show_speed;
+            const float label_h = labels ? font_px : 0.0f;
+            const ImVec2 block(bar_w, label_h + (labels ? gap : 0.0f) + bar_h);
+            const int ta = (int)o.anchor;
+            const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - block.x) * 0.5f * (float)(ta % 3),
+                                     pos.y + margin + (size.y - 2.0f * margin - block.y) * 0.5f * (float)(ta / 3));
+            const float progress = (float)CLAMP(movie_time_bar_progress(profile, time), 0.0, 1.0);
+
+            const ImU32 col_fill  = ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha));
+            const ImU32 col_track = ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha * 0.25f));
+            const ImU32 col_shadow = IM_COL32(0, 0, 0, (int)(160.0f * o.color[3] * alpha));
+            if (o.background[3] > 0.0f) {
+                const float pad = font_px * 0.3f;
+                const ImU32 plate = ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * alpha));
+                dl->AddRectFilled(ImVec2(p0.x - pad, p0.y - pad * 0.6f), ImVec2(p0.x + block.x + pad, p0.y + block.y + pad * 0.6f), plate, font_px * 0.25f);
+            }
+            if (labels) {
+                const float soff = MAX(font_px * 0.05f, 1.0f);
+                if (o.show_elapsed) {
+                    char text[96];
+                    if (md_array_size(state->timeline.x_values) > 0) {
+                        char unit_buf[32] = "";
+                        if (!md_unit_is_none(state->timeline.time_unit)) md_unit_print(unit_buf, sizeof(unit_buf), state->timeline.time_unit);
+                        snprintf(text, sizeof(text), "%.1f / %.1f %s", movie_time_bar_moved(profile, time), profile.total(), unit_buf);
+                    } else {
+                        snprintf(text, sizeof(text), "%.0f / %.0f frames", movie_time_bar_moved(profile, time), profile.total());
+                    }
+                    dl->AddText(font, font_px, ImVec2(p0.x + soff, p0.y + soff), col_shadow, text);
+                    dl->AddText(font, font_px, p0, col_fill, text);
+                }
+                if (o.show_speed) {
+                    // How fast the trajectory is played, as a multiple of the speed of the Animation panel
+                    const double fps = fabs((double)state->animation.fps);
+                    const double frames_per_s = movie_quantity_speed([state](double t) { return movie_trajectory_frame(state, t); }, time, 0.5 / MAX((double)m.fps, 1.0));
+                    char text[32];
+                    snprintf(text, sizeof(text), "x%.1f", fps > 0.0 ? frames_per_s / fps : 0.0);
+                    const float tw = font->CalcTextSizeA(font_px, FLT_MAX, 0.0f, text).x;
+                    const ImVec2 tp(p0.x + block.x - tw, p0.y);
+                    dl->AddText(font, font_px, ImVec2(tp.x + soff, tp.y + soff), col_shadow, text);
+                    dl->AddText(font, font_px, tp, col_fill, text);
+                }
+            }
+            const float by = p0.y + label_h + (labels ? gap : 0.0f);
+            dl->AddRectFilled(ImVec2(p0.x, by), ImVec2(p0.x + bar_w, by + bar_h), col_track, bar_h * 0.5f);
+            if (progress > 0.0f) dl->AddRectFilled(ImVec2(p0.x, by), ImVec2(p0.x + MAX(bar_w * progress, bar_h), by + bar_h), col_fill, bar_h * 0.5f);
+            continue;
+        }
 
         if (o.type == MovieOverlayType::Logo || o.type == MovieOverlayType::Image) {
             float aspect = 4.0f;
@@ -8409,6 +8491,7 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         case MovieOverlayType::Timestamp: o.anchor = MovieOverlayAnchor::TopRight; break;
         case MovieOverlayType::ScaleBar:  o.anchor = MovieOverlayAnchor::BottomLeft; break;
         case MovieOverlayType::Image:     o.anchor = MovieOverlayAnchor::BottomRight; o.size = 0.1f; break;
+        case MovieOverlayType::TimeBar:   o.anchor = MovieOverlayAnchor::BottomCenter; o.size = 0.025f; break;
         case MovieOverlayType::Logo:      o = movie_overlay_default_logo(); o.begin = (double)m.playhead; o.end = (double)MAX(movie_len, m.playhead); break;
         default: break;
         }
@@ -8430,6 +8513,9 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         }
     }
     ImGui::SetItemTooltip("An image from a file (png or jpg), e.g. the logo of a group or a figure. It is kept as a path in the workspace,\nrelative to it.");
+    ImGui::SameLine();
+    if (ImGui::Button("Add Time Bar")) add(MovieOverlayType::TimeBar);
+    ImGui::SetItemTooltip("How far the trajectory has gone. It fills from left to right whichever way the trajectory is played, fast where the\ntrajectory is played fast, slowly where it is slowed down and not at all where it is held, so it shows the pace.");
     ImGui::SameLine();
     if (ImGui::Button("Add Logo")) add(MovieOverlayType::Logo);
     ImGui::SetItemTooltip("The VIAMD logo. A movie starts with it in the top left corner for the whole movie: remove it here\nif you do not want it. Its colour tints it (white keeps its own colours), its size is its height.");
@@ -8456,6 +8542,14 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
             if (ImGui::Combo("Type", &type, movie_overlay_type_str, (int)MovieOverlayType::Count)) o.type = (MovieOverlayType)type;
             if (o.type == MovieOverlayType::Text) {
                 ImGui::InputText("Text", o.text, sizeof(o.text));
+            }
+            if (o.type == MovieOverlayType::TimeBar) {
+                ImGui::SliderFloat("Width", &o.width, 0.05f, 1.0f, "%.2f of the frame");
+                ImGui::Checkbox("Time that has gone", &o.show_elapsed);
+                ImGui::SetItemTooltip("The trajectory time that the movie has covered so far, over the whole (in the unit of the timeline).\nIt counts forward even when the trajectory is played backward.");
+                ImGui::SameLine();
+                ImGui::Checkbox("Speed", &o.show_speed);
+                ImGui::SetItemTooltip("How fast the trajectory is played, as a multiple of the speed of the Animation panel (x1.0 is as there).");
             }
             if (o.type == MovieOverlayType::Image) {
                 ImGui::InputText("File", o.path, sizeof(o.path));

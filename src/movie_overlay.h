@@ -2,6 +2,9 @@
 
 #include <stddef.h>
 
+#include <functional>
+#include <vector>
+
 // Text and a scale bar that are put on the frames of a movie, shown for a stretch of its timeline
 enum class MovieOverlayType : int {
     Text,        // A title or a caption
@@ -9,6 +12,7 @@ enum class MovieOverlayType : int {
     ScaleBar,    // A bar of a given length in the structure, which follows the camera
     Logo,        // The VIAMD logo
     Image,       // An image file (png or jpg)
+    TimeBar,     // How far the trajectory has gone, counted forward even when it is played backward
     Count,
 };
 
@@ -44,6 +48,9 @@ struct MovieOverlay {
     char               text[128] = "";
     float              length = 0.0f;         // Scale bar: its length in Angstrom, 0 chooses one
     char               path[512] = "";         // Image: the file
+    float              width = 0.4f;          // Time bar: its width, as a part of the width of the frame
+    bool               show_elapsed = true;   // Time bar: the time that has gone, over the whole
+    bool               show_speed = false;    // Time bar: how fast the trajectory plays, relative to the Animation panel
 };
 
 // The logo in the top left corner for the whole movie, which a movie starts with
@@ -68,3 +75,24 @@ float movie_scale_bar_length(double units_per_pixel, double span_px, double targ
 
 // How much of the structure one pixel of the frame covers, at the distance the camera looks at
 double movie_units_per_pixel(float distance, float fov_y, float frame_height_px);
+
+// How far a movie has taken the trajectory by each time, for the time bar. What is counted is the movement along the
+// trajectory, whatever its direction: a trajectory that is played backward still fills the bar forward, and a stretch
+// that is played fast fills it fast, a slow one slowly, a hold not at all.
+struct MovieTimeBarProfile {
+    std::vector<double> distance;   // Moved by each sample, in the unit of the quantity
+    double duration = 0.0;          // The movie's length, the samples are even over it
+    double total() const { return distance.empty() ? 0.0 : distance.back(); }
+};
+
+// 'quantity_at(t)' is the trajectory time (or frame) at a movie time. Sampled 'samples' times over 0 .. duration.
+void movie_time_bar_profile(MovieTimeBarProfile* out, double duration, int samples, const std::function<double(double)>& quantity_at);
+
+// 0 (nothing moved yet) .. 1 (all moved) at a movie time. A trajectory that does not move at all gives 0.
+double movie_time_bar_progress(const MovieTimeBarProfile& p, double time);
+
+// How much has moved by a movie time, in the unit of the quantity
+double movie_time_bar_moved(const MovieTimeBarProfile& p, double time);
+
+// How fast the quantity changes at a movie time, per second of the movie, whatever the direction
+double movie_quantity_speed(const std::function<double(double)>& quantity_at, double time, double step);
