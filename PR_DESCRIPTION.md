@@ -2,11 +2,11 @@
 
 ### Summary
 
-This adds a **movie maker** to VIAMD. You set the length of the movie, place camera keyframes and keyed visual settings on a timeline, add overlays (text, time stamp, scale bar, the VIAMD logo), and record. The output is an MP4 (H.264 or H.265) or a WebM (frames piped into ffmpeg) or a numbered PNG sequence.
+This adds a **movie maker** to VIAMD. You set the length of the movie, place camera keyframes and keyed visual settings on a timeline, add overlays (text, time stamp, scale bar, time bar, images, plots of properties, the visualization of a script property, the VIAMD logo), and record. The output is an MP4 (H.264 or H.265) or a WebM (frames piped into ffmpeg) or a numbered PNG sequence.
 
 It has two new windows, both opened from **Windows**:
 - **Movie**: output settings, timing, camera keyframes, look parameters, overlays, and record.
-- **Movie Timeline**: aligned tracks with real axes for trajectory frame, camera distance, field of view and one look parameter. Keys can be dragged and the movie scrubbed. It is closed on startup and when a workspace is loaded.
+- **Movie Timeline**: lanes with real axes for the trajectory frame, camera distance, field of view, a look parameter, a property of a representation and the overlays. Keys and overlays can be dragged and the movie scrubbed. The lanes keep a least height (a slider) and the window scrolls (Ctrl + wheel zooms the time), or they can **Fit to window**. Which lanes are shown is saved in the workspace. It is closed on startup and when a workspace is loaded.
 
 The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspirin_phospholipase_movie.via`](docs/examples/aspirin_phospholipase_movie.via) is a finished movie that uses most of the features (its trajectory files are not in the repository).
 
@@ -50,22 +50,20 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - New focus modes: look-at point (the previous behaviour), a fixed distance that can be keyed, or the follow target.
 
 **Overlays**
-- Text, time stamp, scale bar, time bar, images (png or jpg), timeline and distribution plots, a script property's visualization, and the VIAMD logo. A movie starts with the logo in the top left corner; it can be removed.
-- The time bar fills forward whichever way the trajectory is played, so it shows the pace of the movie; it can show the time that has gone and the speed.
-- A timeline overlay (wide and low, bottom center) and a distribution overlay (narrow and tall, middle right) draw subplots of the Timelines and Distributions windows, stacked, as the movie plays (the curves and the bars grow with the part of the trajectory that has been played), with the value at the frame that is shown in the legend. A timeline's axis is the elapsed trajectory time like the time bar, so it grows to the right whichever way the trajectory is played. Subplots have saved ids and names, so an overlay finds its subplots when others are added or renamed. Text and lines in points, a colour set of its own and light/dark plate presets. Markers on the movie's timeline are drawn on the timelines. Each subplot of an overlay comes in and goes at times of its own, so a property can be added later in the movie, drawn from the start of the overlay, and the plate covers only the subplots that are there; a timeline's axis starts where the overlay is first shown.
-- A property overlay shows the visualization of a script property (atoms, geometry, labels) in the viewport and in the recording.
-- A **Show frame** option draws the frame of the movie in the viewport (dimmed outside, in its proportions) and widens the view to match the recording, so the preview of the camera and the overlays is what is recorded.
-- The movie timeline lanes keep a least height (a slider) and the window scrolls (Ctrl + wheel zooms the time); **Fit to window** shares the window's height as before. Plot overlays can show the subplot names as titles, and the property visualization fades with the overlay's fades.
-- The movie timeline has an overlay lane (a bar per overlay, drag to move or resize, markers shown) and overlays can be duplicated.
-- Sizes are in percent of the frame height or in points (a point is a pixel of a 1080 pixel high frame, scaled with the frame).
-- Each has a time range, fades, nine anchor positions, a size relative to the frame height, a colour and an optional background plate.
+- Kinds: text, time stamp, scale bar, time bar, images (png or jpg), the VIAMD logo, a **timeline** and a **distribution** of properties, and the visualization of a script property.
+- Each has a time range with fades, nine anchor positions, a size (a part of the frame height, or in points: a point is a pixel of a 1080 pixel high frame, scaled with the frame), a colour and an optional background plate. They can be duplicated, and each is a bar that can be dragged in the overlay lane of the Movie Timeline. A movie starts with the logo in the top left corner; it can be removed.
+- The **time bar** fills forward whichever way the trajectory is played, so it shows the pace of the movie; it can show the time that has gone and the speed.
+- **Timeline** (wide and low, bottom center) and **distribution** (narrow and tall, middle right) draw subplots of the Timelines and Distributions windows, stacked, as the movie plays: curves and bars grow with the part of the trajectory that has been played, and the legend gives the value at the frame that is shown. A timeline's axis is the elapsed trajectory time like the time bar, so it grows to the right whichever way the trajectory is played. Each subplot comes in and goes at times of its own and is drawn from the start of the overlay. Titles, markers (notes on the movie's timeline), text and lines in points, a colour set of its own and light or dark plate presets.
+- Subplots of the plot windows have saved ids and names, so overlays keep finding them when others are added or renamed. Workspaces from before are converted when read.
+- The **property visualization** overlay shows the atoms, geometry and labels of a script property in the viewport and in the recording, fading with the overlay's fades.
+- **Show frame** draws the frame of the movie in the viewport (dimmed outside, in its proportions) and widens the view to match the recording, so the preview of the camera and the overlays is what is recorded.
 
 **Undo/redo** (Ctrl+Z, Ctrl+Y)
 - Covers keys, overlays, length and timing.
 
 **Workspace**
-- Everything is saved in a `[Movie]` section, versioned with `Timeline=2`, and older formats are migrated on load.
-- Look parameter ids are stable and must never be renumbered.
+- Everything is saved in a `[Movie]` section (with `[MovieOverlay]` and `[MovieMarker]` sections), versioned with `Timeline=2`, and older formats are migrated on load. The subplots of the Timelines and Distributions windows have saved ids and names.
+- Look parameter ids, the numbers of the representation properties and of the overlay kinds are stable and must never be renumbered.
 
 ### Fixes outside the movie code
 - **Locale (`application.cpp`):** GTK, used by NativeFileDialog, switched the numeric locale. On machines with a decimal-comma locale, workspaces were then written with commas. `LC_NUMERIC` is now reset to `"C"`.
@@ -75,7 +73,8 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 ### New code
 - `src/frame_sink.{h,cpp}`: asynchronous PNG/ffmpeg writer.
 - `src/movie_keys.{h,cpp}`: parameter and representation keys, the snapshot used for undo, time scaling, render range, snapping.
-- `src/movie_overlay.{h,cpp}`: overlay fades, sizes, scale bar length, the time bar maths, ticks and histogram counts of the plot overlays, and the default logo overlay.
+- `src/movie_overlay.{h,cpp}`: overlay fades, sizes, scale bar length, the time bar and elapsed-curve maths, ticks and histogram counts of the plot overlays, the times of their subplots, the frame guide maths, the migration of older overlays and the default logo overlay.
+- `src/plot_series.{h,cpp}`: the subplots of the Timelines and Distributions windows get a stable id and a name.
 - `src/image.{h,cpp}`: decoding of an image in memory (the logo); `icon/viamd_logo.png` is baked into the executable by CMake.
 - `Representation::id` (`viamd.h`): a stable id for each representation, saved in workspaces, which representation keys refer to.
 - `src/gfx/camera_utils.{h,cpp}` and `camera.h`: keyframe evaluation, anchors, keyed curves, `camera_aim_at`.
@@ -86,22 +85,19 @@ New tests are in:
 - `test_camera_utils`: interpolation, easing, spin, loop, follow and anchors.
 - `test_movie_keys`: scaling and undo, render range, frame scaling, time left, snapping, representation keys.
 - `test_frame_sink`.
-- `test_movie_overlay`.
+- `test_movie_overlay`: fades, sizes, the time bar, elapsed curves, ticks, histograms, subplot times, migration of older overlays, the frame fit.
 - `test_image`.
 - `test_serialization`.
 
-All 163 tests pass in a Release build on Linux.
+All 164 tests pass in a Release build on Linux.
 
 ### Testing done and not done
-- I recorded PNG sequences and H.264 MP4s on Linux early on. Everything added since (the Look at atom, anchors and timeline, render range and scale, pause, representation keys and transitions, overlays on frames and the logo, H.265 and WebM) has not been tried by hand in the GUI by me: `MOVIE_STATUS.md` has the list to check.
-- The screenshots in the docs come from a real run with `1ALA-500.pdb`.
-- These have not been tried by hand in the GUI yet:
-  - Look at / Update position.
-  - Dragging anchors, resizing tracks and linked zoom in the Movie Timeline.
-  - Loading older workspaces that had the timeline open.
+- I recorded PNG sequences and H.264 MP4s on Linux early on, and the screenshots in the manual come from a real run with `1ALA-500.pdb`.
+- Everything added since has been tried by hand in the GUI only in part: `gui-checklist.md` is the list to go through, and `MOVIE_STATUS.md` says what is there and what is left out.
 - Not tested on Windows or macOS. The ffmpeg pipe uses `popen`/`_popen`.
 
 ### Known limits
 - Solid representations cannot fade, so they grow in and shrink away at a Visible key. Tint and saturation keys recolor the atoms every frame, which is slow for very large systems.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
 - Distance and field of view can only be moved in time on the timeline. Their values are edited through the camera or the table.
+- A timeline or distribution overlay draws at most six series of a subplot and the first member of a population.
