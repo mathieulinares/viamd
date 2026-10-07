@@ -1093,7 +1093,9 @@ struct ApplicationState {
         bool  show_timeline_window = false;  // Opened explicitly from the window menu
         bool  timeline_tracks[3] = {true, true, true};
         bool  timeline_rep_lane = true;       // The lane of a keyed property of a representation, below the look parameter's
-        float timeline_row_ratios[6] = {1, 1, 1, 1, 1, 1};
+        float timeline_row_ratios[6] = {1, 1, 1, 1, 1, 0.6f};
+        float timeline_lane_height = 150.0f;  // The least height of a lane, in pixels: the window scrolls when they do not fit
+        bool  timeline_fit_window = false;    // The lanes share the height of the window instead, however small
         bool  timeline_overlay_lane = true;   // The overlays as bars, below the lane of the representation
         double timeline_view_begin = 0.0;
         double timeline_view_end = 0.0;
@@ -1208,6 +1210,7 @@ struct ApplicationState {
         // Text, a time stamp and a scale bar on the frames, and in the viewport while the movie is not recording
         std::vector<MovieOverlay> overlays = { movie_overlay_default_logo() };
         bool show_overlay_preview = true;
+        float vis_fade = 1.0f;                // How visible the property visualization of an overlay is this frame (0..1)
         bool show_frame = true;               // The frame of the movie in the viewport, while the movie is edited (not saved)
         std::vector<MovieMarker> markers;     // Notes on the movie's timeline, shown on the timelines of figures
 

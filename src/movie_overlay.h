@@ -91,6 +91,7 @@ struct MovieOverlay {
     float              line_points = 0.0f;    // Timeline, Distribution: the width of the lines, in points, 0 follows the text
     int                palette = 0;           // Timeline, Distribution: 0 the colours of the plots, else a colour set of its own (movie_plot_palette_name)
     bool               show_markers = true;   // Timeline, Distribution: the markers of the movie, on its timelines
+    bool               show_titles = false;   // Timeline, Distribution: the name of each subplot above it (when it has one)
     bool               reveal = true;         // Timeline, Distribution: only what the movie has played so far
     bool               show_value = true;     // Timeline, Distribution: the value at the frame that is shown, in the legend
 };

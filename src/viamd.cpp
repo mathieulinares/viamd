@@ -1900,6 +1900,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         o.reveal = (bits & 1) != 0;
                         o.show_value = (bits & 2) != 0;
                         o.show_markers = (bits & 4) != 0;
+                        o.show_titles = (bits & 8) != 0;
                     }
                 }
                 else if (str_eq(ident, STR_LIT("TimeBarLabels"))) {
@@ -2334,7 +2335,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
                 viamd::write_flt(state, STR_LIT("Width"), o.width);
                 viamd::write_int(state, STR_LIT("PlotAxis"), (int)o.plot_axis);
-                viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0) | (o.show_markers ? 4 : 0));
+                viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0) | (o.show_markers ? 4 : 0) | (o.show_titles ? 8 : 0));
                 viamd::write_flt(state, STR_LIT("FontPoints"), o.font_points);
                 viamd::write_flt(state, STR_LIT("LinePoints"), o.line_points);
                 viamd::write_int(state, STR_LIT("Palette"), o.palette);

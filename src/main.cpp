@@ -550,6 +550,7 @@ int main(int argc, char** argv) {
 
         file_queue_process(&state);
 
+        state.movie.vis_fade = 1.0f;
         state.script.vis = {0};
         md_script_vis_init(&state.script.vis, state.allocator.frame);
 
@@ -6970,8 +6971,12 @@ static void script_vis_text_draw(ImDrawList* dl, ImVec2 res, float scale, const 
     const float font_px = ImGui::GetFontSize() * scale;
     const mat4_t mvp = state.view.param.matrix.curr.proj_no_jitter * state.view.param.matrix.curr.view;
 
-    const ImU32 text_color = convert_color(state.script.text_color);
-    const ImU32 rect_color = convert_color(state.script.text_bg_color);
+    // The visualization of a movie overlay fades in and out with it
+    vec4_t text_col = state.script.text_color, bg_col = state.script.text_bg_color;
+    text_col.w *= state.movie.vis_fade;
+    bg_col.w *= state.movie.vis_fade;
+    const ImU32 text_color = convert_color(text_col);
+    const ImU32 rect_color = convert_color(bg_col);
     const float rect_rounding = 5.f * scale;
     const ImVec2 rect_padding = ImVec2(4.f, 2.f) * scale;
 
@@ -7016,11 +7021,17 @@ static void movie_property_vis_apply(ApplicationState* state) {
     const bool recording = m.state == MovieRecordingState::Recording;
     if (!recording && !(m.show_overlay_preview && (m.show_window || m.show_timeline_window))) return;
     const double time = recording ? m.cur_time : (double)m.playhead;
+    float fade = 0.0f;
     for (const MovieOverlay& o : m.overlays) {
-        if (o.type != MovieOverlayType::PropertyVis || o.text[0] == '\0' || movie_overlay_alpha(o, time) <= 0.0f) continue;
+        const float alpha = movie_overlay_alpha(o, time);
+        if (o.type != MovieOverlayType::PropertyVis || o.text[0] == '\0' || alpha <= 0.0f) continue;
         const md_script_vis_payload_o* payload = md_script_ir_property_vis_payload(state->script.eval_ir, str_from_cstr(o.text));
-        if (payload) script_visualize_payload(state, payload, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+        if (payload) {
+            script_visualize_payload(state, payload, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+            fade = MAX(fade, alpha);
+        }
     }
+    if (fade > 0.0f) m.vis_fade = fade;
 }
 
 // The value of a temporal series at a position on its axis, in the display unit
@@ -7083,7 +7094,9 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
         return o.palette > 0 ? ImPlot::GetColormapColor(color_base + s, o.palette - 1) : sp.series[s].color;
     };
 
-    const float legend_h = (float)ns * fpx * 1.2f;
+    const bool titled = o.show_titles && sp.name[0] != '\0';
+    const float title_h  = titled ? fpx * 1.35f : 0.0f;
+    const float legend_h = title_h + (float)ns * fpx * 1.2f;
     const float axis_h   = x_labels ? fpx * 2.6f : fpx * 0.6f;
     const float label_w  = timeline ? fpx * 3.8f : fpx * 0.6f;
     const float pad      = fpx * 0.4f;
@@ -7297,8 +7310,9 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
     dl->PopClipRect();
 
     // The legend, with the value at the frame that is shown
+    if (titled) text(ImVec2(p0.x, p0.y), col(oc), sp.name);
     for (int s = 0; s < ns; ++s) {
-        const float y = p0.y + (float)s * fpx * 1.2f;
+        const float y = p0.y + title_h + (float)s * fpx * 1.2f;
         dl->AddRectFilled(ImVec2(p0.x, y + fpx * 0.2f), ImVec2(p0.x + fpx * 0.7f, y + fpx * 0.9f), col(series_color(s)));
         char b[160];
         const int n = snprintf(b, sizeof(b), "%s", tv[s].label[0] ? tv[s].label : hv[s].label);
@@ -8442,6 +8456,17 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     if (m.timeline_rep_lane) ratios[rows++] = m.timeline_row_ratios[4];
     if (m.timeline_overlay_lane) ratios[rows++] = m.timeline_row_ratios[5];
     const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
+    if (size.y < 0.0f) {
+        // Every lane has its height, more for the overlays when they have many rows, and the window scrolls
+        float sum = 0.0f;
+        for (int i = 0; i < rows; ++i) sum += ratios[i];
+        float total = (float)rows * m.timeline_lane_height;
+        if (m.timeline_overlay_lane && sum > 0.0f && ratios[rows - 1] > 0.0f) {
+            const float needed = (float)m.overlays.size() * ImGui::GetFontSize() * 1.5f + ImGui::GetFontSize() * 4.0f;
+            total = MAX(total, needed * sum / ratios[rows - 1]);
+        }
+        size.y = total;
+    }
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
       for (int track = 0; track < 3; ++track) {
         if (!m.timeline_tracks[track]) continue;
@@ -9041,8 +9066,26 @@ static void draw_movie_timeline_window(ApplicationState* data) {
             ImGui::EndCombo();
         }
     }
-    ImGui::TextDisabled("Drag between tracks to resize. Keys of the look parameter and the representation: double-click to add, right-click to remove.");
-    draw_movie_strip(data, movie_len, recording, ImVec2(-1, MAX(ImGui::GetContentRegionAvail().y, fs * 12.0f)));
+    ImGui::SetNextItemWidth(fs * 9.0f);
+    ImGui::SliderFloat("Lane height", &m.timeline_lane_height, 60.0f, 400.0f, "%.0f px");
+    ImGui::SetItemTooltip("The least height of a lane. The lanes do not get smaller than this: the window scrolls instead (the mouse wheel scrolls, Ctrl + wheel zooms the time).");
+    ImGui::SameLine();
+    ImGui::Checkbox("Fit to window", &m.timeline_fit_window);
+    ImGui::SetItemTooltip("The lanes share the height of the window, however small, with the mouse wheel zooming the time.");
+    ImGui::TextDisabled("Drag between lanes to resize. Keys of the look parameter and the representation: double-click to add, right-click to remove.");
+    const ImVec2 strip_size(-1, MAX(ImGui::GetContentRegionAvail().y, fs * 12.0f));
+    if (m.timeline_fit_window) {
+        draw_movie_strip(data, movie_len, recording, strip_size);
+    } else {
+        // The lanes have their height and the window scrolls, so the wheel is for scrolling and Ctrl + wheel zooms the time
+        const ImPlotInputMap old_map = ImPlot::GetInputMap();
+        ImPlot::GetInputMap().ZoomMod = ImGuiMod_Ctrl;
+        if (ImGui::BeginChild("##movie_strip_scroll", strip_size, ImGuiChildFlags_None, ImGuiWindowFlags_None)) {
+            draw_movie_strip(data, movie_len, recording, ImVec2(-1, -1));
+        }
+        ImGui::EndChild();
+        ImPlot::GetInputMap() = old_map;
+    }
 
     ImGui::End();
 }
@@ -9223,6 +9266,9 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
                 ImGui::SliderFloat("Width", &o.width, 0.1f, 1.0f, "%.2f of the frame");
                 ImGui::Checkbox("As the movie plays", &o.reveal);
                 ImGui::SetItemTooltip("Only the part of the trajectory that the movie has played is drawn, and it grows (a timeline), and only the frames\nthat have been played are counted, so the bars grow (a distribution). A script distribution (not over frames) is drawn as it is.");
+                ImGui::SameLine();
+                ImGui::Checkbox("Titles", &o.show_titles);
+                ImGui::SetItemTooltip("The name of each subplot above it, if it has one (name them in the Subplots menu of the window)");
                 ImGui::SameLine();
                 ImGui::Checkbox("Value", &o.show_value);
                 ImGui::SetItemTooltip("The value at the frame that is shown, in the legend");
@@ -10356,15 +10402,21 @@ static void render(ApplicationState* state) {
         const md_script_vis_t& vis = state->script.vis;
 
         if (vis.points) {
-            immediate::points(vis_scope, (immediate::Vertex*)vis.points, md_array_size(vis.points), state->script.point_color);
+            vec4_t c = state->script.point_color;
+            c.w *= state->movie.vis_fade;
+            immediate::points(vis_scope, (immediate::Vertex*)vis.points, md_array_size(vis.points), c);
         }
 
         if (vis.triangles) {
-            immediate::triangles(vis_scope, (immediate::Vertex*)vis.triangles, md_array_size(vis.triangles), state->script.triangle_color);
+            vec4_t c = state->script.triangle_color;
+            c.w *= state->movie.vis_fade;
+            immediate::triangles(vis_scope, (immediate::Vertex*)vis.triangles, md_array_size(vis.triangles), c);
         }
 
         if (vis.lines) {
-            immediate::lines(vis_scope, (immediate::Vertex*)vis.lines, md_array_size(vis.lines), state->script.line_color);
+            vec4_t c = state->script.line_color;
+            c.w *= state->movie.vis_fade;
+            immediate::lines(vis_scope, (immediate::Vertex*)vis.lines, md_array_size(vis.lines), c);
         }
 
         const size_t num_matrices = md_array_size(vis.sdf.matrices);
@@ -10488,11 +10540,14 @@ static void render(ApplicationState* state) {
             glStencilFunc(GL_EQUAL, 2, 0xFF);
             vec4_t col_vis = state->selection.color.highlight.visible;
             col_vis.w += sin(ImGui::GetTime() * HIGHLIGHT_PULSE_TIME_SCALE) * HIGHLIGHT_PULSE_ALPHA_SCALE;
+            col_vis.w *= state->movie.vis_fade;   // A property of the movie fades in and out
 
             postprocessing::blit_color(col_vis);
 
             glStencilFunc(GL_EQUAL, 0, 0xFF);
-            postprocessing::blit_color(state->selection.color.highlight.hidden);
+            vec4_t col_hidden = state->selection.color.highlight.hidden;
+            col_hidden.w *= state->movie.vis_fade;
+            postprocessing::blit_color(col_hidden);
         }
 
         glDisable(GL_STENCIL_TEST);

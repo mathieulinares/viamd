@@ -134,7 +134,7 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
         const MovieOverlay& y = b.overlays[i];
         if (x.type != y.type || x.enabled != y.enabled || x.begin != y.begin || x.end != y.end ||
             x.fade_in != y.fade_in || x.fade_out != y.fade_out || x.anchor != y.anchor ||
-            x.size != y.size || x.size_unit != y.size_unit || x.width != y.width || x.show_elapsed != y.show_elapsed || x.show_speed != y.show_speed || x.legacy_subplot_mask != y.legacy_subplot_mask || x.plot_axis != y.plot_axis || x.font_points != y.font_points || x.line_points != y.line_points || x.palette != y.palette || x.show_markers != y.show_markers || x.panels.size() != y.panels.size() || x.reveal != y.reveal || x.show_value != y.show_value || x.length != y.length || strcmp(x.text, y.text) != 0 || strcmp(x.path, y.path) != 0) return false;
+            x.size != y.size || x.size_unit != y.size_unit || x.width != y.width || x.show_elapsed != y.show_elapsed || x.show_speed != y.show_speed || x.legacy_subplot_mask != y.legacy_subplot_mask || x.plot_axis != y.plot_axis || x.font_points != y.font_points || x.line_points != y.line_points || x.palette != y.palette || x.show_markers != y.show_markers || x.show_titles != y.show_titles || x.panels.size() != y.panels.size() || x.reveal != y.reveal || x.show_value != y.show_value || x.length != y.length || strcmp(x.text, y.text) != 0 || strcmp(x.path, y.path) != 0) return false;
         for (int c = 0; c < 4; ++c) {
             if (x.color[c] != y.color[c] || x.background[c] != y.background[c]) return false;
         }
