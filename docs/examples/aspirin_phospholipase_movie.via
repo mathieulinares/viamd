@@ -241,7 +241,7 @@ Background=0,0,0,0.5
 Length=0
 Text=
 Width=0.300000012
-Subplot=0
+Subplots=1
 PlotFlags=3
 
 [MovieOverlay]
@@ -256,7 +256,8 @@ Background=0,0,0,0.5
 Length=0
 Text=
 Width=0.300000012
-Subplot=0
+Subplots=3
+PlotAxis=0
 PlotFlags=3
 
 [MovieOverlay]

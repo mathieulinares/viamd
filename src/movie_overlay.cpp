@@ -1,5 +1,6 @@
 #include "movie_overlay.h"
 
+#include <algorithm>
 #include <math.h>
 
 MovieOverlay movie_overlay_default_logo() {
@@ -73,14 +74,49 @@ void movie_time_bar_profile(MovieTimeBarProfile* out, double duration, int sampl
     out->distance.assign((size_t)(samples < 1 ? 2 : samples + 1), 0.0);
     const int n = (int)out->distance.size() - 1;
     double prev = quantity_at(0.0);
+    out->q.assign(out->distance.size(), prev);
     out->lo.assign(out->distance.size(), prev);
     out->hi.assign(out->distance.size(), prev);
     for (int i = 1; i <= n; ++i) {
         const double q = quantity_at(duration * (double)i / (double)n);
         out->distance[i] = out->distance[i - 1] + fabs(q - prev);
+        out->q[i] = q;
         out->lo[i] = fmin(out->lo[i - 1], q);
         out->hi[i] = fmax(out->hi[i - 1], q);
         prev = q;
+    }
+}
+
+void movie_elapsed_curve(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double time, const float* xs, int num_samples,
+    const std::function<double(int)>& value_of_sample, const std::function<double(double)>& value_at) {
+    out->clear();
+    if (p.q.size() < 2 || p.q.size() != p.distance.size() || p.duration <= 0.0 || num_samples < 1) return;
+
+    // One stretch of the path from qa to qb that starts at s0 on the axis
+    auto stretch = [&](double qa, double qb, double s0) {
+        if (qb > qa) {
+            for (const float* it = std::upper_bound(xs, xs + num_samples, (float)qa); it != xs + num_samples && (double)*it < qb; ++it) {
+                out->push_back({s0 + ((double)*it - qa), value_of_sample((int)(it - xs))});
+            }
+        } else if (qb < qa) {
+            const float* it = std::lower_bound(xs, xs + num_samples, (float)qa);
+            while (it != xs) {
+                --it;
+                if ((double)*it <= qb) break;
+                out->push_back({s0 + (qa - (double)*it), value_of_sample((int)(it - xs))});
+            }
+        }
+        if (qb != qa) out->push_back({s0 + fabs(qb - qa), value_at(qb)});
+    };
+
+    const size_t m = p.q.size() - 1;
+    const double x = fmin(fmax(time / p.duration, 0.0), 1.0) * (double)m;
+    const size_t i_now = (size_t)floor(x);
+    out->push_back({0.0, value_at(p.q[0])});
+    for (size_t i = 0; i < i_now && i < m; ++i) stretch(p.q[i], p.q[i + 1], p.distance[i]);
+    if (i_now < m) {
+        const double qn = p.q[i_now] + (p.q[i_now + 1] - p.q[i_now]) * (x - (double)i_now);
+        stretch(p.q[i_now], qn, p.distance[i_now]);
     }
 }
 

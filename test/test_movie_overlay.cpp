@@ -244,3 +244,75 @@ UTEST(viamd_movie_overlay, a_histogram_takes_the_stride_and_the_scale_of_the_val
     EXPECT_NEAR(1.0, c[0], 1e-6);
     EXPECT_NEAR(1.0, c[1], 1e-6);
 }
+
+/* A timeline overlay follows the movie: its axis is the distance moved, so it always grows to the right */
+
+static std::vector<float> samples_every(float step, int n) {
+    std::vector<float> x((size_t)n);
+    for (int i = 0; i < n; ++i) x[(size_t)i] = step * (float)i;
+    return x;
+}
+
+UTEST(viamd_movie_overlay, a_curve_of_a_backward_movie_grows_forward_and_reads_the_series_backward) {
+    const std::vector<float> xs = samples_every(1.0f, 101);   /* series: value = x * 2 */
+    auto of_sample = [&](int i) { return 2.0 * (double)xs[(size_t)i]; };
+    auto at = [](double x) { return 2.0 * x; };
+    MovieTimeBarProfile down;
+    movie_time_bar_profile(&down, 10.0, 100, ramp_down);   /* 100 -> 0 over 10 s */
+    std::vector<MovieCurvePoint> c;
+    movie_elapsed_curve(&c, down, 5.0, xs.data(), (int)xs.size(), of_sample, at);
+    ASSERT_GT((int)c.size(), 10);
+    EXPECT_NEAR(0.0, c.front().s, 1e-9);
+    EXPECT_NEAR(200.0, c.front().v, 1e-6);   /* starts where the movie starts, at 100 */
+    EXPECT_NEAR(50.0, c.back().s, 1e-6);     /* half of the distance */
+    EXPECT_NEAR(100.0, c.back().v, 1e-6);    /* at 50 */
+    for (size_t i = 1; i < c.size(); ++i) EXPECT_GE(c[i].s, c[i - 1].s);
+}
+
+UTEST(viamd_movie_overlay, a_curve_of_a_forward_movie_is_the_series_itself) {
+    const std::vector<float> xs = samples_every(1.0f, 101);
+    auto of_sample = [&](int i) { return (double)xs[(size_t)i] * 0.5; };
+    auto at = [](double x) { return x * 0.5; };
+    MovieTimeBarProfile up;
+    movie_time_bar_profile(&up, 10.0, 100, ramp_up);
+    std::vector<MovieCurvePoint> c;
+    movie_elapsed_curve(&c, up, 10.0, xs.data(), (int)xs.size(), of_sample, at);
+    for (const MovieCurvePoint& p : c) EXPECT_NEAR(p.s * 0.5, p.v, 1e-6);
+    EXPECT_NEAR(100.0, c.back().s, 1e-6);
+}
+
+UTEST(viamd_movie_overlay, a_curve_goes_on_to_the_right_when_the_movie_turns_back) {
+    const std::vector<float> xs = samples_every(1.0f, 101);
+    auto of_sample = [&](int i) { return (double)xs[(size_t)i]; };
+    auto at = [](double x) { return x; };
+    auto there_and_back = [](double t) { return t < 5.0 ? 10.0 * t : 100.0 - 10.0 * t; };   /* 0 -> 50 -> 0 */
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 10.0, 200, there_and_back);
+    std::vector<MovieCurvePoint> c;
+    movie_elapsed_curve(&c, p, 10.0, xs.data(), (int)xs.size(), of_sample, at);
+    EXPECT_NEAR(100.0, c.back().s, 1e-6);
+    EXPECT_NEAR(0.0, c.back().v, 1e-6);
+    for (size_t i = 1; i < c.size(); ++i) EXPECT_GE(c[i].s, c[i - 1].s);
+    double top = 0.0, at_top = 0.0;
+    for (const MovieCurvePoint& q : c) if (q.v > top) { top = q.v; at_top = q.s; }
+    EXPECT_NEAR(50.0, top, 1e-6);
+    EXPECT_NEAR(50.0, at_top, 1.0);
+}
+
+UTEST(viamd_movie_overlay, a_hold_adds_nothing_to_the_curve) {
+    const std::vector<float> xs = samples_every(1.0f, 101);
+    auto of_sample = [&](int i) { return (double)xs[(size_t)i]; };
+    auto at = [](double x) { return x; };
+    MovieTimeBarProfile p;
+    movie_time_bar_profile(&p, 10.0, 100, [](double) { return 40.0; });
+    std::vector<MovieCurvePoint> c;
+    movie_elapsed_curve(&c, p, 6.0, xs.data(), (int)xs.size(), of_sample, at);
+    ASSERT_EQ(1, (int)c.size());
+    EXPECT_NEAR(40.0, c[0].v, 1e-9);
+}
+
+UTEST(viamd_movie_overlay, the_plot_axis_comes_with_a_default_that_follows_the_movie) {
+    MovieOverlay o;
+    EXPECT_EQ((int)MoviePlotAxis::Elapsed, (int)o.plot_axis);
+    EXPECT_EQ(1, o.subplot_mask);
+}

@@ -36,6 +36,13 @@ enum class MovieOverlaySizeUnit : int {
 
 constexpr float MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT = 1080.0f;
 
+// What the horizontal axis of a timeline overlay is
+enum class MoviePlotAxis : int {
+    Elapsed,           // Trajectory time that the movie has covered, like the time bar: the curve always grows to the right
+    TrajectoryTime,    // Trajectory time itself, turned around when the movie plays the trajectory backward
+    Count,
+};
+
 struct MovieOverlay {
     MovieOverlayType   type = MovieOverlayType::Text;
     bool               enabled = true;
@@ -54,7 +61,8 @@ struct MovieOverlay {
     float              width = 0.4f;          // Time bar: its width, as a part of the width of the frame
     bool               show_elapsed = true;   // Time bar: the time that has gone, over the whole
     bool               show_speed = false;    // Time bar: how fast the trajectory plays, relative to the Animation panel
-    int                subplot = 0;           // Timeline, Distribution: which subplot of the window (0 based)
+    int                subplot_mask = 1;      // Timeline, Distribution: the subplots of the window that are drawn, stacked (bit i is subplot i)
+    MoviePlotAxis      plot_axis = MoviePlotAxis::Elapsed;   // Timeline: what the horizontal axis is
     bool               reveal = true;         // Timeline, Distribution: only what the movie has played so far
     bool               show_value = true;     // Timeline, Distribution: the value at the frame that is shown, in the legend
 };
@@ -87,6 +95,7 @@ double movie_units_per_pixel(float distance, float fov_y, float frame_height_px)
 // that is played fast fills it fast, a slow one slowly, a hold not at all.
 struct MovieTimeBarProfile {
     std::vector<double> distance;   // Moved by each sample, in the unit of the quantity
+    std::vector<double> q;          // The quantity at each sample
     std::vector<double> lo, hi;     // The least and the most the quantity has been at by each sample (the stretch of it that has been visited)
     double duration = 0.0;          // The movie's length, the samples are even over it
     double total() const { return distance.empty() ? 0.0 : distance.back(); }
@@ -110,6 +119,15 @@ int movie_nice_ticks(double lo, double hi, int max_ticks, double* out, int cap, 
 // over [v_min, v_max]. Values outside it are left out. 'counts' is resized.
 void movie_histogram_counts(std::vector<float>* counts, int num_bins, double v_min, double v_max, const float* x, const float* y,
     int stride, double y_scale, int num_samples, double x_lo, double x_hi);
+
+// A series along the path of the movie: how much has moved (s) and the value there (v)
+struct MovieCurvePoint { double s, v; };
+
+// The points of a series along the elapsed axis from the start of the movie to a movie time, in order. Where the movie plays
+// the trajectory backward the series is read backward, so s only ever grows. 'xs' are the ascending positions of the series'
+// samples in the unit of the quantity, 'value_of_sample' the value of sample i and 'value_at' the value at any position.
+void movie_elapsed_curve(std::vector<MovieCurvePoint>* out, const MovieTimeBarProfile& p, double time, const float* xs, int num_samples,
+    const std::function<double(int)>& value_of_sample, const std::function<double(double)>& value_at);
 
 // How much has moved by a movie time, in the unit of the quantity
 double movie_time_bar_moved(const MovieTimeBarProfile& p, double time);

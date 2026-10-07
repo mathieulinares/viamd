@@ -1859,10 +1859,15 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Background"))) viamd::extract_flt_vec(o.background, 4, arg);
                 else if (str_eq(ident, STR_LIT("Length"))) viamd::extract_flt(o.length, arg);
                 else if (str_eq(ident, STR_LIT("Width")))  viamd::extract_flt(o.width, arg);
-                else if (str_eq(ident, STR_LIT("Subplot"))) {
+                else if (str_eq(ident, STR_LIT("Subplot"))) {   // Older workspaces: one subplot
                     int v = 0;
-                    if (viamd::extract_int(v, arg)) o.subplot = CLAMP(v, 0, PLOT_MAX_SUBPLOTS - 1);
+                    if (viamd::extract_int(v, arg)) o.subplot_mask = 1 << CLAMP(v, 0, PLOT_MAX_SUBPLOTS - 1);
                 }
+                else if (str_eq(ident, STR_LIT("Subplots"))) {
+                    int v = 0;
+                    if (viamd::extract_int(v, arg)) o.subplot_mask = v & ((1 << PLOT_MAX_SUBPLOTS) - 1);
+                }
+                else if (str_eq(ident, STR_LIT("PlotAxis"))) viamd::extract_enum(o.plot_axis, arg, (int)MoviePlotAxis::Count);
                 else if (str_eq(ident, STR_LIT("PlotFlags"))) {
                     int bits = 0;
                     if (viamd::extract_int(bits, arg)) {
@@ -2280,7 +2285,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_str (state, STR_LIT("Text"), str_from_cstr(o.text));
             if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution) {
                 viamd::write_flt(state, STR_LIT("Width"), o.width);
-                viamd::write_int(state, STR_LIT("Subplot"), o.subplot);
+                viamd::write_int(state, STR_LIT("Subplots"), o.subplot_mask);
+                viamd::write_int(state, STR_LIT("PlotAxis"), (int)o.plot_axis);
                 viamd::write_int(state, STR_LIT("PlotFlags"), (o.reveal ? 1 : 0) | (o.show_value ? 2 : 0));
             }
             if (o.type == MovieOverlayType::TimeBar) {
