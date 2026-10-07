@@ -547,3 +547,16 @@ UTEST(viamd_movie_keys, the_time_of_a_panel_is_part_of_the_undo_state_and_scales
     EXPECT_NEAR(24.0, a.overlays[0].panels[0].begin, 1e-9);
     EXPECT_NEAR(40.0, a.overlays[0].panels[0].end, 1e-9);
 }
+
+UTEST(viamd_movie_keys, the_title_of_a_panel_is_part_of_the_undo_state) {
+    MovieKeys a, b;
+    a.overlays.push_back(MovieOverlay{});
+    b.overlays.push_back(MovieOverlay{});
+    a.overlays[0].panels.push_back({MoviePlotView::Timeline, 3, 0.0, 0.0});
+    b.overlays[0].panels.push_back({MoviePlotView::Timeline, 3, 0.0, 0.0});
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    snprintf(b.overlays[0].panels[0].title, sizeof(b.overlays[0].panels[0].title), "Distance to the ligand");
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    snprintf(a.overlays[0].panels[0].title, sizeof(a.overlays[0].panels[0].title), "Distance to the ligand");
+    EXPECT_TRUE(movie_keys_equal(a, b));
+}

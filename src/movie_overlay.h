@@ -51,6 +51,7 @@ struct MoviePlotPanel {
     uint32_t      subplot = 0;
     double        begin = 0.0;   // Movie time (seconds) it appears at. Inside the overlay's own range: before it, the overlay is not shown.
     double        end = 0.0;     // ... and goes away at; not after 'begin' means it stays to the end of the overlay
+    char          title[48] = "";   // Written above it with the overlay's Titles; empty takes the name of the subplot
 };
 
 // A note on the timeline of the movie, drawn on the timelines of a figure where the movie gets to it

@@ -7069,7 +7069,7 @@ struct MoviePlotContext {
 
 // One subplot as a panel of 'w' by 'h' at 'p0': its legend with the value at the frame that is shown, the axes and the
 // curves (or the bars). The labels of the horizontal axis are left out of a timeline panel that has another below it.
-static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
+static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, const char* title_text, MoviePlotView view, ImVec2 p0, float w, float h, bool x_labels, bool marker_labels) {
     ImDrawList* dl = c.dl;
     ImFont* font = c.font;
     const MovieOverlay& o = *c.o;
@@ -7094,7 +7094,8 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
         return o.palette > 0 ? ImPlot::GetColormapColor(color_base + s, o.palette - 1) : sp.series[s].color;
     };
 
-    const bool titled = o.show_titles && sp.name[0] != '\0';
+    const char* title = title_text[0] != '\0' ? title_text : sp.name;
+    const bool titled = o.show_titles && title[0] != '\0';
     const float title_h  = titled ? fpx * 1.35f : 0.0f;
     const float legend_h = title_h + (float)ns * fpx * 1.2f;
     const float axis_h   = x_labels ? fpx * 2.6f : fpx * 0.6f;
@@ -7310,7 +7311,7 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, Mo
     dl->PopClipRect();
 
     // The legend, with the value at the frame that is shown
-    if (titled) text(ImVec2(p0.x, p0.y), col(oc), sp.name);
+    if (titled) text(ImVec2(p0.x, p0.y), col(oc), title);
     for (int s = 0; s < ns; ++s) {
         const float y = p0.y + title_h + (float)s * fpx * 1.2f;
         dl->AddRectFilled(ImVec2(p0.x, y + fpx * 0.2f), ImVec2(p0.x + fpx * 0.7f, y + fpx * 0.9f), col(series_color(s)));
@@ -7396,7 +7397,7 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
         const bool first_timeline = views[i] == MoviePlotView::Timeline && !labelled_markers;
         labelled_markers |= first_timeline;
         c.alpha = panel_alpha[i];   // Already inside the fades of the overlay
-        movie_plot_panel_draw(c, *shown[i], views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(seen_views, seen, seen_index), first_timeline);
+        movie_plot_panel_draw(c, *shown[i], shown_panel[i]->title, views[i], ImVec2(p0.x, p0.y + (float)i * panel_h), plot_w, panel_h, movie_figure_x_labels(seen_views, seen, seen_index), first_timeline);
         seen_index += 1;
     }
 }
@@ -9238,6 +9239,9 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
                     ImGui::SetItemTooltip("When this subplot comes in and goes, inside the range the overlay is shown in. A property that comes in later starts to be drawn there.\nIts place stays free until then, so the others do not move. Drag the right end back to the left end to let it stay to the end.");
                     ImGui::SameLine();
                     if (ImGui::SmallButton("In at preview time")) o.panels[pi].begin = MAX((double)m.playhead, o.begin);
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+                    ImGui::InputTextWithHint("##panel_title", idx >= 0 && subs[idx].name[0] != '\0' ? subs[idx].name : "Title (the name of the subplot)", o.panels[pi].title, sizeof(o.panels[pi].title));
+                    ImGui::SetItemTooltip("The title written above this subplot when Titles is ticked. Empty takes the name of the subplot (set in the Subplots menu of its window).");
                     ImGui::PopID();
                 }
                 if (remove_panel >= 0) o.panels.erase(o.panels.begin() + remove_panel);

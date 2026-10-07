@@ -140,7 +140,7 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
         }
         for (size_t p = 0; p < x.panels.size(); ++p) {
             if (x.panels[p].view != y.panels[p].view || x.panels[p].subplot != y.panels[p].subplot ||
-                x.panels[p].begin != y.panels[p].begin || x.panels[p].end != y.panels[p].end) return false;
+                x.panels[p].begin != y.panels[p].begin || x.panels[p].end != y.panels[p].end || strcmp(x.panels[p].title, y.panels[p].title) != 0) return false;
         }
     }
     if (a.markers.size() != b.markers.size()) return false;

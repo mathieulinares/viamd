@@ -1722,6 +1722,20 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("SaveCopy")))       viamd::extract_bool(m.save_copy, arg);
                 else if (str_eq(ident, STR_LIT("RepTransition")))  viamd::extract_flt(m.rep_transition, arg);
                 else if (str_eq(ident, STR_LIT("SnapFrames")))     viamd::extract_bool(m.snap_frames, arg);
+                else if (str_eq(ident, STR_LIT("Lanes"))) {
+                    int bits = 0;
+                    if (viamd::extract_int(bits, arg)) {
+                        for (int t = 0; t < 3; ++t) m.timeline_tracks[t] = (bits >> t) & 1;
+                        m.timeline_param_lane   = (bits & 8) != 0;
+                        m.timeline_rep_lane     = (bits & 16) != 0;
+                        m.timeline_overlay_lane = (bits & 32) != 0;
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("LaneHeight"))) {
+                    float h = 0.0f;
+                    if (viamd::extract_flt(h, arg)) m.timeline_lane_height = CLAMP(h, 60.0f, 400.0f);
+                }
+                else if (str_eq(ident, STR_LIT("FitLanes")))       viamd::extract_bool(m.timeline_fit_window, arg);
                 else if (str_eq(ident, STR_LIT("Overlays")))       m.overlays.clear();   // The overlays that follow are all of them
                 else if (str_eq(ident, STR_LIT("RenderRange"))) {
                     float r[3];
@@ -1886,6 +1900,9 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         o.panels.back().begin = (double)v[0];
                         o.panels.back().end = (double)v[1];
                     }
+                }
+                else if (str_eq(ident, STR_LIT("PanelTitle"))) {
+                    if (!o.panels.empty()) viamd::extract_to_char_buf(o.panels.back().title, sizeof(o.panels.back().title), arg);
                 }
                 else if (str_eq(ident, STR_LIT("FontPoints"))) viamd::extract_flt(o.font_points, arg);
                 else if (str_eq(ident, STR_LIT("LinePoints"))) viamd::extract_flt(o.line_points, arg);
@@ -2290,6 +2307,10 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("SaveCopy"), m.save_copy);
         viamd::write_flt (state, STR_LIT("RepTransition"), m.rep_transition);
         viamd::write_bool(state, STR_LIT("SnapFrames"), m.snap_frames);
+        viamd::write_int (state, STR_LIT("Lanes"), (m.timeline_tracks[0] ? 1 : 0) | (m.timeline_tracks[1] ? 2 : 0) | (m.timeline_tracks[2] ? 4 : 0) |
+            (m.timeline_param_lane ? 8 : 0) | (m.timeline_rep_lane ? 16 : 0) | (m.timeline_overlay_lane ? 32 : 0));
+        viamd::write_flt (state, STR_LIT("LaneHeight"), m.timeline_lane_height);
+        viamd::write_bool(state, STR_LIT("FitLanes"), m.timeline_fit_window);
         viamd::write_bool(state, STR_LIT("Overlays"), true);
         const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
         viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);
@@ -2342,6 +2363,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
                 for (const MoviePlotPanel& p : o.panels) {
                     const int v[2] = {(int)p.view, (int)p.subplot};
                     viamd::write_int_vec(state, STR_LIT("Panel"), v, 2);
+                    if (p.title[0] != '\0') viamd::write_str(state, STR_LIT("PanelTitle"), str_from_cstr(p.title));
                     if (p.begin != 0.0 || p.end != 0.0) {
                         const float t[2] = {(float)p.begin, (float)p.end};
                         viamd::write_flt_vec(state, STR_LIT("PanelTime"), t, 2);
