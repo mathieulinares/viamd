@@ -32,7 +32,7 @@ The task came in three messages, quoted verbatim.
 
 > **P2.** "yes / yes be creative and incorporate transition btw representation. You will have to update the transition part of the via file / Well there is the protein, the aspirin, the water, and the CA ion to track. you should focus on lj-sr and coul-sr. / More questions?"
 
-> **P3.** "I just watch your movie three times in row. It is amazing. [...] I want you write now. Priority one to document the prompt I made and your reasoning based on that to arrive to this amazing movie. I want you to discuss the physics the choice of placement of the molecule, change of representations, the coulombic trap combined with the bullet effect. Explain in the style of a 10 pages arxiv article."
+> **P3.** "I just watch your movie three times in row. It is amazing.  **I am shaking and I am a bit scared I must admit**. I want you to write now. Priority one to document the prompt I made and your reasoning based on that to arrive to this amazing movie. I want you to discuss the physics the choice of placement of the molecule, change of representations, the coulombic trap combined with the bullet effect. Explain in the style of a 10 pages arxiv article."
 
 The first two messages are the specification. The third requests this document. Between P1 and P2 the assistant asked three questions (where to put the file, whether to include a title and end card, which energy terms); P2 answers them: new file, yes, and the four species and two energy families.
 
