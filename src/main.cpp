@@ -183,6 +183,7 @@ static void update_view_param(ApplicationState* state);
 //static void update_density_volume_texture(ApplicationState* state);
 
 static void render(ApplicationState* state);
+static void render_scene(ApplicationState* state, bool pip);
 static void draw_representations_opaque(ApplicationState* state);
 static void draw_representations_opaque_lean_and_mean(ApplicationState* state, uint32_t mask = 0xFFFFFFFFU);
 static void draw_representations_transparent(ApplicationState* state);
@@ -1317,7 +1318,7 @@ static void update_view_param(ApplicationState* data) {
     const float f = cam.far_plane;
     const float aspect_ratio = (float)data->gbuffer.width / (float)data->gbuffer.height;
 
-    if (data->visuals.temporal_aa.enabled && data->visuals.temporal_aa.jitter) {
+    if (data->visuals.temporal_aa.enabled && data->visuals.temporal_aa.jitter && !data->movie.pip_pass) {
         static uint32_t i = 0;
         i = (i+1) % (uint32_t)ARRAY_SIZE(data->view.jitter.sequence);
         param.jitter.curr = data->view.jitter.sequence[i] - 0.5f;
@@ -6687,9 +6688,8 @@ static const vec3_t* movie_upright(const ApplicationState* state) {
     return state->movie.keep_upright ? movie_up_vector(state) : nullptr;
 }
 
-static void movie_camera_apply(ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now) {
-    ViewTransform vt;
-    float fov_y;
+// The camera the keys give at a time, with the follow target where it is now
+static void movie_camera_evaluate(const ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now, ViewTransform* vt, float* fov_y) {
     // Keys that look at an atom of their own are moved by where that atom is now. One that cannot be found stays put.
     std::vector<vec3_t> atom_now;
     if (movie_keys_track_atoms(keys, num_keys)) {
@@ -6699,7 +6699,13 @@ static void movie_camera_apply(ApplicationState* state, double time, const Camer
             if (keys[i].follow && keys[i].follow_atom >= 0 ) movie_atom_position(state, keys[i].follow_atom, &atom_now[i]);
         }
     }
-    camera_keyframes_evaluate(&vt, &fov_y, keys, num_keys, time, state->movie.loop, follow_now, atom_now.empty() ? nullptr : atom_now.data(), movie_upright(state));
+    camera_keyframes_evaluate(vt, fov_y, keys, num_keys, time, state->movie.loop, follow_now, atom_now.empty() ? nullptr : atom_now.data(), movie_upright(state));
+}
+
+static void movie_camera_apply(ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now) {
+    ViewTransform vt;
+    float fov_y;
+    movie_camera_evaluate(state, time, keys, num_keys, follow_now, &vt, &fov_y);
     state->view.target = vt;
     state->view.camera = vt;
     state->view.camera.fov_y = fov_y;
@@ -6782,7 +6788,7 @@ static void movie_frame_size(const ApplicationState* state, int* w, int* h) {
 // recorded, in the proportions of the frame. False while there is nothing to show (not editing the movie, recording, a screenshot).
 static bool movie_frame_guide(const ApplicationState* state, ImVec2* pos, ImVec2* size) {
     const auto& m = state->movie;
-    if (!m.show_frame || m.state == MovieRecordingState::Recording || !m.show_window) return false;
+    if ((!m.show_frame && !m.pip_pass) || m.state == MovieRecordingState::Recording || !m.show_window) return false;
     if (!str_empty(state->screenshot.path_to_file)) return false;
     int fw = 0, fh = 0;
     movie_frame_size(state, &fw, &fh);
@@ -12018,6 +12024,11 @@ static void draw_movie_window(ApplicationState* data) {
         if (ImGui::Button("Fit path")) movie_scene_fit_path(data);
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Scene view: move the view back so that the whole camera path is in sight.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m.show_frame);
+        ImGui::Checkbox("Preview", &m.pip_enabled);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Scene view: a small live picture of the movie camera in the lower right corner of this window (right click it for the size).\nIt costs one more render of the scene when something changes, and every half second otherwise.");
         const float button_width = ImGui::GetFontSize() * 15.0f;
         ImGui::SameLine(MAX(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width));
         ImGui::BeginDisabled(m.state == MovieRecordingState::Recording);
@@ -12044,6 +12055,44 @@ static void draw_movie_window(ApplicationState* data) {
                 ImGui::EndChild();
             }
             ImGui::EndTable();
+        }
+
+        // The live preview of the movie camera, over the lower right corner while Scene view is shown. It is a child so that it is on top of
+        // the panels; the scene is rendered for it by movie_render_pip as long as this is asked for every frame.
+        if (m.pip_enabled && movie_scene_view(data)) {
+            m.pip_requested_frame = ImGui::GetFrameCount();
+            if (m.pip_valid && m.pip_tex) {
+                const ImVec2 size((float)m.pip_w, (float)m.pip_h);
+                const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+                const float margin = ImGui::GetStyle().ScrollbarSize + 8.0f;
+                ImGui::SetCursorScreenPos(ImVec2(wp.x + ws.x - size.x - margin, wp.y + ws.y - size.y - margin));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
+                if (ImGui::BeginChild("##movie_pip", size, ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground)) {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+                    const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+                    dl->AddImage((ImTextureID)(intptr_t)m.pip_tex, p0, p1, ImVec2(0, 1), ImVec2(1, 0));
+                    if (!m.overlays.empty()) movie_overlays_draw(dl, p0, size, (double)m.playhead, data);
+                    dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 160));
+                    char label[48];
+                    snprintf(label, sizeof(label), "Movie camera  %.2f s", m.playhead);
+                    dl->AddRectFilled(ImVec2(p0.x + 3.0f, p0.y + 3.0f), ImVec2(p0.x + ImGui::CalcTextSize(label).x + 9.0f, p0.y + ImGui::GetFontSize() + 7.0f), IM_COL32(0, 0, 0, 120), 3.0f);
+                    dl->AddText(ImVec2(p0.x + 6.0f, p0.y + 5.0f), IM_COL32(255, 255, 255, 230), label);
+                    ImGui::InvisibleButton("##movie_pip_hit", size);
+                    ImGui::SetItemTooltip("What the movie camera sees at the preview time, as it will be recorded (without the look of the final render).\nRight click for the size.");
+                    if (ImGui::BeginPopupContextItem("##movie_pip_menu")) {
+                        ImGui::TextDisabled("Preview size");
+                        if (ImGui::RadioButton("Small", m.pip_size == 0)) m.pip_size = 0;
+                        if (ImGui::RadioButton("Medium", m.pip_size == 1)) m.pip_size = 1;
+                        if (ImGui::RadioButton("Large", m.pip_size == 2)) m.pip_size = 2;
+                        if (ImGui::MenuItem("Hide")) m.pip_enabled = false;
+                        ImGui::EndPopup();
+                    }
+                }
+                ImGui::EndChild();
+                ImGui::PopStyleVar(2);
+            }
         }
     }
     ImGui::End();
@@ -12125,10 +12174,119 @@ static void draw_coordinate_system_widget_window(ViewTransform* target, const Vi
     ImGui::End();
 }
 
+// ## The live preview of the movie camera
+//
+// While Scene view is shown the Movie window has a small picture of what the movie camera sees at the preview time. It is the scene
+// rendered once more through the same pipeline, before the main view so that the main view's picking, history and view matrices are
+// the ones that last (those are saved and put back), into the G-buffer and from there scaled down into a small texture. It is only
+// rendered when something it depends on changed (at most about 20 times a second) or twice a second otherwise, and only while the
+// Movie window is open to show it.
+
+static bool movie_pip_wanted(const ApplicationState* state) {
+    const auto& m = state->movie;
+    return m.pip_enabled && movie_scene_view(state) && str_empty(state->screenshot.path_to_file) && state->app.window.width > 0 && state->app.window.height > 0 &&
+        ImGui::GetFrameCount() - m.pip_requested_frame <= 2;
+}
+
+static void movie_pip_free(ApplicationState* state) {
+    auto& m = state->movie;
+    if (m.pip_fbo) glDeleteFramebuffers(1, &m.pip_fbo);
+    if (m.pip_tex) glDeleteTextures(1, &m.pip_tex);
+    m.pip_fbo = 0;
+    m.pip_tex = 0;
+    m.pip_w = m.pip_h = 0;
+    m.pip_valid = false;
+}
+
+static void movie_render_pip(ApplicationState* state) {
+    auto& m = state->movie;
+    if (!movie_pip_wanted(state)) return;
+
+    int frame_w = 0, frame_h = 0;
+    movie_frame_size(state, &frame_w, &frame_h);
+    static const int widths[3] = {240, 360, 480};
+    const int w = widths[CLAMP(m.pip_size, 0, 2)];
+    const int h = MAX(1, (int)((double)w * (double)frame_h / (double)MAX(frame_w, 1) + 0.5));
+    if (m.pip_w != w || m.pip_h != h || !m.pip_tex) {
+        movie_pip_free(state);
+        glGenTextures(1, &m.pip_tex);
+        glBindTexture(GL_TEXTURE_2D, m.pip_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glGenFramebuffers(1, &m.pip_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m.pip_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m.pip_tex, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        m.pip_w = w;
+        m.pip_h = h;
+    }
+
+    // What the picture depends on, apart from what the movie's looks do (those make it at most half a second old)
+    const size_t n = md_array_size(m.keyframes);
+    const double scalars[] = {(double)m.playhead, state->animation.frame, (double)m.loop, (double)m.keep_upright, (double)m.up_axis, (double)w, (double)h,
+        (double)state->app.framebuffer.width, (double)state->app.framebuffer.height, (double)n};
+    uint64_t hash = md_hash64(scalars, sizeof(scalars), 11);
+    if (n > 0) hash = md_hash64_combine(hash, md_hash64(m.keyframes, n * sizeof(CameraKeyframe), 12));
+    const double now = ImGui::GetTime();
+    const bool changed = hash != m.pip_hash || !m.pip_valid;
+    if (!(changed && now - m.pip_time > 0.05) && now - m.pip_time < 0.5) return;
+
+    // The movie camera at the preview time, where the trajectory is now
+    ViewTransform vt = state->view.target;
+    float fov_y = state->view.camera.fov_y;
+    if (n > 0) {
+        std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
+        std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+        vec3_t center;
+        const bool have = movie_follow_center(state, &center);
+        movie_camera_evaluate(state, (double)m.playhead, sorted.data(), n, have ? &center : nullptr, &vt, &fov_y);
+    } else if (m.pose_movie.valid) {
+        vt = m.pose_movie.target;
+        fov_y = m.pose_movie.fov_y;
+    }
+
+    const Camera saved_camera = state->view.camera;
+    const ViewParam saved_param = state->view.param;
+    state->view.camera = vt;
+    state->view.camera.fov_y = fov_y;
+    m.pip_pass = true;
+    render_scene(state, true);
+
+    // The frame of the movie is the part of the G-buffer that the widened view was made to match
+    ImVec2 guide_pos, guide_size;
+    if (movie_frame_guide(state, &guide_pos, &guide_size) && guide_size.x > 0.0f && guide_size.y > 0.0f) {
+        const float sx = (float)state->gbuffer.width / (float)state->app.window.width;
+        const float sy = (float)state->gbuffer.height / (float)state->app.window.height;
+        const int x0 = (int)(guide_pos.x * sx), x1 = (int)((guide_pos.x + guide_size.x) * sx);
+        const int y0 = (int)((float)state->gbuffer.height - (guide_pos.y + guide_size.y) * sy), y1 = (int)((float)state->gbuffer.height - guide_pos.y * sy);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, state->gbuffer.fbo);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m.pip_fbo);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glBlitFramebuffer(x0, y0, x1, y1, 0, 0, m.pip_w, m.pip_h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        m.pip_valid = true;
+    }
+    m.pip_pass = false;
+    state->view.camera = saved_camera;
+    state->view.param = saved_param;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m.pip_hash = hash;
+    m.pip_time = now;
+}
+
 static void render(ApplicationState* state) {
+    movie_render_pip(state);
+    render_scene(state, false);
+}
+
+// Renders the scene. With 'pip' it is the live preview of the movie camera: no screenshot, recording, immediate drawing or temporal
+// effects, and the result is left in the G-buffer's color attachment for the caller, which renders the main view after it.
+static void render_scene(ApplicationState* state, bool pip) {
     // Frames of a recording are rendered at the movie's size into the G-buffer for as long as it lasts
-    const bool movie_capture = state->movie.state == MovieRecordingState::Recording;
-    bool do_screenshot = !str_empty(state->screenshot.path_to_file) && !movie_capture;
+    const bool movie_capture = !pip && state->movie.state == MovieRecordingState::Recording;
+    bool do_screenshot = !pip && !str_empty(state->screenshot.path_to_file) && !movie_capture;
 
     uint32_t gbuffer_target_width  = state->app.framebuffer.width;
     uint32_t gbuffer_target_height = state->app.framebuffer.height;
@@ -12166,14 +12324,14 @@ static void render(ApplicationState* state) {
 
     PUSH_GPU_SECTION("G-Buffer fill")
 
-    if (state->simulation_box.enabled && state->mold.state.unitcell.flags != 0) {
+    if (!pip && state->simulation_box.enabled && state->mold.state.unitcell.flags != 0) {
         mat3_t A = { 0 };
 		md_unitcell_A_extract_float(A.elem, &state->mold.state.unitcell);
         immediate::Scope scope(state->gfx.world, "simulation box");
         immediate::box_wireframe(scope, {0,0,0}, {1,1,1}, mat4_from_mat3(A), convert_color(state->simulation_box.color));
     }
 
-    {
+    if (!pip) {
         immediate::Scope vis_scope(state->gfx.overlay, "visualization");
         immediate::Scope vis_scope_depth(state->gfx.world, "visualization with depth");
 
@@ -12246,7 +12404,7 @@ static void render(ApplicationState* state) {
     //glEnable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
-    immediate::render(state->gfx.world, params);
+    if (!pip) immediate::render(state->gfx.world, params);
     //glDisable(GL_BLEND);
     POP_GPU_SECTION()
 
@@ -12372,7 +12530,7 @@ static void render(ApplicationState* state) {
 
     PUSH_GPU_SECTION("Immediate overlay")
     glDisable(GL_DEPTH_TEST);
-    immediate::render(state->gfx.overlay, params);
+    if (!pip) immediate::render(state->gfx.overlay, params);
     POP_GPU_SECTION()
 
     glDisable(GL_BLEND);
@@ -12380,7 +12538,7 @@ static void render(ApplicationState* state) {
 
     POP_GPU_SECTION()  // G-buffer
 
-    if (movie_capture || (do_screenshot && state->screenshot.hide_gui)) {
+    if (movie_capture || pip || (do_screenshot && state->screenshot.hide_gui)) {
         // Activate gbuffer to store the frame
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state->gbuffer.fbo);
         glViewport(0, 0, state->gbuffer.width, state->gbuffer.height);
@@ -12428,6 +12586,12 @@ static void render(ApplicationState* state) {
     settings.sharpen.enabled = state->visuals.temporal_aa.enabled && state->visuals.sharpen.enabled;
     settings.sharpen.weight = state->visuals.sharpen.weight;
 
+    if (pip) {
+        settings.taa.enabled = false;
+        settings.taa.motion_blur.enabled = false;
+        settings.sharpen.enabled = false;
+    }
+
     inputs.depth = state->gbuffer.tex.depth;
     inputs.color = state->gbuffer.tex.color;
     inputs.normal = state->gbuffer.tex.normal;
@@ -12437,6 +12601,8 @@ static void render(ApplicationState* state) {
 
     postprocess_pipeline::execute(inputs, settings, state->view.param);
     POP_GPU_SECTION()
+
+    if (pip) return;
 
     if (movie_capture) {
         // Samples of one output frame are accumulated by temporal AA, the last of them is the frame

@@ -127,6 +127,10 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] **Add Keyframe** (K) in Scene view adds a key on the path at the preview time (the camera does not change); with no keys, it takes the view you had in Movie preview. **Key on Selection** in Scene view adds a key that frames the selected atoms from the movie camera's direction without moving the viewport. **Update position** in the table is off in Scene view.
 - [ ] Record from Scene view: the recording uses the movie camera and the viewport goes back to its Scene view pose afterwards.
 
+- [ ] Preview (Scene view, **Preview** ticked): a small picture of the movie camera appears in the lower right corner of the Movie window with the overlays on it, in the proportions of the movie frame; it is not there in Movie preview. Scrub the preview time, play the preview, drag a key handle in the viewport, change a key's field of view: the picture follows. Right-click it: Small / Medium / Large change its size, Hide removes it (the **Preview** box is then unticked).
+- [ ] The main viewport is not disturbed by the preview: no flicker, no ghosting while orbiting with temporal anti-aliasing on, atom picking and selection still hit the right atoms, the selection and highlight look the same, depth of field and ambient occlusion in the main view are unchanged. Compare with **Preview** off.
+- [ ] The preview with keys that follow a target or look at an atom shows the camera where it is at that frame of the trajectory. With the Movie window collapsed or closed, nothing is rendered for it (the frame rate returns to normal). On a large system the frame rate while scrubbing is lower with **Preview** on than off, and about the same when nothing moves.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.

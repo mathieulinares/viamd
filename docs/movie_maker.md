@@ -221,6 +221,8 @@ The top-right button switches between **Movie preview** and **Scene view**. Movi
 - In Scene view scrubbing, playing the preview and clicking a key move the **green camera** (the movie camera) along the path, and the trajectory plays, but the viewport stays where it is. The path with its handles is always drawn there; in Movie preview it is hidden unless **In Movie preview** is ticked in the path options.
 - **Add Keyframe** (K) in Scene view adds a key of the movie camera at the preview time, which is on the path (with no keys yet, where the movie camera last was in Movie preview). To make a key from a new pose, switch to Movie preview, fly there and add it, or drag the key's handles in the viewport. **Update position** is off in Scene view.
 
+- **Preview** (the checkbox next to **Fit path**, on while Scene view is shown): a small live picture of what the movie camera sees at the preview time sits in the lower right corner of the Movie window, with the overlays on it. It follows the preview time, the trajectory and the keys, so you can drag the path in the viewport and watch the shot at the same time, without switching. Right-click it for its size (small, medium, large) or to hide it. It is the scene rendered once more with the movie camera, which costs one extra render whenever the picture changes (at most about 20 times a second) and twice a second otherwise; switch it off on very large systems. It does not show the temporal anti-aliasing and sharpening of the final render, and not the property visualization of an overlay.
+
 Switching modes does not change camera keys, playback or recorded output; it is disabled while recording.
 
 ## The left timeline panel

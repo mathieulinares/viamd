@@ -1165,6 +1165,16 @@ struct ApplicationState {
         ViewPose pose_scene, pose_movie;
         bool   peek_active = false;       // Tab is held to look at the other mode for a moment
         double peek_t0 = 0.0;
+        // A small live preview of the movie camera in the Movie window while Scene view is shown (not saved)
+        bool     pip_enabled = true;
+        int      pip_size = 1;            // 0 small, 1 medium, 2 large
+        bool     pip_pass = false;        // The scene is being rendered for it
+        bool     pip_valid = false;
+        uint32_t pip_fbo = 0, pip_tex = 0;
+        int      pip_w = 0, pip_h = 0;
+        uint64_t pip_hash = 0;
+        double   pip_time = -1.0;
+        int      pip_requested_frame = -100;   // The last frame in which the Movie window was open to show it
         int shortcut_frame = -1;          // The frame in which the timeline took a shortcut (the others leave it alone)
 
         MovieRecordingState state = MovieRecordingState::Idle;
