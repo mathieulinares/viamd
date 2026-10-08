@@ -24,7 +24,7 @@ EnergyFile=./aspirin-phospholipase.edr
 CoarseGrained=0
 
 [Animation]
-Frame=0
+Frame=22.488997508099008
 Fps=2.94000006
 Tension=0
 Interpolation=2
@@ -245,8 +245,8 @@ SimulationBoxEnabled=0
 SimulationBoxColor=0,0,0,0.5
 
 [Camera]
-Position=-2.2574625,-11.2575359,-5.36616707
-Orientation=0.911136091,-0.11805135,-0.0707517341,0.388444453
+Position=-1.13578713,-11.6676779,-5.22942257
+Orientation=0.907319665,-0.123998016,-0.0170066878,0.40138042
 Distance=12.4299278
 Mode=0
 FovY=0.876155317
@@ -262,7 +262,7 @@ Timeline=2
 Duration=80
 TrajectoryBegin=0
 TrajectoryEnd=80
-Playhead=55.4500008
+Playhead=48.630455
 FilenamePrefix=frame
 AnimateCamera=1
 ShowPath=0
@@ -277,16 +277,19 @@ SnapFrames=1
 Lanes=995
 LaneHeight=237
 FitLanes=0
+RepEqualRows=1
 Overlays=1
 RenderRange=0,0,80
 Loop=0
+KeepUpright=0
+UpAxis=1
 AnimateParams=1
 KeyframeV3=0,0.785398185,55.9218102,12.2344742,-6.63168669,57.830349,0.0936078951,-0.0430380628,0.955402792,0.276750743,1,600,0,0,0,0,1,-0.580844879,0.389476776,-0.396865845,-1
 KeyframeV3=4,0.785398185,55.9218102,12.2344742,-6.63168669,57.830349,0.0936078951,-0.0430380628,0.955402792,0.276750743,1,568,1,0,0,0,1,-0.580844879,0.389476776,-0.396865845,-1
 KeyframeV3=12,0.785398185,56.441658,3.55710983,-51.7380066,36.1043854,0.352911383,-0.554926991,0.687653482,0.307639897,1,508,0,0,0,0,0,-4.56631851,3.59368134,28.4836769,-1
 KeyframeV3=18.583334,0.785398185,62.4234657,-28.308712,-1.02311063,85.2341309,-0.173277676,-0.100842938,0.951308787,0.234130546,1,503.90625,0,0,0,0,0,-4.78117752,5.88882446,27.8288269,-1
 KeyframeV3=30.333334,0.876155317,33.3868904,-0.454283059,-3.80049133,62.3583908,0.0101780584,-0.0166669562,0.998020768,0.0597769506,1,496,0,0,0,0,0,0,0,0,-1
-KeyframeV3=35,0.876155317,30.0390987,-22.0158157,-6.73035145,-19.2403183,0.934521735,-0.0941398889,-0.31998831,0.124155059,1,304,0,0,0,0,0,0,0,0,-1
+KeyframeV3=35,0.876155317,30.0390987,-22.0158157,-6.73035145,-19.2403183,0.934521616,-0.094139874,-0.319988281,0.124155045,1,304,0,0,0,0,0,0,0,0,-1
 KeyframeV3=40,0.876155317,26.4837818,-5.03957939,-4.05876017,-22.6754513,0.987187505,-0.11727757,-0.101067528,0.0386307724,1,158,0,0,0,0,0,0,0,0,-1
 KeyframeV3=45,0.876155317,17.3075638,-1.60633087,-15.2569437,-8.50199509,-0.90674895,0.124606915,0.0112960348,-0.402680963,1,34,0,0,0,0,0,0,0,0,-1
 KeyframeV3=48,0.876155317,12.4299278,-1.01692247,-11.7087307,-5.20744514,0.906748891,-0.124606907,-0.0112960339,0.402680933,1,24,0,0,0,0,0,0,0,0,-1
@@ -294,7 +297,7 @@ KeyframeV3=56,0.876155317,12.4299278,-1.01692247,-11.7087307,-5.20744514,0.90674
 KeyframeV3=62,0.876155317,34.3310585,4.04138374,-12.805068,35.7947769,0.0952845588,-0.126636684,0.940992355,0.299027562,1,8,0,0,0,0,0,0,0,0,-1
 KeyframeV3=72,0.876155317,34.3310585,4.04138374,-12.805068,35.7947769,0.0952845588,-0.126636684,0.940992355,0.299027562,1,4,1,0,0,0,0,0,0,0,-1
 KeyframeV3=80,0.787257731,27.0439453,3.28652477,-10.6530819,28.8737087,0.0952846259,-0.126636699,0.940992415,0.299027473,1,0,0,0,0,0,0,0,0,0,-1
-FollowTarget=###PwMAAAABAAIAEK05GuUhSyltLHhGGRYc7OWUupTXI3yPH1FXU5VJDBWsaM9bQu3YzBFnDXp84pWtuMmGBVB1+ub4H9C9VYNvy3jgkFrvTRRS2JJ7y5lWfx/YinHATFtS1fziH31rVMtdECveewk5q8TVAUTDNXykaB8kXVM5XfeNoJLNHBEGuLGp1zppOmJQLtyWnzhuDpVK7YTUpHfCLwEA4B0ABAAAAAAA###
+FollowTarget=###JwMAAAABAAIAYAACgFtAYAcAwKAHAQBcgA8AQKAHAICgBwDAoAcBAF2gH6AHAICgBwDAoAcBAF6gH6AHAICgBwDAoAcBAF+gH6AHAICgBwDAoAfgHQAEAAAAAAA=###
 ParamKey=0,0,1,1,1,0
 ParamKey=5,17.5212708,0.558887959,0,0,0
 ParamKey=5,20.8999996,18.3372402,0,0,0
@@ -374,7 +377,7 @@ Anchor=1
 Size=0.0390000008
 SizeUnit=0
 Color=0.649350643,0,1,1
-Background=0.15,0.15,0.15,0.65
+Background=0,0,0,0.258823544
 Length=0
 Text=
 Width=0.400000006
@@ -423,9 +426,9 @@ PlotFlags=15
 FontPoints=21
 LinePoints=0
 Palette=0
+NumBins=32
 Panel=1,11
 PanelTitle=Dihedral angle
-NumBins=128
 
 [MovieOverlay]
 Type=8
@@ -466,10 +469,12 @@ Text=nb
 [MovieMarker]
 Time=10
 Label=Pocket shown
+Subplot=0
 
 [MovieMarker]
 Time=50
 Label=Aspirin enters the pocket
+Subplot=0
 
 [Operations]
 Recenter=0
@@ -482,7 +487,7 @@ RecenterQuery=
 
 [Representation]
 Id=1
-Name=protein
+Name=protein-cartoon
 Filter=protein
 Enabled=1
 Type=4
@@ -502,9 +507,9 @@ Param=1,1,1,1
 DynamicEval=0
 
 [Representation]
-Id=2
-Name=ion
-Filter=ion
+Id=14
+Name=ligand-vdw
+Filter=not (protein or nucleic or water or ion)
 Enabled=0
 Type=0
 ColorMapping=1
@@ -516,11 +521,11 @@ SecondaryStructureColorUnknown=0.5,0.5,0.5,1
 SecondaryStructureColorCoil=0.860000014,0.860000014,0.860000014,1
 SecondaryStructureColorHelix=0.119999997,0.860000014,0.119999997,1
 SecondaryStructureColorSheet=0.119999997,0.119999997,0.860000014,1
-BondColor=0
+BondColor=1
 BondSharpness=0.5
 BondBaseColor=1,1,1,1
-Param=1,1,1,1
-DynamicEval=1
+Param=0.699999988,1.19500005,1,1
+DynamicEval=0
 
 [Representation]
 Id=3
@@ -589,7 +594,7 @@ DynamicEval=0
 Id=8
 Name=protein-cpk
 Filter=protein
-Enabled=1
+Enabled=0
 Type=1
 ColorMapping=3
 BaseColor=1,1,1,1
@@ -610,7 +615,7 @@ DynamicEval=0
 Id=13
 Name=protein-vdw
 Filter=protein
-Enabled=1
+Enabled=0
 Type=0
 ColorMapping=3
 BaseColor=1,1,1,1
@@ -625,27 +630,6 @@ BondColor=0
 BondSharpness=0.5
 BondBaseColor=1,1,1,1
 Param=0.699999988,1,1,1
-DynamicEval=0
-
-[Representation]
-Id=14
-Name=ligand-vdw
-Filter=not (protein or nucleic or water or ion)
-Enabled=1
-Type=0
-ColorMapping=1
-BaseColor=1,1,1,1
-Saturation=1
-TintColor=1,0,0,1
-TintScale=0
-SecondaryStructureColorUnknown=0.5,0.5,0.5,1
-SecondaryStructureColorCoil=0.860000014,0.860000014,0.860000014,1
-SecondaryStructureColorHelix=0.119999997,0.860000014,0.119999997,1
-SecondaryStructureColorSheet=0.119999997,0.119999997,0.860000014,1
-BondColor=1
-BondSharpness=0.5
-BondBaseColor=1,1,1,1
-Param=0.699999988,1.19500005,1,1
 DynamicEval=0
 
 [Script]
@@ -671,7 +655,7 @@ Granularity=1
 Timelines=1
 Distributions=0
 Representations=0
-ScriptEditor=0
+ScriptEditor=1
 Animation=0
 Movie=1
 Attributes=0

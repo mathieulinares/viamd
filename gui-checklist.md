@@ -6,78 +6,78 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 
 ## 0. Combined editor and compact inspector
 
-- [ ] Resize the editor and drag its divider: timeline left, controls right, both independently scrollable. Hide either panel with **Timeline** / **Controls**; one always stays visible. Shared playback, repeat, scrubber and Add Keyframe still work with either panel hidden.
-- [ ] Use the large top-right button to switch between **Scene view** and **Movie preview**. Scene view hides the movie frame, overlays and property highlights; Movie preview restores them. Camera-path editing stays available. Neither switch starts/stops preview playback or changes the recording settings.
-- [ ] **Output**, **Timing**, **Camera**, **Looks**, **Representations** and **Overlays** show their own controls without a long stack of sections. The viewport-mode button and editing controls are disabled during recording, while Stop/Pause/Resume remain usable.
-- [ ] **Add overlay...** offers every supported type. The list stays compact and scrollable; selecting an item shows only its settings. Enable/disable, Duplicate, Remove and undo/redo still work, including an empty list and removing its last item.
-- [ ] Clicking an overlay bar on the left selects the same overlay on the right and opens **Overlays** (also after hiding Controls). Expand a subplot to edit its timing/title; expand **Plot style** for fonts, lines, colours and plate presets.
-- [ ] A time bar has a neutral grey unfilled track, including with a purple fill. New time bars and the updated example have a grey plate behind the labels and bar. Change **Appearance > Background**, fade, preview and record: colours and transparency match.
-- [ ] Select a distribution and set **Number of bins** to 32, 37 and 128: temporal histograms use those counts. The Distributions window's own settings do not change. **Use source bin counts** restores each series' count. A script distribution only coarsens to an available divisor.
-- [ ] In **Timeline markers**, target one of the four example timeline subplots: both the line and label appear only there, including when that subplot is not first in the stack. **All timeline subplots** restores the previous behavior.
-- [ ] Bin counts and marker targets survive save/load, undo/redo and movie length changes. Rename a subplot or reorder panels: marker targets retain their identity. A missing target is reported and is not silently moved to another subplot.
-- [ ] The edited example retains its four timeline subplots, camera/representation keys, overlay positions/colours and preview time (about 55.45 s). Its distribution has 128 bins and its time bar a grey plate.
+- [x] Resize the editor and drag its divider: timeline left, controls right, both independently scrollable. Hide either panel with **Timeline** / **Controls**; one always stays visible. Shared playback, repeat, scrubber and Add Keyframe still work with either panel hidden.
+- [x] Use the large top-right button to switch between **Scene view** and **Movie preview**. Scene view hides the movie frame, overlays and property highlights; Movie preview restores them. Camera-path editing stays available. Neither switch starts/stops preview playback or changes the recording settings.
+- [X] **Output**, **Timing**, **Camera**, **Looks**, **Representations** and **Overlays** show their own controls without a long stack of sections. The viewport-mode button and editing controls are disabled during recording, while Stop/Pause/Resume remain usable.
+- [x] **Add overlay...** offers every supported type. The list stays compact and scrollable; selecting an item shows only its settings. Enable/disable, Duplicate, Remove and undo/redo still work, including an empty list and removing its last item.
+- [x] Clicking an overlay bar on the left selects the same overlay on the right and opens **Overlays** (also after hiding Controls). Expand a subplot to edit its timing/title; expand **Plot style** for fonts, lines, colours and plate presets.
+- [x] A time bar has a neutral grey unfilled track, including with a purple fill. New time bars and the updated example have a grey plate behind the labels and bar. Change **Appearance > Background**, fade, preview and record: colours and transparency match.
+- [x] Select a distribution and set **Number of bins** to 32, 37 and 128: temporal histograms use those counts. The Distributions window's own settings do not change. **Use source bin counts** restores each series' count. A script distribution only coarsens to an available divisor.
+- [x] In **Timeline markers**, target one of the four example timeline subplots: both the line and label appear only there, including when that subplot is not first in the stack. **All timeline subplots** restores the previous behavior.
+- [x] Bin counts and marker targets survive save/load, undo/redo and movie length changes. Rename a subplot or reorder panels: marker targets retain their identity. A missing target is reported and is not silently moved to another subplot.
+- [x] The edited example retains its four timeline subplots, camera/representation keys, overlay positions/colours and preview time (about 55.45 s). Its distribution has 128 bins and its time bar a grey plate.
 
 ## 1. Workspace
 
-- [ ] Open the example. It loads without errors in the log, the movie is 80 s long and the playhead is at about 55.45 s. Drag the playhead to 0 and play the preview.
-- [ ] Save it under another name and open that. Keys, overlays (with the subplots and the in and out times of their plots), markers, representation keys, **Transition (s)**, **Scale**, **Samples per frame**, the range settings and the lanes of the Movie Timeline are all there.
-- [ ] Open an older workspace that has no `Id` on its representations, no overlays and no `Overlays` entry (for example `~/Desktop/try.via`). It loads, the logo is in the top left, and a representation key can be added.
-- [ ] Open a workspace with keyframes from before the follow target existed. The keys are unchanged.
-- [ ] Open a workspace from before the plot overlays were separate (a timeline or distribution overlay that picked a subplot by position, or one figure with both): each opens as a timeline and a distribution of the same subplots.
+- [x] Open the example. It loads without errors in the log, the movie is 80 s long and the playhead is at about 55.45 s. Drag the playhead to 0 and play the preview.
+- [x] Save it under another name and open that. Keys, overlays (with the subplots and the in and out times of their plots), markers, representation keys, **Transition (s)**, **Scale**, **Samples per frame**, the range settings and the lanes of the Movie Timeline are all there.
+- [x] Open an older workspace that has no `Id` on its representations, no overlays and no `Overlays` entry (for example `~/Desktop/try.via`). It loads, the logo is in the top left, and a representation key can be added.
+- [x] Open a workspace with keyframes from before the follow target existed. The keys are unchanged.
+- [x] Open a workspace from before the plot overlays were separate (a timeline or distribution overlay that picked a subplot by position, or one figure with both): each opens as a timeline and a distribution of the same subplots.
 
 ## 2. Overlays
 
 ### 2.1 Every overlay
 
-- [ ] A new movie (no workspace loaded) has the VIAMD logo in the top left corner. **Remove** it, save, open the file again: it stays gone.
-- [ ] The logo has a transparent background (the picture shows through, no white box) and no dark edge; its lettering is black and the molecule keeps its colours; on a light picture it has a strong contrast, on a dark one a light **Background** plate makes it readable. It is as high as its **Size** says, with no empty margin around it.
-- [ ] **Add Logo**, **Add Text**, **Add Time Stamp**, **Add Scale Bar**: each shows in the viewport; **Position**, **Size**, **Color** and **Background** work. The scale bar follows the zoom of the camera. The time stamp starts at 0 and only grows, also when the trajectory plays backward, and reads the time since the movie started when it is shown late (set its range to start at 40 s: it does not start at 0 there). It ends at the same value as **Time that has gone** of the time bar.
-- [ ] **Add Image...** with a png that has transparency and with a jpg: it shows in the viewport and in a recording; **Browse...** and **Reload** work. Save, copy the workspace and the image together to another folder and open it: the image is found. Remove the file: the message turns red and nothing crashes.
-- [ ] **Add Time Bar** on a movie with a slow stretch, a fast stretch and a hold: it fills slowly, fast and not at all. Where the trajectory plays backward it still fills forward. **Time that has gone** ends at the whole, **Speed** reads about x1.0 where the trajectory plays at the Animation speed.
-- [ ] **Size**: switch the unit between % and points, the size does not jump. A recording at 1920x1080 and at 3840x2160 has text of the same size in points. A saved workspace keeps the unit.
-- [ ] **Fade in** and **Fade out** work when scrubbing across the start and end of an overlay. The **Background** plate is rounded, sized to the text and fades with it.
-- [ ] **Duplicate** adds a copy right below, which can be changed independently. The **Type** can be changed.
-- [ ] Undo and redo (Ctrl+Z, Ctrl+Y) restore overlay edits, also the **Background**.
+- [x] A new movie (no workspace loaded) has the VIAMD logo in the top left corner. **Remove** it, save, open the file again: it stays gone.
+- [x] The logo has a transparent background (the picture shows through, no white box) and no dark edge; its lettering is black and the molecule keeps its colours; on a light picture it has a strong contrast, on a dark one a light **Background** plate makes it readable. It is as high as its **Size** says, with no empty margin around it.
+- [x] **Add Logo**, **Add Text**, **Add Time Stamp**, **Add Scale Bar**: each shows in the viewport; **Position**, **Size**, **Color** and **Background** work. The scale bar follows the zoom of the camera. The time stamp starts at 0 and only grows, also when the trajectory plays backward, and reads the time since the movie started when it is shown late (set its range to start at 40 s: it does not start at 0 there). It ends at the same value as **Time that has gone** of the time bar.
+- [x] **Add Image...** with a png that has transparency and with a jpg: it shows in the viewport and in a recording; **Browse...** and **Reload** work. Save, copy the workspace and the image together to another folder and open it: the image is found. Remove the file: the message turns red and nothing crashes.
+- [x] **Add Time Bar** on a movie with a slow stretch, a fast stretch and a hold: it fills slowly, fast and not at all. Where the trajectory plays backward it still fills forward. **Time that has gone** ends at the whole, **Speed** reads about x1.0 where the trajectory plays at the Animation speed.
+- [x] **Size**: switch the unit between % and points, the size does not jump. A recording at 1920x1080 and at 3840x2160 has text of the same size in points. A saved workspace keeps the unit.
+- [x] **Fade in** and **Fade out** work when scrubbing across the start and end of an overlay. The **Background** plate is rounded, sized to the text and fades with it.
+- [x] **Duplicate** adds a copy right below, which can be changed independently. The **Type** can be changed.
+- [x] Undo and redo (Ctrl+Z, Ctrl+Y) restore overlay edits, also the **Background**.
 
 ### 2.2 Timeline and distribution
 
-- [ ] **Add Timeline** with series in two Timelines subplots (e.g. `d` and `nb`): wide and low at the bottom center, the subplots stacked, each with its own scale, legend and value, the x labels under the last. The curves grow to the right as the preview plays.
-- [ ] A timeline that is shown from 25 s (set its range): its axis is still the whole movie, from 0, with the labels it would have anyway, and it appears already drawn up to the time that has gone. A distribution that appears late has already counted the frames played before.
-- [ ] Frame keys that play the trajectory backward: the curves still grow to the right and the dot follows the frame. Where the movie turns back the curve goes on to the right, in a hold it does not grow. **Horizontal axis** *Trajectory time* turns the axis around for a backward movie.
-- [ ] **Add Distribution** with a series in a Distributions subplot: narrow and tall at the middle right. The bars grow with the frames played to the shape of the whole, the line marks the shown frame. A script distribution (an RDF) is drawn as it is.
-- [ ] **Add subplot**, **Up** and **Remove** work and only offer the subplots of the overlay's own window. A subplot without series is reported and not drawn. Changing **Type** between the two keeps only the subplots of the new kind.
-- [ ] **As the movie plays** off shows the whole plot. **Value** and **Markers** off hide the number and the marker lines.
-- [ ] Subplot names: name the subplots in the **Subplots** menu (**Names**), lower and raise **Num Subplots**, drag series between subplots, save and reopen: the overlay draws the same subplots.
-- [ ] **Titles**: the typed **Title** of a subplot, else its name, above it; none for an unnamed one; nothing overlaps; unticking removes them.
-- [ ] Properties at different times: set the second subplot of a timeline to come in at 30 s (**In at preview time**, or the drag; **out at** takes it away). The first is drawn from the start of the movie. The second appears at 30 s with a fade and with its curve from the start up to 30 s already there, and goes on growing. The plate is only behind the first before and grows downward when the second comes in (no empty grey box), and the first does not move. The same for a distribution (it has counted every frame since the movie started). A subplot added with **Add subplot** while the preview is later comes in there.
-- [ ] Changing the movie length scales the in and out times; Ctrl+Z restores them; they come back after saving and opening.
-- [ ] The look: **Text (points)** and **Lines (points)** stay the same size relative to the frame in a recording at another resolution; **Colours** gives the series another set of colours in the order of the stack; the two plate buttons give a readable plot on a dark and a light picture; **Width**, **Size**, **Position** and the fades work; nothing is cut off at the edge.
-- [ ] Markers: **Add marker at the preview time** and **Add one at each camera key**; edit the time and the label; a timeline draws a line and the label where the movie gets to it (the label on the left of the line near the right edge); changing the movie length moves them; Ctrl+Z restores a removed one; they come back after saving and opening.
+- [x] **Add Timeline** with series in two Timelines subplots (e.g. `d` and `nb`): wide and low at the bottom center, the subplots stacked, each with its own scale, legend and value, the x labels under the last. The curves grow to the right as the preview plays.
+- [x] A timeline that is shown from 25 s (set its range): its axis is still the whole movie, from 0, with the labels it would have anyway, and it appears already drawn up to the time that has gone. A distribution that appears late has already counted the frames played before.
+- [x] Frame keys that play the trajectory backward: the curves still grow to the right and the dot follows the frame. Where the movie turns back the curve goes on to the right, in a hold it does not grow. **Horizontal axis** *Trajectory time* turns the axis around for a backward movie.
+- [x] **Add Distribution** with a series in a Distributions subplot: narrow and tall at the middle right. The bars grow with the frames played to the shape of the whole, the line marks the shown frame. A script distribution (an RDF) is drawn as it is.
+- [x] **Add subplot**, **Up** and **Remove** work and only offer the subplots of the overlay's own window. A subplot without series is reported and not drawn. Changing **Type** between the two keeps only the subplots of the new kind.
+- [x] **As the movie plays** off shows the whole plot. **Value** and **Markers** off hide the number and the marker lines.
+- [x] Subplot names: name the subplots in the **Subplots** menu (**Names**), lower and raise **Num Subplots**, drag series between subplots, save and reopen: the overlay draws the same subplots.
+- [x] **Titles**: the typed **Title** of a subplot, else its name, above it; none for an unnamed one; nothing overlaps; unticking removes them.
+- [x] Properties at different times: set the second subplot of a timeline to come in at 30 s (**In at preview time**, or the drag; **out at** takes it away). The first is drawn from the start of the movie. The second appears at 30 s with a fade and with its curve from the start up to 30 s already there, and goes on growing. The plate is only behind the first before and grows downward when the second comes in (no empty grey box), and the first does not move. The same for a distribution (it has counted every frame since the movie started). A subplot added with **Add subplot** while the preview is later comes in there.
+- [x] Changing the movie length scales the in and out times; Ctrl+Z restores them; they come back after saving and opening.
+- [x] The look: **Text (points)** and **Lines (points)** stay the same size relative to the frame in a recording at another resolution; **Colours** gives the series another set of colours in the order of the stack; the two plate buttons give a readable plot on a dark and a light picture; **Width**, **Size**, **Position** and the fades work; nothing is cut off at the edge.
+- [x] Markers: **Add marker at the preview time** and **Add one at each camera key**; edit the time and the label; a timeline draws a line and the label where the movie gets to it (the label on the left of the line near the right edge); changing the movie length moves them; Ctrl+Z restores a removed one; they come back after saving and opening.
 
 ### 2.3 Property visualization
 
-- [ ] **Add Property** and pick a script property (a distance, an angle): its visualization (highlight, lines, labels) is in the viewport at the preview time and not outside the range of the overlay. The warning shows for a name the script does not have.
-- [ ] When a property overlay ends (play past it, or scrub out of its range, with the mouse over a Movie window), its highlighted atoms go with it: nothing stays highlighted, not in the viewport and not in a recording. Atoms you highlight by hovering or select yourself are not cleared by it.
-- [ ] In a recording the geometry and the labels are in the frames, in the right places and of a similar size.
-- [ ] With **Fade in** and **Fade out** at 1 s the highlighted atoms, the lines or points and the labels fade in and out, in the preview and in the recording, and nothing is left behind after it ends.
+- [x] **Add Property** and pick a script property (a distance, an angle): its visualization (highlight, lines, labels) is in the viewport at the preview time and not outside the range of the overlay. The warning shows for a name the script does not have.
+- [x] When a property overlay ends (play past it, or scrub out of its range, with the mouse over a Movie window), its highlighted atoms go with it: nothing stays highlighted, not in the viewport and not in a recording. Atoms you highlight by hovering or select yourself are not cleared by it.
+- [x] In a recording the geometry and the labels are in the frames, in the right places and of a similar size.
+- [x] With **Fade in** and **Fade out** at 1 s the highlighted atoms, the lines or points and the labels fade in and out, in the preview and in the recording, and nothing is left behind after it ends.
 
 ### 2.4 Seeing them while you edit and recording them
 
-- [ ] **Show frame**: with the Movie window open the viewport shows the frame of the movie (a box with the size above it, the outside dimmed) and the view is a little wider. Set the resolution to 1920x1080, then to a tall custom size (1080x1920) and back: the box follows the proportions and the overlays are laid out in it.
-- [ ] A recording matches what the box showed: the camera, the title, the logo, the timeline and the distribution, the labels of a property overlay and their size, the scale bar length. In the video the text, the bar and the logo are the right way up, not stretched, sharp at 1920x1080 and at **Scale** 25 %.
-- [ ] Switching to **Scene view** restores the plain view and hides overlays. The dimming and the wider view are gone while recording and when the Movie window is closed. Clicking atoms in the viewport still selects the right one.
-- [ ] Record with **Samples per frame** above 1: the overlays are not smeared or doubled.
+- [x] **Show frame**: with the Movie window open the viewport shows the frame of the movie (a box with the size above it, the outside dimmed) and the view is a little wider. Set the resolution to 1920x1080, then to a tall custom size (1080x1920) and back: the box follows the proportions and the overlays are laid out in it.
+- [x] A recording matches what the box showed: the camera, the title, the logo, the timeline and the distribution, the labels of a property overlay and their size, the scale bar length. In the video the text, the bar and the logo are the right way up, not stretched, sharp at 1920x1080 and at **Scale** 25 %.
+- [x] Switching to **Scene view** restores the plain view and hides overlays. The dimming and the wider view are gone while recording and when the Movie window is closed. Clicking atoms in the viewport still selects the right one.
+- [x] Record with **Samples per frame** above 1: the overlays are not smeared or doubled.
 
 ## 3. Camera keys
 
-- [ ] **Add Keyframe (current view)** and **K** add a key at the preview time. A key at the same time is replaced and keeps its spin and frame.
-- [ ] **Key on Selection**: select a molecule and press it. The view moves to frame it, the key is added. Select one that is split over the periodic boundary: it is framed whole.
-- [ ] **Copy** on a row, move the preview time, **Paste Keyframe**. Also Ctrl+C at a key's time and Ctrl+V somewhere else. A pasted key replaces one at that time and keeps its spin, ease and follow settings.
-- [ ] Drag a row by its number onto another row. The pose moves, the times stay.
-- [ ] **Set Follow Target** from a selection, tick **keys follow target**, add two keys at different trajectory frames (tick **with trajectory frame**), play the preview: the camera stays on the target.
-- [ ] With a follow target and keys that follow, **Show path in viewport**: the blue (eye) and yellow (look-at) paths bend with the target through the trajectory and match what **Play Preview** does. The path grows for a moment and the interface does not stall. Moving a key or changing the target restarts it, and the old path stays until the new one is done. The green camera at the playhead is where the preview camera is.
-- [ ] **Follow** on an existing key: **Go To** it first, then **Follow**. Without Go To an error is logged and nothing changes. **Unfollow** makes it fixed again.
-- [ ] **Look at** on a key, click an atom: the key tracks that atom through the trajectory. **Update position** moves the eye and keeps what it looks at.
+- [x] **Add Keyframe (current view)** and **K** add a key at the preview time. A key at the same time is replaced and keeps its spin and frame.
+- [x] **Key on Selection**: select a molecule and press it. The view moves to frame it, the key is added. Select one that is split over the periodic boundary: it is framed whole.
+- [x] **Copy** on a row, move the preview time, **Paste Keyframe**. Also Ctrl+C at a key's time and Ctrl+V somewhere else. A pasted key replaces one at that time and keeps its spin, ease and follow settings.
+- [x] Drag a row by its number onto another row. The pose moves, the times stay.
+- [x] **Set Follow Target** from a selection, tick **keys follow target**, add two keys at different trajectory frames (tick **with trajectory frame**), play the preview: the camera stays on the target.
+- [x] With a follow target and keys that follow, **Show path in viewport**: the blue (eye) and yellow (look-at) paths bend with the target through the trajectory and match what **Play Preview** does. The path grows for a moment and the interface does not stall. Moving a key or changing the target restarts it, and the old path stays until the new one is done. The green camera at the playhead is where the preview camera is.
+- [x] **Follow** on an existing key: **Go To** it first, then **Follow**. Without Go To an error is logged and nothing changes. **Unfollow** makes it fixed again.
+- [x] **Look at** on a key, click an atom: the key tracks that atom through the trajectory. **Update position** moves the eye and keeps what it looks at.
 - [ ] Double-click on the viewport aims the camera at the clicked point with the eye fixed.
 - [ ] **Add Orbit** with **Snap to frames** on: the end key is where it should be.
 - [ ] **Close Loop** and **Seamless loop**: no jump when the preview repeats.
