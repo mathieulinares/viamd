@@ -109,6 +109,11 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] The buttons **Pick all**, **Put down**, **Delete**, **Copy** and **Paste** above the lanes do the same; the hint line next to them explains what is possible.
 - [ ] Group moves of **Visible** and color keys only change the time; a single **Visible** key still turns around when dragged up or down.
 
+- [ ] Bars: click an overlay bar and a block of the overview: a white outline. Ctrl + click adds a second; a box on the background of each lane picks the bars or blocks it touches.
+- [ ] Group move with bars: pick two camera keys, an overlay bar and a block, drag the bar by its middle: all move by the same time; the group stops at the ends of the movie as a whole; the tooltip says `4 items: +1.20 s`. The subplot times inside a timeline overlay move with it. One undo.
+- [ ] A picked block stops at the other blocks of its representation; moving a block alone still behaves as before (neighbours constrain it). Dragging a bar's or a block's end changes only that end.
+- [ ] Delete with a block picked removes it (the representation is hidden there); a picked overlay is not removed.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.

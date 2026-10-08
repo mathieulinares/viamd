@@ -8856,9 +8856,68 @@ struct MovieKeyPointResult {
     bool clicked = false, hovered = false, held = false;
 };
 
-// One key as a point of a lane. A click picks it (Ctrl adds it to the picked keys or takes it from them), dragging moves every
-// picked key together: sideways in time and, in a lane with a value, up and down. A drag is made from the keys as they were when it
-// began, so nothing is lost on the way; where a key ends on another it replaces it when the mouse is released.
+// A click on a key, a bar or a block: it is picked (Ctrl adds it to the picked ones or takes it away); a click on one that is picked
+// leaves the group for when the mouse is released without a drag. A click is reported when the mouse is released over the item, which
+// a drag ends with too, so after a drag there is nothing to do.
+static void movie_pick_click(ApplicationState* data, KeyKind kind, int64_t subject, double time, double end, const KeyShift& lane) {
+    auto& m = data->movie;
+    auto& kd = m.key_drag;
+    if (kd.active && kd.moved) return;
+    if (ImGui::GetIO().KeyCtrl) {
+        m.sel.toggle(kind, subject, time, end);
+    } else if (!m.sel.contains(kind, subject, time)) {
+        m.sel.set(kind, subject, time, end);
+    } else {
+        kd.collapse = true;
+        kd.collapse_to = {kind, subject, time, end};
+    }
+    m.sel_lane = lane;
+}
+
+// A drag of a key, a bar or a block to 'new_time' (its start; for a key with a value to 'py'): every picked item moves by the same,
+// made from the keys as they were when the drag began, so nothing is lost on the way. A key that is not picked is picked alone.
+static void movie_group_drag(ApplicationState* data, KeyKind kind, int64_t subject, double time, double end, double y, double new_time, double py,
+    const KeyShift& lane, bool toggles_value = false) {
+    auto& m = data->movie;
+    auto& kd = m.key_drag;
+    if (!m.sel.contains(kind, subject, time)) m.sel.set(kind, subject, time, end);
+    m.sel_lane = lane;
+    if (!kd.active) {
+        kd.active = true;
+        kd.moved = false;
+        kd.start = movie_keys_snapshot(data);
+        kd.start_sel = m.sel;
+        kd.x0 = time;
+        kd.y0 = y;
+    }
+    KeyShift s = lane;
+    if (lane.lane != KeyLane::None) s.dy = lane.ratio ? (kd.y0 != 0.0 ? py / kd.y0 : 1.0) : py - kd.y0;
+    MovieKeys out = kd.start;
+    kd.dt = movie_keys_shift(&out, &m.sel, kd.start, kd.start_sel, new_time - kd.x0, s, (double)movie_duration(data));
+    kd.dy = s.dy;
+    kd.moved = true;
+    movie_keys_restore(data, out);
+    if (kind == KeyKind::Block) movie_reps_apply(data, (double)m.playhead);
+    if (toggles_value && m.sel.size() == 1) {
+        // A key of Visible has no value to move, it is shown or hidden by where it is dragged to
+        for (RepKey& k : m.rep_keys) {
+            if (kind == KeyKind::Rep && rep_key_subject(k.rep, k.prop) == subject && fabs(k.time - m.sel.ids[0].time) < 1.0e-9) k.value[0] = py >= 0.5 ? 1.0f : 0.0f;
+        }
+    }
+}
+
+// What a drag is doing, as a tooltip next to the mouse
+static void movie_group_drag_tooltip(ApplicationState* data, const KeyShift& lane) {
+    const auto& kd = data->movie.key_drag;
+    char buf[96];
+    const int count = (int)data->movie.sel.size();
+    const int len = snprintf(buf, sizeof(buf), "%d item%s: %+.2f s", count, count == 1 ? "" : "s", kd.dt);
+    if (lane.lane != KeyLane::None) snprintf(buf + len, sizeof(buf) - (size_t)len, lane.ratio ? "  x%.3g" : "  %+.3g", kd.dy);
+    ImGui::SetTooltip("%s", buf);
+}
+
+// One key as a point of a lane. A click picks it, dragging moves every picked item together: sideways in time and, in a lane with a
+// value, up and down. Where a key ends on another it replaces it when the mouse is released.
 static MovieKeyPointResult movie_key_point(ApplicationState* data, bool locked, KeyKind kind, int64_t subject, double time, double y, int id,
     ImVec4 color, float size, const KeyShift& lane, bool* any_held, bool toggles_value = false) {
     auto& m = data->movie;
@@ -8870,60 +8929,18 @@ static MovieKeyPointResult movie_key_point(ApplicationState* data, bool locked, 
     const bool changed = ImPlot::DragPoint(id, &x, &py, color, size, flags, &r.clicked, &r.hovered, &r.held);
 
     if (!locked) {
-        // A click is reported when the mouse is released over the key, which a drag ends with too
-        if (r.clicked && !(kd.active && kd.moved)) {
-            const bool picked = m.sel.contains(kind, subject, time);
-            if (ImGui::GetIO().KeyCtrl) {
-                m.sel.toggle(kind, subject, time);
-            } else if (!picked) {
-                m.sel.set(kind, subject, time);
-            } else {
-                kd.collapse = true;
-                kd.collapse_to = {kind, subject, time};
-            }
-            m.sel_lane = lane;
-        }
-        if (changed) {
-            if (!m.sel.contains(kind, subject, time)) m.sel.set(kind, subject, time);
-            m.sel_lane = lane;
-            if (!kd.active) {
-                kd.active = true;
-                kd.moved = false;
-                kd.start = movie_keys_snapshot(data);
-                kd.start_sel = m.sel;
-                kd.x0 = time;
-                kd.y0 = y;
-            }
-            KeyShift s = lane;
-            if (lane.lane != KeyLane::None) s.dy = lane.ratio ? (kd.y0 != 0.0 ? py / kd.y0 : 1.0) : py - kd.y0;
-            MovieKeys out = kd.start;
-            kd.dt = movie_keys_shift(&out, &m.sel, kd.start, kd.start_sel, movie_snap_time(data, x) - kd.x0, s, duration);
-            kd.dy = s.dy;
-            kd.moved = true;
-            movie_keys_restore(data, out);
-            if (toggles_value && m.sel.size() == 1) {
-                // A key of Visible has no value to move, it is shown or hidden by where it is dragged to
-                for (RepKey& k : m.rep_keys) {
-                    if (kind == KeyKind::Rep && rep_key_subject(k.rep, k.prop) == subject && fabs(k.time - m.sel.ids[0].time) < 1.0e-9) k.value[0] = py >= 0.5 ? 1.0f : 0.0f;
-                }
-            }
-        }
+        if (r.clicked) movie_pick_click(data, kind, subject, time, 0.0, lane);
+        if (changed) movie_group_drag(data, kind, subject, time, 0.0, y, movie_snap_time(data, x), py, lane, toggles_value);
         if (r.held) {
             *any_held = true;
             m.playhead = (float)CLAMP(kd.active && kd.moved ? kd.x0 + kd.dt : time, 0.0, duration);
         }
     }
 
-    if (r.held && kd.active && kd.moved) {
-        char buf[96];
-        const int count = (int)m.sel.size();
-        int len = snprintf(buf, sizeof(buf), "%d key%s: %+.2f s", count, count == 1 ? "" : "s", kd.dt);
-        if (lane.lane != KeyLane::None) snprintf(buf + len, sizeof(buf) - (size_t)len, lane.ratio ? "  x%.3g" : "  %+.3g", kd.dy);
-        ImGui::SetTooltip("%s", buf);
-    }
+    const bool dragged = r.held && kd.active && kd.moved;
+    if (dragged) movie_group_drag_tooltip(data, lane);
 
     // A ring on the picked keys
-    const bool dragged = r.held && kd.active && kd.moved;
     const double ring_time = dragged ? kd.x0 + kd.dt : time;
     if (m.sel.contains(kind, subject, ring_time)) {
         ImPlot::PushPlotClipRect();
@@ -9151,6 +9168,8 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         cur.camera.assign(m.keyframes, m.keyframes + n);
         cur.params = m.param_keys;
         cur.reps = m.rep_keys;
+        cur.overlays = m.overlays;
+        cur.duration = m.duration;
         key_selection_prune(&m.sel, cur);
     }
     // Dragging the background picks keys with a box, so the middle button pans (Shift + wheel and sideways scrolling pan too)
@@ -9778,6 +9797,7 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.7, (double)MAX(n, 1) - 0.3, ImPlotCond_Always);
         if (n == 0) ImPlot::PlotText("No overlay: add one in the Movie window", 0.5 * (double)movie_len, 0.0);
+        bool any_hovered = false;
 
         for (int i = 0; i < n; ++i) {
             MovieOverlay& o = m.overlays[i];
@@ -9785,24 +9805,29 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
             if (!o.enabled) col.w = 0.35f;
             double x0 = o.begin, x1 = o.end, y0 = (double)i - 0.38, y1 = (double)i + 0.38;
             bool clicked = false, hovered = false, held = false;
-            if (ImPlot::DragRect(7000 + i, &x0, &y0, &x1, &y1, col, drag_flags, &clicked, &hovered, &held)) {
+            const bool changed = ImPlot::DragRect(7000 + i, &x0, &y0, &x1, &y1, col, drag_flags, &clicked, &hovered, &held);
+            any_hovered |= hovered;
+            if (changed && !locked) {
                 double b = movie_snap_time(data, MIN(x0, x1)), e = movie_snap_time(data, MAX(x0, x1));
                 const bool moved_only = fabs((x1 - x0) - (o.end - o.begin)) < 1.0e-6;
                 b = CLAMP(b, 0.0, (double)movie_len);
                 e = CLAMP(e, b + 0.05, (double)movie_len);
                 if (moved_only) {
-                    // The whole bar was moved, so what is timed inside it moves too
-                    const double d = b - o.begin;
-                    for (MoviePlotPanel& panel : o.panels) {
-                        panel.begin = MAX(panel.begin + d, 0.0);
-                        if (panel.end > 0.0) panel.end = MAX(panel.end + d, 0.0);
-                    }
-                    e = b + (o.end - o.begin);
+                    // The whole bar was moved, with the picked ones, and what is timed inside it moves too
+                    movie_group_drag(data, KeyKind::Overlay, i, o.begin, o.end, 0.0, b, 0.0, KeyShift{});
+                } else {
+                    o.begin = b;
+                    o.end = e;
                 }
-                o.begin = b;
-                o.end = e;
+            }
+            if (held && m.key_drag.active && m.key_drag.moved) movie_group_drag_tooltip(data, KeyShift{});
+            if (m.sel.contains(KeyKind::Overlay, i, o.begin)) {
+                ImPlot::PushPlotClipRect();
+                ImPlot::GetPlotDrawList()->AddRect(ImPlot::PlotToPixels(o.begin, y0), ImPlot::PlotToPixels(o.end, y1), IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
+                ImPlot::PopPlotClipRect();
             }
             if (clicked && !locked) {
+                movie_pick_click(data, KeyKind::Overlay, i, o.begin, o.end, KeyShift{});
                 m.overlay_selected = i;
                 m.editor_controls = true;
                 m.editor_select_overlays = true;
@@ -9826,6 +9851,16 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
                 }
                 ImPlot::PopPlotClipRect();
             }
+        }
+
+        {
+            const double vline = (double)m.playhead;
+            movie_lane_box(data, locked, 50, any_hovered, &vline, 1, [&](double x0, double x1, double y0, double y1) {
+                for (int i = 0; i < (int)m.overlays.size(); ++i) {
+                    const MovieOverlay& o = m.overlays[i];
+                    if (o.end >= x0 && o.begin <= x1 && (double)i + 0.38 >= y0 && (double)i - 0.38 <= y1) m.sel.add(KeyKind::Overlay, i, o.begin, o.end);
+                }
+            });
         }
 
         // The notes of the movie, at the bottom
@@ -10007,15 +10042,18 @@ static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len
                 dl->AddText(ImVec2(a.x + 4.0f, a.y + MAX((b.y - a.y - ImGui::GetFontSize()) * 0.5f, 0.0f)),
                     IM_COL32(255, 255, 255, 255), label);
                 dl->PopClipRect();
+                if (m.sel.contains(KeyKind::Block, rep->id, iv.begin)) dl->AddRect(a, b, IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
                 ImPlot::PopPlotClipRect();
 
                 if (hovered && !held) {
-                    ImGui::SetTooltip("%s (%s)\n%.2f s to %.2f s\nDrag to move or resize. Right click to change representation or remove.", rep->name,
+                    ImGui::SetTooltip("%s (%s)\n%.2f s to %.2f s\nDrag to move or resize. Right click to change representation or remove.\nClick picks it, Ctrl + click adds it to the picked items, which move together.", rep->name,
                         representation_type_str[(int)rep->type], iv.begin, iv.end);
                 }
+                if (held && m.key_drag.active && m.key_drag.moved) movie_group_drag_tooltip(data, KeyShift{});
                 if (clicked) {
                     m.rep_selected = block.rep;
                     m.rep_prop_selected = (int)RepProp::Visible;
+                    if (!locked && iv.begin_key >= 0) movie_pick_click(data, KeyKind::Block, rep->id, iv.begin, iv.end, KeyShift{});
                 }
                 if (!locked && hovered && !held && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                     menu_group = row.group;
@@ -10030,11 +10068,16 @@ static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len
                     const bool moved_only = fabs((x1 - x0) - length) < 1.0e-6;
                     double nb = movie_snap_time(data, MIN(x0, x1)), ne = movie_snap_time(data, MAX(x0, x1));
                     if (moved_only) ne = nb + length;
-                    edit.kind = 1;
-                    edit.iv = iv;
-                    edit.rep = rep->id;
-                    edit.b = nb;
-                    edit.e = ne;
+                    if (moved_only && iv.begin_key >= 0 && !locked) {
+                        // A block that is moved goes with the other picked items
+                        movie_group_drag(data, KeyKind::Block, rep->id, iv.begin, iv.end, 0.0, nb, 0.0, KeyShift{});
+                    } else {
+                        edit.kind = 1;
+                        edit.iv = iv;
+                        edit.rep = rep->id;
+                        edit.b = nb;
+                        edit.e = ne;
+                    }
                 }
                 ImPlot::PushPlotClipRect();
                 for (const RepKey& key : m.rep_keys) {
@@ -10045,6 +10088,23 @@ static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len
                 }
                 ImPlot::PopPlotClipRect();
             }
+        }
+
+        {
+            const double vline = (double)m.playhead;
+            movie_lane_box(data, locked, 60, any_hovered, &vline, 1, [&](double x0, double x1, double y0, double y1) {
+                for (int r = 0; r < n; ++r) {
+                    const double slot_h = layout.band_height[(size_t)r] / (double)layout.slots[(size_t)r];
+                    const double pad = MIN(0.05, 0.1 * slot_h);
+                    for (const RepBlock& block : layout.blocks[(size_t)r]) {
+                        const double top = layout.band_begin[(size_t)r] + block.slot * slot_h + pad, bottom = top + slot_h - 2.0 * pad;
+                        const RepInterval& iv = block.interval;
+                        if (iv.begin_key >= 0 && iv.end >= x0 && iv.begin <= x1 && bottom >= y0 && top <= y1) {
+                            m.sel.add(KeyKind::Block, data->representation.reps[block.rep].id, iv.begin, iv.end);
+                        }
+                    }
+                }
+            });
         }
 
         // A stretch is added where a representation is hidden

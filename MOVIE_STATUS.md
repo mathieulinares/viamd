@@ -5,7 +5,7 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 ## Build and test
 
 - Build: `cmake --build build --target viamd -j8` and `--target viamd_test`; run `cmake -S . -B build` after adding files.
-- Tests: `./build/bin/viamd_test` (228 tests, all passing). They cover pure logic; ffmpeg is not needed because frame sink tests use a fake script.
+- Tests: `./build/bin/viamd_test` (231 tests, all passing). They cover pure logic; ffmpeg is not needed because frame sink tests use a fake script.
 - VS Code CMake Tools: a local, gitignored `CMakeUserPresets.json` (preset `release`, binary dir `build`, unit tests on) and `.vscode/settings.json` make it configure; select the `release` preset after reloading the window. VS Code's test runner does not discover the C++ tests; run the executable.
 - The GUI could not be run while the code was written, so everything in `gui-checklist.md` is untested by the author and needs a manual check. Windows and macOS are untested too (the ffmpeg pipe uses `popen` / `_popen`).
 
@@ -43,7 +43,7 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 - Overlay text has one style (a shadow and an optional background plate).
 - A timeline or a distribution overlay draws at most six series of a subplot and the first member of a population; a timeline overlay has one kind of axis for all its subplots.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
-- Picking keys works in the camera, trajectory, distance, field of view, look parameter and representation lanes; the overlay bars and the blocks of the representation overview cannot be picked or moved as a group yet.
+- Picked overlay bars and representation blocks move with the picked keys but are not copied, pasted or (for overlays) deleted by the picking shortcuts; unkeyed blocks cannot be picked.
 - With **Keep upright**, a spin around a horizontal axis flips at the poles (the camera cannot stay level looking straight along the up axis). Roll eases as a number, so 170° to -170° turns the long way.
 - Default view (code from master): a perfectly symmetric flat molecule (exact ideal benzene geometry) can settle about 10 degrees off face-on. Real coordinates are fine.
 

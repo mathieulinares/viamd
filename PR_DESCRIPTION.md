@@ -101,7 +101,7 @@ New tests are in:
 - `test_image`.
 - `test_serialization`.
 
-All 228 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The newer ones cover bin overrides, marker targets, system rows and bands, overlap packing and transition tails, unkeyed visibility, block switching/removal, undo/redo, camera levelling, roll and keep upright.
+All 231 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The newer ones cover bin overrides, marker targets, system rows and bands, overlap packing and transition tails, unkeyed visibility, block switching/removal, undo/redo, camera levelling, roll and keep upright.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on, and the screenshots in the manual come from a real run with `1ALA-500.pdb`.
@@ -111,5 +111,5 @@ All 228 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The n
 ### Known limits
 - Solid representations cannot fade, so they grow in and shrink away at a Visible key. Tint and saturation keys recolor the atoms every frame, which is slow for very large systems.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
-- Overlay bars and the blocks of the representation overview cannot be picked and moved as a group yet.
+- Picked overlay bars and representation blocks move with the picked keys; they are not copied or pasted, and an overlay is not deleted by the picking shortcuts.
 - A timeline or distribution overlay draws at most six series of a subplot and the first member of a population.

@@ -219,7 +219,9 @@ void movie_keys_scale_time(MovieKeys* keys, double scale);
 // A key is picked out by what it belongs to and its time (a time is unique among the keys of one thing), so a selection stays
 // valid when the keys are re-sorted. A camera key is one key however many lanes it is drawn in.
 
-enum class KeyKind : int { Camera, Param, Rep };
+// Overlay: a bar of the overlay lane (subject: its place in the list, time: when it starts, end: when it stops).
+// Block: a stretch of the representation overview where a representation is shown (subject: its id, time and end as the stretch).
+enum class KeyKind : int { Camera, Param, Rep, Overlay, Block };
 
 // What a key of a parameter or of a property of a representation belongs to
 inline int64_t rep_key_subject(uint32_t rep, int prop) { return ((int64_t)rep << 8) | (int64_t)prop; }
@@ -228,15 +230,16 @@ struct KeyId {
     KeyKind kind = KeyKind::Camera;
     int64_t subject = 0;       // The parameter, rep_key_subject() of a representation, 0 for the camera
     double  time = 0.0;
+    double  end = 0.0;         // Overlay and Block: when it stops
 };
 
 struct KeySelection {
     std::vector<KeyId> ids;
 
     bool   contains(KeyKind kind, int64_t subject, double time) const;
-    void   add(KeyKind kind, int64_t subject, double time);
-    void   toggle(KeyKind kind, int64_t subject, double time);
-    void   set(KeyKind kind, int64_t subject, double time);
+    void   add(KeyKind kind, int64_t subject, double time, double end = 0.0);
+    void   toggle(KeyKind kind, int64_t subject, double time, double end = 0.0);
+    void   set(KeyKind kind, int64_t subject, double time, double end = 0.0);
     void   clear() { ids.clear(); }
     bool   empty() const { return ids.empty(); }
     size_t size() const { return ids.size(); }
@@ -262,8 +265,10 @@ struct KeyShift {
     bool    step_ratio = false; // An arrow key multiplies the value by 1.05 instead of adding 'step'
 };
 
-// Moves the keys of 'start' that are in 'start_sel' by 'dt' seconds and, in the lane, their values by shift.dy: the result is
-// put in 'keys' (the camera, parameter and representation keys; the order is kept, nothing is sorted) and the selection in 'sel'.
+// Moves the keys, overlay bars and representation blocks of 'start' that are in 'start_sel' by 'dt' seconds and, in the lane, the values
+// of the keys by shift.dy: the result is put in 'keys' (the camera, parameter and representation keys and the overlays; the order is
+// kept, nothing is sorted) and the selection in 'sel'. A bar takes what is timed inside it along; a block stops at the other blocks
+// of its representation (so it may move less than the rest).
 // The selection is kept inside 0 .. duration as a whole: the dt that was used is returned. A distance changes with the
 // camera looking at the same point, and every value stays within its limits.
 double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double dt, const KeyShift& shift, double duration);
@@ -271,7 +276,7 @@ double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
 // Sorts the keys. Where a key lies on another (within a millisecond) one of them goes: the selected one stays.
 void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel);
 
-// Removes the selected keys
+// Removes the selected keys and representation blocks (an overlay is not removed this way)
 void movie_keys_delete(MovieKeys* keys, KeySelection* sel);
 
 // Selected keys remembered to be put in somewhere else

@@ -1374,3 +1374,94 @@ UTEST(viamd_movie_keys, a_copy_is_put_in_with_its_spacing_and_inside_the_movie) 
     movie_keys_paste(&keys, &late, KeyClip{}, 3.0, 20.0);
     EXPECT_EQ(keys.camera.size(), count);
 }
+
+static MovieOverlay bar(double begin, double end) {
+    MovieOverlay o;
+    o.begin = begin;
+    o.end = end;
+    return o;
+}
+
+UTEST(viamd_movie_keys, overlay_bars_move_with_what_is_timed_inside_them) {
+    MovieKeys start;
+    start.duration = 20.0f;
+    start.overlays = {bar(1.0, 4.0), bar(6.0, 9.0), bar(10.0, 12.0)};
+    MoviePlotPanel panel;
+    panel.begin = 7.0;
+    panel.end = 8.0;
+    start.overlays[1].panels.push_back(panel);
+    start.camera.push_back(cam_key(5.0, 10));
+    KeySelection sel;
+    sel.add(KeyKind::Overlay, 1, 6.0, 9.0);
+    sel.add(KeyKind::Camera, 0, 5.0);
+    MovieKeys out;
+    KeySelection out_sel;
+    double used = movie_keys_shift(&out, &out_sel, start, sel, 2.5, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 2.5);
+    EXPECT_EQ(out.overlays[0].begin, 1.0);
+    EXPECT_EQ(out.overlays[1].begin, 8.5);
+    EXPECT_EQ(out.overlays[1].end, 11.5);
+    EXPECT_EQ(out.overlays[1].panels[0].begin, 9.5);
+    EXPECT_EQ(out.overlays[1].panels[0].end, 10.5);
+    EXPECT_EQ(out.camera[0].time, 7.5);
+    EXPECT_TRUE(out_sel.contains(KeyKind::Overlay, 1, 8.5));
+    EXPECT_EQ(out_sel.ids[0].end, 11.5);
+
+    // The end of the bar is what stops it at the end of the movie
+    used = movie_keys_shift(&out, &out_sel, start, sel, 100.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 11.0);
+    EXPECT_EQ(out.overlays[1].end, 20.0);
+    used = movie_keys_shift(&out, &out_sel, start, sel, -100.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, -5.0);
+    EXPECT_EQ(out.overlays[1].begin, 1.0);
+}
+
+UTEST(viamd_movie_keys, representation_blocks_move_together_and_follow_their_keys) {
+    MovieKeys start;
+    start.duration = 20.0f;
+    start.reps = {rk(7, 0, 0.0, 0.0f), rk(7, 0, 2.0, 1.0f), rk(7, 0, 4.0, 0.0f), rk(9, 0, 0.0, 0.0f), rk(9, 0, 10.0, 1.0f), rk(9, 0, 14.0, 0.0f)};
+    KeySelection sel;
+    sel.add(KeyKind::Block, 7, 2.0, 4.0);
+    sel.add(KeyKind::Block, 9, 10.0, 14.0);
+    MovieKeys out;
+    KeySelection out_sel;
+    double used = movie_keys_shift(&out, &out_sel, start, sel, 3.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 3.0);
+    EXPECT_EQ(out.reps[1].time, 5.0);
+    EXPECT_EQ(out.reps[2].time, 7.0);
+    EXPECT_EQ(out.reps[4].time, 13.0);
+    EXPECT_EQ(out.reps[5].time, 17.0);
+    EXPECT_TRUE(out_sel.contains(KeyKind::Block, 7, 5.0));
+    EXPECT_TRUE(out_sel.contains(KeyKind::Block, 9, 13.0));
+    EXPECT_EQ(out_sel.ids[1].end, 17.0);
+
+    // The group stops at the end of the movie by the block that is the furthest
+    used = movie_keys_shift(&out, &out_sel, start, sel, 100.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 6.0);
+    EXPECT_EQ(out.reps[5].time, 20.0);
+    EXPECT_EQ(out.reps[2].time, 10.0);
+
+    // A block of the selection that no stretch is there for is left alone
+    KeySelection stale;
+    stale.add(KeyKind::Block, 7, 3.0, 4.0);
+    used = movie_keys_shift(&out, &out_sel, start, stale, 3.0, KeyShift{}, 20.0);
+    EXPECT_EQ(out.reps[1].time, 2.0);
+}
+
+UTEST(viamd_movie_keys, a_picked_block_is_removed_with_its_keys_and_stale_bars_and_blocks_are_forgotten) {
+    MovieKeys keys;
+    keys.duration = 20.0f;
+    keys.reps = {rk(7, 0, 0.0, 0.0f), rk(7, 0, 2.0, 1.0f), rk(7, 0, 4.0, 0.0f)};
+    keys.overlays = {bar(1.0, 4.0)};
+    KeySelection sel;
+    sel.add(KeyKind::Block, 7, 2.0, 4.0);
+    sel.add(KeyKind::Overlay, 0, 1.0, 4.0);
+    sel.add(KeyKind::Overlay, 3, 1.0, 4.0);      // No such bar
+    sel.add(KeyKind::Block, 7, 8.0, 9.0);        // No such stretch
+    key_selection_prune(&sel, keys);
+    EXPECT_EQ(sel.size(), (size_t)2);
+    movie_keys_delete(&keys, &sel);
+    for (const RepKey& k : keys.reps) EXPECT_LT(k.value[0], 0.5f);   // Nothing is shown any more
+    EXPECT_EQ(keys.overlays.size(), (size_t)1);                      // The bar stays
+    EXPECT_TRUE(sel.empty());
+}

@@ -750,23 +750,23 @@ bool KeySelection::contains(KeyKind kind, int64_t subject, double time) const {
     return false;
 }
 
-void KeySelection::add(KeyKind kind, int64_t subject, double time) {
-    if (!contains(kind, subject, time)) ids.push_back({kind, subject, time});
+void KeySelection::add(KeyKind kind, int64_t subject, double time, double end) {
+    if (!contains(kind, subject, time)) ids.push_back({kind, subject, time, end});
 }
 
-void KeySelection::toggle(KeyKind kind, int64_t subject, double time) {
+void KeySelection::toggle(KeyKind kind, int64_t subject, double time, double end) {
     for (size_t i = 0; i < ids.size(); ++i) {
         if (same_key(ids[i], kind, subject, time)) {
             ids.erase(ids.begin() + (ptrdiff_t)i);
             return;
         }
     }
-    ids.push_back({kind, subject, time});
+    ids.push_back({kind, subject, time, end});
 }
 
-void KeySelection::set(KeyKind kind, int64_t subject, double time) {
+void KeySelection::set(KeyKind kind, int64_t subject, double time, double end) {
     ids.clear();
-    ids.push_back({kind, subject, time});
+    ids.push_back({kind, subject, time, end});
 }
 
 static bool has_key(const MovieKeys& keys, const KeyId& id) {
@@ -779,6 +779,13 @@ static bool has_key(const MovieKeys& keys, const KeyId& id) {
         return false;
     case KeyKind::Rep:
         for (const RepKey& k : keys.reps) if (rep_key_subject(k.rep, k.prop) == id.subject && fabs(k.time - id.time) < 1.0e-9) return true;
+        return false;
+    case KeyKind::Overlay:
+        return id.subject >= 0 && (size_t)id.subject < keys.overlays.size() && fabs(keys.overlays[(size_t)id.subject].begin - id.time) < 1.0e-9;
+    case KeyKind::Block:
+        for (const RepInterval& iv : rep_shown_intervals(keys.reps, (uint32_t)id.subject, (double)keys.duration)) {
+            if (iv.begin_key >= 0 && fabs(iv.begin - id.time) < 1.0e-9) return true;
+        }
         return false;
     }
     return false;
@@ -806,6 +813,7 @@ double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
     std::vector<CameraKeyframe> camera = start.camera;
     std::vector<ParamKey> params = start.params;
     std::vector<RepKey> reps = start.reps;
+    std::vector<MovieOverlay> overlays = start.overlays;
 
     auto cam_sel = [&](const CameraKeyframe& k) { return start_sel.contains(KeyKind::Camera, 0, k.time); };
     auto par_sel = [&](const ParamKey& k) { return start_sel.contains(KeyKind::Param, (int64_t)k.param, k.time); };
@@ -815,6 +823,22 @@ double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
     for (const CameraKeyframe& k : camera) if (cam_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
     for (const ParamKey& k : params) if (par_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
     for (const RepKey& k : reps) if (rep_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
+    struct BlockMove { size_t id; uint32_t rep; RepInterval iv; };
+    std::vector<BlockMove> blocks;
+    for (size_t i = 0; i < start_sel.ids.size(); ++i) {
+        const KeyId& id = start_sel.ids[i];
+        if (id.kind == KeyKind::Overlay && id.subject >= 0 && (size_t)id.subject < overlays.size()) {
+            const MovieOverlay& o = overlays[(size_t)id.subject];
+            if (fabs(o.begin - id.time) < 1.0e-9) { t_min = std::min(t_min, o.begin); t_max = std::max(t_max, o.end); }
+        } else if (id.kind == KeyKind::Block) {
+            for (const RepInterval& iv : rep_shown_intervals(start.reps, (uint32_t)id.subject, duration)) {
+                if (iv.begin_key < 0 || fabs(iv.begin - id.time) >= 1.0e-9) continue;
+                blocks.push_back({i, (uint32_t)id.subject, iv});
+                t_min = std::min(t_min, iv.begin);
+                t_max = std::max(t_max, iv.end);
+            }
+        }
+    }
 
     double d = 0.0;
     if (t_min <= t_max) {
@@ -851,8 +875,33 @@ double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
         if (s.lane == KeyLane::Rep && s.subject == rep_key_subject(k.rep, k.prop)) k.value[0] = (float)std::min(std::max(shifted_value((double)k.value[0], s), s.lo), s.hi);
     }
 
+    for (size_t i = 0; i < overlays.size(); ++i) {
+        MovieOverlay& o = overlays[i];
+        if (!start_sel.contains(KeyKind::Overlay, (int64_t)i, o.begin)) continue;
+        o.begin += d;
+        o.end += d;
+        // What is timed inside a bar moves with it
+        for (MoviePlotPanel& panel : o.panels) {
+            panel.begin = std::max(panel.begin + d, 0.0);
+            if (panel.end > 0.0) panel.end = std::max(panel.end + d, 0.0);
+        }
+    }
+    // The blocks one after the other, the ones ahead of the move first so that they make room
+    std::sort(blocks.begin(), blocks.end(), [&](const BlockMove& a, const BlockMove& b) { return d > 0.0 ? a.iv.begin > b.iv.begin : a.iv.begin < b.iv.begin; });
+    for (const BlockMove& b : blocks) rep_move_interval(&reps, b.rep, b.iv, b.iv.begin + d, b.iv.end + d, duration);
+
     std::vector<KeyId> ids = start_sel.ids;
-    for (KeyId& id : ids) id.time += d;
+    for (KeyId& id : ids) {
+        if (id.kind == KeyKind::Block) continue;
+        id.time += d;
+        if (id.kind == KeyKind::Overlay) id.end += d;
+    }
+    for (const BlockMove& b : blocks) {
+        for (const RepInterval& iv : rep_shown_intervals(reps, b.rep, duration)) {
+            if (iv.begin_key == b.iv.begin_key) { ids[b.id].time = iv.begin; ids[b.id].end = iv.end; }
+        }
+    }
+    keys->overlays = std::move(overlays);
     keys->camera = std::move(camera);
     keys->params = std::move(params);
     keys->reps = std::move(reps);
@@ -898,6 +947,15 @@ void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel) {
 }
 
 void movie_keys_delete(MovieKeys* keys, KeySelection* sel) {
+    for (const KeyId& id : sel->ids) {
+        if (id.kind != KeyKind::Block) continue;
+        for (const RepInterval& iv : rep_shown_intervals(keys->reps, (uint32_t)id.subject, (double)keys->duration)) {
+            if (iv.begin_key >= 0 && fabs(iv.begin - id.time) < 1.0e-9) {
+                rep_remove_interval(&keys->reps, iv);
+                break;
+            }
+        }
+    }
     keys->camera.erase(std::remove_if(keys->camera.begin(), keys->camera.end(),
         [&](const CameraKeyframe& k) { return sel->contains(KeyKind::Camera, 0, k.time); }), keys->camera.end());
     keys->params.erase(std::remove_if(keys->params.begin(), keys->params.end(),
