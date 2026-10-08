@@ -273,6 +273,23 @@ struct KeyShift {
 // camera looking at the same point, and every value stays within its limits.
 double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double dt, const KeyShift& shift, double duration);
 
+// The first and last time of what is selected (keys, bars, blocks). False if nothing is.
+bool key_selection_extent(const MovieKeys& keys, const KeySelection& sel, double* t0, double* t1);
+
+// Stretches the selected items in time about 'anchor': a time t goes to anchor + (t - anchor) * factor (the length of a bar or a
+// block too, and what is timed inside a bar). The factor is kept so that nothing leaves the movie, and the one used is returned.
+// Made like movie_keys_shift: from 'start', into 'keys' (camera, parameter, representation keys and overlays) and 'sel', not sorted.
+double movie_keys_scale(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double anchor, double factor, double duration);
+
+// The easing of the picked keys that have one that can be chosen (the camera keys but the first, the parameter keys and the
+// properties of representations but Visible, which holds). Returns how many there are; 'mixed' is whether they differ, and
+// 'common' the easing of the first.
+int key_selection_ease(const CameraKeyframe* camera, size_t num_camera, const std::vector<ParamKey>& params, const std::vector<RepKey>& reps,
+    const KeySelection& sel, KeyEase* common, bool* mixed);
+
+// Sets it on those keys
+void movie_keys_set_ease(MovieKeys* keys, const KeySelection& sel, KeyEase ease);
+
 // Sorts the keys. Where a key lies on another (within a millisecond) one of them goes: the selected one stays.
 void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel);
 

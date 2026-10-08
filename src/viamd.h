@@ -1146,6 +1146,14 @@ struct ApplicationState {
             double x0 = 0.0, y0 = 0.0;
             float  px = 0.0f, py = 0.0f;
         } key_box;
+        float sel_scale = 100.0f;         // The stretch of the picked items, in percent, while it is dragged
+        int   sel_anchor = 0;             // What it stretches about: 0 the first picked item, 1 the preview time
+        struct KeyScale {
+            bool         active = false;
+            MovieKeys    start;
+            KeySelection start_sel;
+            double       anchor = 0.0;
+        } key_scale;
         int shortcut_frame = -1;          // The frame in which the timeline took a shortcut (the others leave it alone)
 
         MovieRecordingState state = MovieRecordingState::Idle;

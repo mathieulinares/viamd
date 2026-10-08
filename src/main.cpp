@@ -10387,6 +10387,38 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         ImGui::SameLine();
         if (ImGui::SmallButton("Copy")) movie_selection_copy(data);
         ImGui::SetItemTooltip("Remembers the picked keys, with the time between them. Ctrl + C.");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 5.5f);
+        ImGui::DragFloat("##sel_scale", &m.sel_scale, 0.5f, 5.0f, 1000.0f, "%.0f %%");
+        ImGui::SetItemTooltip("Stretches the time between the picked items (keys, bars, blocks, and what is timed in a bar): drag to the right to spread them out,\nto the left to bring them closer. 100 % is as it is. It stops where something would leave the movie. Ctrl + click to type a value.");
+        if (ImGui::IsItemActivated()) {
+            auto& ks = m.key_scale;
+            ks.active = true;
+            ks.start = movie_keys_snapshot(data);
+            ks.start_sel = m.sel;
+            double t0 = 0.0, t1 = 0.0;
+            key_selection_extent(ks.start, ks.start_sel, &t0, &t1);
+            ks.anchor = m.sel_anchor == 1 ? (double)m.playhead : t0;
+        }
+        if (m.key_scale.active && ImGui::IsItemActive()) {
+            auto& ks = m.key_scale;
+            MovieKeys out = ks.start;
+            movie_keys_scale(&out, &m.sel, ks.start, ks.start_sel, ks.anchor, (double)m.sel_scale / 100.0, (double)movie_duration(data));
+            movie_keys_restore(data, out);
+            movie_reps_apply(data, (double)m.playhead);
+        }
+        if (m.key_scale.active && ImGui::IsItemDeactivated()) {
+            MovieKeys cur = movie_keys_snapshot(data);
+            movie_keys_resolve(&cur, m.sel);
+            movie_keys_restore(data, cur);
+            key_selection_prune(&m.sel, cur);
+            m.key_scale = decltype(m.key_scale){};
+            m.sel_scale = 100.0f;
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 8.0f);
+        ImGui::Combo("##sel_anchor", &m.sel_anchor, "about first\0about preview time\0");
+        ImGui::SetItemTooltip("What the stretch keeps in place: the first of the picked items, or the preview time.");
         ImGui::EndDisabled();
         ImGui::BeginDisabled(m.key_clip.empty());
         ImGui::SameLine();
@@ -10397,6 +10429,60 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         ImGui::SameLine();
         if (picked > 0) ImGui::TextDisabled("%zu key%s picked: drag one to move them all, arrow keys nudge (Shift: 1 s, Ctrl: 10 frames; up and down change the value)", picked, picked == 1 ? "" : "s");
         else            ImGui::TextDisabled("Click a key to pick it, Ctrl + click adds, drag the background to pick with a box. Middle button or Shift + wheel pans.");
+    }
+    if (!m.sel.empty() && !recording) {
+        // What the picked items have in common, to set for all of them
+        double first = 1.0e30;
+        int counts[5] = {};
+        for (const KeyId& id : m.sel.ids) {
+            first = MIN(first, id.time);
+            counts[CLAMP((int)id.kind, 0, 4)] += 1;
+        }
+        static const char* kind_names[5] = {"camera", "look parameter", "representation", "overlay", "block"};
+        char summary[160] = "";
+        size_t len = 0;
+        for (int k = 0; k < 5; ++k) {
+            if (counts[k] == 0 || len + 40 >= sizeof(summary)) continue;
+            len += (size_t)snprintf(summary + len, sizeof(summary) - len, "%s%d %s", len ? ", " : "", counts[k], kind_names[k]);
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s: first at", summary);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fs * 6.0f);
+        double start_time = first;
+        if (ImGui::InputDouble("##sel_start", &start_time, 0.0, 0.0, "%.2f s", ImGuiInputTextFlags_EnterReturnsTrue)) movie_selection_edit(data, start_time - first, 0.0, false, false);
+        ImGui::SetItemTooltip("When the first picked item is. Type a time (and Enter) to move all the picked items so that the first one is there.");
+
+        KeyEase common = KeyEase::Smooth;
+        bool mixed = false;
+        const int with_ease = key_selection_ease(m.keyframes, md_array_size(m.keyframes), m.param_keys, m.rep_keys, m.sel, &common, &mixed);
+        if (with_ease > 0) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(fs * 8.0f);
+            if (ImGui::BeginCombo("##sel_ease", mixed ? "(mixed)" : key_ease_str[(int)common])) {
+                for (int e = 0; e < (int)KeyEase::Count; ++e) {
+                    if (ImGui::Selectable(key_ease_str[e], !mixed && e == (int)common)) {
+                        MovieKeys keys = movie_keys_snapshot(data);
+                        movie_keys_set_ease(&keys, m.sel, (KeyEase)e);
+                        movie_keys_restore(data, keys);
+                        movie_params_apply(data, (double)m.playhead);
+                        movie_reps_apply(data, (double)m.playhead);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip("How the movie gets to the picked keys (%d): they all take what you choose. The first camera key and the visibility keys have no easing to choose.", with_ease);
+        }
+        if (m.sel.size() == 1 && m.sel.ids[0].kind == KeyKind::Camera) {
+            for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+                if (fabs(m.keyframes[i].time - m.sel.ids[0].time) >= 1.0e-9) continue;
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(fs * 9.0f);
+                ImGui::InputTextWithHint("##sel_name", "name", m.keyframes[i].name, sizeof(m.keyframes[i].name));
+                ImGui::SetItemTooltip("What the camera key is called, shown in the camera lane and the table.");
+                break;
+            }
+        }
     }
     const ImVec2 strip_size(-1, MAX(ImGui::GetContentRegionAvail().y, fs * 12.0f));
     const ImVec2 strip_pos = ImGui::GetCursorScreenPos();

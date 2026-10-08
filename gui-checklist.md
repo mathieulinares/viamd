@@ -114,6 +114,9 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] A picked block stops at the other blocks of its representation; moving a block alone still behaves as before (neighbours constrain it). Dragging a bar's or a block's end changes only that end.
 - [ ] Delete with a block picked removes it (the representation is hidden there); a picked overlay is not removed.
 
+- [ ] Stretch: pick keys, a bar and a block, drag the percentage box to 200 %: the time between them doubles about the first picked item (the first stays), bars and blocks get twice as long, the subplot times inside a bar scale too. 50 % halves it. Dragging far stops where the last item reaches the end of the movie. **about preview time** keeps the preview time still instead. Ctrl + click types a value. One undo; the box goes back to 100 % on release.
+- [ ] Inspector line (when items are picked): counts by kind; **first at** with a time: Enter moves everything so the first item is there; the easing list shows the common easing or **(mixed)** and sets it for all picked keys (check in the table and in the shape of the camera path); with one camera key picked the name box edits its name.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.

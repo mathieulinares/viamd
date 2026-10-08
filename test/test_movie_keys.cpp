@@ -1465,3 +1465,110 @@ UTEST(viamd_movie_keys, a_picked_block_is_removed_with_its_keys_and_stale_bars_a
     EXPECT_EQ(keys.overlays.size(), (size_t)1);                      // The bar stays
     EXPECT_TRUE(sel.empty());
 }
+
+UTEST(viamd_movie_keys, the_picked_items_are_stretched_about_an_anchor) {
+    MovieKeys start = select_keys();
+    start.overlays = {bar(6.0, 9.0)};
+    MoviePlotPanel panel;
+    panel.begin = 7.0;
+    panel.end = 8.0;
+    start.overlays[0].panels.push_back(panel);
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 5.0);
+    sel.add(KeyKind::Camera, 0, 9.0);
+    sel.add(KeyKind::Param, 1, 7.0);
+    sel.add(KeyKind::Overlay, 0, 6.0, 9.0);
+    double t0 = 0.0, t1 = 0.0;
+    ASSERT_TRUE(key_selection_extent(start, sel, &t0, &t1));
+    EXPECT_EQ(t0, 5.0);
+    EXPECT_EQ(t1, 9.0);
+
+    MovieKeys out;
+    KeySelection out_sel;
+    double used = movie_keys_scale(&out, &out_sel, start, sel, 5.0, 2.0, 20.0);
+    EXPECT_EQ(used, 2.0);
+    EXPECT_EQ(out.camera[0].time, 2.0);     // Not picked
+    EXPECT_EQ(out.camera[1].time, 5.0);     // The anchor stays
+    EXPECT_EQ(out.camera[2].time, 13.0);
+    EXPECT_EQ(out.params[1].time, 9.0);
+    EXPECT_EQ(out.overlays[0].begin, 7.0);
+    EXPECT_EQ(out.overlays[0].end, 13.0);
+    EXPECT_EQ(out.overlays[0].panels[0].begin, 9.0);
+    EXPECT_EQ(out.overlays[0].panels[0].end, 11.0);
+    EXPECT_TRUE(out_sel.contains(KeyKind::Camera, 0, 13.0));
+    EXPECT_TRUE(out_sel.contains(KeyKind::Overlay, 0, 7.0));
+    EXPECT_EQ(out_sel.ids[3].end, 13.0);
+
+    // It is kept from going out of the movie, and a squeeze keeps the order
+    used = movie_keys_scale(&out, &out_sel, start, sel, 5.0, 100.0, 20.0);
+    EXPECT_EQ(used, 15.0 / 4.0);
+    EXPECT_EQ(out.camera[2].time, 20.0);
+    used = movie_keys_scale(&out, &out_sel, start, sel, 5.0, 0.5, 20.0);
+    EXPECT_EQ(out.camera[2].time, 7.0);
+
+    // About a time inside the selection: both sides are limited
+    used = movie_keys_scale(&out, &out_sel, start, sel, 8.0, 100.0, 20.0);
+    EXPECT_NEAR(used, 8.0 / 3.0, 1.0e-9);
+    EXPECT_NEAR(out.camera[1].time, 0.0, 1.0e-9);
+
+    // Nothing picked: the factor is 1
+    KeySelection none;
+    used = movie_keys_scale(&out, &out_sel, start, none, 5.0, 3.0, 20.0);
+    EXPECT_EQ(used, 1.0);
+    EXPECT_EQ(out.camera[1].time, 5.0);
+    EXPECT_FALSE(key_selection_extent(start, none, &t0, &t1));
+}
+
+UTEST(viamd_movie_keys, blocks_are_stretched_with_their_keys) {
+    MovieKeys start;
+    start.duration = 20.0f;
+    start.reps = {rk(7, 0, 0.0, 0.0f), rk(7, 0, 2.0, 1.0f), rk(7, 0, 4.0, 0.0f), rk(9, 0, 0.0, 0.0f), rk(9, 0, 6.0, 1.0f), rk(9, 0, 8.0, 0.0f)};
+    KeySelection sel;
+    sel.add(KeyKind::Block, 7, 2.0, 4.0);
+    sel.add(KeyKind::Block, 9, 6.0, 8.0);
+    MovieKeys out;
+    KeySelection out_sel;
+    const double used = movie_keys_scale(&out, &out_sel, start, sel, 2.0, 2.0, 20.0);
+    EXPECT_EQ(used, 2.0);
+    EXPECT_EQ(out.reps[1].time, 2.0);
+    EXPECT_EQ(out.reps[2].time, 6.0);    // Twice as long
+    EXPECT_EQ(out.reps[4].time, 10.0);
+    EXPECT_EQ(out.reps[5].time, 14.0);
+    EXPECT_TRUE(out_sel.contains(KeyKind::Block, 9, 10.0));
+    EXPECT_EQ(out_sel.ids[1].end, 14.0);
+}
+
+UTEST(viamd_movie_keys, the_easing_of_the_picked_keys_is_read_and_set_together) {
+    MovieKeys keys = select_keys();
+    keys.camera[0].ease = KeyEase::Hold;          // The first key has no easing to choose
+    keys.camera[2].ease = KeyEase::Linear;
+    keys.params[0].ease = KeyEase::Linear;
+    keys.reps.push_back(rk(4, 0, 8.0, 1.0f));     // Visible holds
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 2.0);
+    sel.add(KeyKind::Camera, 0, 9.0);
+    sel.add(KeyKind::Param, 1, 3.0);
+    sel.add(KeyKind::Rep, rep_key_subject(4, 0), 8.0);
+    KeyEase common = KeyEase::Smooth;
+    bool mixed = true;
+    int count = key_selection_ease(keys.camera.data(), keys.camera.size(), keys.params, keys.reps, sel, &common, &mixed);
+    EXPECT_EQ(count, 2);
+    EXPECT_FALSE(mixed);
+    EXPECT_EQ(common, KeyEase::Linear);
+
+    sel.add(KeyKind::Camera, 0, 5.0);             // Smooth
+    count = key_selection_ease(keys.camera.data(), keys.camera.size(), keys.params, keys.reps, sel, &common, &mixed);
+    EXPECT_EQ(count, 3);
+    EXPECT_TRUE(mixed);
+
+    movie_keys_set_ease(&keys, sel, KeyEase::EaseInOut);
+    EXPECT_EQ(keys.camera[0].ease, KeyEase::Hold);
+    EXPECT_EQ(keys.camera[1].ease, KeyEase::EaseInOut);
+    EXPECT_EQ(keys.camera[2].ease, KeyEase::EaseInOut);
+    EXPECT_EQ(keys.camera[3].ease, KeyEase::Smooth);
+    EXPECT_EQ(keys.params[0].ease, KeyEase::EaseInOut);
+    EXPECT_EQ(keys.reps.back().ease, KeyEase::Smooth);
+
+    KeySelection none;
+    EXPECT_EQ(key_selection_ease(keys.camera.data(), keys.camera.size(), keys.params, keys.reps, none, &common, &mixed), 0);
+}

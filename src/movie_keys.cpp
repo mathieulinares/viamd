@@ -809,6 +809,36 @@ static double shifted_value(double v, const KeyShift& s) {
     return s.ratio ? v * s.dy : v + s.dy;
 }
 
+struct BlockMove { size_t id; uint32_t rep; RepInterval iv; };
+
+// The first and the last time of what is selected (nothing selected: t_min > t_max), and the stretches of the selected blocks
+static void selection_extent(const MovieKeys& keys, const KeySelection& sel, double duration, double* t_min, double* t_max, std::vector<BlockMove>* blocks) {
+    *t_min = DBL_MAX;
+    *t_max = -DBL_MAX;
+    auto take = [&](double a, double b) { *t_min = std::min(*t_min, a); *t_max = std::max(*t_max, b); };
+    for (const CameraKeyframe& k : keys.camera) if (sel.contains(KeyKind::Camera, 0, k.time)) take(k.time, k.time);
+    for (const ParamKey& k : keys.params) if (sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) take(k.time, k.time);
+    for (const RepKey& k : keys.reps) if (sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) take(k.time, k.time);
+    for (size_t i = 0; i < sel.ids.size(); ++i) {
+        const KeyId& id = sel.ids[i];
+        if (id.kind == KeyKind::Overlay && id.subject >= 0 && (size_t)id.subject < keys.overlays.size()) {
+            const MovieOverlay& o = keys.overlays[(size_t)id.subject];
+            if (fabs(o.begin - id.time) < 1.0e-9) take(o.begin, o.end);
+        } else if (id.kind == KeyKind::Block) {
+            for (const RepInterval& iv : rep_shown_intervals(keys.reps, (uint32_t)id.subject, duration)) {
+                if (iv.begin_key < 0 || fabs(iv.begin - id.time) >= 1.0e-9) continue;
+                if (blocks) blocks->push_back({i, (uint32_t)id.subject, iv});
+                take(iv.begin, iv.end);
+            }
+        }
+    }
+}
+
+bool key_selection_extent(const MovieKeys& keys, const KeySelection& sel, double* t0, double* t1) {
+    selection_extent(keys, sel, (double)keys.duration, t0, t1, nullptr);
+    return *t0 <= *t1;
+}
+
 double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double dt, const KeyShift& s, double duration) {
     std::vector<CameraKeyframe> camera = start.camera;
     std::vector<ParamKey> params = start.params;
@@ -819,26 +849,9 @@ double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
     auto par_sel = [&](const ParamKey& k) { return start_sel.contains(KeyKind::Param, (int64_t)k.param, k.time); };
     auto rep_sel = [&](const RepKey& k) { return start_sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); };
 
-    double t_min = DBL_MAX, t_max = -DBL_MAX;
-    for (const CameraKeyframe& k : camera) if (cam_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
-    for (const ParamKey& k : params) if (par_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
-    for (const RepKey& k : reps) if (rep_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
-    struct BlockMove { size_t id; uint32_t rep; RepInterval iv; };
+    double t_min = 0.0, t_max = 0.0;
     std::vector<BlockMove> blocks;
-    for (size_t i = 0; i < start_sel.ids.size(); ++i) {
-        const KeyId& id = start_sel.ids[i];
-        if (id.kind == KeyKind::Overlay && id.subject >= 0 && (size_t)id.subject < overlays.size()) {
-            const MovieOverlay& o = overlays[(size_t)id.subject];
-            if (fabs(o.begin - id.time) < 1.0e-9) { t_min = std::min(t_min, o.begin); t_max = std::max(t_max, o.end); }
-        } else if (id.kind == KeyKind::Block) {
-            for (const RepInterval& iv : rep_shown_intervals(start.reps, (uint32_t)id.subject, duration)) {
-                if (iv.begin_key < 0 || fabs(iv.begin - id.time) >= 1.0e-9) continue;
-                blocks.push_back({i, (uint32_t)id.subject, iv});
-                t_min = std::min(t_min, iv.begin);
-                t_max = std::max(t_max, iv.end);
-            }
-        }
-    }
+    selection_extent(start, start_sel, duration, &t_min, &t_max, &blocks);
 
     double d = 0.0;
     if (t_min <= t_max) {
@@ -988,4 +1001,84 @@ void movie_keys_paste(MovieKeys* keys, KeySelection* sel, const KeyClip& clip, d
     for (ParamKey k : clip.params) { k.time += offset; keys->params.push_back(k); sel->add(KeyKind::Param, (int64_t)k.param, k.time); }
     for (RepKey k : clip.reps) { k.time += offset; keys->reps.push_back(k); sel->add(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); }
     movie_keys_resolve(keys, *sel);
+}
+
+double movie_keys_scale(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double anchor, double factor, double duration) {
+    std::vector<CameraKeyframe> camera = start.camera;
+    std::vector<ParamKey> params = start.params;
+    std::vector<RepKey> reps = start.reps;
+    std::vector<MovieOverlay> overlays = start.overlays;
+
+    double t_min = 0.0, t_max = 0.0;
+    std::vector<BlockMove> blocks;
+    selection_extent(start, start_sel, duration, &t_min, &t_max, &blocks);
+
+    double f = 1.0;
+    if (t_min <= t_max) {
+        f = std::max(factor, 0.01);
+        if (t_max > anchor) f = std::min(f, (duration - anchor) / (t_max - anchor));
+        if (t_min < anchor) f = std::min(f, anchor / (anchor - t_min));
+        f = std::max(f, 0.0);
+    }
+    auto at = [&](double t) { return anchor + (t - anchor) * f; };
+
+    for (CameraKeyframe& k : camera) if (start_sel.contains(KeyKind::Camera, 0, k.time)) k.time = at(k.time);
+    for (ParamKey& k : params) if (start_sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) k.time = at(k.time);
+    for (RepKey& k : reps) if (start_sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) k.time = at(k.time);
+    for (size_t i = 0; i < overlays.size(); ++i) {
+        MovieOverlay& o = overlays[i];
+        if (!start_sel.contains(KeyKind::Overlay, (int64_t)i, o.begin)) continue;
+        o.begin = at(o.begin);
+        o.end = at(o.end);
+        for (MoviePlotPanel& panel : o.panels) {
+            panel.begin = std::max(at(panel.begin), 0.0);
+            if (panel.end > 0.0) panel.end = std::max(at(panel.end), 0.0);
+        }
+    }
+    // The blocks that move away from the anchor first, so that they make room
+    std::sort(blocks.begin(), blocks.end(), [&](const BlockMove& a, const BlockMove& b) { return f >= 1.0 ? a.iv.begin > b.iv.begin : a.iv.begin < b.iv.begin; });
+    for (const BlockMove& b : blocks) rep_move_interval(&reps, b.rep, b.iv, at(b.iv.begin), at(b.iv.end), duration);
+
+    std::vector<KeyId> ids = start_sel.ids;
+    for (KeyId& id : ids) {
+        if (id.kind == KeyKind::Block) continue;
+        id.time = at(id.time);
+        if (id.kind == KeyKind::Overlay) id.end = at(id.end);
+    }
+    for (const BlockMove& b : blocks) {
+        for (const RepInterval& iv : rep_shown_intervals(reps, b.rep, duration)) {
+            if (iv.begin_key == b.iv.begin_key) { ids[b.id].time = iv.begin; ids[b.id].end = iv.end; }
+        }
+    }
+    keys->overlays = std::move(overlays);
+    keys->camera = std::move(camera);
+    keys->params = std::move(params);
+    keys->reps = std::move(reps);
+    sel->ids = std::move(ids);
+    return f;
+}
+
+int key_selection_ease(const CameraKeyframe* camera, size_t num_camera, const std::vector<ParamKey>& params, const std::vector<RepKey>& reps,
+    const KeySelection& sel, KeyEase* common, bool* mixed) {
+    double first = DBL_MAX;
+    for (size_t i = 0; i < num_camera; ++i) first = std::min(first, camera[i].time);
+    int count = 0;
+    *mixed = false;
+    auto take = [&](KeyEase e) {
+        if (count == 0) *common = e;
+        else if (e != *common) *mixed = true;
+        ++count;
+    };
+    for (size_t i = 0; i < num_camera; ++i) if (camera[i].time > first && sel.contains(KeyKind::Camera, 0, camera[i].time)) take(camera[i].ease);
+    for (const ParamKey& k : params) if (sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) take(k.ease);
+    for (const RepKey& k : reps) if (k.prop != (int)RepProp::Visible && sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) take(k.ease);
+    return count;
+}
+
+void movie_keys_set_ease(MovieKeys* keys, const KeySelection& sel, KeyEase ease) {
+    double first = DBL_MAX;
+    for (const CameraKeyframe& k : keys->camera) first = std::min(first, k.time);
+    for (CameraKeyframe& k : keys->camera) if (k.time > first && sel.contains(KeyKind::Camera, 0, k.time)) k.ease = ease;
+    for (ParamKey& k : keys->params) if (sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) k.ease = ease;
+    for (RepKey& k : keys->reps) if (k.prop != (int)RepProp::Visible && sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) k.ease = ease;
 }
