@@ -312,31 +312,6 @@ void rep_swap_at(std::vector<RepKey>* keys, uint32_t from, uint32_t to, double t
     put(to, false, true);
 }
 
-void rep_move_group(std::vector<RepKey>* keys, const std::vector<uint32_t>& reps, double begin, double end, double new_begin, double new_end, double duration) {
-    const double d0 = new_begin - begin, d1 = new_end - end;
-    const bool left = fabs(d1) < 1.0e-9 && fabs(d0) > 1.0e-9;
-    const bool right = fabs(d0) < 1.0e-9 && fabs(d1) > 1.0e-9;
-    for (uint32_t rep : reps) {
-        const std::vector<RepInterval> all = rep_shown_intervals(*keys, rep, duration);
-        for (const RepInterval& iv : all) {
-            if (iv.begin < begin - REP_EPS || iv.end > end + REP_EPS) continue;
-            double b = iv.begin, e = iv.end;
-            if (left) {
-                if (fabs(iv.begin - begin) > REP_EPS) continue;
-                b = new_begin;
-            } else if (right) {
-                if (fabs(iv.end - end) > REP_EPS) continue;
-                e = new_end;
-            } else {
-                b += d0;
-                e += d0;
-            }
-            rep_move_interval(keys, rep, iv, b, e, duration);
-            break;   // The keys of the others may have moved: one stretch a representation each time it is asked
-        }
-    }
-}
-
 std::vector<RepInterval> rep_union_intervals(std::vector<RepInterval> intervals) {
     std::sort(intervals.begin(), intervals.end(), [](const RepInterval& a, const RepInterval& b) { return a.begin < b.begin; });
     std::vector<RepInterval> out;
@@ -379,49 +354,6 @@ std::vector<RepRow> rep_system_rows(const std::vector<std::string>& names) {
             rows.push_back(row);
         } else {
             ++it->members;
-        }
-    }
-    return rows;
-}
-
-std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed) {
-    struct Group { std::string name; std::vector<int> members; };
-    std::vector<Group> groups;
-    std::vector<std::string> member_names(names.size());
-    for (size_t i = 0; i < names.size(); ++i) {
-        std::string g, m;
-        rep_name_split(names[i].c_str(), &g, &m);
-        member_names[i] = m;
-        size_t gi = 0;
-        while (gi < groups.size() && groups[gi].name != g) ++gi;
-        if (gi == groups.size()) groups.push_back({g, {}});
-        groups[gi].members.push_back((int)i);
-    }
-    std::vector<RepRow> rows;
-    for (const Group& g : groups) {
-        if (g.members.size() == 1) {
-            RepRow r;
-            r.rep = g.members[0];
-            r.label = names[(size_t)g.members[0]];
-            r.group = g.name;
-            rows.push_back(r);
-            continue;
-        }
-        RepRow h;
-        h.header = true;
-        h.rep = g.members[0];
-        h.label = g.name;
-        h.group = g.name;
-        h.members = (int)g.members.size();
-        rows.push_back(h);
-        if (std::find(collapsed.begin(), collapsed.end(), g.name) != collapsed.end()) continue;
-        for (int m : g.members) {
-            RepRow r;
-            r.rep = m;
-            r.label = member_names[(size_t)m].empty() ? names[(size_t)m] : member_names[(size_t)m];
-            r.group = g.name;
-            r.indented = true;
-            rows.push_back(r);
         }
     }
     return rows;

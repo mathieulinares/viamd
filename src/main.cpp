@@ -10617,7 +10617,7 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(fs * 5.5f);
         ImGui::DragFloat("##sel_scale", &m.sel_scale, 0.5f, 5.0f, 1000.0f, "%.0f %%");
-        ImGui::SetItemTooltip("Stretches the time between the picked items (keys, bars, blocks, and what is timed in a bar): drag to the right to spread them out,\nto the left to bring them closer. 100 % is as it is. It stops where something would leave the movie. Ctrl + click to type a value.");
+        ImGui::SetItemTooltip("Stretches the time between the picked items (keys, bars, blocks, and what is timed in a bar): drag to the right to spread them out,\nto the left to bring them closer. 100 %% is as it is. It stops where something would leave the movie. Ctrl + click to type a value.");
         if (ImGui::IsItemActivated()) {
             auto& ks = m.key_scale;
             ks.active = true;
@@ -11403,7 +11403,7 @@ static void draw_movie_param_section(ApplicationState* data, float movie_len) {
     }
     ImGui::SetItemTooltip("Keys the value the parameter has now at the preview time.\nSet it up in the Settings first, then key it.");
     if (sel.tip) ImGui::TextDisabled("%s", sel.tip);
-    ImGui::TextDisabled("The keys can be dragged in the Movie Timeline window.");
+    ImGui::TextDisabled("The keys can be dragged in the timeline, the left panel of this window.");
 
     if (m.param_keys.empty()) return;
 

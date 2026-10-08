@@ -95,11 +95,6 @@ void rep_transfer_interval(std::vector<RepKey>* keys, uint32_t from, uint32_t to
 // taken to have been shown ('from') or hidden ('to') up to then.
 void rep_swap_at(std::vector<RepKey>* keys, uint32_t from, uint32_t to, double t);
 
-// Moves the stretches of several representations that lie inside [begin, end] when that group of stretches is dragged to
-// [new_begin, new_end]: all of them by the same time when it was only moved, the ones that start at 'begin' when its left end
-// was dragged, the ones that end at 'end' when its right end was.
-void rep_move_group(std::vector<RepKey>* keys, const std::vector<uint32_t>& reps, double begin, double end, double new_begin, double new_end, double duration);
-
 // The union of stretches (a group's: shown whenever any of its members is)
 std::vector<RepInterval> rep_union_intervals(std::vector<RepInterval> intervals);
 
@@ -107,8 +102,7 @@ std::vector<RepInterval> rep_union_intervals(std::vector<RepInterval> intervals)
 // is a group of its own: the member is empty and false is returned.
 bool rep_name_split(const char* name, std::string* group, std::string* member);
 
-// The rows of a list of representations in a lane: representations of one group together, at the place of the first of them,
-// with a row for the group above its members when it has several (the members are left out of a group that is 'collapsed').
+// A row of the representation overview: one system, named by the part of the representation names before the first hyphen
 struct RepRow {
     bool        header = false;   // The row of a group
     int         rep = -1;         // The place in the list of a representation row; for a header the first member
@@ -117,8 +111,6 @@ struct RepRow {
     int         members = 1;
     bool        indented = false;
 };
-std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed);
-
 std::vector<RepRow> rep_system_rows(const std::vector<std::string>& names);
 
 struct RepBlock {

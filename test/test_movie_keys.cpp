@@ -730,26 +730,6 @@ UTEST(viamd_movie_keys, a_swap_on_a_key_that_is_there_changes_it_instead_of_addi
     EXPECT_EQ(1, at_ten);
 }
 
-UTEST(viamd_movie_keys, dragging_the_left_end_of_a_group_moves_the_members_that_start_there) {
-    std::vector<RepKey> keys = {vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false), vis_key(2, 0, false), vis_key(2, 10, true), vis_key(2, 30, false),
-        vis_key(3, 0, false), vis_key(3, 12, true), vis_key(3, 18, false)};
-    rep_move_group(&keys, {1, 2, 3}, 10.0, 30.0, 15.0, 30.0, 50.0);
-    EXPECT_NEAR(15.0, rep_shown_intervals(keys, 1, 50.0)[0].begin, 1e-9);
-    EXPECT_NEAR(15.0, rep_shown_intervals(keys, 2, 50.0)[0].begin, 1e-9);
-    EXPECT_NEAR(12.0, rep_shown_intervals(keys, 3, 50.0)[0].begin, 1e-9);   /* does not start at the end that moved */
-}
-
-UTEST(viamd_movie_keys, dragging_a_whole_group_moves_every_stretch_in_it_by_the_same_time) {
-    std::vector<RepKey> keys = {vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false), vis_key(2, 0, false), vis_key(2, 15, true), vis_key(2, 30, false)};
-    rep_move_group(&keys, {1, 2}, 10.0, 30.0, 14.0, 34.0, 60.0);
-    const RepInterval a = rep_shown_intervals(keys, 1, 60.0)[0];
-    const RepInterval b = rep_shown_intervals(keys, 2, 60.0)[0];
-    EXPECT_NEAR(14.0, a.begin, 1e-9);
-    EXPECT_NEAR(24.0, a.end, 1e-9);
-    EXPECT_NEAR(19.0, b.begin, 1e-9);
-    EXPECT_NEAR(34.0, b.end, 1e-9);
-}
-
 UTEST(viamd_movie_keys, stretches_that_touch_or_overlap_are_one_in_the_union) {
     std::vector<RepInterval> in(3);
     in[0].begin = 10; in[0].end = 20;
@@ -777,36 +757,6 @@ UTEST(viamd_movie_keys, a_name_is_split_at_its_first_hyphen) {
     EXPECT_STREQ("-odd", g.c_str());
     EXPECT_FALSE(rep_name_split("odd-", &g, &m));
     EXPECT_STREQ("odd-", g.c_str());
-}
-
-UTEST(viamd_movie_keys, the_rows_of_a_lane_put_a_group_together_at_the_place_of_its_first_member) {
-    const std::vector<std::string> names = {"protein-cartoon", "ligand", "protein-cpk", "water", "ligand-vdw"};
-    const std::vector<RepRow> rows = rep_group_rows(names, {});
-    ASSERT_EQ(7, (int)rows.size());
-    EXPECT_TRUE(rows[0].header);  EXPECT_STREQ("protein", rows[0].label.c_str());  EXPECT_EQ(2, rows[0].members);
-    EXPECT_STREQ("cartoon", rows[1].label.c_str());  EXPECT_TRUE(rows[1].indented);  EXPECT_EQ(0, rows[1].rep);
-    EXPECT_STREQ("cpk", rows[2].label.c_str());      EXPECT_EQ(2, rows[2].rep);
-    EXPECT_TRUE(rows[3].header);  EXPECT_STREQ("ligand", rows[3].label.c_str());
-    EXPECT_STREQ("ligand", rows[4].label.c_str());   /* a member with the name of the group alone keeps its whole name */
-    EXPECT_STREQ("vdw", rows[5].label.c_str());
-    EXPECT_FALSE(rows[6].header);  EXPECT_STREQ("water", rows[6].label.c_str());  EXPECT_FALSE(rows[6].indented);
-}
-
-UTEST(viamd_movie_keys, a_collapsed_group_keeps_only_its_row) {
-    const std::vector<std::string> names = {"protein-cartoon", "protein-cpk", "water"};
-    const std::vector<RepRow> rows = rep_group_rows(names, {"protein"});
-    ASSERT_EQ(2, (int)rows.size());
-    EXPECT_TRUE(rows[0].header);
-    EXPECT_STREQ("water", rows[1].label.c_str());
-}
-
-static CameraKeyframe cam_key(double time, float distance, bool follow = false, int atom = -1) {
-    CameraKeyframe k = {};
-    k.time = time;
-    k.transform.distance = distance;
-    k.follow = follow;
-    k.follow_atom = atom;
-    return k;
 }
 
 UTEST(viamd_movie_keys, system_rows_have_one_label_per_system_in_first_occurrence_order) {
@@ -904,6 +854,15 @@ UTEST(viamd_movie_keys, switching_representation_blocks_is_undoable_without_chan
     EXPECT_TRUE(movie_keys_equal(before, cur));
     ASSERT_TRUE(history.redo(&cur));
     EXPECT_TRUE(movie_keys_equal(after, cur));
+}
+
+static CameraKeyframe cam_key(double time, float distance, bool follow = false, int atom = -1) {
+    CameraKeyframe k = {};
+    k.time = time;
+    k.transform.distance = distance;
+    k.follow = follow;
+    k.follow_atom = atom;
+    return k;
 }
 
 UTEST(viamd_movie_keys, camera_bands_are_runs_of_keys_that_follow_the_same_thing) {
