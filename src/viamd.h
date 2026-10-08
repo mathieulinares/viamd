@@ -1098,8 +1098,9 @@ struct ApplicationState {
         bool  timeline_param_lane = true;     // The lane of a keyed look parameter
         bool  timeline_rep_overview = true;   // When each representation is shown, as bars, grouped by name
         bool  timeline_rep_lane = true;       // The lane of a keyed property of a representation, below the look parameter's
+        bool  timeline_ruler = true;          // The time ruler above the lanes: frames, notes, click to scrub
         bool  timeline_camera_lane = true;    // The camera keys, what they follow and where they spin, on one lane above the curves
-        float timeline_row_ratios[8] = {1, 1, 1, 1, 1, 0.6f, 0.8f, 0.6f};
+        float timeline_row_ratios[9] = {1, 1, 1, 1, 1, 0.6f, 0.8f, 0.6f, 0.45f};
         float timeline_lane_height = 150.0f;  // The height of a lane at ratio 1, in pixels, when the window scrolls instead of fitting them
         bool  timeline_fit_window = false;    // The lanes share the height of the window instead, however small
         bool  timeline_rep_equal_rows = true; // Every system has a band of one row's height, its overlapping blocks share it

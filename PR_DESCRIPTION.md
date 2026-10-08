@@ -111,6 +111,8 @@ All 234 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The n
 ### Known limits
 - Solid representations cannot fade, so they grow in and shrink away at a Visible key. Tint and saturation keys recolor the atoms every frame, which is slow for very large systems.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
+- The Movie Timeline has a time ruler (frame ticks and numbers, the notes of the movie, click or drag to scrub) and every lane shows its name.
+
 - The picked items can be stretched in time (about the first of them or the preview time) and have their easing and start time set together from a line above the lanes.
 
 - Picked overlay bars and representation blocks move with the picked keys; they are not copied or pasted, and an overlay is not deleted by the picking shortcuts.

@@ -8845,6 +8845,8 @@ struct MovieCameraLaneEdit {
     bool   held = false;
 };
 static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool locked, const std::vector<CameraKeyframe>& sorted, MovieCameraLaneEdit* edit);
+static void draw_movie_ruler(ApplicationState* data, float movie_len, bool locked);
+static void movie_lane_title(const char* text);
 static void movie_reps_apply(ApplicationState* state, double time);
 static std::vector<RepRow> movie_rep_overview_rows(const ApplicationState* data);
 static std::vector<RepBlock> movie_rep_system_blocks(const ApplicationState* data, const std::string& group, double duration);
@@ -9081,6 +9083,106 @@ static void movie_selection_shortcuts(ApplicationState* data, bool hovered) {
     if (took) m.shortcut_frame = ImGui::GetFrameCount();
 }
 
+// A line of text in the corner of a lane, so that the lanes can be told apart
+static void movie_lane_title(const char* text) {
+    ImPlot::PushPlotClipRect();
+    const ImVec2 p = ImPlot::GetPlotPos();
+    const ImVec2 size = ImGui::CalcTextSize(text);
+    ImDrawList* dl = ImPlot::GetPlotDrawList();
+    dl->AddRectFilled(ImVec2(p.x + 4.0f, p.y + 3.0f), ImVec2(p.x + size.x + 12.0f, p.y + size.y + 7.0f), IM_COL32(0, 0, 0, 110), 3.0f);
+    dl->AddText(ImVec2(p.x + 8.0f, p.y + 5.0f), IM_COL32(230, 230, 230, 210), text);
+    ImPlot::PopPlotClipRect();
+}
+
+// The time ruler: the seconds of the axis, a tick for every frame of the movie when they are far enough apart (numbered), the notes
+// of the movie as triangles (click one to go there), and clicking or dragging anywhere in it moves the preview time.
+static void draw_movie_ruler(ApplicationState* data, float movie_len, bool locked) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
+    static bool scrubbing = false;
+    if (!ImPlot::BeginPlot("##movie_ruler", ImVec2(-1, -1), plot_flags)) return;
+    ImPlot::SetupAxes(nullptr, nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations);
+    ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
+    ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 1.0, ImPlotCond_Always);
+    ImPlot::SetupFinish();
+
+    const ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImPlot::GetPlotDrawList();
+    const ImVec2 p0 = ImPlot::GetPlotPos(), size = ImPlot::GetPlotSize();
+    const double fps = MAX((double)m.fps, 1.0);
+    const double span = MAX(m.timeline_view_end - m.timeline_view_begin, 1.0e-9);
+    const double px_per_frame = (double)size.x / span / fps;
+    const int num_frames = movie_num_frames(data);
+    const float fs = ImGui::GetFontSize();
+
+    ImPlot::PushPlotClipRect();
+    if (px_per_frame >= 4.0) {
+        static const int steps[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000};
+        int step = steps[(sizeof(steps) / sizeof(steps[0])) - 1];
+        for (int s : steps) {
+            if (px_per_frame * s >= 44.0) { step = s; break; }
+        }
+        const int f0 = MAX((int)floor(m.timeline_view_begin * fps), 0), f1 = MIN((int)ceil(m.timeline_view_end * fps), num_frames - 1);
+        for (int f = f0; f <= f1; ++f) {
+            const float x = ImPlot::PlotToPixels((double)f / fps, 0.0).x;
+            const bool major = f % step == 0;
+            dl->AddLine(ImVec2(x, p0.y + size.y - (major ? 11.0f : 5.0f)), ImVec2(x, p0.y + size.y), IM_COL32(200, 200, 200, major ? 210 : 110));
+            if (major) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", f);
+                dl->AddText(ImVec2(x + 3.0f, p0.y + size.y - fs - 3.0f), IM_COL32(170, 170, 170, 220), buf);
+            }
+        }
+    }
+
+    // The notes of the movie
+    int hovered_marker = -1;
+    for (int i = 0; i < (int)m.markers.size(); ++i) {
+        const MovieMarker& mk = m.markers[i];
+        const float x = ImPlot::PlotToPixels(mk.time, 0.0).x;
+        const float y = p0.y + 4.0f;
+        dl->AddTriangleFilled(ImVec2(x - 5.0f, y), ImVec2(x + 5.0f, y), ImVec2(x, y + 9.0f), IM_COL32(255, 220, 90, 240));
+        if (mk.label[0] != '\0') dl->AddText(ImVec2(x + 7.0f, y - 2.0f), IM_COL32(255, 230, 140, 230), mk.label);
+        if (ImPlot::IsPlotHovered() && fabsf(io.MousePos.x - x) < 7.0f && io.MousePos.y > y - 3.0f && io.MousePos.y < y + 13.0f) hovered_marker = i;
+    }
+
+    const float ph = ImPlot::PlotToPixels((double)m.playhead, 0.0).x;
+    dl->AddLine(ImVec2(ph, p0.y), ImVec2(ph, p0.y + size.y), IM_COL32(255, 255, 0, 255), 1.5f);
+    if (locked) {
+        const float cur = ImPlot::PlotToPixels(m.cur_time, 0.0).x;
+        dl->AddLine(ImVec2(cur, p0.y), ImVec2(cur, p0.y + size.y), IM_COL32(255, 80, 80, 255), 1.5f);
+    }
+    ImPlot::PopPlotClipRect();
+
+    if (hovered_marker >= 0) {
+        const MovieMarker& mk = m.markers[hovered_marker];
+        ImGui::SetTooltip("%s\n%.2f s. Click to go there.", mk.label[0] ? mk.label : "Note", mk.time);
+    }
+    if (!locked) {
+        if (ImPlot::IsPlotHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (hovered_marker >= 0) {
+                m.playhead = (float)CLAMP(m.markers[hovered_marker].time, 0.0, (double)movie_len);
+                movie_apply_time(data, (double)m.playhead, true);
+            } else {
+                scrubbing = true;
+            }
+        }
+        if (scrubbing) {
+            if (io.MouseDown[0]) {
+                m.playhead = (float)movie_snap_time(data, ImPlot::GetPlotMousePos().x);
+                movie_apply_time(data, (double)m.playhead, true);
+            } else {
+                scrubbing = false;
+            }
+        }
+    } else {
+        scrubbing = false;
+    }
+    movie_lane_title("Time");
+    ImPlot::EndPlot();
+}
+
 // Subplots align the time axes and provide draggable row splitters.
 static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
     auto& m = data->movie;
@@ -9126,10 +9228,11 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
     const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
     int rows = 0;
-    float ratios[8];
-    int ratio_slot[8];  // Which of timeline_row_ratios each row is
+    float ratios[9];
+    int ratio_slot[9];  // Which of timeline_row_ratios each row is
     int overview_row = -1, overlay_row = -1, camera_row = -1;
     auto add_row = [&](int slot) { ratio_slot[rows] = slot; ratios[rows] = m.timeline_row_ratios[slot]; return rows++; };
+    if (m.timeline_ruler) add_row(8);
     if (m.timeline_camera_lane) camera_row = add_row(7);
     for (int track = 0; track < 3; ++track) {
         if (m.timeline_tracks[track]) add_row(track);
@@ -9146,7 +9249,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     // With a fixed lane height, every lane is sized in pixels (the lane height times its ratio, or what its rows need
     // when that is more) and the window scrolls. Otherwise the lanes share the given height by their ratios.
     const bool fixed_height = size.y < 0.0f;
-    float given[8];
+    float given[9];
     if (fixed_height) {
         const float fs = ImGui::GetFontSize();
         const int list_rows[3] = {overview_row, overlay_row, camera_row};
@@ -9176,6 +9279,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const ImPlotInputMap old_input_map = ImPlot::GetInputMap();
     ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
+      if (m.timeline_ruler) draw_movie_ruler(data, movie_len, locked);
       if (m.timeline_camera_lane) draw_movie_camera_lane(data, movie_len, locked, sorted, &camera_edit);
       for (int track = 0; track < 3; ++track) {
         if (!m.timeline_tracks[track]) continue;
@@ -9353,6 +9457,7 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.6, 3.6, ImPlotCond_Always);
         ImPlot::SetupAxisTicks(ImAxis_Y1, row_pos, 4, row_labels);
         ImPlot::SetupFinish();
+        movie_lane_title("Camera");
 
         ImDrawList* dl = ImPlot::GetPlotDrawList();
         const ImVec2 mouse = ImGui::GetMousePos();
@@ -9524,6 +9629,7 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
             ImPlot::SetupAxisLimits(ImAxis_Y1, d.lo - pad, d.hi + pad, ImPlotCond_Always);
         }
 
+        movie_lane_title((std::string("Look parameter: ") + d.label).c_str());
         if (!d.color && !mine.empty()) {
             ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(0.75f, 0.5f, 1.0f, 1.0f));
             ImPlot::PlotLine(d.label, xs, ys, N);
@@ -9670,6 +9776,7 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         const double pad = 0.1 * (double)(hi - lo);
         ImPlot::SetupAxisLimits(ImAxis_Y1, (double)lo - pad, (double)hi + pad, ImPlotCond_Always);
+        movie_lane_title(rep ? (std::string("Representation: ") + rep->name + ", " + label).c_str() : "Representation");
         if (rep && color_prop) ImPlot::PlotText(axis[0] ? axis : (std::string(rep->name) + ": " + label).c_str(), 0.02 * (double)movie_len, 0.95, ImVec2(0, 0));
 
         if (!rep) {
@@ -9796,6 +9903,7 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
         ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations | ImPlotAxisFlags_Invert);
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.7, (double)MAX(n, 1) - 0.3, ImPlotCond_Always);
+        movie_lane_title("Overlays");
         if (n == 0) ImPlot::PlotText("No overlay: add one in the Movie window", 0.5 * (double)movie_len, 0.0);
         bool any_hovered = false;
 
@@ -9981,6 +10089,7 @@ static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len
         ImPlot::SetupAxisLimits(ImAxis_Y1, -half_gap, layout.total + half_gap, ImPlotCond_Always);
         if (n > 0) ImPlot::SetupAxisTicks(ImAxis_Y1, label_pos.data(), n, label_ptr.data());
         ImPlot::SetupFinish();
+        movie_lane_title("Representations");
         if (n == 0) ImPlot::PlotText("No representation yet", 0.5 * duration, 0.5);
 
         ImDrawList* dl = ImPlot::GetPlotDrawList();
@@ -10271,6 +10380,9 @@ static void draw_movie_timeline_options(ApplicationState* data) {
     ImGui::SetItemTooltip("Keys, the playhead and the trajectory's start and end that are dragged here land on a frame of the movie (at the Output FPS).");
     const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
+    ImGui::Checkbox("Ruler", &m.timeline_ruler);
+    ImGui::SetItemTooltip("The time ruler above the lanes: a tick for every frame when they are far enough apart, the notes of the movie, and click or drag to move the preview time.");
+    ImGui::SameLine();
     ImGui::Checkbox("Camera lane", &m.timeline_camera_lane);
     ImGui::SetItemTooltip("The camera keys with their names, where the camera follows the target or an atom, where it spins and the keys that pin a\ntrajectory frame. Drag a key sideways to change when, click it to go there, right click for its name and removal,\ndouble click on an empty place to add a key on the path without moving the camera.");
     ImGui::SameLine();

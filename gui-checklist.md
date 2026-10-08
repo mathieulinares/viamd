@@ -117,6 +117,9 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] Stretch: pick keys, a bar and a block, drag the percentage box to 200 %: the time between them doubles about the first picked item (the first stays), bars and blocks get twice as long, the subplot times inside a bar scale too. 50 % halves it. Dragging far stops where the last item reaches the end of the movie. **about preview time** keeps the preview time still instead. Ctrl + click types a value. One undo; the box goes back to 100 % on release.
 - [ ] Inspector line (when items are picked): counts by kind; **first at** with a time: Enter moves everything so the first item is there; the easing list shows the common easing or **(mixed)** and sets it for all picked keys (check in the table and in the shape of the camera path); with one camera key picked the name box edits its name.
 
+- [ ] Ruler (first lane): seconds on its axis; zoom in with Ctrl + wheel until a tick per frame appears, with frame numbers at some of them that follow the zoom; the notes (markers) are yellow triangles with their label, hovering shows the time, clicking goes there; clicking and dragging elsewhere in the ruler moves the preview time (the viewport follows, it lands on frames with **Snap to frames**). It is not editable while recording and shows the red recording time.
+- [ ] Every lane has its name in its top left corner (Camera, Look parameter, Representation, Representations, Overlays, Time).
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.
@@ -125,7 +128,7 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] Ctrl + wheel zooms the time and the middle button (or Shift + wheel, or sideways scrolling) pans: all lanes move together. The plain wheel scrolls the window. **Show whole movie** resets.
 - [ ] **Lane height**: raising it makes every lane taller in proportion and the window scrolls; a long representation overview or overlay list grows only its own lane, the others keep the slider's height. Dragging a divider resizes only the two lanes beside it. **Fit to window** gives the old behaviour (the lanes share the window, the wheel zooms).
 - [ ] Resize the lanes by dragging between them.
-- [ ] Hide each lane with its box: **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane** (its picker goes too), **Representation lane**, **Representation overview**, **Overlay lane**. With all of them unticked the window says so.
+- [ ] Hide each lane with its box: **Ruler**, **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane** (its picker goes too), **Representation lane**, **Representation overview**, **Overlay lane**. With all of them unticked the window says so.
 - [ ] Save and open the workspace: the ticked lanes, the lane height and **Fit to window** come back.
 - [ ] Overlay lane: one bar per overlay with its name and a colour per kind (dimmer when switched off). Drag a bar: the overlay moves (**Shown (s)** follows, a timeline's or a distribution's subplot in and out times move with it). Drag an end: only that end moves. The bars follow **Snap to frames**. The ticks in a bar are where its subplots come in, the yellow triangles are markers. Ctrl+Z undoes a drag.
 - [ ] Drag a frame pin on the trajectory track up and down: the frame changes. Drag a distance dot up and down: the distance changes and the camera keeps looking at the same point (see it in the viewport); a field of view dot changes the angle.
