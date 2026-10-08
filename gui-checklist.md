@@ -69,6 +69,12 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] **Add Orbit** with **Snap to frames** on: the end key is where it should be.
 - [ ] **Close Loop** and **Seamless loop**: no jump when the preview repeats.
 
+- [ ] Camera lane (Movie Timeline, **Camera lane**, at the top): orange dots with the key numbers on the first row; the one at the preview time is yellow.
+- [ ] Camera lane, keys: drag a dot sideways (the key moves, the preview time follows, the list re-sorts when released, **Snap to frames** applies); click a dot (the view goes to the key); Ctrl+Z undoes a drag.
+- [ ] Camera lane, menu: right-click a dot, type a name, Enter: the name is shown next to the number, in the **Name** column of the table, and comes back after saving and opening the workspace. **Go to** and **Remove** work; Ctrl+Z brings a removed key back.
+- [ ] Camera lane, double-click an empty place: a key appears there and the camera does not jump (the view stays as it was; **Show path in viewport** shows the same path). It is not added where a key already is. Not possible while recording.
+- [ ] Camera lane, bands: keys that **Follow** show a teal band over the run of keys, **Look at** an atom a blue band with the atom number, a key with **Spin** a purple band like `+2 x` over the stretch before it, a key with **with trajectory frame** a green mark with the frame. Hovering shows the details. A key added by double-click between two that follow also follows.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.
@@ -77,7 +83,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] Ctrl + wheel zooms the time and dragging the background pans: all lanes move together. The plain wheel scrolls the window. **Show whole movie** resets.
 - [ ] **Lane height**: raising it makes the lanes taller and the window scrolls; every lane keeps at least that height. **Fit to window** gives the old behaviour (the lanes share the window, the wheel zooms).
 - [ ] Resize the lanes by dragging between them.
-- [ ] Hide each lane with its box: **Trajectory**, **Distance**, **Field of view**, **Look parameter lane** (its picker goes too), **Representation lane**, **Representation overview**, **Overlay lane**. With all of them unticked the window says so.
+- [ ] Hide each lane with its box: **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane** (its picker goes too), **Representation lane**, **Representation overview**, **Overlay lane**. With all of them unticked the window says so.
 - [ ] Save and open the workspace: the ticked lanes, the lane height and **Fit to window** come back.
 - [ ] Overlay lane: one bar per overlay with its name and a colour per kind (dimmer when switched off). Drag a bar: the overlay moves (**Shown (s)** follows, a timeline's or a distribution's subplot in and out times move with it). Drag an end: only that end moves. The bars follow **Snap to frames**. The ticks in a bar are where its subplots come in, the yellow triangles are markers. Ctrl+Z undoes a drag.
 - [ ] Drag a frame pin on the trajectory track up and down: the frame changes. Distance and field of view dots only move in time.

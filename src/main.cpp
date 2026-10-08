@@ -8426,6 +8426,14 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
 static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool locked);
 static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, bool locked);
 static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len, bool locked);
+// What the camera lane asks for, done by the caller once the lanes are drawn: the keys are read while they are
+struct MovieCameraLaneEdit {
+    int    remove = -1;
+    double insert = -1.0;
+    bool   moved = false;
+    bool   held = false;
+};
+static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool locked, const std::vector<CameraKeyframe>& sorted, MovieCameraLaneEdit* edit);
 static void movie_reps_apply(ApplicationState* state, double time);
 static std::vector<RepRow> movie_rep_overview_rows(const ApplicationState* data);
 
@@ -8474,8 +8482,9 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
     const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
     int rows = 0;
-    float ratios[7];
-    int overview_row = -1, overlay_row = -1;
+    float ratios[8];
+    int overview_row = -1, overlay_row = -1, camera_row = -1;
+    if (m.timeline_camera_lane) { camera_row = rows; ratios[rows++] = m.timeline_row_ratios[7]; }
     for (int track = 0; track < 3; ++track) {
         if (m.timeline_tracks[track]) ratios[rows++] = m.timeline_row_ratios[track];
     }
@@ -8495,14 +8504,16 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         float total = (float)rows * m.timeline_lane_height;
         // The lanes with a row for each thing in them are tall enough for their rows
         const float fs = ImGui::GetFontSize();
-        const int list_rows[2] = {overview_row, overlay_row};
-        const float list_needed[2] = {(float)movie_rep_overview_rows(data).size() * fs * 1.5f + fs * 4.0f, (float)m.overlays.size() * fs * 1.5f + fs * 4.0f};
-        for (int i = 0; i < 2; ++i) {
+        const int list_rows[3] = {overview_row, overlay_row, camera_row};
+        const float list_needed[3] = {(float)movie_rep_overview_rows(data).size() * fs * 1.5f + fs * 4.0f, (float)m.overlays.size() * fs * 1.5f + fs * 4.0f, fs * 1.5f * 4.0f + fs * 4.0f};
+        for (int i = 0; i < 3; ++i) {
             if (list_rows[i] >= 0 && sum > 0.0f && ratios[list_rows[i]] > 0.0f) total = MAX(total, list_needed[i] * sum / ratios[list_rows[i]]);
         }
         size.y = total;
     }
+    MovieCameraLaneEdit camera_edit;
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
+      if (m.timeline_camera_lane) draw_movie_camera_lane(data, movie_len, locked, sorted, &camera_edit);
       for (int track = 0; track < 3; ++track) {
         if (!m.timeline_tracks[track]) continue;
         if (!ImPlot::BeginPlot(titles[track], ImVec2(-1, -1), plot_flags)) continue;
@@ -8606,6 +8617,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
       if (m.timeline_overlay_lane) draw_movie_overlay_lane(data, movie_len, locked);
       ImPlot::EndSubplots();
       int row = 0;
+      if (m.timeline_camera_lane) m.timeline_row_ratios[7] = ratios[row++];
       for (int track = 0; track < 3; ++track) {
           if (m.timeline_tracks[track]) m.timeline_row_ratios[track] = ratios[row++];
       }
@@ -8613,10 +8625,181 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
       if (m.timeline_rep_lane) m.timeline_row_ratios[4] = ratios[row++];
       if (m.timeline_rep_overview) m.timeline_row_ratios[6] = ratios[row++];
       if (m.timeline_overlay_lane) m.timeline_row_ratios[5] = ratios[row];
+
+      if (!locked) {
+        if (camera_edit.remove >= 0 && camera_edit.remove < (int)md_array_size(m.keyframes)) {
+            CameraKeyframe* keys = m.keyframes;
+            const size_t count = md_array_size(keys);
+            memmove(keys + camera_edit.remove, keys + camera_edit.remove + 1, (count - (size_t)camera_edit.remove - 1) * sizeof(CameraKeyframe));
+            md_array_pop(keys);
+        }
+        if (camera_edit.insert >= 0.0) {
+            bool taken = false;
+            for (size_t i = 0; i < md_array_size(m.keyframes); ++i) taken |= fabs(m.keyframes[i].time - camera_edit.insert) < 1.0e-3;
+            if (!taken) {
+                CameraKeyframe key;
+                if (md_array_size(m.keyframes) > 0) {
+                    key = camera_key_on_path(sorted, camera_edit.insert, m.loop);
+                } else {
+                    key = movie_current_key(data);
+                    key.time = camera_edit.insert;
+                }
+                movie_insert_key(data, key, false);
+                m.playhead = (float)camera_edit.insert;
+            }
+        }
+        if (camera_edit.moved) resort_pending = true;
+        if (camera_edit.held) movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
+      }
     }
     if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         movie_sort_keyframes(data);
         resort_pending = false;
+    }
+}
+
+// The camera on one lane: its keys (numbered, with their names), where the look-at point follows the target or an atom, where
+// the camera spins, and the keys that pin a trajectory frame. Drag a key sideways to change when, click it to go there, right
+// click for its name and removal. A double click on an empty place adds a key on the path, without moving the camera.
+static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool locked, const std::vector<CameraKeyframe>& sorted, MovieCameraLaneEdit* edit) {
+    auto& m = data->movie;
+    if (movie_len <= 0.0f) return;
+    const size_t n = md_array_size(m.keyframes);
+    const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
+    static const char* row_labels[4] = {"Camera keys", "Look at", "Spin", "Frame"};
+    static const double row_pos[4] = {0.0, 1.0, 2.0, 3.0};
+    static int menu_key = -1;
+    int open_menu = -1;
+    bool any_hovered = false;
+
+    if (ImPlot::BeginPlot("##camera_lane", ImVec2(-1, -1), plot_flags)) {
+        ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_Invert);
+        ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.6, 3.6, ImPlotCond_Always);
+        ImPlot::SetupAxisTicks(ImAxis_Y1, row_pos, 4, row_labels);
+        ImPlot::SetupFinish();
+
+        ImDrawList* dl = ImPlot::GetPlotDrawList();
+        const ImVec2 mouse = ImGui::GetMousePos();
+        const bool plot_hovered = ImPlot::IsPlotHovered();
+        auto px = [&](double t, double y) { return ImPlot::PlotToPixels(t, y); };
+
+        // Spans between keys
+        ImPlot::PushPlotClipRect();
+        std::string band_tip;
+        for (const CameraBand& b : camera_bands(sorted)) {
+            const int row = b.kind == CameraBandKind::Spin ? 2 : 1;
+            ImVec2 a = px(b.begin, (double)row - 0.3), c = px(b.end, (double)row + 0.3);
+            if (c.x - a.x < 8.0f) { a.x -= 4.0f; c.x += 4.0f; }
+            ImVec4 col(0.2f, 0.75f, 0.7f, 1.0f);
+            std::string text, tip;
+            char buf[96];
+            if (b.kind == CameraBandKind::LookAtAtom) {
+                col = ImVec4(0.45f, 0.6f, 1.0f, 1.0f);
+                snprintf(buf, sizeof(buf), "atom %d", b.atom + 1);
+                text = buf;
+                snprintf(buf, sizeof(buf), "Looks at atom %d, tracked through the trajectory\nKeys %d to %d, %.2f s to %.2f s", b.atom + 1, b.first + 1, b.last + 1, b.begin, b.end);
+            } else if (b.kind == CameraBandKind::FollowTarget) {
+                text = "follow target";
+                snprintf(buf, sizeof(buf), "Looks at the follow target, which moves with the trajectory\nKeys %d to %d, %.2f s to %.2f s", b.first + 1, b.last + 1, b.begin, b.end);
+            } else {
+                col = ImVec4(0.75f, 0.45f, 0.95f, 1.0f);
+                snprintf(buf, sizeof(buf), "%+d x", b.turns);
+                text = buf;
+                snprintf(buf, sizeof(buf), "%+d turns around %s, from key %d to key %d\n%.2f s to %.2f s", b.turns, spin_axis_str[(int)sorted[(size_t)b.last].spin_axis], b.first + 1, b.last + 1, b.begin, b.end);
+            }
+            tip = buf;
+            dl->AddRectFilled(a, c, ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.45f)), 3.0f);
+            dl->AddRect(a, c, ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.9f)), 3.0f);
+            dl->PushClipRect(a, c, true);
+            dl->AddText(ImVec2(a.x + 4.0f, 0.5f * (a.y + c.y) - 0.5f * ImGui::GetFontSize()), IM_COL32(255, 255, 255, 235), text.c_str());
+            dl->PopClipRect();
+            if (plot_hovered && mouse.x >= a.x && mouse.x <= c.x && mouse.y >= a.y && mouse.y <= c.y) band_tip = tip;
+        }
+
+        // The keys that pin a trajectory frame
+        for (size_t i = 0; i < sorted.size(); ++i) {
+            if (!sorted[i].use_frame) continue;
+            const ImVec2 p = px(sorted[i].time, 3.0);
+            const float r = ImGui::GetFontSize() * 0.4f;
+            dl->AddQuadFilled(ImVec2(p.x, p.y - r), ImVec2(p.x + r, p.y), ImVec2(p.x, p.y + r), ImVec2(p.x - r, p.y), IM_COL32(110, 230, 110, 255));
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.0f", sorted[i].frame);
+            dl->AddText(ImVec2(p.x + r + 3.0f, p.y - 0.5f * ImGui::GetFontSize()), IM_COL32(200, 255, 200, 255), buf);
+            if (plot_hovered && fabsf(mouse.x - p.x) < r * 1.5f && fabsf(mouse.y - p.y) < r * 1.5f) {
+                char tip[96];
+                snprintf(tip, sizeof(tip), "Key %d shows trajectory frame %.0f at %.2f s", (int)i + 1, sorted[i].frame, sorted[i].time);
+                band_tip = tip;
+            }
+        }
+        ImPlot::PopPlotClipRect();
+
+        // The keys, which are dragged sideways only
+        for (size_t i = 0; i < n; ++i) {
+            CameraKeyframe& key = m.keyframes[i];
+            double x = key.time, y = 0.0;
+            bool clicked = false, hovered = false, held = false;
+            const bool at_playhead = fabs(key.time - (double)m.playhead) < 1.0e-3;
+            const ImVec4 col = at_playhead ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f) : ImVec4(1.0f, 0.45f, 0.15f, 1.0f);
+            if (ImPlot::DragPoint(9500 + (int)i, &x, &y, col, 7.0f, drag_flags, &clicked, &hovered, &held)) {
+                key.time = movie_snap_time(data, x);
+                edit->moved = true;
+            }
+            any_hovered |= hovered;
+            if (held && !locked) {
+                edit->held = true;
+                m.playhead = (float)key.time;
+            }
+            if (clicked && !locked) movie_goto_keyframe(data, i);
+            if (hovered && !locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) open_menu = (int)i;
+            const std::string label = camera_key_label(key, (int)i);
+            ImPlot::PlotText(label.c_str(), key.time, 0.0, ImVec2(0.0f, -16.0f));
+            if (hovered && !held) {
+                ImGui::SetTooltip("Keyframe %s\n%.2f s, field of view %.1f deg%s\nDrag sideways to change when, click to go to it, right click for its name and removal.",
+                    label.c_str(), key.time, key.fov_y * MOVIE_RAD_TO_DEG, key.use_frame ? ", pins a trajectory frame" : "");
+            }
+        }
+        if (!any_hovered && !band_tip.empty()) ImGui::SetTooltip("%s", band_tip.c_str());
+
+        // A key is added on the path where it is double clicked
+        if (!locked && !any_hovered && plot_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            edit->insert = movie_snap_time(data, ImPlot::GetPlotMousePos().x);
+        }
+
+        double playhead = (double)m.playhead;
+        if (ImPlot::DragLineX(1000, &playhead, ImVec4(1, 1, 0, 1), 1.5f, drag_flags)) {
+            m.playhead = (float)movie_snap_time(data, playhead);
+            if (!locked) movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), sorted.size());
+        }
+        if (locked) {
+            double cur = m.cur_time;
+            ImPlot::DragLineX(1001, &cur, ImVec4(1.0f, 0.3f, 0.3f, 1), 1.5f, ImPlotDragToolFlags_NoInputs | ImPlotDragToolFlags_NoFit);
+        }
+        if (n == 0) ImPlot::PlotText("Double click to add a key", 0.5 * (double)movie_len, 0.0, ImVec2(0.0f, 0.0f));
+        ImPlot::EndPlot();
+    }
+
+    if (open_menu >= 0) {
+        menu_key = open_menu;
+        ImGui::OpenPopup("##camera_key_menu");
+    }
+    if (ImGui::BeginPopup("##camera_key_menu")) {
+        if (menu_key >= 0 && menu_key < (int)n) {
+            CameraKeyframe& key = m.keyframes[menu_key];
+            ImGui::TextDisabled("Keyframe %d", menu_key + 1);
+            if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+            if (ImGui::InputTextWithHint("##camera_key_name", "Name", key.name, sizeof(key.name), ImGuiInputTextFlags_EnterReturnsTrue)) ImGui::CloseCurrentPopup();
+            if (ImGui::Selectable("Go to")) movie_goto_keyframe(data, (size_t)menu_key);
+            if (ImGui::Selectable("Remove")) {
+                edit->remove = menu_key;
+                ImGui::CloseCurrentPopup();
+            }
+        } else {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 }
 
@@ -9249,6 +9432,9 @@ static void draw_movie_timeline_window(ApplicationState* data) {
     ImGui::SetItemTooltip("Keys, the playhead and the trajectory's start and end that are dragged here land on a frame of the movie (at the Output FPS).");
     const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
+    ImGui::Checkbox("Camera lane", &m.timeline_camera_lane);
+    ImGui::SetItemTooltip("The camera keys with their names, where the camera follows the target or an atom, where it spins and the keys that pin a\ntrajectory frame. Drag a key sideways to change when, click it to go there, right click for its name and removal,\ndouble click on an empty place to add a key on the path without moving the camera.");
+    ImGui::SameLine();
     ImGui::Checkbox("Look parameter lane", &m.timeline_param_lane);
     if (m.timeline_param_lane) {
         ImGui::SameLine();
@@ -9725,8 +9911,9 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
 
     // Columns can be resized, and the table scrolls sideways when they do not fit
     const float fs = ImGui::GetFontSize();
-    if (ImGui::BeginTable("##keyframes", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX)) {
+    if (ImGui::BeginTable("##keyframes", 8, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX)) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, fs * 1.8f);
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
         ImGui::TableSetupColumn("Time (s)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
         ImGui::TableSetupColumn("FOV (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
         ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
@@ -9757,6 +9944,11 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
                 ImGui::EndDragDropTarget();
             }
             ImGui::SetItemTooltip("Drag to another row to move this keyframe, with its pose, easing and frame, to that place.\nThe times stay where they are in the list.");
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputTextWithHint("##name", "name", key.name, sizeof(key.name));
+            ImGui::SetItemTooltip("What this keyframe is called, shown in the camera lane. Saved with the workspace.");
 
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(-FLT_MIN);

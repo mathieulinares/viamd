@@ -114,6 +114,36 @@ struct RepRow {
 };
 std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed);
 
+// ## The camera keys as a lane
+//
+// What the camera does between its keys, as spans on the timeline. Keys are sorted by time.
+
+enum class CameraBandKind : int {
+    FollowTarget,   // The look-at point moves with the movie's follow target
+    LookAtAtom,     // ... with an atom of its own
+    Spin,           // Extra turns around what is looked at, in the stretch leading to a key
+};
+
+struct CameraBand {
+    CameraBandKind kind = CameraBandKind::FollowTarget;
+    int    first = 0;      // The keys it starts and ends at (the same one for a single key that follows)
+    int    last = 0;
+    double begin = 0.0;
+    double end = 0.0;
+    int    atom = -1;      // LookAtAtom
+    int    turns = 0;      // Spin
+};
+
+// One follow band for each run of keys that follow the same thing, one spin band for each key with turns
+std::vector<CameraBand> camera_bands(const std::vector<CameraKeyframe>& keys);
+
+// "3", or "3 intro" for a key with a name. 'index' counts from 0.
+std::string camera_key_label(const CameraKeyframe& key, int index);
+
+// A key at 'time' that is on the path of 'keys' (not empty, sorted), so that adding it does not move the camera there:
+// the pose the path has at that time. It follows what the keys on both sides follow; it has no frame and no spin.
+CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop);
+
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;

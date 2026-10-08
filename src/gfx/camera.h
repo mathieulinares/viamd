@@ -63,4 +63,7 @@ struct CameraKeyframe {
     vec3_t follow_center = {0, 0, 0};
     // With follow set: the atom this key's look-at tracks. Negative means the movie's follow target.
     int32_t follow_atom = -1;
+
+    // What the user calls this key ("intro", "close-up"), shown in the lane and the table. Empty: only its number.
+    char name[24] = {};
 };

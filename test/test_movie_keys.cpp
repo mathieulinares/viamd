@@ -769,3 +769,96 @@ UTEST(viamd_movie_keys, a_collapsed_group_keeps_only_its_row) {
     EXPECT_TRUE(rows[0].header);
     EXPECT_STREQ("water", rows[1].label.c_str());
 }
+
+static CameraKeyframe cam_key(double time, float distance, bool follow = false, int atom = -1) {
+    CameraKeyframe k = {};
+    k.time = time;
+    k.transform.distance = distance;
+    k.follow = follow;
+    k.follow_atom = atom;
+    return k;
+}
+
+UTEST(viamd_movie_keys, camera_bands_are_runs_of_keys_that_follow_the_same_thing) {
+    std::vector<CameraKeyframe> keys = {
+        cam_key(0, 10), cam_key(1, 10, true), cam_key(2, 10, true), cam_key(3, 10, true, 7), cam_key(4, 10, true, 7), cam_key(5, 10), cam_key(6, 10, true),
+    };
+    const std::vector<CameraBand> bands = camera_bands(keys);
+    ASSERT_EQ(bands.size(), (size_t)3);
+    EXPECT_EQ(bands[0].kind, CameraBandKind::FollowTarget);
+    EXPECT_EQ(bands[0].first, 1);
+    EXPECT_EQ(bands[0].last, 2);
+    EXPECT_EQ(bands[1].kind, CameraBandKind::LookAtAtom);
+    EXPECT_EQ(bands[1].atom, 7);
+    EXPECT_EQ(bands[1].begin, 3.0);
+    EXPECT_EQ(bands[1].end, 4.0);
+    EXPECT_EQ(bands[2].kind, CameraBandKind::FollowTarget);
+    EXPECT_EQ(bands[2].first, 6);
+    EXPECT_EQ(bands[2].last, 6);
+}
+
+UTEST(viamd_movie_keys, a_spin_is_a_band_over_the_stretch_leading_to_its_key) {
+    std::vector<CameraKeyframe> keys = {cam_key(0, 10), cam_key(2, 10), cam_key(5, 10)};
+    keys[0].spin_turns = 3;   // Nothing leads to the first key
+    keys[2].spin_turns = -2;
+    const std::vector<CameraBand> bands = camera_bands(keys);
+    ASSERT_EQ(bands.size(), (size_t)1);
+    EXPECT_EQ(bands[0].kind, CameraBandKind::Spin);
+    EXPECT_EQ(bands[0].begin, 2.0);
+    EXPECT_EQ(bands[0].end, 5.0);
+    EXPECT_EQ(bands[0].turns, -2);
+    EXPECT_TRUE(camera_bands({}).empty());
+}
+
+UTEST(viamd_movie_keys, a_key_is_labelled_by_its_number_and_its_name) {
+    CameraKeyframe k = {};
+    EXPECT_STREQ(camera_key_label(k, 0).c_str(), "1");
+    strcpy(k.name, "close-up");
+    EXPECT_STREQ(camera_key_label(k, 2).c_str(), "3 close-up");
+}
+
+UTEST(viamd_movie_keys, a_key_on_the_path_does_not_move_the_camera) {
+    std::vector<CameraKeyframe> keys = {cam_key(0, 10), cam_key(4, 30), cam_key(8, 20)};
+    keys[1].spin_turns = 1;
+    keys[1].use_frame = true;
+    strcpy(keys[1].name, "mid");
+    const CameraKeyframe k = camera_key_on_path(keys, 2.0, false);
+    ViewTransform vt;
+    float fov;
+    camera_keyframes_evaluate(&vt, &fov, keys.data(), keys.size(), 2.0, false);
+    EXPECT_EQ(k.time, 2.0);
+    EXPECT_EQ(k.transform.distance, vt.distance);
+    EXPECT_EQ(k.fov_y, fov);
+    EXPECT_EQ(k.spin_turns, 0);
+    EXPECT_FALSE(k.use_frame);
+    EXPECT_EQ(k.name[0], '\0');
+    EXPECT_FALSE(k.follow);
+}
+
+UTEST(viamd_movie_keys, a_key_between_keys_that_follow_follows_too) {
+    std::vector<CameraKeyframe> keys = {cam_key(0, 10, true, 5), cam_key(4, 10, true, 5), cam_key(8, 10)};
+    keys[0].follow_center = {0, 0, 0};
+    keys[1].follow_center = {4, 0, 0};
+    CameraKeyframe k = camera_key_on_path(keys, 1.0, false);
+    EXPECT_TRUE(k.follow);
+    EXPECT_EQ(k.follow_atom, 5);
+    EXPECT_NEAR(k.follow_center.x, 1.0f, 1.0e-5f);
+
+    // Between a key that follows and one that does not it stays fixed, and so it does when the keys on one side follow nothing
+    EXPECT_FALSE(camera_key_on_path(keys, 6.0, false).follow);
+
+    // Outside the keys it holds what the end key does
+    keys[2].follow = true;
+    keys[2].follow_atom = 5;
+    keys[2].follow_center = {9, 0, 0};
+    k = camera_key_on_path(keys, 10.0, false);
+    EXPECT_TRUE(k.follow);
+    EXPECT_NEAR(k.follow_center.x, 9.0f, 1.0e-5f);
+}
+
+UTEST(viamd_movie_keys, renaming_a_key_is_an_edit) {
+    MovieKeys a = keys_with(2), b = keys_with(2);
+    EXPECT_TRUE(movie_keys_equal(a, b));
+    strcpy(b.camera[1].name, "end");
+    EXPECT_FALSE(movie_keys_equal(a, b));
+}

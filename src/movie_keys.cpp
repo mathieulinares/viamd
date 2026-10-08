@@ -42,7 +42,7 @@ static bool equal(const CameraKeyframe& a, const CameraKeyframe& b) {
            a.use_frame == b.use_frame && a.frame == b.frame &&
            a.spin_turns == b.spin_turns && a.spin_axis == b.spin_axis && a.spin_constant_speed == b.spin_constant_speed &&
            a.follow == b.follow && a.follow_center.x == b.follow_center.x && a.follow_center.y == b.follow_center.y &&
-           a.follow_center.z == b.follow_center.z && a.follow_atom == b.follow_atom;
+           a.follow_center.z == b.follow_center.z && a.follow_atom == b.follow_atom && strcmp(a.name, b.name) == 0;
 }
 
 static bool equal(const ParamKey& a, const ParamKey& b) {
@@ -482,4 +482,71 @@ bool movie_time_left(int done, int total, double active_seconds, double* seconds
 double movie_snap_to_frame(double time, double fps, double duration) {
     if (fps > 0.0) time = std::round(time * fps) / fps;
     return std::clamp(time, 0.0, std::max(duration, 0.0));
+}
+
+std::vector<CameraBand> camera_bands(const std::vector<CameraKeyframe>& keys) {
+    std::vector<CameraBand> bands;
+    const int n = (int)keys.size();
+    for (int i = 0; i < n;) {
+        if (!keys[i].follow) { ++i; continue; }
+        int j = i;
+        while (j + 1 < n && keys[j + 1].follow && keys[j + 1].follow_atom == keys[i].follow_atom) ++j;
+        CameraBand b;
+        b.kind = keys[i].follow_atom >= 0 ? CameraBandKind::LookAtAtom : CameraBandKind::FollowTarget;
+        b.first = i;
+        b.last = j;
+        b.begin = keys[i].time;
+        b.end = keys[j].time;
+        b.atom = keys[i].follow_atom;
+        bands.push_back(b);
+        i = j + 1;
+    }
+    for (int i = 1; i < n; ++i) {
+        if (keys[i].spin_turns == 0) continue;
+        CameraBand b;
+        b.kind = CameraBandKind::Spin;
+        b.first = i - 1;
+        b.last = i;
+        b.begin = keys[i - 1].time;
+        b.end = keys[i].time;
+        b.turns = keys[i].spin_turns;
+        bands.push_back(b);
+    }
+    return bands;
+}
+
+std::string camera_key_label(const CameraKeyframe& key, int index) {
+    std::string s = std::to_string(index + 1);
+    if (key.name[0] != '\0') s += std::string(" ") + key.name;
+    return s;
+}
+
+CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop) {
+    CameraKeyframe key = {};
+    ViewTransform vt;
+    float fov_y;
+    camera_keyframes_evaluate(&vt, &fov_y, keys.data(), keys.size(), time, loop);
+    key.transform = vt;
+    key.fov_y = fov_y;
+    key.time = time;
+
+    const CameraKeyframe* prev = nullptr;
+    const CameraKeyframe* next = nullptr;
+    for (const CameraKeyframe& k : keys) {
+        if (k.time <= time) prev = &k;
+        else if (!next) next = &k;
+    }
+    const CameraKeyframe* ref = prev ? prev : next;
+    if (!ref || !ref->follow) return key;
+    if (prev && next && (!next->follow || next->follow_atom != prev->follow_atom)) return key;
+
+    key.follow = true;
+    key.follow_atom = ref->follow_atom;
+    if (prev && next) {
+        const double u = (time - prev->time) / std::max(next->time - prev->time, 1.0e-9);
+        key.follow_center = prev->follow_center + (next->follow_center - prev->follow_center) * (float)u;
+    } else {
+        key.follow_center = ref->follow_center;
+    }
+    return key;
 }
