@@ -251,11 +251,21 @@ Camera keys, trajectory, distance, FOV, look-parameter and representation-lane k
 
 The movie (length, trajectory timing, camera keys with their names and targets, look and representation keys, overlays with bin counts and markers with subplot targets, follow target, path options and timeline layout) is saved in the workspace (`.via`) under `[Movie]`, with the subplot names the overlays use. Workspaces from earlier versions load and are converted. Whether Scene view or Movie preview is shown, and which editor panels are visible, are not saved.
 
-## Example workspace
+## Example workspaces
 
 [`examples/aspirin_phospholipase_movie.via`](examples/aspirin_phospholipase_movie.via) is an 80 s movie of aspirin in phospholipase, with the trajectory played backward. It has camera keys (the first follow a target), keyed depth-of-field blur, representation keys, two markers ("Pocket shown", "Aspirin enters the pocket"), a logo, title, time stamp, scale bar, a time bar with a grey plate, four timeline subplots that come in at different times, a 128-bin distribution with a title, and three property visualization overlays. It opens at the saved preview time (about 55.45 s): set the scrubber to 0 and play.
 
-It refers to `aspirin-phospholipase.gro`, `.xtc` and `.edr` in its own folder, which are not in the repository. Put your copies next to the workspace and use **File > Open Workspace**.
+[`examples/aspirin_binding_movie.via`](examples/aspirin_binding_movie.via) is a 60 s movie of the same data, built to show what the tools can do together. The trajectory is played in reverse, so aspirin approaches and docks. It is in five chapters:
+
+1. **The approach** (4 to 16 s): the trajectory plays fast, the camera glides in, the waters around aspirin come in.
+2. **First contact** (16 to 24 s): a **dolly zoom** at touchdown. Over 7 s the camera backs away from 14 to 80 A while the field of view narrows from 77 to 16 degrees, so aspirin keeps its size and the protein behind it seems to rise. The cartoon hands over to a spacefill surface that loses its color behind aspirin.
+3. **Bullet time** (25 to 30.5 s): the trajectory is frozen at the frame with the strongest protein-aspirin Coulomb attraction (frame 288) while the camera goes once around aspirin (a spin of one turn, slightly tilted, with a tinted background and shallow depth of field). The surface changes to licorice, then the pocket residues grow in.
+4. **Into the pocket** (31 to 44 s): the cartoon returns and the camera follows aspirin down into the pocket.
+5. **The calcium handshake** (47 to 57 s): in slow motion the carboxylate meets the Ca2+ ion, which swells at the strongest attraction; the waters leave and aspirin changes to spheres. The camera then pulls back for the end title.
+
+The plots are the short-range Lennard-Jones and Coulomb terms from the `.edr` between aspirin and the protein, the Ca2+ ion and the water, and the geometry (distances to the pocket and to the ion, the number of waters around aspirin, the torsion of the carboxylate), each coming in at the time it matters, with four markers. The energies are read from the `.edr` with `attr("edr/...")` in the workspace's script.
+
+Both refer to `aspirin-phospholipase.gro`, `.xtc` and `.edr` in their own folder, which are not in the repository. Put your copies next to the workspace and use **File > Open Workspace**.
 
 ## Tips
 

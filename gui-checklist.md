@@ -2,7 +2,7 @@
 
 Fifteen blocks, one box each. Tick a block when everything listed in it works; when something does not, write what you saw under that block. The bullets say what to do and what to expect.
 
-Everything was written without being able to run the GUI. Start from the example workspace `docs/examples/aspirin_phospholipase_movie.via` (put it next to `aspirin-phospholipase.gro`, `.xtc` and `.edr`, then **File > Open Workspace**). Open **Windows > Movie**: the timeline is on the left and the tabbed controls on the right. The manual is [`docs/movie_maker.md`](docs/movie_maker.md).
+Everything was written without being able to run the GUI. Start from the example workspace `docs/examples/aspirin_phospholipase_movie.via` (put it next to `aspirin-phospholipase.gro`, `.xtc` and `.edr`, then **File > Open Workspace**). A second example, `docs/examples/aspirin_binding_movie.via`, uses the same files and shows a dolly zoom (16 to 24 s), bullet time (25 to 30.5 s) and representation hand-overs; it is worth a look after blocks 6 and 11 to 13. Open **Windows > Movie**: the timeline is on the left and the tabbed controls on the right. The manual is [`docs/movie_maker.md`](docs/movie_maker.md).
 
 Already checked by you (blocks 1 to 5) are ticked.
 

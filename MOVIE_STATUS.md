@@ -7,7 +7,8 @@ Branch `video`; no pull request yet.
 | `docs/movie_maker.md` | The user manual (also the text for the GitHub wiki, a separate repository) |
 | `gui-checklist.md` | What to check by hand, in 15 blocks |
 | `PR_DESCRIPTION.md` | The pull request text |
-| `docs/examples/aspirin_phospholipase_movie.via` | The one example workspace (its trajectory files are not in the repository) |
+| `docs/examples/aspirin_phospholipase_movie.via` | The first example workspace (its trajectory files are not in the repository) |
+| `docs/examples/aspirin_binding_movie.via` | A 60 s example with a dolly zoom, a bullet-time orbit, representation hand-overs and energy plots; see the manual |
 
 ## Build and test
 

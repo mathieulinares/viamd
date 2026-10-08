@@ -6,7 +6,7 @@ A **movie maker** for VIAMD. Set the length of the movie, place camera keyframes
 
 Everything is in one **Windows > Movie** editor: a timeline with draggable lanes on the left, tabbed controls (**Output**, **Timing**, **Camera**, **Looks**, **Representations**, **Overlays**) on the right, and shared preview playback on top. A **Scene view / Movie preview** switch gives you a free editor camera next to the movie camera, with a live picture of the movie camera while you edit.
 
-The manual is [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspirin_phospholipase_movie.via`](docs/examples/aspirin_phospholipase_movie.via) is a finished 80 s movie using most features (its trajectory files are not in the repository).
+The manual is [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspirin_phospholipase_movie.via`](docs/examples/aspirin_phospholipase_movie.via) is a finished 80 s movie using most features, and [`docs/examples/aspirin_binding_movie.via`](docs/examples/aspirin_binding_movie.via) a 60 s one with a dolly zoom, a bullet-time orbit, representation hand-overs and energy plots (their trajectory files are not in the repository).
 
 ![Movie maker](docs/images/movie/overview.png)
 
