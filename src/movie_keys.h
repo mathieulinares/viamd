@@ -214,6 +214,81 @@ struct MovieKeys {
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b);
 void movie_keys_scale_time(MovieKeys* keys, double scale);
 
+// ## Selecting keys and moving them together
+//
+// A key is picked out by what it belongs to and its time (a time is unique among the keys of one thing), so a selection stays
+// valid when the keys are re-sorted. A camera key is one key however many lanes it is drawn in.
+
+enum class KeyKind : int { Camera, Param, Rep };
+
+// What a key of a parameter or of a property of a representation belongs to
+inline int64_t rep_key_subject(uint32_t rep, int prop) { return ((int64_t)rep << 8) | (int64_t)prop; }
+
+struct KeyId {
+    KeyKind kind = KeyKind::Camera;
+    int64_t subject = 0;       // The parameter, rep_key_subject() of a representation, 0 for the camera
+    double  time = 0.0;
+};
+
+struct KeySelection {
+    std::vector<KeyId> ids;
+
+    bool   contains(KeyKind kind, int64_t subject, double time) const;
+    void   add(KeyKind kind, int64_t subject, double time);
+    void   toggle(KeyKind kind, int64_t subject, double time);
+    void   set(KeyKind kind, int64_t subject, double time);
+    void   clear() { ids.clear(); }
+    bool   empty() const { return ids.empty(); }
+    size_t size() const { return ids.size(); }
+};
+
+// Takes out what no key is there for any more (after an undo or a removal)
+void key_selection_prune(KeySelection* sel, const MovieKeys& keys);
+
+// All the camera keys, the keys of one parameter (-1: none) and the keys of one representation property (-1: none)
+void key_selection_all(KeySelection* sel, const MovieKeys& keys, int64_t param, int64_t rep_subject);
+
+// The value part of a move: which quantity of the keys changes, in the units the lane shows
+enum class KeyLane : int { None, Frame, Distance, Fov, Param, Rep };
+
+struct KeyShift {
+    KeyLane lane = KeyLane::None;
+    int64_t subject = 0;        // Param: the parameter, Rep: rep_key_subject()
+    double  dy = 0.0;           // Added to the value (with 'ratio': multiplies it)
+    bool    ratio = false;
+    double  lo = 0.0, hi = 0.0; // Limits of Frame, Param and Rep
+    double  unit = 1.0;         // Distance: the display unit per internal unit
+    double  step = 1.0;         // How far an arrow key moves the value (not used by movie_keys_shift)
+    bool    step_ratio = false; // An arrow key multiplies the value by 1.05 instead of adding 'step'
+};
+
+// Moves the keys of 'start' that are in 'start_sel' by 'dt' seconds and, in the lane, their values by shift.dy: the result is
+// put in 'keys' (the camera, parameter and representation keys; the order is kept, nothing is sorted) and the selection in 'sel'.
+// The selection is kept inside 0 .. duration as a whole: the dt that was used is returned. A distance changes with the
+// camera looking at the same point, and every value stays within its limits.
+double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double dt, const KeyShift& shift, double duration);
+
+// Sorts the keys. Where a key lies on another (within a millisecond) one of them goes: the selected one stays.
+void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel);
+
+// Removes the selected keys
+void movie_keys_delete(MovieKeys* keys, KeySelection* sel);
+
+// Selected keys remembered to be put in somewhere else
+struct KeyClip {
+    std::vector<CameraKeyframe> camera;
+    std::vector<ParamKey> params;
+    std::vector<RepKey> reps;
+    double begin = 0.0;         // The time of the first
+    bool empty() const { return camera.empty() && params.empty() && reps.empty(); }
+};
+
+KeyClip movie_keys_copy(const MovieKeys& keys, const KeySelection& sel);
+
+// Puts a clip in with its first key at 'time' (earlier if it would go past the end of the movie), a key on another replacing it.
+// The keys that came in are the selection afterwards; the keys are sorted.
+void movie_keys_paste(MovieKeys* keys, KeySelection* sel, const KeyClip& clip, double time, double duration);
+
 // Undo and redo of edits to the keys. It is not told what changed: it is shown the keys every frame, and
 // whenever they differ from the last committed state and no edit is under way (a slider being dragged, a
 // point being moved) that is one step. A drag is therefore one undo, not hundreds.

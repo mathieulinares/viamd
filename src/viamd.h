@@ -1124,6 +1124,30 @@ struct ApplicationState {
             CameraKeyframe start = {};
         } path_drag;
 
+        // Keys picked in the lanes of the Movie Timeline, which move together (not saved)
+        KeySelection sel;
+        KeyClip      key_clip;            // What Ctrl+C took from the selection
+        KeyShift     sel_lane;            // The lane the last pick was in: the quantity the up and down arrow keys change
+        struct KeyDrag {
+            bool        active = false;
+            bool        moved = false;
+            MovieKeys   start;            // The keys when the drag began: every frame of it is made from these
+            KeySelection start_sel;
+            double      x0 = 0.0, y0 = 0.0;   // Where the key that is dragged was
+            double      dt = 0.0, dy = 0.0;   // What the drag has done so far
+            bool        collapse = false;     // A click on a key of the selection: it alone is selected if the mouse is released without a drag
+            KeyId       collapse_to;
+        } key_drag;
+        struct KeyBox {
+            bool   active = false;
+            bool   moved = false;
+            bool   add = false;
+            int    lane = -1;
+            double x0 = 0.0, y0 = 0.0;
+            float  px = 0.0f, py = 0.0f;
+        } key_box;
+        int shortcut_frame = -1;          // The frame in which the timeline took a shortcut (the others leave it alone)
+
         MovieRecordingState state = MovieRecordingState::Idle;
 
         ScreenshotResolution resolution = ScreenshotResolution::Window;

@@ -738,3 +738,196 @@ void camera_key_translate(CameraKeyframe* key, vec3_t delta) {
     key->transform.position = key->transform.position + delta;
     if (key->follow) key->follow_center = key->follow_center + delta;
 }
+
+static bool same_key(const KeyId& k, KeyKind kind, int64_t subject, double time) {
+    return k.kind == kind && k.subject == subject && fabs(k.time - time) < 1.0e-9;
+}
+
+bool KeySelection::contains(KeyKind kind, int64_t subject, double time) const {
+    for (const KeyId& k : ids) {
+        if (same_key(k, kind, subject, time)) return true;
+    }
+    return false;
+}
+
+void KeySelection::add(KeyKind kind, int64_t subject, double time) {
+    if (!contains(kind, subject, time)) ids.push_back({kind, subject, time});
+}
+
+void KeySelection::toggle(KeyKind kind, int64_t subject, double time) {
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (same_key(ids[i], kind, subject, time)) {
+            ids.erase(ids.begin() + (ptrdiff_t)i);
+            return;
+        }
+    }
+    ids.push_back({kind, subject, time});
+}
+
+void KeySelection::set(KeyKind kind, int64_t subject, double time) {
+    ids.clear();
+    ids.push_back({kind, subject, time});
+}
+
+static bool has_key(const MovieKeys& keys, const KeyId& id) {
+    switch (id.kind) {
+    case KeyKind::Camera:
+        for (const CameraKeyframe& k : keys.camera) if (fabs(k.time - id.time) < 1.0e-9) return true;
+        return false;
+    case KeyKind::Param:
+        for (const ParamKey& k : keys.params) if ((int64_t)k.param == id.subject && fabs(k.time - id.time) < 1.0e-9) return true;
+        return false;
+    case KeyKind::Rep:
+        for (const RepKey& k : keys.reps) if (rep_key_subject(k.rep, k.prop) == id.subject && fabs(k.time - id.time) < 1.0e-9) return true;
+        return false;
+    }
+    return false;
+}
+
+void key_selection_prune(KeySelection* sel, const MovieKeys& keys) {
+    sel->ids.erase(std::remove_if(sel->ids.begin(), sel->ids.end(), [&](const KeyId& id) { return !has_key(keys, id); }), sel->ids.end());
+}
+
+void key_selection_all(KeySelection* sel, const MovieKeys& keys, int64_t param, int64_t rep_subject) {
+    for (const CameraKeyframe& k : keys.camera) sel->add(KeyKind::Camera, 0, k.time);
+    if (param >= 0) {
+        for (const ParamKey& k : keys.params) if ((int64_t)k.param == param) sel->add(KeyKind::Param, param, k.time);
+    }
+    if (rep_subject >= 0) {
+        for (const RepKey& k : keys.reps) if (rep_key_subject(k.rep, k.prop) == rep_subject) sel->add(KeyKind::Rep, rep_subject, k.time);
+    }
+}
+
+static double shifted_value(double v, const KeyShift& s) {
+    return s.ratio ? v * s.dy : v + s.dy;
+}
+
+double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& start, const KeySelection& start_sel, double dt, const KeyShift& s, double duration) {
+    std::vector<CameraKeyframe> camera = start.camera;
+    std::vector<ParamKey> params = start.params;
+    std::vector<RepKey> reps = start.reps;
+
+    auto cam_sel = [&](const CameraKeyframe& k) { return start_sel.contains(KeyKind::Camera, 0, k.time); };
+    auto par_sel = [&](const ParamKey& k) { return start_sel.contains(KeyKind::Param, (int64_t)k.param, k.time); };
+    auto rep_sel = [&](const RepKey& k) { return start_sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); };
+
+    double t_min = DBL_MAX, t_max = -DBL_MAX;
+    for (const CameraKeyframe& k : camera) if (cam_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
+    for (const ParamKey& k : params) if (par_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
+    for (const RepKey& k : reps) if (rep_sel(k)) { t_min = std::min(t_min, k.time); t_max = std::max(t_max, k.time); }
+
+    double d = 0.0;
+    if (t_min <= t_max) {
+        const double lo_d = -t_min;
+        const double hi_d = std::max(duration - t_max, lo_d);
+        d = std::min(std::max(dt, lo_d), hi_d);
+    }
+
+    for (CameraKeyframe& k : camera) {
+        if (!cam_sel(k)) continue;
+        k.time += d;
+        if (s.lane == KeyLane::Frame && k.use_frame) {
+            k.frame = std::min(std::max(shifted_value(k.frame, s), s.lo), s.hi);
+        } else if (s.lane == KeyLane::Distance) {
+            const double unit = s.unit > 0.0 ? s.unit : 1.0;
+            const double shown = shifted_value((double)k.transform.distance * unit, s);
+            const float dist = (float)std::max(shown / unit, 0.01);
+            const vec3_t look = camera_get_look_at(k.transform);
+            k.transform.distance = dist;
+            k.transform.position = camera_position_from_look_at(look, k.transform.orientation, dist);
+        } else if (s.lane == KeyLane::Fov) {
+            const double deg = shifted_value((double)k.fov_y * 57.29577951308232, s);
+            k.fov_y = (float)(std::min(std::max(deg, 1.0), 170.0) * 0.017453292519943295);
+        }
+    }
+    for (ParamKey& k : params) {
+        if (!par_sel(k)) continue;
+        k.time += d;
+        if (s.lane == KeyLane::Param && s.subject == (int64_t)k.param) k.value[0] = (float)std::min(std::max(shifted_value((double)k.value[0], s), s.lo), s.hi);
+    }
+    for (RepKey& k : reps) {
+        if (!rep_sel(k)) continue;
+        k.time += d;
+        if (s.lane == KeyLane::Rep && s.subject == rep_key_subject(k.rep, k.prop)) k.value[0] = (float)std::min(std::max(shifted_value((double)k.value[0], s), s.lo), s.hi);
+    }
+
+    std::vector<KeyId> ids = start_sel.ids;
+    for (KeyId& id : ids) id.time += d;
+    keys->camera = std::move(camera);
+    keys->params = std::move(params);
+    keys->reps = std::move(reps);
+    sel->ids = std::move(ids);
+    return d;
+}
+
+// Of keys within a millisecond of each other (same thing, sorted) one is kept: the selected one
+template <typename T, typename Same, typename IsSel>
+static void keep_one_per_time(std::vector<T>& v, Same same, IsSel is_sel) {
+    std::vector<T> out;
+    size_t i = 0;
+    while (i < v.size()) {
+        size_t keep = i, j = i + 1;
+        bool keep_sel = is_sel(v[i]);
+        while (j < v.size() && same(v[i], v[j]) && v[j].time - v[j - 1].time < 1.0e-3) {
+            if (!keep_sel && is_sel(v[j])) { keep = j; keep_sel = true; }
+            ++j;
+        }
+        out.push_back(v[keep]);
+        i = j;
+    }
+    v = std::move(out);
+}
+
+void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel) {
+    std::stable_sort(keys->camera.begin(), keys->camera.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    keep_one_per_time(keys->camera, [](const CameraKeyframe&, const CameraKeyframe&) { return true; },
+        [&](const CameraKeyframe& k) { return sel.contains(KeyKind::Camera, 0, k.time); });
+
+    std::stable_sort(keys->params.begin(), keys->params.end(), [](const ParamKey& a, const ParamKey& b) {
+        return a.param != b.param ? a.param < b.param : a.time < b.time;
+    });
+    keep_one_per_time(keys->params, [](const ParamKey& a, const ParamKey& b) { return a.param == b.param; },
+        [&](const ParamKey& k) { return sel.contains(KeyKind::Param, (int64_t)k.param, k.time); });
+
+    std::stable_sort(keys->reps.begin(), keys->reps.end(), [](const RepKey& a, const RepKey& b) {
+        if (a.rep != b.rep) return a.rep < b.rep;
+        return a.prop != b.prop ? a.prop < b.prop : a.time < b.time;
+    });
+    keep_one_per_time(keys->reps, [](const RepKey& a, const RepKey& b) { return a.rep == b.rep && a.prop == b.prop; },
+        [&](const RepKey& k) { return sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); });
+}
+
+void movie_keys_delete(MovieKeys* keys, KeySelection* sel) {
+    keys->camera.erase(std::remove_if(keys->camera.begin(), keys->camera.end(),
+        [&](const CameraKeyframe& k) { return sel->contains(KeyKind::Camera, 0, k.time); }), keys->camera.end());
+    keys->params.erase(std::remove_if(keys->params.begin(), keys->params.end(),
+        [&](const ParamKey& k) { return sel->contains(KeyKind::Param, (int64_t)k.param, k.time); }), keys->params.end());
+    keys->reps.erase(std::remove_if(keys->reps.begin(), keys->reps.end(),
+        [&](const RepKey& k) { return sel->contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); }), keys->reps.end());
+    sel->clear();
+}
+
+KeyClip movie_keys_copy(const MovieKeys& keys, const KeySelection& sel) {
+    KeyClip clip;
+    double begin = DBL_MAX;
+    for (const CameraKeyframe& k : keys.camera) if (sel.contains(KeyKind::Camera, 0, k.time)) { clip.camera.push_back(k); begin = std::min(begin, k.time); }
+    for (const ParamKey& k : keys.params) if (sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) { clip.params.push_back(k); begin = std::min(begin, k.time); }
+    for (const RepKey& k : keys.reps) if (sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) { clip.reps.push_back(k); begin = std::min(begin, k.time); }
+    clip.begin = clip.empty() ? 0.0 : begin;
+    return clip;
+}
+
+void movie_keys_paste(MovieKeys* keys, KeySelection* sel, const KeyClip& clip, double time, double duration) {
+    if (clip.empty()) return;
+    double last = clip.begin;
+    for (const CameraKeyframe& k : clip.camera) last = std::max(last, k.time);
+    for (const ParamKey& k : clip.params) last = std::max(last, k.time);
+    for (const RepKey& k : clip.reps) last = std::max(last, k.time);
+    const double offset = std::max(std::min(time, duration - (last - clip.begin)), 0.0) - clip.begin;
+
+    sel->clear();
+    for (CameraKeyframe k : clip.camera) { k.time += offset; keys->camera.push_back(k); sel->add(KeyKind::Camera, 0, k.time); }
+    for (ParamKey k : clip.params) { k.time += offset; keys->params.push_back(k); sel->add(KeyKind::Param, (int64_t)k.param, k.time); }
+    for (RepKey k : clip.reps) { k.time += offset; keys->reps.push_back(k); sel->add(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); }
+    movie_keys_resolve(keys, *sel);
+}

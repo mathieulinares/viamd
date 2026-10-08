@@ -50,6 +50,8 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - Representations now have a stable `id` (saved in the workspace, never reused), which keys refer to, so reordering, duplicating or removing representations does not break them. Removing one removes its keys.
 - The Representations window is locked while a recording is running.
 
+- Keys of the camera, trajectory, distance, field of view, look parameter and representation lanes can be picked (click, Ctrl + click, a box on the background) and moved together in time and, in a lane with a value, in value; arrow keys nudge, Delete removes, Ctrl + C and Ctrl + V copy and paste. Distance and field of view can now be edited by dragging their dots. The time axis pans with the middle button or Shift + wheel.
+
 - The camera path in the viewport is drawn over it, with ticks at round times and chevrons that show speed and direction, brighter ahead of the preview time, sight lines, cameras at the keys, rings for spins, and a green camera with the line it looks along at the preview time. Each key has a handle on the eye and one on what it looks at: click to go to the key, drag to edit it (Ctrl moves both), Ctrl + click on the path adds a key.
 
 - The **Camera lane** of the editor's left timeline shows the camera keys (with names that are saved) as dots that can be dragged, clicked, renamed and removed, bands where the camera follows the target or an atom or spins, and the keys that pin a trajectory frame; a double click adds a key on the path without moving the camera.
@@ -99,7 +101,7 @@ New tests are in:
 - `test_image`.
 - `test_serialization`.
 
-All 219 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The newer ones cover bin overrides, marker targets, system rows and bands, overlap packing and transition tails, unkeyed visibility, block switching/removal, undo/redo, camera levelling, roll and keep upright.
+All 228 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The newer ones cover bin overrides, marker targets, system rows and bands, overlap packing and transition tails, unkeyed visibility, block switching/removal, undo/redo, camera levelling, roll and keep upright.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on, and the screenshots in the manual come from a real run with `1ALA-500.pdb`.
@@ -109,5 +111,5 @@ All 219 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The n
 ### Known limits
 - Solid representations cannot fade, so they grow in and shrink away at a Visible key. Tint and saturation keys recolor the atoms every frame, which is slow for very large systems.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
-- Distance and field of view can only be moved in time on the timeline. Their values are edited through the camera or the table.
+- Overlay bars and the blocks of the representation overview cannot be picked and moved as a group yet.
 - A timeline or distribution overlay draws at most six series of a subplot and the first member of a population.

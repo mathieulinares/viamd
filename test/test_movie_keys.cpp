@@ -1133,3 +1133,244 @@ UTEST(viamd_movie_keys, a_key_on_an_upright_path_takes_the_roll_there) {
     EXPECT_NEAR(k.roll, 0.6f, 1.0e-4f);
     EXPECT_EQ(camera_key_on_path(keys, 4.0, false).roll, 0.0f);
 }
+
+/* Selecting and moving keys together */
+
+static RepKey rk(uint32_t rep, int prop, double time, float value = 1.0f) {
+    RepKey k;
+    k.rep = rep;
+    k.prop = prop;
+    k.time = time;
+    k.value[0] = value;
+    return k;
+}
+
+static MovieKeys select_keys() {
+    MovieKeys k;
+    k.duration = 20.0f;
+    for (double t : {2.0, 5.0, 9.0, 14.0}) k.camera.push_back(cam_key(t, 10));
+    k.params.push_back(pk(1, 3.0, 1.0f));
+    k.params.push_back(pk(1, 7.0, 2.0f));
+    k.params.push_back(pk(2, 3.0, 5.0f));
+    k.reps.push_back(rk(4, 2, 6.0, 0.5f));
+    return k;
+}
+
+UTEST(viamd_movie_keys, a_selection_picks_keys_by_what_they_belong_to_and_their_time) {
+    KeySelection s;
+    s.add(KeyKind::Camera, 0, 5.0);
+    s.add(KeyKind::Camera, 0, 5.0);
+    s.add(KeyKind::Param, 1, 5.0);
+    EXPECT_EQ(s.size(), (size_t)2);
+    EXPECT_TRUE(s.contains(KeyKind::Param, 1, 5.0));
+    EXPECT_FALSE(s.contains(KeyKind::Param, 2, 5.0));
+    s.toggle(KeyKind::Camera, 0, 5.0);
+    EXPECT_FALSE(s.contains(KeyKind::Camera, 0, 5.0));
+    s.toggle(KeyKind::Camera, 0, 6.0);
+    EXPECT_TRUE(s.contains(KeyKind::Camera, 0, 6.0));
+    s.set(KeyKind::Rep, rep_key_subject(4, 2), 1.0);
+    EXPECT_EQ(s.size(), (size_t)1);
+}
+
+UTEST(viamd_movie_keys, a_selection_forgets_keys_that_are_gone_and_can_take_all_of_a_lane) {
+    const MovieKeys keys = select_keys();
+    KeySelection s;
+    key_selection_all(&s, keys, 1, -1);
+    EXPECT_EQ(s.size(), (size_t)6);   // 4 camera keys and 2 of parameter 1
+    key_selection_all(&s, keys, -1, rep_key_subject(4, 2));
+    EXPECT_EQ(s.size(), (size_t)7);
+    s.add(KeyKind::Camera, 0, 99.0);
+    key_selection_prune(&s, keys);
+    EXPECT_EQ(s.size(), (size_t)7);
+    EXPECT_FALSE(s.contains(KeyKind::Camera, 0, 99.0));
+}
+
+UTEST(viamd_movie_keys, selected_keys_move_together_and_the_others_stay) {
+    const MovieKeys start = select_keys();
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 5.0);
+    sel.add(KeyKind::Camera, 0, 9.0);
+    sel.add(KeyKind::Param, 1, 7.0);
+    MovieKeys out;
+    KeySelection out_sel;
+    const double used = movie_keys_shift(&out, &out_sel, start, sel, 1.5, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 1.5);
+    EXPECT_EQ(out.camera[0].time, 2.0);
+    EXPECT_EQ(out.camera[1].time, 6.5);
+    EXPECT_EQ(out.camera[2].time, 10.5);
+    EXPECT_EQ(out.camera[3].time, 14.0);
+    EXPECT_EQ(out.params[0].time, 3.0);
+    EXPECT_EQ(out.params[1].time, 8.5);
+    EXPECT_EQ(out.params[2].time, 3.0);
+    EXPECT_EQ(out.reps[0].time, 6.0);
+    EXPECT_TRUE(out_sel.contains(KeyKind::Camera, 0, 6.5));
+    EXPECT_TRUE(out_sel.contains(KeyKind::Param, 1, 8.5));
+    EXPECT_FALSE(out_sel.contains(KeyKind::Camera, 0, 5.0));
+    // What it was made from is left alone
+    EXPECT_EQ(start.camera[1].time, 5.0);
+}
+
+UTEST(viamd_movie_keys, a_group_stops_at_the_ends_of_the_movie_as_a_whole) {
+    const MovieKeys start = select_keys();
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 9.0);
+    sel.add(KeyKind::Camera, 0, 14.0);
+    MovieKeys out;
+    KeySelection out_sel;
+    double used = movie_keys_shift(&out, &out_sel, start, sel, 100.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 6.0);
+    EXPECT_EQ(out.camera[2].time, 15.0);   // The spacing of the group is kept
+    EXPECT_EQ(out.camera[3].time, 20.0);
+    used = movie_keys_shift(&out, &out_sel, start, sel, -100.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, -9.0);
+    EXPECT_EQ(out.camera[2].time, 0.0);
+    EXPECT_EQ(out.camera[3].time, 5.0);
+    // Nothing selected: nothing moves
+    KeySelection none;
+    used = movie_keys_shift(&out, &out_sel, start, none, 3.0, KeyShift{}, 20.0);
+    EXPECT_EQ(used, 0.0);
+    EXPECT_EQ(out.camera[1].time, 5.0);
+    EXPECT_EQ(out.params[1].time, 7.0);
+}
+
+UTEST(viamd_movie_keys, the_values_of_a_lane_move_with_the_keys_and_stay_in_their_limits) {
+    MovieKeys start = select_keys();
+    start.camera[0].use_frame = true;
+    start.camera[0].frame = 40.0;
+    start.camera[1].use_frame = true;
+    start.camera[1].frame = 90.0;
+    start.camera[0].fov_y = 0.5f;
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 2.0);
+    sel.add(KeyKind::Camera, 0, 5.0);
+    sel.add(KeyKind::Param, 1, 3.0);
+    sel.add(KeyKind::Rep, rep_key_subject(4, 2), 6.0);
+    MovieKeys out;
+    KeySelection out_sel;
+
+    KeyShift frame;
+    frame.lane = KeyLane::Frame;
+    frame.dy = 25.0;
+    frame.lo = 0.0;
+    frame.hi = 100.0;
+    movie_keys_shift(&out, &out_sel, start, sel, 0.0, frame, 20.0);
+    EXPECT_EQ(out.camera[0].frame, 65.0);
+    EXPECT_EQ(out.camera[1].frame, 100.0);   // Limited
+
+    KeyShift fov;
+    fov.lane = KeyLane::Fov;
+    fov.dy = 1000.0;
+    movie_keys_shift(&out, &out_sel, start, sel, 0.0, fov, 20.0);
+    EXPECT_NEAR(out.camera[0].fov_y, 170.0f * 3.14159265f / 180.0f, 1.0e-4f);
+
+    KeyShift param;
+    param.lane = KeyLane::Param;
+    param.subject = 1;
+    param.dy = 3.0;
+    param.lo = 0.0;
+    param.hi = 10.0;
+    movie_keys_shift(&out, &out_sel, start, sel, 0.0, param, 20.0);
+    EXPECT_EQ(out.params[0].value[0], 4.0f);
+    EXPECT_EQ(out.params[1].value[0], 2.0f);   // Not selected
+    EXPECT_EQ(out.params[2].value[0], 5.0f);   // Another parameter
+
+    KeyShift rep;
+    rep.lane = KeyLane::Rep;
+    rep.subject = rep_key_subject(4, 2);
+    rep.dy = 2.0;
+    rep.ratio = true;
+    rep.lo = 0.0;
+    rep.hi = 10.0;
+    movie_keys_shift(&out, &out_sel, start, sel, 0.0, rep, 20.0);
+    EXPECT_EQ(out.reps[0].value[0], 1.0f);
+}
+
+UTEST(viamd_movie_keys, a_distance_moves_along_the_line_of_sight_and_the_camera_keeps_looking_at_the_same_point) {
+    MovieKeys start;
+    CameraKeyframe k = cam_key(1.0, 10.0f);
+    k.transform.position = {2, 3, 10};
+    start.camera.push_back(k);
+    const vec3_t look = camera_get_look_at(k.transform);
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 1.0);
+    KeyShift s;
+    s.lane = KeyLane::Distance;
+    s.unit = 2.0;    // Shown in units that are twice the internal ones
+    s.dy = 6.0;      // 6 shown = 3 internal
+    MovieKeys out;
+    KeySelection out_sel;
+    movie_keys_shift(&out, &out_sel, start, sel, 0.0, s, 20.0);
+    EXPECT_NEAR(out.camera[0].transform.distance, 13.0f, 1.0e-5f);
+    const vec3_t look_after = camera_get_look_at(out.camera[0].transform);
+    EXPECT_NEAR(look_after.x, look.x, 1.0e-4f);
+    EXPECT_NEAR(look_after.z, look.z, 1.0e-4f);
+    s.dy = -1000.0;
+    movie_keys_shift(&out, &out_sel, start, sel, 0.0, s, 20.0);
+    EXPECT_GT(out.camera[0].transform.distance, 0.0f);
+}
+
+UTEST(viamd_movie_keys, a_moved_key_that_lands_on_another_replaces_it_and_everything_is_sorted) {
+    MovieKeys keys = select_keys();
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 5.0);
+    sel.add(KeyKind::Param, 1, 3.0);
+    keys.camera[1].time = 9.0;           // On the camera key at 9
+    keys.camera[1].fov_y = 0.123f;
+    sel.ids[0].time = 9.0;
+    keys.params[0].time = 7.0;           // On the parameter key at 7
+    keys.params[0].value[0] = 42.0f;
+    sel.ids[1].time = 7.0;
+    keys.camera.push_back(cam_key(1.0, 10));   // Out of order
+    movie_keys_resolve(&keys, sel);
+    ASSERT_EQ(keys.camera.size(), (size_t)4);
+    EXPECT_EQ(keys.camera[0].time, 1.0);
+    EXPECT_EQ(keys.camera[2].time, 9.0);
+    EXPECT_EQ(keys.camera[2].fov_y, 0.123f);   // The selected one stayed
+    ASSERT_EQ(keys.params.size(), (size_t)2);
+    EXPECT_EQ(keys.params[0].value[0], 42.0f);
+    EXPECT_EQ(keys.params[1].param, 2);
+}
+
+UTEST(viamd_movie_keys, selected_keys_are_deleted) {
+    MovieKeys keys = select_keys();
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 2.0);
+    sel.add(KeyKind::Param, 2, 3.0);
+    sel.add(KeyKind::Rep, rep_key_subject(4, 2), 6.0);
+    movie_keys_delete(&keys, &sel);
+    EXPECT_EQ(keys.camera.size(), (size_t)3);
+    EXPECT_EQ(keys.params.size(), (size_t)2);
+    EXPECT_TRUE(keys.reps.empty());
+    EXPECT_TRUE(sel.empty());
+}
+
+UTEST(viamd_movie_keys, a_copy_is_put_in_with_its_spacing_and_inside_the_movie) {
+    MovieKeys keys = select_keys();
+    KeySelection sel;
+    sel.add(KeyKind::Camera, 0, 2.0);
+    sel.add(KeyKind::Camera, 0, 5.0);
+    sel.add(KeyKind::Param, 1, 7.0);
+    const KeyClip clip = movie_keys_copy(keys, sel);
+    EXPECT_EQ(clip.camera.size(), (size_t)2);
+    EXPECT_EQ(clip.params.size(), (size_t)1);
+    EXPECT_EQ(clip.begin, 2.0);
+
+    KeySelection pasted;
+    movie_keys_paste(&keys, &pasted, clip, 10.0, 20.0);
+    EXPECT_EQ(keys.camera.size(), (size_t)6);
+    EXPECT_TRUE(pasted.contains(KeyKind::Camera, 0, 10.0));
+    EXPECT_TRUE(pasted.contains(KeyKind::Camera, 0, 13.0));
+    EXPECT_TRUE(pasted.contains(KeyKind::Param, 1, 15.0));
+    EXPECT_EQ(pasted.size(), (size_t)3);
+
+    // Near the end it is moved earlier as a whole
+    KeySelection late;
+    movie_keys_paste(&keys, &late, clip, 19.0, 20.0);
+    EXPECT_TRUE(late.contains(KeyKind::Camera, 0, 12.0) || late.contains(KeyKind::Camera, 0, 15.0));
+    for (const KeyId& id : late.ids) EXPECT_LE(id.time, 20.0);
+
+    // An empty clip changes nothing
+    const size_t count = keys.camera.size();
+    movie_keys_paste(&keys, &late, KeyClip{}, 3.0, 20.0);
+    EXPECT_EQ(keys.camera.size(), count);
+}

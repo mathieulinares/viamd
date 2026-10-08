@@ -100,18 +100,27 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] The path is not in the recorded frames or a screenshot; it is hidden while recording and while a key waits for **Look at** (clicking an atom still works).
 - [ ] Path with depth of field on: the pink focus frame is still drawn at the preview time.
 
+- [ ] Picking: click a key in the camera lane, a curve lane and a look parameter or representation lane: a white ring. Ctrl + click adds a second and takes it away again. A camera key picked in one lane has its ring in every lane it is drawn in (camera, trajectory, distance, field of view) and a white ring around its handle in the viewport. Clicking a handle in the viewport picks that key.
+- [ ] Box pick: drag on the empty background of each lane: a blue box, the keys inside are picked (camera lane: by time only). With Ctrl or Shift held the box adds. A click on the background puts all down. Dragging the playhead line or the blue anchors still works and does not start a box.
+- [ ] Group move in time: pick three keys of different spacing, drag one: all move by the same time and keep their spacing; the tooltip shows the keys and the time. Dragging against the start or the end of the movie stops the whole group. With **Snap to frames** they land on frames. Ctrl+Z undoes the whole drag in one step.
+- [ ] Group move in value: pick several keys in the trajectory lane (with pinned frames), the distance lane, the field of view lane, a look parameter and a representation property: dragging up or down changes all picked keys of that lane by the same amount (a log parameter by the same factor); limits are respected. Keys of other lanes only move in time.
+- [ ] Moving onto another key: drag a picked key over an unpicked key of the same lane and release: the moved key replaces it. While dragging nothing is lost (move back and the other key is still there).
+- [ ] Keyboard with the mouse over the lanes: arrow keys nudge the picked keys (a frame, Shift: a second, Ctrl: ten frames); up and down change the value of the lane picked in last; Delete removes; Esc puts down; Ctrl + A picks all; Ctrl + C and Ctrl + V copy and paste at the preview time. The trajectory frame does not step with the arrow keys while keys are picked and the mouse is over the lanes. Without picked keys the arrow keys and Ctrl + C / V behave as before.
+- [ ] The buttons **Pick all**, **Put down**, **Delete**, **Copy** and **Paste** above the lanes do the same; the hint line next to them explains what is possible.
+- [ ] Group moves of **Visible** and color keys only change the time; a single **Visible** key still turns around when dragged up or down.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.
 - [ ] Drag the blue **Start** and **End** anchors: the trajectory waits before the start and holds after the end.
 - [ ] Change **Movie length (s)** to double: the pacing is the same at half the speed, the overlays and their fades scale. Undo restores it.
-- [ ] Ctrl + wheel zooms the time and dragging the background pans: all lanes move together. The plain wheel scrolls the window. **Show whole movie** resets.
+- [ ] Ctrl + wheel zooms the time and the middle button (or Shift + wheel, or sideways scrolling) pans: all lanes move together. The plain wheel scrolls the window. **Show whole movie** resets.
 - [ ] **Lane height**: raising it makes every lane taller in proportion and the window scrolls; a long representation overview or overlay list grows only its own lane, the others keep the slider's height. Dragging a divider resizes only the two lanes beside it. **Fit to window** gives the old behaviour (the lanes share the window, the wheel zooms).
 - [ ] Resize the lanes by dragging between them.
 - [ ] Hide each lane with its box: **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane** (its picker goes too), **Representation lane**, **Representation overview**, **Overlay lane**. With all of them unticked the window says so.
 - [ ] Save and open the workspace: the ticked lanes, the lane height and **Fit to window** come back.
 - [ ] Overlay lane: one bar per overlay with its name and a colour per kind (dimmer when switched off). Drag a bar: the overlay moves (**Shown (s)** follows, a timeline's or a distribution's subplot in and out times move with it). Drag an end: only that end moves. The bars follow **Snap to frames**. The ticks in a bar are where its subplots come in, the yellow triangles are markers. Ctrl+Z undoes a drag.
-- [ ] Drag a frame pin on the trajectory track up and down: the frame changes. Distance and field of view dots only move in time.
+- [ ] Drag a frame pin on the trajectory track up and down: the frame changes. Drag a distance dot up and down: the distance changes and the camera keeps looking at the same point (see it in the viewport); a field of view dot changes the angle.
 - [ ] Click an orange marker on the timeline of the Timelines window: the view goes to that key.
 - [ ] Open a workspace saved with **Movie** open: the combined editor opens according to the workspace's Movie window setting; there is no separate Movie Timeline window.
 

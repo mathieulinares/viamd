@@ -729,6 +729,8 @@ int main(int argc, char** argv) {
                     movie_undo(&state);
                 } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) || ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)) {
                     movie_redo(&state);
+                } else if (state.movie.shortcut_frame == ImGui::GetFrameCount()) {
+                    // the lanes took a shortcut this frame
                 } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C)) {
                     movie_copy_keyframe_at_playhead(&state);
                 } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V)) {
@@ -764,7 +766,7 @@ int main(int argc, char** argv) {
 
             }
 
-            if (!movie_recording && (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME))) {
+            if (!movie_recording && state.movie.shortcut_frame != ImGui::GetFrameCount() && (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME))) {
                 double step = ImGui::IsKeyDown(ImGuiMod_Ctrl) ? 10.0 : 1.0;
                 if (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME)) step = -step;
                 state.animation.frame = CLAMP(state.animation.frame + step, 0.0, max_frame);
@@ -8374,6 +8376,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     }
     if (hover_key >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         d = decltype(m.path_drag){};
+        if (!m.sel.contains(KeyKind::Camera, 0, keys[hover_key].time)) m.sel.set(KeyKind::Camera, 0, keys[hover_key].time);
         d.active = true;
         d.key = hover_key;
         d.kind = hover_kind;
@@ -8624,6 +8627,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         ImVec2 pe, pl;
         if (V.point(eye, &pe)) {
             if (hot) dl->AddCircle(pe, handle_r + 4.0f, IM_COL32(255, 235, 90, 255), 0, 2.5f);
+            if (m.sel.contains(KeyKind::Camera, 0, k.time)) dl->AddCircle(pe, handle_r + 2.5f, IM_COL32(255, 255, 255, 255), 0, 2.0f);
             dl->AddCircleFilled(pe, handle_r, fill);
             dl->AddCircle(pe, handle_r, col_dark, 0, 1.5f);
             dl->AddText(ImVec2(pe.x - num_size.x * 0.5f, pe.y - num_size.y * 0.5f), col_dark, num);
@@ -8838,7 +8842,6 @@ static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len
 struct MovieCameraLaneEdit {
     int    remove = -1;
     double insert = -1.0;
-    bool   moved = false;
     bool   held = false;
 };
 static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool locked, const std::vector<CameraKeyframe>& sorted, MovieCameraLaneEdit* edit);
@@ -8846,6 +8849,220 @@ static void movie_reps_apply(ApplicationState* state, double time);
 static std::vector<RepRow> movie_rep_overview_rows(const ApplicationState* data);
 static std::vector<RepBlock> movie_rep_system_blocks(const ApplicationState* data, const std::string& group, double duration);
 static float movie_rep_overview_height(const ApplicationState* data, double duration);
+
+// ## Picking keys and moving them together
+
+struct MovieKeyPointResult {
+    bool clicked = false, hovered = false, held = false;
+};
+
+// One key as a point of a lane. A click picks it (Ctrl adds it to the picked keys or takes it from them), dragging moves every
+// picked key together: sideways in time and, in a lane with a value, up and down. A drag is made from the keys as they were when it
+// began, so nothing is lost on the way; where a key ends on another it replaces it when the mouse is released.
+static MovieKeyPointResult movie_key_point(ApplicationState* data, bool locked, KeyKind kind, int64_t subject, double time, double y, int id,
+    ImVec4 color, float size, const KeyShift& lane, bool* any_held, bool toggles_value = false) {
+    auto& m = data->movie;
+    auto& kd = m.key_drag;
+    const double duration = (double)movie_duration(data);
+    const ImPlotDragToolFlags flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
+    MovieKeyPointResult r;
+    double x = time, py = y;
+    const bool changed = ImPlot::DragPoint(id, &x, &py, color, size, flags, &r.clicked, &r.hovered, &r.held);
+
+    if (!locked) {
+        // A click is reported when the mouse is released over the key, which a drag ends with too
+        if (r.clicked && !(kd.active && kd.moved)) {
+            const bool picked = m.sel.contains(kind, subject, time);
+            if (ImGui::GetIO().KeyCtrl) {
+                m.sel.toggle(kind, subject, time);
+            } else if (!picked) {
+                m.sel.set(kind, subject, time);
+            } else {
+                kd.collapse = true;
+                kd.collapse_to = {kind, subject, time};
+            }
+            m.sel_lane = lane;
+        }
+        if (changed) {
+            if (!m.sel.contains(kind, subject, time)) m.sel.set(kind, subject, time);
+            m.sel_lane = lane;
+            if (!kd.active) {
+                kd.active = true;
+                kd.moved = false;
+                kd.start = movie_keys_snapshot(data);
+                kd.start_sel = m.sel;
+                kd.x0 = time;
+                kd.y0 = y;
+            }
+            KeyShift s = lane;
+            if (lane.lane != KeyLane::None) s.dy = lane.ratio ? (kd.y0 != 0.0 ? py / kd.y0 : 1.0) : py - kd.y0;
+            MovieKeys out = kd.start;
+            kd.dt = movie_keys_shift(&out, &m.sel, kd.start, kd.start_sel, movie_snap_time(data, x) - kd.x0, s, duration);
+            kd.dy = s.dy;
+            kd.moved = true;
+            movie_keys_restore(data, out);
+            if (toggles_value && m.sel.size() == 1) {
+                // A key of Visible has no value to move, it is shown or hidden by where it is dragged to
+                for (RepKey& k : m.rep_keys) {
+                    if (kind == KeyKind::Rep && rep_key_subject(k.rep, k.prop) == subject && fabs(k.time - m.sel.ids[0].time) < 1.0e-9) k.value[0] = py >= 0.5 ? 1.0f : 0.0f;
+                }
+            }
+        }
+        if (r.held) {
+            *any_held = true;
+            m.playhead = (float)CLAMP(kd.active && kd.moved ? kd.x0 + kd.dt : time, 0.0, duration);
+        }
+    }
+
+    if (r.held && kd.active && kd.moved) {
+        char buf[96];
+        const int count = (int)m.sel.size();
+        int len = snprintf(buf, sizeof(buf), "%d key%s: %+.2f s", count, count == 1 ? "" : "s", kd.dt);
+        if (lane.lane != KeyLane::None) snprintf(buf + len, sizeof(buf) - (size_t)len, lane.ratio ? "  x%.3g" : "  %+.3g", kd.dy);
+        ImGui::SetTooltip("%s", buf);
+    }
+
+    // A ring on the picked keys
+    const bool dragged = r.held && kd.active && kd.moved;
+    const double ring_time = dragged ? kd.x0 + kd.dt : time;
+    if (m.sel.contains(kind, subject, ring_time)) {
+        ImPlot::PushPlotClipRect();
+        ImPlot::GetPlotDrawList()->AddCircle(ImPlot::PlotToPixels(ring_time, dragged ? py : y), size + 3.5f, IM_COL32(255, 255, 255, 255), 0, 2.0f);
+        ImPlot::PopPlotClipRect();
+    }
+    return r;
+}
+
+// Dragging on the empty background of a lane draws a box and picks the keys in it (Ctrl or Shift: in addition to the picked ones);
+// a click on the background puts them all down. 'vlines' are times of lines in the lane that are dragged themselves.
+template <typename Pick>
+static void movie_lane_box(ApplicationState* data, bool locked, int lane_id, bool over_key, const double* vlines, int num_vlines, Pick pick) {
+    auto& b = data->movie.key_box;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (locked) {
+        b.active = false;
+        return;
+    }
+    if (!b.active && !over_key && !data->movie.key_drag.active && ImPlot::IsPlotHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        bool on_line = false;
+        for (int i = 0; i < num_vlines; ++i) on_line |= fabsf(ImPlot::PlotToPixels(vlines[i], 0.0).x - io.MousePos.x) < 6.0f;
+        if (!on_line) {
+            const ImPlotPoint p = ImPlot::GetPlotMousePos();
+            b = {};
+            b.active = true;
+            b.lane = lane_id;
+            b.x0 = p.x;
+            b.y0 = p.y;
+            b.px = io.MousePos.x;
+            b.py = io.MousePos.y;
+            b.add = io.KeyCtrl || io.KeyShift;
+        }
+    }
+    if (!b.active || b.lane != lane_id) return;
+    const ImPlotPoint p = ImPlot::GetPlotMousePos();
+    if (io.MouseDown[0]) {
+        if (fabsf(io.MousePos.x - b.px) + fabsf(io.MousePos.y - b.py) > 4.0f) b.moved = true;
+        if (b.moved) {
+            ImPlot::PushPlotClipRect();
+            ImDrawList* dl = ImPlot::GetPlotDrawList();
+            const ImVec2 a = ImPlot::PlotToPixels(b.x0, b.y0);
+            dl->AddRectFilled(a, io.MousePos, IM_COL32(120, 170, 255, 45));
+            dl->AddRect(a, io.MousePos, IM_COL32(150, 190, 255, 200), 0.0f, 0, 1.5f);
+            ImPlot::PopPlotClipRect();
+        }
+    } else {
+        b.active = false;
+        if (!b.add) data->movie.sel.clear();
+        if (b.moved) pick(MIN(b.x0, p.x), MAX(b.x0, p.x), MIN(b.y0, p.y), MAX(b.y0, p.y));
+    }
+}
+
+// Once the lanes are drawn: a drag that ended puts the keys in order, a click on a picked key that was not a drag picks it alone
+static void movie_key_drag_end(ApplicationState* data) {
+    auto& m = data->movie;
+    auto& kd = m.key_drag;
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
+    if (kd.collapse && !(kd.active && kd.moved)) m.sel.set(kd.collapse_to.kind, kd.collapse_to.subject, kd.collapse_to.time);
+    kd.collapse = false;
+    if (kd.active) {
+        MovieKeys cur = movie_keys_snapshot(data);
+        movie_keys_resolve(&cur, m.sel);
+        movie_keys_restore(data, cur);
+        key_selection_prune(&m.sel, cur);
+        kd.active = false;
+        kd.moved = false;
+        kd.start = MovieKeys();
+    }
+}
+
+static void movie_params_apply(ApplicationState* state, double time);
+
+// Edits of the picked keys that are not drags: arrow keys, delete, copy and paste. They are made from the keys as they are and end
+// with the keys in order.
+static void movie_selection_edit(ApplicationState* data, double dt, double steps, bool remove, bool paste) {
+    auto& m = data->movie;
+    MovieKeys keys = movie_keys_snapshot(data);
+    const double duration = (double)movie_duration(data);
+    if (remove) {
+        movie_keys_delete(&keys, &m.sel);
+    } else if (paste) {
+        movie_keys_paste(&keys, &m.sel, m.key_clip, (double)m.playhead, duration);
+    } else {
+        KeyShift s = m.sel_lane;
+        s.dy = s.lane == KeyLane::None ? 0.0 : s.step_ratio ? pow(1.05, steps) : steps * s.step;
+        KeySelection moved;
+        MovieKeys out = keys;
+        movie_keys_shift(&out, &moved, keys, m.sel, dt, s, duration);
+        keys = out;
+        m.sel = moved;
+        movie_keys_resolve(&keys, m.sel);
+    }
+    if (remove || paste) movie_keys_resolve(&keys, m.sel);
+    movie_keys_restore(data, keys);
+    key_selection_prune(&m.sel, keys);
+    movie_params_apply(data, (double)m.playhead);
+    movie_reps_apply(data, (double)m.playhead);
+}
+
+static void movie_selection_select_all(ApplicationState* data) {
+    auto& m = data->movie;
+    const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
+    const int num_reps = (int)md_array_size(data->representation.reps);
+    const int64_t param = m.timeline_param_lane ? (int64_t)movie_param_table[CLAMP(m.param_selected, 0, num_params - 1)].id : -1;
+    const int64_t rep = m.timeline_rep_lane && num_reps > 0 ? rep_key_subject(data->representation.reps[CLAMP(m.rep_selected, 0, num_reps - 1)].id, m.rep_prop_selected) : -1;
+    MovieKeys keys = movie_keys_snapshot(data);
+    key_selection_all(&m.sel, keys, param, rep);
+}
+
+static void movie_selection_copy(ApplicationState* data) {
+    auto& m = data->movie;
+    m.key_clip = movie_keys_copy(movie_keys_snapshot(data), m.sel);
+}
+
+// Arrow keys move the picked keys (a frame, with Shift a second, with Ctrl ten frames; up and down change the value of the lane they
+// were last picked in), Delete removes them, Esc puts them down, Ctrl + A picks all, Ctrl + C and Ctrl + V copy and paste at the preview
+// time. They work with the mouse over the lanes.
+static void movie_selection_shortcuts(ApplicationState* data, bool hovered) {
+    auto& m = data->movie;
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!hovered || io.WantTextInput || m.state == MovieRecordingState::Recording || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) return;
+    bool took = false;
+    const double frame = 1.0 / MAX((double)m.fps, 1.0);
+    const double stride = io.KeyShift ? 1.0 : io.KeyCtrl ? 10.0 * frame : frame;
+    const double vsteps = io.KeyShift ? 10.0 : 1.0;
+    if (!m.sel.empty()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))       { movie_selection_edit(data, -stride, 0.0, false, false); took = true; }
+        else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) { movie_selection_edit(data, stride, 0.0, false, false); took = true; }
+        else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))    { movie_selection_edit(data, 0.0, vsteps, false, false); took = true; }
+        else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))  { movie_selection_edit(data, 0.0, -vsteps, false, false); took = true; }
+        else if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)) { movie_selection_edit(data, 0.0, 0.0, true, false); took = true; }
+        else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) { m.sel.clear(); took = true; }
+        else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C)) { movie_selection_copy(data); took = true; }
+    }
+    if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_A)) { movie_selection_select_all(data); took = true; }
+    if (!m.key_clip.empty() && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_V)) { movie_selection_edit(data, 0.0, 0.0, false, true); took = true; }
+    if (took) m.shortcut_frame = ImGui::GetFrameCount();
+}
 
 // Subplots align the time axes and provide draggable row splitters.
 static void draw_movie_strip(ApplicationState* data, float movie_len, bool locked, ImVec2 size) {
@@ -8929,6 +9146,16 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     }
     for (int i = 0; i < rows; ++i) given[i] = ratios[i];
     MovieCameraLaneEdit camera_edit;
+    if (!m.sel.empty()) {
+        MovieKeys cur;
+        cur.camera.assign(m.keyframes, m.keyframes + n);
+        cur.params = m.param_keys;
+        cur.reps = m.rep_keys;
+        key_selection_prune(&m.sel, cur);
+    }
+    // Dragging the background picks keys with a box, so the middle button pans (Shift + wheel and sideways scrolling pan too)
+    const ImPlotInputMap old_input_map = ImPlot::GetInputMap();
+    ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
       if (m.timeline_camera_lane) draw_movie_camera_lane(data, movie_len, locked, sorted, &camera_edit);
       for (int track = 0; track < 3; ++track) {
@@ -8979,31 +9206,36 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
         ImPlot::PlotLine(titles[track], xs, track == 0 ? frm : track == 1 ? dist : fov, N);
         ImPlot::PopStyleColor();
 
-        bool any_moved = false;
-        bool any_held = false;
+        bool any_held = false, over_key = false;
+        KeyShift lane;
+        lane.lane = track == 0 ? KeyLane::Frame : track == 1 ? KeyLane::Distance : KeyLane::Fov;
+        lane.lo = 0.0;
+        lane.hi = last_frame;
+        lane.unit = distance_scale;
+        lane.step_ratio = track == 1;
         for (size_t i = 0; i < n; ++i) {
-            CameraKeyframe& key = m.keyframes[i];
+            const CameraKeyframe key = m.keyframes[i];
             if (track == 0 && !key.use_frame) continue;
-            double x = key.time;
-            double y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
-            bool hovered = false, held = false;
-            if (ImPlot::DragPoint(2000 + (int)i, &x, &y, ImVec4(1.0f, 0.45f, 0.15f, 1.0f), 7.0f, drag_flags, nullptr, &hovered, &held)) {
-                key.time = movie_snap_time(data, x);
-                if (track == 0) key.frame = CLAMP(y, 0.0, last_frame);
-                any_moved = true;
-            }
-            if (held && !locked) {
-                any_held = true;
-                m.playhead = (float)key.time;
-            }
+            const double key_y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
+            const MovieKeyPointResult r = movie_key_point(data, locked, KeyKind::Camera, 0, key.time, key_y, 2000 + (int)i, ImVec4(1.0f, 0.45f, 0.15f, 1.0f), 7.0f, lane, &any_held);
+            over_key |= r.hovered;
             char label[16];
             snprintf(label, sizeof(label), "%d", (int)i + 1);
-            const double key_y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
             ImPlot::PlotText(label, key.time, key_y, ImVec2(0, -14));
-            if (hovered && !held) {
-                ImGui::SetTooltip("Keyframe %d: %.2f s\n%s: %.2f\n%s", (int)i + 1, key.time, axes[track], key_y,
-                    track == 0 ? "Drag sideways for time, vertically for frame" : "Drag sideways to change time; value is read-only here");
+            if (r.hovered && !r.held) {
+                ImGui::SetTooltip("Keyframe %d: %.2f s\n%s: %.2f\nDrag to change the time and the value. Click picks it, Ctrl + click adds it to the picked keys:\nthey move together. Drag the background to pick with a box.", (int)i + 1, key.time, axes[track], key_y);
             }
+        }
+        {
+            double vlines[3] = {(double)m.playhead, (double)m.traj_begin, (double)m.traj_end};
+            movie_lane_box(data, locked, 10 + track, over_key, vlines, track == 0 ? 3 : 1, [&](double x0, double x1, double y0, double y1) {
+                for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+                    const CameraKeyframe& k = m.keyframes[i];
+                    if (track == 0 && !k.use_frame) continue;
+                    const double ky = track == 0 ? k.frame : track == 1 ? k.transform.distance * distance_scale : k.fov_y * MOVIE_RAD_TO_DEG;
+                    if (k.time >= x0 && k.time <= x1 && ky >= y0 && ky <= y1) m.sel.add(KeyKind::Camera, 0, k.time);
+                }
+            });
         }
 
         double playhead = (double)m.playhead;
@@ -9019,19 +9251,25 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 
         ImPlot::EndPlot();
 
-        if (any_moved) {
-            sorted.assign(m.keyframes, m.keyframes + n);
-            std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
-        }
         if (any_held || anchors_held) {
-            movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
+            sorted.assign(m.keyframes, m.keyframes + md_array_size(m.keyframes));
+            std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+            movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), sorted.size());
         }
-        if (any_moved) resort_pending = true;
       }
       if (m.timeline_param_lane) draw_movie_param_lane(data, movie_len, locked);
       if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
       if (m.timeline_rep_overview) draw_movie_rep_overview_lane(data, movie_len, locked);
       if (m.timeline_overlay_lane) draw_movie_overlay_lane(data, movie_len, locked);
+      if (ImPlot::IsSubplotsHovered() && !ImGui::GetIO().KeyCtrl) {
+          const ImGuiIO& io = ImGui::GetIO();
+          const double wheel = io.MouseWheelH != 0.0f ? (double)io.MouseWheelH : io.KeyShift ? -(double)io.MouseWheel : 0.0;
+          if (wheel != 0.0) {
+              const double shift = wheel * 0.1 * (m.timeline_view_end - m.timeline_view_begin);
+              m.timeline_view_begin += shift;
+              m.timeline_view_end += shift;
+          }
+      }
       ImPlot::EndSubplots();
       for (int i = 0; i < rows; ++i) {
           if (!fixed_height) {
@@ -9064,10 +9302,11 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
                 m.playhead = (float)camera_edit.insert;
             }
         }
-        if (camera_edit.moved) resort_pending = true;
         if (camera_edit.held) movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), n);
       }
     }
+    ImPlot::GetInputMap() = old_input_map;
+    movie_key_drag_end(data);
     if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         movie_sort_keyframes(data);
         resort_pending = false;
@@ -9153,31 +9392,31 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
 
         // The keys, which are dragged sideways only
         for (size_t i = 0; i < n; ++i) {
-            CameraKeyframe& key = m.keyframes[i];
-            double x = key.time, y = 0.0;
-            bool clicked = false, hovered = false, held = false;
+            const CameraKeyframe key = m.keyframes[i];
             const bool at_playhead = fabs(key.time - (double)m.playhead) < 1.0e-3;
             const ImVec4 col = at_playhead ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f) : ImVec4(1.0f, 0.45f, 0.15f, 1.0f);
-            if (ImPlot::DragPoint(9500 + (int)i, &x, &y, col, m.path_hover_key == (int)i ? 11.0f : 7.0f, drag_flags, &clicked, &hovered, &held)) {
-                key.time = movie_snap_time(data, x);
-                edit->moved = true;
-            }
+            const MovieKeyPointResult r = movie_key_point(data, locked, KeyKind::Camera, 0, key.time, 0.0, 9500 + (int)i, col, m.path_hover_key == (int)i ? 11.0f : 7.0f, KeyShift{}, &edit->held);
+            const bool hovered = r.hovered, held = r.held, clicked = r.clicked;
             any_hovered |= hovered;
             if (hovered) m.lane_hover_key = (int)i;
-            if (held && !locked) {
-                edit->held = true;
-                m.playhead = (float)key.time;
-            }
-            if (clicked && !locked) movie_goto_keyframe(data, i);
+            if (clicked && !locked && !ImGui::GetIO().KeyCtrl && !(m.key_drag.active && m.key_drag.moved)) movie_goto_keyframe(data, i);
             if (hovered && !locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) open_menu = (int)i;
             const std::string label = camera_key_label(key, (int)i);
             ImPlot::PlotText(label.c_str(), key.time, 0.0, ImVec2(0.0f, -16.0f));
             if (hovered && !held) {
-                ImGui::SetTooltip("Keyframe %s\n%.2f s, field of view %.1f deg%s\nDrag sideways to change when, click to go to it, right click for its name and removal.",
+                ImGui::SetTooltip("Keyframe %s\n%.2f s, field of view %.1f deg%s\nDrag sideways to change when, click to go to it, right click for its name and removal.\nCtrl + click adds it to the picked keys, which move together. Drag the background to pick with a box.",
                     label.c_str(), key.time, key.fov_y * MOVIE_RAD_TO_DEG, key.use_frame ? ", pins a trajectory frame" : "");
             }
         }
         if (!any_hovered && !band_tip.empty()) ImGui::SetTooltip("%s", band_tip.c_str());
+        {
+            const double vline = (double)m.playhead;
+            movie_lane_box(data, locked, 20, any_hovered, &vline, 1, [&](double x0, double x1, double, double) {
+                for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
+                    if (m.keyframes[i].time >= x0 && m.keyframes[i].time <= x1) m.sel.add(KeyKind::Camera, 0, m.keyframes[i].time);
+                }
+            });
+        }
 
         // A key is added on the path where it is double clicked
         if (!locked && !any_hovered && plot_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -9247,8 +9486,7 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
     }
 
     const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
-    static bool resort_pending = false;
-    bool any_moved = false, any_held = false, any_hovered = false;
+    bool any_held = false, any_hovered = false;
     int  remove_idx = -1;
     bool add_key = false;
     double add_time = 0.0, add_value = 0.0;
@@ -9273,29 +9511,38 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
             ImPlot::PopStyleColor();
         }
 
+        KeyShift lane;
+        if (!d.color) {
+            lane.lane = KeyLane::Param;
+            lane.subject = d.id;
+            lane.lo = d.lo;
+            lane.hi = d.hi;
+            lane.ratio = d.log;
+            lane.step = (d.hi - d.lo) / 100.0;
+            lane.step_ratio = d.log;
+        }
         for (int ki : mine) {
-            ParamKey& key = m.param_keys[ki];
-            double x = key.time;
-            double y = d.color ? 0.5 : (double)key.value[0];
+            const ParamKey key = m.param_keys[ki];
             const ImVec4 col = d.color ? ImVec4(key.value[0], key.value[1], key.value[2], 1.0f) : ImVec4(0.75f, 0.5f, 1.0f, 1.0f);
-            bool hovered = false, held = false;
-            if (ImPlot::DragPoint(4000 + ki, &x, &y, col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
-                key.time = movie_snap_time(data, x);
-                if (!d.color) key.value[0] = (float)CLAMP(y, (double)d.lo, (double)d.hi);
-                any_moved = true;
-            }
-            if (held && !locked) {
-                any_held = true;
-                m.playhead = (float)key.time;
-            }
-            if (hovered) {
+            const MovieKeyPointResult r = movie_key_point(data, locked, KeyKind::Param, d.id, key.time, d.color ? 0.5 : (double)key.value[0], 4000 + ki, col, 7.0f, lane, &any_held);
+            if (r.hovered) {
                 any_hovered = true;
-                if (!held) {
+                if (!r.held) {
                     if (d.color) ImGui::SetTooltip("%.2f s\nDrag to change its time. Its color is edited in the table of the Movie window.", key.time);
-                    else         ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it", key.time, key.value[0]);
+                    else         ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it.\nCtrl + click adds it to the picked keys, which move together.", key.time, key.value[0]);
                 }
                 if (!locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) remove_idx = ki;
             }
+        }
+        {
+            double vline = (double)m.playhead;
+            movie_lane_box(data, locked, 30, any_hovered, &vline, 1, [&](double x0, double x1, double y0, double y1) {
+                for (int ki : mine) {
+                    const ParamKey& k = m.param_keys[ki];
+                    const double ky = d.color ? 0.5 : (double)k.value[0];
+                    if (k.time >= x0 && k.time <= x1 && ky >= y0 && ky <= y1) m.sel.add(KeyKind::Param, d.id, k.time);
+                }
+            });
         }
 
         if (!locked && !any_hovered && ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -9321,11 +9568,6 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
 
     if (any_held) {
         movie_apply_time(data, (double)m.playhead, true);
-    }
-    if (any_moved) resort_pending = true;
-    if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        movie_param_sort(data);
-        resort_pending = false;
     }
 
     if (remove_idx >= 0) {
@@ -9393,8 +9635,7 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
     }
 
     const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
-    static bool resort_pending = false;
-    bool any_moved = false, any_held = false, any_hovered = false;
+    bool any_held = false, any_hovered = false;
     int  remove_idx = -1;
     bool add_key = false;
     double add_time = 0.0, add_value = 0.0;
@@ -9423,30 +9664,39 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
             ImPlot::PopStyleColor();
         }
 
+        KeyShift lane;
+        const int64_t subject = rep ? rep_key_subject(rep->id, prop) : 0;
+        if (rep && !color_prop && !visible_prop) {
+            lane.lane = KeyLane::Rep;
+            lane.subject = subject;
+            lane.lo = lo;
+            lane.hi = hi;
+            lane.step = (double)(hi - lo) / 50.0;
+        }
         for (int ki : mine) {
-            RepKey& key = m.rep_keys[ki];
-            double x = key.time;
-            double y = color_prop ? 0.5 : (double)key.value[0];
+            const RepKey key = m.rep_keys[ki];
             const ImVec4 point_col = color_prop ? ImVec4(key.value[0], key.value[1], key.value[2], 1.0f) : col;
-            bool hovered = false, held = false;
-            if (ImPlot::DragPoint(5000 + ki, &x, &y, point_col, 7.0f, drag_flags, nullptr, &hovered, &held)) {
-                key.time = movie_snap_time(data, x);
-                if (!color_prop) key.value[0] = visible_prop ? (y >= 0.5 ? 1.0f : 0.0f) : (float)CLAMP(y, (double)lo, (double)hi);
-                any_moved = true;
-            }
-            if (held && !locked) {
-                any_held = true;
-                m.playhead = (float)key.time;
-            }
-            if (hovered) {
+            const MovieKeyPointResult r = movie_key_point(data, locked, KeyKind::Rep, subject, key.time, color_prop ? 0.5 : (double)key.value[0], 5000 + ki, point_col, 7.0f, lane, &any_held, visible_prop);
+            if (r.hovered) {
                 any_hovered = true;
-                if (!held) {
+                if (!r.held) {
                     if (visible_prop) ImGui::SetTooltip("%.2f s: %s\nDrag sideways to change when. Right click to remove it", key.time, key.value[0] >= 0.5f ? "shown" : "hidden");
                     else if (color_prop) ImGui::SetTooltip("%.2f s\nDrag to change its time, right click to remove it. Its color is edited in the table of the Movie window.", key.time);
                     else              ImGui::SetTooltip("%.2f s, %.3g\nDrag to change it, right click to remove it", key.time, key.value[0]);
                 }
                 if (!locked && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) remove_idx = ki;
             }
+        }
+
+        if (rep) {
+            double vline = (double)m.playhead;
+            movie_lane_box(data, locked, 40, any_hovered, &vline, 1, [&](double x0, double x1, double y0, double y1) {
+                for (int ki : mine) {
+                    const RepKey& k = m.rep_keys[ki];
+                    const double ky = color_prop ? 0.5 : (double)k.value[0];
+                    if (k.time >= x0 && k.time <= x1 && ky >= y0 && ky <= y1) m.sel.add(KeyKind::Rep, subject, k.time);
+                }
+            });
         }
 
         if (rep && !locked && !any_hovered && ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -9471,11 +9721,6 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
     }
 
     if (any_held) movie_apply_time(data, (double)m.playhead, true);
-    if (any_moved) resort_pending = true;
-    if (resort_pending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        movie_rep_sort(data);
-        resort_pending = false;
-    }
 
     if (remove_idx >= 0) {
         m.rep_keys.erase(m.rep_keys.begin() + remove_idx);
@@ -10066,7 +10311,36 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         draw_movie_timeline_options(data);
         ImGui::TreePop();
     }
+    {
+        // The picked keys: what can be done with them is also on the keyboard, with the mouse over the lanes
+        const size_t picked = m.sel.size();
+        ImGui::BeginDisabled(recording);
+        if (ImGui::SmallButton("Pick all")) movie_selection_select_all(data);
+        ImGui::SetItemTooltip("Picks the camera keys and the keys of the look parameter and of the representation property that are shown. Ctrl + A.");
+        ImGui::BeginDisabled(picked == 0);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Put down")) m.sel.clear();
+        ImGui::SetItemTooltip("Esc");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Delete")) movie_selection_edit(data, 0.0, 0.0, true, false);
+        ImGui::SetItemTooltip("Removes the picked keys. Delete.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) movie_selection_copy(data);
+        ImGui::SetItemTooltip("Remembers the picked keys, with the time between them. Ctrl + C.");
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(m.key_clip.empty());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Paste")) movie_selection_edit(data, 0.0, 0.0, false, true);
+        ImGui::SetItemTooltip("Puts the copied keys in with the first one at the preview time. A key that lands on another replaces it. Ctrl + V.");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (picked > 0) ImGui::TextDisabled("%zu key%s picked: drag one to move them all, arrow keys nudge (Shift: 1 s, Ctrl: 10 frames; up and down change the value)", picked, picked == 1 ? "" : "s");
+        else            ImGui::TextDisabled("Click a key to pick it, Ctrl + click adds, drag the background to pick with a box. Middle button or Shift + wheel pans.");
+    }
     const ImVec2 strip_size(-1, MAX(ImGui::GetContentRegionAvail().y, fs * 12.0f));
+    const ImVec2 strip_pos = ImGui::GetCursorScreenPos();
+    const ImVec2 strip_avail = ImGui::GetContentRegionAvail();
     if (m.timeline_fit_window) {
         draw_movie_strip(data, movie_len, recording, strip_size);
     } else {
@@ -10079,7 +10353,7 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         ImGui::EndChild();
         ImPlot::GetInputMap() = old_map;
     }
-
+    movie_selection_shortcuts(data, ImGui::IsMouseHoveringRect(strip_pos, ImVec2(strip_pos.x + strip_avail.x, strip_pos.y + strip_avail.y)) && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows));
 }
 
 static void draw_movie_overlay_section(ApplicationState* data, float movie_len) {
