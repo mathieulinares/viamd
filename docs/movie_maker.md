@@ -8,7 +8,7 @@ Open the combined editor with **Windows > Movie**:
 
 - **Left:** timeline lanes for the trajectory frame, camera, distance, field of view, looks, representations and overlays. Drag the divider to resize the two panels.
 - **Right:** tabs for **Output**, **Timing**, **Camera**, **Looks**, **Representations** and **Overlays**. Both panels scroll independently. The **Timeline** and **Controls** boxes hide either panel; at least one stays visible.
-- **Top:** shared preview playback, repeat, scrubber and **Add Keyframe** controls. The large button at the top right switches between **Scene view** (plain viewport) and **Movie preview** (recording frame and overlays). It does not start or stop playback or alter the recording.
+- **Top:** shared preview playback, repeat, scrubber and **Add Keyframe** controls. The large button at the top right (or **Tab**) switches between **Scene view** (your own camera, for working on the path) and **Movie preview** (the movie camera, the recording frame and the overlays). Holding Tab looks at the other one for a moment. It does not start or stop playback or alter the recording.
 
 The screenshots below show the earlier two-window layout; the controls now live in the combined editor.
 
@@ -215,7 +215,13 @@ The unfilled track is neutral grey, independent of the fill colour. New time bar
 
 #### Seeing them while you edit
 
-The top-right button switches between **Movie preview** and **Scene view**. Movie preview draws the recording frame in the viewport, dims the outside and widens the view to match the recording. The overlays are laid out in that frame. Scene view hides the frame and overlays, including property visualization overlays, while keeping camera-path editing available. Switching modes does not change camera keys, playback or recorded output; it is disabled while recording.
+The top-right button switches between **Movie preview** and **Scene view**. Movie preview draws the recording frame in the viewport, dims the outside and widens the view to match the recording. The overlays are laid out in that frame. Scene view hides the frame and overlays, including property visualization overlays, and gives you an editor camera of your own:
+
+- The first time you enter Scene view it moves back to frame the whole camera path (the eye, what it looks at, and the keys), seen from the direction you were looking. **Fit path** (next to the switch) does that again. Afterwards each mode keeps its own view: switching back to Movie preview returns to the movie camera (at the preview time with **Animate camera**, otherwise where you left it) and switching to Scene view returns to where you were.
+- In Scene view scrubbing, playing the preview and clicking a key move the **green camera** (the movie camera) along the path, and the trajectory plays, but the viewport stays where it is. The path with its handles is always drawn there; in Movie preview it is hidden unless **In Movie preview** is ticked in the path options.
+- **Add Keyframe** (K) in Scene view adds a key of the movie camera at the preview time, which is on the path (with no keys yet, where the movie camera last was in Movie preview). To make a key from a new pose, switch to Movie preview, fly there and add it, or drag the key's handles in the viewport. **Update position** is off in Scene view.
+
+Switching modes does not change camera keys, playback or recorded output; it is disabled while recording.
 
 ## The left timeline panel
 

@@ -1109,7 +1109,7 @@ struct ApplicationState {
         double timeline_view_end = 0.0;
         float timeline_view_duration = 0.0f;
         bool  show_path   = true;    // Draw the camera path and keyframes in the viewport
-        int   path_options = 15;     // What more the path shows: 1 time ticks, 2 sight lines, 4 cameras at the keys, 8 rings of the spins
+        int   path_options = 15;     // What more the path shows: 1 time ticks, 2 sight lines, 4 cameras at the keys, 8 rings of the spins, 16 also in the Movie preview
         bool  path_hot = false;      // The mouse is over a key's handle or the path (with Ctrl): the viewport leaves its own interaction alone
         int   path_hover_key = -1;   // The key whose handle is hovered in the viewport, and the one hovered in the camera lane
         int   lane_hover_key = -1;
@@ -1155,6 +1155,16 @@ struct ApplicationState {
             KeySelection start_sel;
             double       anchor = 0.0;
         } key_scale;
+        // The viewport has its own pose in each of the two modes (Scene view: the editor's camera, Movie preview: the movie's), kept while the other is shown
+        struct ViewPose {
+            bool          valid = false;
+            ViewTransform target;
+            ViewTransform camera;
+            float         fov_y = 0.7853982f;
+        };
+        ViewPose pose_scene, pose_movie;
+        bool   peek_active = false;       // Tab is held to look at the other mode for a moment
+        double peek_t0 = 0.0;
         int shortcut_frame = -1;          // The frame in which the timeline took a shortcut (the others leave it alone)
 
         MovieRecordingState state = MovieRecordingState::Idle;

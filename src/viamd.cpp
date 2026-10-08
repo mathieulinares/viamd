@@ -1726,7 +1726,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("ShowPath")))       viamd::extract_bool(m.show_path, arg);
                 else if (str_eq(ident, STR_LIT("PathOptions"))) {
                     int bits = 0;
-                    if (viamd::extract_int(bits, arg)) m.path_options = bits & 15;
+                    if (viamd::extract_int(bits, arg)) m.path_options = bits & 31;
                 }
                 else if (str_eq(ident, STR_LIT("Output")))         viamd::extract_enum(m.output, arg, (int)MovieOutput::Count);
                 else if (str_eq(ident, STR_LIT("Crf")))            viamd::extract_int(m.crf, arg);

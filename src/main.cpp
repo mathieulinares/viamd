@@ -246,6 +246,7 @@ static double movie_duration(const ApplicationState* state);
 static double movie_trajectory_frame(const ApplicationState* state, double time);
 static int movie_num_frames(const ApplicationState* state);
 static void movie_restore_state(ApplicationState* state);
+static void movie_set_scene_view(ApplicationState* state, bool scene);
 
 // The sizes offered in the Settings menu. The stored setting is the size itself, not an
 // index into this table, so the table can change without invalidating anyone's .ini.
@@ -704,6 +705,12 @@ int main(int argc, char** argv) {
             script_set_hovered_property(&state,  STR_LIT(""));
         }
 
+        // Tab held for a moment: back to what it was before when it is let go
+        if (state.movie.peek_active && !ImGui::IsKeyDown(ImGuiKey_Tab)) {
+            state.movie.peek_active = false;
+            if (ImGui::GetTime() - state.movie.peek_t0 > 0.3 && state.movie.show_window && !movie_recording) movie_set_scene_view(&state, state.movie.show_frame);
+        }
+
         // Capture non-window specific keyboard events
         if (!ImGui::GetIO().WantCaptureKeyboard) {
 #if EXPERIMENTAL_GFX_API
@@ -718,6 +725,13 @@ int main(int argc, char** argv) {
 
             if (movie_recording && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
                 movie_recording_stop(&state);
+            }
+
+            if (state.movie.show_window && !movie_recording && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
+                // Tab changes between Scene view and Movie preview; held, it only looks at the other one for a moment
+                movie_set_scene_view(&state, state.movie.show_frame);
+                state.movie.peek_active = true;
+                state.movie.peek_t0 = ImGui::GetTime();
             }
 
             if (state.movie.show_window && !movie_recording && ImGui::IsKeyPressed(KEY_ADD_MOVIE_KEYFRAME, false)) {
@@ -6691,6 +6705,13 @@ static void movie_camera_apply(ApplicationState* state, double time, const Camer
     state->view.camera.fov_y = fov_y;
 }
 
+// Scene view: the viewport is the editor's own camera, for working on the path from outside. The movie camera is then only drawn in
+// it (the green camera), and the movie moves it only while recording.
+static bool movie_scene_view(const ApplicationState* state) {
+    const auto& m = state->movie;
+    return m.show_window && !m.show_frame && m.state != MovieRecordingState::Recording;
+}
+
 // Both view targets are set so the exponential smoothing in camera_animate does not lag behind.
 // The keys must be sorted by time.
 static void movie_apply_time_with_keys(ApplicationState* state, double time, bool apply_camera, const CameraKeyframe* keys, size_t num_keys) {
@@ -6699,7 +6720,7 @@ static void movie_apply_time_with_keys(ApplicationState* state, double time, boo
     movie_params_apply(state, time);
     movie_reps_apply(state, time);
     m.follow_pending = false;
-    if (apply_camera && m.animate_camera && num_keys > 0) {
+    if (apply_camera && m.animate_camera && num_keys > 0 && !movie_scene_view(state)) {
         if (movie_keys_track_atoms(keys, num_keys) || (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask))) {
             // The target is not where it will be until the trajectory frame has been loaded, so the camera waits for that
             m.follow_keys.assign(keys, keys + num_keys);
@@ -7938,12 +7959,32 @@ static void movie_insert_key(ApplicationState* state, CameraKeyframe key, bool k
     movie_sort_keyframes(state);
 }
 
-// The view as it is now, at the playhead
+// The movie camera: the viewport in Movie preview, where the path has it at the preview time (or where it was last in Movie preview, with no keys) in Scene view
+static void movie_camera_pose(const ApplicationState* state, ViewTransform* vt, float* fov_y) {
+    const auto& m = state->movie;
+    const size_t n = md_array_size(m.keyframes);
+    if (movie_scene_view(state)) {
+        if (n > 0) {
+            std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
+            std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+            camera_keyframes_evaluate(vt, fov_y, sorted.data(), n, (double)m.playhead, m.loop, nullptr, nullptr, movie_upright(state));
+            return;
+        }
+        if (m.pose_movie.valid) {
+            *vt = m.pose_movie.target;
+            *fov_y = m.pose_movie.fov_y;
+            return;
+        }
+    }
+    *vt = state->view.target;
+    *fov_y = state->view.camera.fov_y;
+}
+
+// The movie camera as it is now, at the playhead
 static CameraKeyframe movie_current_key(ApplicationState* state) {
     auto& m = state->movie;
     CameraKeyframe key = {};
-    key.transform = state->view.target;
-    key.fov_y = state->view.camera.fov_y;
+    movie_camera_pose(state, &key.transform, &key.fov_y);
     key.time = movie_snap_time(state, (double)m.playhead);
     if (m.key_includes_frame) {
         key.use_frame = true;
@@ -8007,13 +8048,13 @@ static void movie_add_selection_keyframe(ApplicationState* state) {
     for (size_t i = 0; i < count; ++i) xyz[i] = vec3_from_vec4(xyzw[i]);
 
     CameraKeyframe key = movie_current_key(state);
-    ViewTransform t = state->view.target;
-    t.distance = camera_fit_distance(xyz, nullptr, count, center, t.orientation, state->view.camera.fov_y);
+    ViewTransform t = key.transform;
+    t.distance = camera_fit_distance(xyz, nullptr, count, center, t.orientation, key.fov_y);
     t.position = camera_position_from_look_at(mat4_mul_vec3(state->mold.unitcell_transform, center, 1.0f), t.orientation, t.distance);
     key.transform = t;
     key.follow = false;
     movie_insert_key(state, key, true);
-    state->view.target = t;
+    if (!movie_scene_view(state)) state->view.target = t;
 }
 
 // Two keys with the view as it is now, the second after the orbit's duration with whole turns around it.
@@ -8131,11 +8172,79 @@ static void movie_goto_keyframe(ApplicationState* state, size_t idx) {
     auto& m = state->movie;
     if (idx >= md_array_size(m.keyframes)) return;
     const CameraKeyframe& key = m.keyframes[idx];
-    state->view.target = key.transform;
-    if (const vec3_t* up = movie_upright(state)) camera_level(&state->view.target, *up, key.roll);
-    state->view.camera.fov_y = key.fov_y;
+    if (!movie_scene_view(state)) {
+        state->view.target = key.transform;
+        if (const vec3_t* up = movie_upright(state)) camera_level(&state->view.target, *up, key.roll);
+        state->view.camera.fov_y = key.fov_y;
+    }
     m.playhead = CLAMP((float)key.time, 0.0f, (float)movie_duration(state));
     state->animation.frame = movie_trajectory_frame(state, key.time);
+}
+
+// Moves the viewport back so that the whole camera path (the eye, what it looks at, and the keys) is in view, seen from the direction
+// the viewport looks now
+static void movie_scene_fit_path(ApplicationState* state) {
+    auto& m = state->movie;
+    const size_t n = md_array_size(m.keyframes);
+    if (n == 0) return;
+    std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
+    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    std::vector<vec3_t> pts;
+    for (const CameraKeyframe& k : sorted) {
+        pts.push_back(k.transform.position);
+        pts.push_back(camera_get_look_at(k.transform));
+    }
+    const double t0 = sorted.front().time, t1 = sorted.back().time;
+    if (n >= 2 && t1 > t0) {
+        const int samples = CLAMP((int)n * 8, 16, 256);
+        for (int i = 0; i <= samples; ++i) {
+            ViewTransform vt;
+            float fov_y;
+            camera_keyframes_evaluate(&vt, &fov_y, sorted.data(), n, t0 + (t1 - t0) * (double)i / (double)samples, m.loop, nullptr, nullptr, movie_upright(state));
+            pts.push_back(vt.position);
+            pts.push_back(camera_get_look_at(vt));
+        }
+    }
+    vec3_t lo = pts[0], hi = pts[0];
+    for (const vec3_t& p : pts) {
+        lo = vec3_set(MIN(lo.x, p.x), MIN(lo.y, p.y), MIN(lo.z, p.z));
+        hi = vec3_set(MAX(hi.x, p.x), MAX(hi.y, p.y), MAX(hi.z, p.z));
+    }
+    const vec3_t center = (lo + hi) * 0.5f;
+    ViewTransform t = state->view.target;
+    t.distance = MAX(camera_fit_distance(pts.data(), nullptr, pts.size(), center, t.orientation, state->view.camera.fov_y) * 1.1f, 2.0f);
+    t.position = camera_position_from_look_at(center, t.orientation, t.distance);
+    state->view.target = t;
+}
+
+// Changes between Scene view and Movie preview. Each keeps its own viewport pose: the first time Scene view is entered it frames the
+// whole path, afterwards it is where it was left; Movie preview goes back to the movie camera (at the preview time with Animate camera).
+static void movie_set_scene_view(ApplicationState* state, bool scene) {
+    auto& m = state->movie;
+    if (m.state == MovieRecordingState::Recording || scene == !m.show_frame) return;
+    auto save = [&](decltype(m.pose_scene)& p) {
+        p.valid = true;
+        p.target = state->view.target;
+        p.camera = state->view.camera;
+        p.fov_y = state->view.camera.fov_y;
+    };
+    auto restore = [&](const decltype(m.pose_scene)& p) {
+        state->view.target = p.target;
+        state->view.camera.fov_y = p.fov_y;
+    };
+    if (scene) {
+        save(m.pose_movie);
+        m.show_frame = false;
+        m.show_overlay_preview = false;
+        if (m.pose_scene.valid) restore(m.pose_scene);
+        else movie_scene_fit_path(state);
+    } else {
+        save(m.pose_scene);
+        m.show_frame = true;
+        m.show_overlay_preview = true;
+        if (m.pose_movie.valid) restore(m.pose_movie);
+        movie_apply_time(state, (double)m.playhead, true);
+    }
 }
 
 // What the path of the camera depends on, apart from the trajectory itself
@@ -8338,7 +8447,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     m.path_hot = false;
     m.path_hover_key = -1;
     const size_t n = md_array_size(m.keyframes);
-    const bool shown = m.show_path && n > 0 && m.show_window && m.state != MovieRecordingState::Recording && str_empty(state->screenshot.path_to_file);
+    const bool shown = m.show_path && n > 0 && m.show_window && (movie_scene_view(state) || (m.path_options & 16)) && m.state != MovieRecordingState::Recording && str_empty(state->screenshot.path_to_file);
     if (!shown) {
         d.active = false;
         m.lane_hover_key = -1;
@@ -10356,7 +10465,7 @@ static void draw_movie_preview_controls(ApplicationState* data) {
     if (ImGui::Button("Add Keyframe")) {
         movie_add_keyframe(data);
     }
-    ImGui::SetItemTooltip("Adds a keyframe of the current view at the playhead. Shortcut: K");
+    ImGui::SetItemTooltip("Adds a keyframe of the movie camera at the playhead: the viewport in Movie preview, the camera as the path has it\nat the preview time in Scene view. Shortcut: K");
     ImGui::EndDisabled();
 }
 
@@ -11168,6 +11277,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             if (key.follow && key.follow_atom >= 0) ImGui::SetItemTooltip("Looks at atom %d, tracked through the trajectory.\nClick to pick another atom in the viewport. Esc cancels.", key.follow_atom + 1);
             else ImGui::SetItemTooltip("Click an atom in the viewport for this keyframe to look at. It is tracked through the trajectory. Esc cancels.");
             ImGui::SameLine();
+            ImGui::BeginDisabled(movie_scene_view(data));
             if (ImGui::SmallButton("Update position")) {
                 // The camera moves to the current view's eye, still looking at the point the keyframe looks at
                 const vec3_t look = camera_get_look_at(key.transform);
@@ -11176,7 +11286,8 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
                 key.fov_y = data->view.camera.fov_y;
                 if (key.use_frame) key.frame = data->animation.frame;
             }
-            ImGui::SetItemTooltip("Move this keyframe's camera to the current view's position. What it looks at stays.");
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Move this keyframe's camera to the current view's position. What it looks at stays.\nIn Scene view the viewport is not the movie camera: switch to Movie preview, or drag the key's handles in the viewport.");
             ImGui::SameLine();
             if (ImGui::SmallButton(key.follow ? "Unfollow" : "Follow")) {
                 if (key.follow) {
@@ -11755,6 +11866,10 @@ static void draw_movie_settings_panel(ApplicationState* data) {
             ImGui::SetItemTooltip("A camera drawn at each keyframe.");
             ImGui::SameLine();
             if (ImGui::Checkbox("Spin rings", &rings)) m.path_options = (m.path_options & ~8) | (rings ? 8 : 0);
+            ImGui::SameLine();
+            bool preview = (m.path_options & 16) != 0;
+            if (ImGui::Checkbox("In Movie preview", &preview)) m.path_options = (m.path_options & ~16) | (preview ? 16 : 0);
+            ImGui::SetItemTooltip("The path is always drawn in Scene view. In Movie preview, where you look through the movie camera, it is hidden unless this is ticked.");
             ImGui::SetItemTooltip("The circle the camera goes round in a spin, with arrows the way it turns.");
             ImGui::Unindent();
             ImGui::EndDisabled();
@@ -11898,15 +12013,19 @@ static void draw_movie_window(ApplicationState* data) {
         ImGui::SameLine();
         ImGui::Checkbox("Controls", &m.editor_controls);
         if (!m.editor_timeline && !m.editor_controls) m.editor_controls = true;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m.show_frame || md_array_size(m.keyframes) == 0 || m.state == MovieRecordingState::Recording);
+        if (ImGui::Button("Fit path")) movie_scene_fit_path(data);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Scene view: move the view back so that the whole camera path is in sight.");
         const float button_width = ImGui::GetFontSize() * 15.0f;
         ImGui::SameLine(MAX(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width));
         ImGui::BeginDisabled(m.state == MovieRecordingState::Recording);
         if (ImGui::Button(m.show_frame ? "Switch to Scene view" : "Switch to Movie preview",
                           ImVec2(button_width, ImGui::GetFrameHeight() * 1.4f))) {
-            m.show_frame = !m.show_frame;
-            m.show_overlay_preview = m.show_frame;
+            movie_set_scene_view(data, m.show_frame);
         }
-        ImGui::SetItemTooltip("Movie preview shows the recording frame and overlays. Scene view hides them for scene editing.\nThis does not change playback or the recording.");
+        ImGui::SetItemTooltip("Movie preview: the viewport is the movie camera, with the recording frame and the overlays.\nScene view: your own camera, framing the whole camera path (the movie camera is the green one), for editing the path.\nEach keeps its own view. Tab switches; hold Tab to look at the other one for a moment.");
         ImGui::EndDisabled();
         ImGui::Separator();
         draw_movie_preview_controls(data);

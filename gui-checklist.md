@@ -120,6 +120,13 @@ Open **Windows > Movie**: the timeline is on the left and tabbed controls on the
 - [ ] Ruler (first lane): seconds on its axis; zoom in with Ctrl + wheel until a tick per frame appears, with frame numbers at some of them that follow the zoom; the notes (markers) are yellow triangles with their label, hovering shows the time, clicking goes there; clicking and dragging elsewhere in the ruler moves the preview time (the viewport follows, it lands on frames with **Snap to frames**). It is not editable while recording and shows the red recording time.
 - [ ] Every lane has its name in its top left corner (Camera, Look parameter, Representation, Representations, Overlays, Time).
 
+- [ ] Scene view / Movie preview: the first **Switch to Scene view** moves the viewport back so the whole path (blue, yellow, key handles) is in sight, from the direction you were looking; the frame and overlays are gone. Orbit and zoom the viewport freely. **Fit path** frames the path again.
+- [ ] In Scene view with **Animate camera** on: scrub the timeline and play the preview: the green camera moves along the path and the trajectory plays, the viewport does not move. Clicking a key (lane, table **Go To**, viewport handle) moves the playhead and the green camera only.
+- [ ] **Switch to Movie preview** goes back to the movie camera (at the preview time with **Animate camera**, otherwise to the view you had in Movie preview), with the frame. Switching again returns to the Scene view pose you left. Tab does the same switching; holding Tab for more than a third of a second and letting go returns to the first mode. Tab does nothing while typing in a text field or while recording.
+- [ ] The path is hidden in Movie preview and shown in Scene view; **In Movie preview** (path options) shows it in both.
+- [ ] **Add Keyframe** (K) in Scene view adds a key on the path at the preview time (the camera does not change); with no keys, it takes the view you had in Movie preview. **Key on Selection** in Scene view adds a key that frames the selected atoms from the movie camera's direction without moving the viewport. **Update position** in the table is off in Scene view.
+- [ ] Record from Scene view: the recording uses the movie camera and the viewport goes back to its Scene view pose afterwards.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.
