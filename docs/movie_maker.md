@@ -2,21 +2,24 @@
 
 VIAMD can record a movie of a trajectory. You set how long the movie is, and you can place camera keyframes, key look parameters (exposure, background and so on) and the properties of representations (show or hide one, change its size or color), and add overlays (text, a time stamp, a scale bar, a time bar, images, plots of properties of the trajectory, the visualization of a script property and the VIAMD logo). The result is an MP4 file (H.264 or H.265) or a WebM file, encoded by ffmpeg, or a numbered PNG sequence.
 
-![The Movie window (right) and the Movie Timeline (bottom left), with the camera path drawn in the viewport](images/movie/overview.png)
+![The earlier two-window movie editor, with the camera path drawn in the viewport](images/movie/overview.png)
 
-There are two windows, both opened from the **Windows** menu:
+Open the combined editor with **Windows > Movie**:
 
-- **Movie**: all the settings, the keyframe table and the record button.
-- **Movie Timeline**: lanes with the trajectory frame, camera distance, field of view, a look parameter, a property of a representation and the overlays over time. Here you can drag keys and overlays and scrub. It is closed when VIAMD starts and when a workspace is loaded.
+- **Left:** timeline lanes for the trajectory frame, camera, distance, field of view, looks, representations and overlays. Drag the divider to resize the two panels.
+- **Right:** tabs for **Output**, **Timing**, **Camera**, **Looks**, **Representations** and **Overlays**. Both panels scroll independently. The **Timeline** and **Controls** boxes hide either panel; at least one stays visible.
+- **Top:** shared preview playback, repeat, scrubber and **Add Keyframe** controls. The large button at the top right switches between **Scene view** (plain viewport) and **Movie preview** (recording frame and overlays). It does not start or stop playback or alter the recording.
+
+The screenshots below show the earlier two-window layout; the controls now live in the combined editor.
 
 ## Quick start
 
 1. Load a trajectory and open **Windows > Movie**.
 2. Under **Output**, click **Select Output Folder...** and pick a format.
 3. Set **Movie length (s)** and press Enter. At first the trajectory fills the whole movie.
-4. Move **Preview time (s)** to 0, set up the view, and press **K** (or **Add Keyframe (current view)**).
+4. Move the top preview slider to 0, set up the view, and press **K** (or **Add Keyframe**).
 5. Move the preview time, set up another view, and press **K** again. Repeat as needed.
-6. Tick **Animate camera** and press **Play Preview** to watch the movie in the viewport. While a movie window is open the viewport shows the frame of the movie (**Show frame**), so what is in it is what will be recorded.
+6. In **Camera**, tick **Animate camera** and press **Play Preview** to watch the movie. Choose **Movie preview** with the top-right button to see the recording frame and overlays.
 7. Press **Start Recording**. Press **Esc** or **Stop Recording** to stop early.
 
 When the recording is done, your own view, the animation playback and the screenshot settings are put back as they were.
@@ -62,7 +65,7 @@ To make the trajectory play faster or slower in parts of the movie, pin frames o
 A keyframe is a camera (where the eye is, where it looks, its distance and its field of view) at a time in the movie. Between keyframes the camera moves smoothly. Before the first and after the last keyframe it holds still.
 
 - **Animate camera**: while previewing or recording, the camera follows the keyframes. When it is off, the camera stays where you leave it and only the trajectory plays.
-- **Show path in viewport**: draws the camera's path over the viewport (the movie window or the Movie Timeline has to be open). It is not part of the recorded frames.
+- **Show path in viewport**: draws the camera's path over the viewport while the Movie editor is open. It is not part of the recorded frames.
     - The path of the eye is blue and the path of the look-at point yellow. Each is brighter ahead of the preview time than behind it.
     - **Time ticks**: a dot at round times along the path (the step adapts to the length of the movie) with the time next to some, and chevrons that show the direction. Dots close together are where the camera is slow, dots far apart where it is fast, so the easing can be read from them. Yellow diamonds mark the same times on the look-at path.
     - **Sight lines**: a thin line from the eye to what it looks at at each tick.
@@ -73,6 +76,7 @@ A keyframe is a camera (where the eye is, where it looks, its distance and its f
     - The **green camera** is where the camera is at the preview time: a green dot on the eye, a green ring with a cross where it looks (**looks at**), and a thick green line with an arrow from one to the other. The view the key handles are in is the viewport's, so move around the scene to see the path from other sides.
     - With keys that follow that follow a target or an atom, the path is the one the camera takes as the target moves through the trajectory: it is computed a few points at a time (the trajectory frames have to be read), so it appears from the start and grows for a moment, and the old path stays until the new one is done.
 - **Seamless loop** and **Close Loop**: makes the camera path cyclic, so a movie played on repeat has no jump. **Close Loop** adds a final key in the first key's pose and turns the loop on.
+- **Keep upright** (on for new movies), **Up** and **From view**: the camera stays level, with the chosen world axis (+X, +Y, +Z, -X, -Y, -Z) up on the screen, so loops and spins cannot leave it tilted or upside down. **From view** picks the axis closest to the view's up now. The keyframes then only give where the camera looks from and at; its tilt is each keyframe's **Roll (deg)** in the keyframe table (positive leans the camera to the left, **0** levels it), and the movie goes smoothly from one roll to the next. A spin around **Camera up** turns around the up axis. Off, the camera goes through the keyframes' own tilts, as in workspaces saved before this option, and the **Roll** column shows each keyframe's tilt with a **Level** button that straightens it.
 - **Play Preview**, **Repeat** and **Preview time (s)**: play or scrub the movie in the viewport at its real speed, without recording.
 - **Add Keyframe (current view)** (shortcut **K** while a movie window is open): adds a key of the current view at the preview time. A key at the same time is replaced. Tick **with trajectory frame** to also pin the trajectory frame shown now.
 - **Key on Selection**: adds a key at the preview time that frames the selected atoms, seen from the direction the camera has now, and moves the viewport there. Molecules split by the periodic cell are framed as one.
@@ -90,6 +94,7 @@ The columns can be resized by dragging their borders. When they are wider than t
 | **Name** | What you call the key ("intro", "close-up", up to 23 characters). It is shown next to the number in the camera lane and saved with the workspace. |
 | **Time (s)** | When in the movie. The list re-sorts when you finish editing. |
 | **FOV (deg)** | Field of view. Narrow it to zoom in without moving the camera. |
+| **Roll (deg)** | With **Keep upright** on: the camera's tilt at this key (positive leans it to the left); **0** levels it. Off: the key's measured tilt, read only, and **Level** straightens it. |
 | **Ease** | How the movie gets *to* this key from the previous one. **Smooth** passes through without stopping, **Ease in/out** slows down at both ends, **Linear** moves at constant speed, **Hold** stays put and then jumps. |
 | **Frame** | Tick to pin a trajectory frame to this key, then drag the number. Pins control the trajectory's speed (see above). A frame lower than the previous pin plays backwards. |
 | **Spin** | Extra whole turns around the look-at point on the way to this key. **...** opens the axis and a **Constant speed** option. |
@@ -133,13 +138,14 @@ Changing tint or saturation recolors the atoms of that representation every fram
 
 #### Seeing and editing when representations are shown
 
-The **Representation overview** lane of the Movie Timeline shows all of them at once, one row each, as bars: a bar is a stretch where the representation is shown (from the key that shows it to the key that hides it, or to the end of the movie). The bar grows in over the **Transition (s)** after its start and fades away over it after its end, as the representation does. Small white triangles on a row are the keys of its other properties (a scale, the tint, a colour).
+The **Representation overview** lane has one row per system (protein, ligand, water, etc.). Each coloured, labelled block is a stretch where one representation is shown. Colours identify representation types. Systems are separated by a gap, a divider and alternating shading. A block that starts where another ends stays on the same line and the two cross-fade over **Transition (s)**; only representations shown at the same time stack. With **One line per system** (the default) every system has the same height and its stacked blocks share it; untick it to give each stacked block a full line, the lane then growing to fit unless **Fit to window** is on. A representation that is enabled without visibility keys has a block covering the whole movie.
 
 - Drag a bar to move when the representation is shown, or one of its ends to change when it starts or stops. The times land on frames with **Snap to frames**, and a bar stays between its neighbours.
-- A **double click** on an empty place of a row adds a bar there (a tenth of the movie long, up to the next bar). A **right click** on a bar removes it.
+- **Double-click** empty space in a system row to choose which of its existing representations to add (a tenth of the movie long, up to that representation's next block). It may overlap other representations of the system.
+- **Right-click** a block to switch that interval to another existing representation of the same system or **Remove block**. Switching preserves other systems and property keys; existing target blocks that overlap the interval are merged. Removing the last block keeps that representation hidden.
 - Clicking a bar selects the representation (and its **Visible** property) for the **Representation lane**, which shows and edits the values.
 
-*Groups.* Representations named alike up to the first hyphen are a group: `protein-cartoon` and `protein-cpk` are the group `protein`, with the members `cartoon` and `cpk`. A name without a hyphen is a group of its own (`protein` next to `protein-cpk` is a member of the group `protein` too, named `protein`). A group gets a row of its own above its members, in a colour that its members share, which shows when any of them is shown. Dragging a group's bar moves the bars of its members that are in it, by the same time; dragging its left end changes the members that start there, and its right end the ones that stop there. The buttons **+ group** and **- group** next to the lane fold and unfold a group.
+*Systems.* Representations named alike up to the first hyphen share one row: `protein-cartoon`, `protein-cpk` and `protein-vdw` belong to `protein`. A plain `protein` belongs to the same row; its block uses the representation type as its label. Names without a hyphen otherwise give a system of their own. Rename representations in the Representations window to group them; switching a block chooses an existing representation, not a new molecular selection.
 
 *Swap.* **Swap with the next of its group** hands over at the preview time from the selected representation to the next one of its group, with the transition: for example `protein-cartoon` shrinks away while `protein-cpk` grows in. A representation without keys is taken to have been shown (the one that goes) or hidden (the one that comes) until then.
 
@@ -155,7 +161,7 @@ Under **Visuals > Depth of Field**, **Focus** chooses what is sharp:
 
 ### Overlays
 
-Overlays are drawn into the recorded frames, and into the viewport while you edit. Add them with the buttons above the list of overlays in the Movie window: **Add Text**, **Add Time Stamp**, **Add Scale Bar**, **Add Time Bar**, **Add Timeline**, **Add Distribution**, **Add Property**, **Add Logo** and **Add Image...**. A new movie starts with the VIAMD logo in the top left corner for the whole movie; **Remove** it if you do not want it (a saved workspace remembers that).
+Overlays are drawn into recorded frames and into the viewport in **Movie preview**. In the **Overlays** tab, use **Add overlay...** to choose a type. Select one overlay in the compact list to edit it: **Content** holds type-specific settings, **Timing** holds its range and fades, and **Appearance** holds position, size and colours. Subplot details and **Plot style** are expandable. Clicking an overlay bar in the left timeline selects it and opens its inspector. A new movie starts with the VIAMD logo in the top left corner for the whole movie; **Remove** it if you do not want it (a saved workspace remembers that).
 
 #### What every overlay has
 
@@ -164,7 +170,7 @@ Overlays are drawn into the recorded frames, and into the viewport while you edi
 - **Position**: one of nine anchors in the frame.
 - **Size**: a part of the height of the frame, or in points. A point is a pixel of a frame that is 1080 pixels high, scaled with the frame, so a size looks the same at any resolution; changing the unit keeps the size as it is. For text it is the height of the text, for a logo or an image its height, for a timeline or a distribution the height of the whole stack.
 - **Color** and a **Background** plate, to read it over a busy picture (no plate while its opacity is 0).
-- On the **Movie Timeline** every overlay is a bar in the overlay lane, where it can be dragged (see below).
+- In the left timeline panel every overlay is a bar in the overlay lane, where it can be dragged (see below).
 
 #### Text, time stamp and scale bar
 
@@ -174,15 +180,17 @@ Overlays are drawn into the recorded frames, and into the viewport while you edi
 
 #### Logo and images
 
-The logo is the VIAMD icon (`icon/viamd.png`) on a transparent background. The light grey of the icon is made black, so the lettering has a strong contrast on a light picture; on a dark picture give it a light **Background** plate. Its **Color** multiplies the picture (white keeps it as it is). **Add Image...** asks for a png or jpg file (a group's logo, a figure) and shows it like the logo, with its transparency kept. The file is saved in the workspace as a path relative to it, so keep it with the workspace. **Reload** reads it again after it was changed, and the box turns red when it cannot be read.
+The logo is the VIAMD icon (`icon/viamd.png`) on a transparent background. The light grey of the icon is made black, so the lettering has a strong contrast on a light picture; on a dark picture give it a light **Background** plate. Its **Color** multiplies the picture (white keeps it as it is). **Add overlay... > Image** asks for a png or jpg file (a group's logo, a figure) and shows it like the logo, with its transparency kept. The file is saved in the workspace as a path relative to it, so keep it with the workspace. **Reload** reads it again after it was changed, and the box turns red when it cannot be read.
 
 #### Time bar
 
 A bar that shows how far the trajectory has gone. It fills from left to right whichever way the trajectory is played (a trajectory played backward still fills it forward), fast where the trajectory is played fast, slowly where it is slowed down and not at all where it is held, so it shows the pace of the movie. **Width** is a part of the width of the frame and **Size** the height of its text. **Time that has gone** writes the trajectory time covered so far over the whole, and **Speed** how fast it plays as a multiple of the speed of the Animation window (x1.0 is the same).
 
+The unfilled track is neutral grey, independent of the fill colour. New time bars also have a translucent grey background plate; adjust it under **Appearance > Background**. Existing workspaces keep their saved plate colour.
+
 #### Timeline and distribution
 
-**Add Timeline** and **Add Distribution** draw subplots of the **Timelines** and **Distributions** windows into the movie, as it plays. A timeline is wide and low, at the bottom center of the frame, and a distribution is narrow and tall, at the middle of the right side; both can be moved and resized like any overlay.
+**Add overlay... > Timeline** and **Distribution** draw subplots of the **Timelines** and **Distributions** windows into the movie, as it plays. A timeline is wide and low, at the bottom center of the frame, and a distribution is narrow and tall, at the middle of the right side; both can be moved and resized like any overlay.
 
 *Which subplots.* A new overlay holds the subplots of its window that have series. **Add subplot** adds another, **Up** moves one up the stack and **Remove** takes it out; several subplots are stacked, each with its own scale and legend. What is drawn is what is in the subplot in its window, in the colours it has there, at most six series per subplot and the first member of a population. A subplot is found by an identity of its own and not by its position, so changing the number of subplots, or naming them, does not change what an overlay draws. Name the subplots in the **Subplots** menu of their window (**Names**). A subplot that is gone, or has no series, is reported in the overlay and not drawn.
 
@@ -191,27 +199,29 @@ A bar that shows how far the trajectory has gone. It fills from left to right wh
 - **Timeline.** Its horizontal axis is by default **Elapsed time**: the trajectory time that the movie has covered, as in the time bar. The curve always grows to the right, also where the movie plays the trajectory backward (the series is then read backward; where the movie turns back the curve goes on to the right, and a hold adds nothing). **Trajectory time** is the time of the trajectory itself, turned around when the movie plays it backward. The axis is the whole movie, from 0 to the total time that the movie covers, and the curve is drawn from the start of the movie up to now, so a timeline that appears late already shows what happened before, with the same labels as ever. The overlay's own range only decides when it is visible. Timelines above each other share the axis, with its labels under the last.
 - **Distribution.** It is counted over the frames that have been played since the movie started, so its bars grow to the shape of the whole, also when it appears late. A distribution of a script that is not over frames (an RDF, say) is drawn as it is.
 
+*Number of bins.* Distribution overlays have a **Number of bins** control (2 to 4096), applied to all their subplots without changing the Distributions window. New overlays use 128 bins. **Use source bin counts** instead keeps each series' own setting, which is also the default for older workspaces. Script distributions can only be coarsened to a divisor of the resolution at which they were evaluated.
+
 *Properties that come in at different times.* Each subplot in the list has **in at** and **out at** times (in movie seconds, inside the range the overlay is shown in; **stays to the end** when they are the same), and **In at preview time** takes the first from the preview. A subplot that is added while the preview is later in the overlay comes in there. It fades in and out with the fades of the overlay. A property that comes in later is drawn from the start of the movie, as if it had been there all along: a curve that comes in at 30 s appears with what it did from the start up to then and goes on growing, and a distribution has counted every frame played since the movie started. The plate only covers the subplots that are there, so it grows when one comes in, and the place of a subplot that is not there yet stays free, so the others do not move. For another place, use another overlay.
 
 *Titles and look.*
 - **Titles** writes a title above each subplot: the **Title** typed in its row, or else the name of the subplot (none if it has neither).
 - **Text (points)** and **Lines (points)** set the text and the lines in points (0 follows the height). **Colours** gives the series a set of colours of their own instead of the ones they have in the plots, and the two buttons set light text on a dark plate or dark text on a light plate, for a dark or a light picture. **Width** is a part of the width of the frame.
 
-*Markers.* Markers are notes on the timeline of the movie ("water appears"). **Add marker at the preview time** or **Add one at each camera key** (below the list of overlays), then set the time and the label. A timeline draws them as a line with the label where the movie gets to them (**Markers** in the overlay turns this off). They scale with the movie length and are part of undo.
+*Markers.* Expand **Timeline markers** below the overlay inspector. **Add marker at the preview time** or **Add one at each camera key**, then set the time, label and target subplot. **All timeline subplots** preserves the previous behavior; choosing a subplot puts the line and label on that subplot only, in any timeline overlay that contains it. Targets use stable subplot identities and survive renaming and workspace save/load. Missing targets are reported instead of reassigned. **Markers** in an overlay hides its markers. Marker targets and bin counts are included in undo/redo; marker times scale with movie length.
 
 #### Property visualization
 
-**Add Property** shows the visualization of a script property in the viewport while the overlay is shown: the atoms, the geometry and the labels that hovering its plot shows. Type the identifier of the property or pick it from the script. It is in the recording too, with its labels, and it fades in and out with the **Fade in** and **Fade out** of the overlay. The script has to have evaluated the property.
+**Add overlay... > Property** shows the visualization of a script property in Movie preview while the overlay is shown: the atoms, the geometry and the labels that hovering its plot shows. Type the identifier of the property or pick it from the script. It is in the recording too, with its labels, and it fades in and out with the **Fade in** and **Fade out** of the overlay. The script has to have evaluated the property.
 
 #### Seeing them while you edit
 
-**Show in viewport** previews the overlays at the preview time. **Show frame** (on by default, while the Movie window is open and nothing is being recorded) draws the frame of the movie in the viewport, in its proportions, with what is outside it dimmed and its size written above it. The view is widened so that the frame shows what the recording will show, and the overlays are laid out in the frame, so what you see in it is what is recorded, whatever the shape of the viewport. It does not change the camera keys or the recording; switch it off to see the plain viewport.
+The top-right button switches between **Movie preview** and **Scene view**. Movie preview draws the recording frame in the viewport, dims the outside and widens the view to match the recording. The overlays are laid out in that frame. Scene view hides the frame and overlays, including property visualization overlays, while keeping camera-path editing available. Switching modes does not change camera keys, playback or recorded output; it is disabled while recording.
 
-## The Movie Timeline window
+## The left timeline panel
 
 ![The Movie Timeline](images/movie/movie_timeline.png)
 
-Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **Repeat**, a playhead slider and **Add Keyframe**. Below are lanes with real axes, which share the time axis:
+Open **Windows > Movie** and leave **Timeline** ticked. Playback, the scrubber and **Add Keyframe** are shared in the editor's top toolbar. Expand **Lanes and layout** to choose lanes, snapping, zoom reset, lane height and fit behavior. The lanes have real axes and share the time axis:
 
 - **Trajectory**: the trajectory frame shown at each moment. The blue **Start** and **End** lines are when the trajectory starts and stops; drag them. Orange dots are keys with a pinned frame: drag sideways to change the time and up or down to change the frame.
 - **Camera lane** (tick **Camera lane**, at the top): the camera on one lane. The first row has the keys as orange dots with their number and name (the one at the preview time is yellow). Drag a key sideways to change when, click it to go there, right-click it for a menu with its name, **Go to** and **Remove**, and double-click on an empty place to add a key at that time on the camera's path, so the camera does not move. The row **Look at** has a band over the keys that look at the follow target (teal) or at an atom of their own (blue, with the atom's number), the row **Spin** a purple band over each stretch with extra turns (for instance `+2 x`) and the row **Frame** a green mark at each key that pins a trajectory frame, with the frame number. Hover a band for its details. A key added by double-click follows what the keys on both its sides follow; the turns of a spin stay with the part of the stretch that ends at the later key.
@@ -222,23 +232,24 @@ Open it with **Windows > Movie Timeline**. Its top line has **Play Preview**, **
 - **Representation overview** (tick **Representation overview**): when each representation is shown, as bars, grouped by name (see *Seeing and editing when representations are shown* above).
 - **Overlay lane** (tick **Overlay lane**): the overlays as bars, one row each and a colour for each kind, with the notes of the movie (markers) as small yellow triangles at the bottom. Drag a bar to move when the overlay is shown, or one of its ends to change when it starts and stops (it lands on frames with **Snap to frames**). Moving a whole bar moves the in and out times of the subplots of a timeline or a distribution with it, and the small ticks in such a bar are where subplots come in later. Hover a bar for its name and times.
 
-The yellow line is the playhead. Ctrl + wheel zooms the time, drag the background to pan, and use **Show whole movie** to reset. Every lane has at least the **Lane height** (a slider, 60 to 400 px), and the window scrolls with the wheel when the lanes do not fit, so many lanes stay readable; the overlay lane gets enough height for its rows. **Fit to window** instead shares the height of the window between the lanes, however small, and then the wheel zooms the time. Drag between lanes to change their heights. Untick **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane**, **Representation lane**, **Representation overview** or **Overlay lane** to hide a lane. Which lanes are shown, the lane height and **Fit to window** are saved in the workspace. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
+The yellow line is the playhead. Ctrl + wheel zooms the time, drag the background to pan, and use **Show whole movie** to reset. Every lane gets the **Lane height** (a slider, 60 to 400 px) times its own proportion, which dragging a divider changes, and the window scrolls with the wheel when the lanes do not fit; the representation overview, overlay and camera lanes grow to fit their rows without making the other lanes taller. **Fit to window** instead shares the height of the window between the lanes, however small, and then the wheel zooms the time. Drag between lanes to change their heights. Untick **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane**, **Representation lane**, **Representation overview** or **Overlay lane** to hide a lane. Which lanes are shown, the lane height, **Fit to window** and **One line per system** are saved in the workspace. With **Snap to frames** ticked (the default), keys, the playhead and the trajectory's start and end that you drag, and keys added at the preview time, land on a frame of the movie (at the **Output FPS**), so a change happens on a frame and not between two.
 
 ## Saving
 
-The movie (length, trajectory timing, camera keys including what they look at, look parameter keys, representation keys, overlays, markers, follow target and the lanes of the Movie Timeline) is saved in the workspace (`.via`) under `[Movie]`, together with the names of the subplots of the Timelines and Distributions windows that the overlays use. Workspaces from earlier versions load and are converted (an older timeline or distribution overlay finds the subplots it had). The setting **Show frame** and the preview of overlays are not saved.
+The movie (length, trajectory timing, camera keys including what they look at, look parameter keys, representation keys, overlays including distribution bin counts, markers including subplot targets, follow target and timeline lanes) is saved in the workspace (`.via`) under `[Movie]`, together with the names of the subplots of the Timelines and Distributions windows that the overlays use. Workspaces from earlier versions load and are converted. The viewport mode and which editor panels are visible are not saved.
 
 ## Example workspace
 
-[`examples/aspirin_phospholipase_movie.via`](examples/aspirin_phospholipase_movie.via) is a finished 80 s movie of aspirin in phospholipase. The trajectory plays backward, from its last frame to its first. It has camera keys (the first ones follow a target), a keyed depth of field blur, representation keys (parts of the structure grow in at their time, and the ligand shrinks as the camera comes in), two markers ("Pocket shown" and "Aspirin enters the pocket"), and these overlays: the logo, a title, a time stamp, a scale bar, a time bar, a timeline of two script properties (the second comes in later), a distribution with a title, and the visualization of three script properties, each shown for a few seconds. It is kept as the worked example and is updated when the features grow. It opens with the playhead at the end of the movie: drag **Preview time** back to 0 and play it, and look at what each overlay and lane does.
+[`examples/aspirin_phospholipase_movie.via`](examples/aspirin_phospholipase_movie.via) is an 80 s movie of aspirin in phospholipase. The trajectory plays backward, from its last frame to its first. It has camera keys (the first ones follow a target), keyed depth of field blur, representation keys, two markers ("Pocket shown" and "Aspirin enters the pocket"), the logo, title, time stamp, scale bar, a time bar with a grey plate, four timeline subplots that come in at different times, a 128-bin distribution with a title, and three property visualization overlays. It opens at the saved preview time (about 55.45 s): drag the top preview slider to 0 and play it. The user's timing, positions, colours and keys are retained.
 
-It refers to `aspirin-phospholipase.gro` and `.xtc` in its own folder, which are not part of the repository. Put your copy of the two files next to the workspace, then **File > Open Workspace**.
+It refers to `aspirin-phospholipase.gro`, `.xtc` and `.edr` in its own folder, which are not part of the repository. Put your copies next to the workspace, then **File > Open Workspace**.
 
 ## Tips
 
 - Plan the length first, then place keys. If the movie is too fast or too slow, change **Movie length** and everything stays in proportion.
 - For a fly-over before the dynamics start, drag the blue **Start** line to the right. The trajectory waits on its first frame until then.
 - To slow down an interesting event, pin frames on two keys around it and move them further apart in time.
+- If a loop or spin leaves the camera tilted or upside down, tick **Keep upright** (use **From view** if your molecule's up is not +Y).
 - **Smooth** keys never stop the camera. Use **Ease in/out** or **Hold** where the camera should rest.
 - PNG sequences are safest for very long or very large movies. Encode them afterwards with **Copy ffmpeg command**.
 - Check the motion at **Scale** 25 % and with few **Samples per frame** first, then make the final movie at full size. To fix one part afterwards, use **Render only a range** with a PNG sequence and replace the files.
@@ -250,3 +261,4 @@ It refers to `aspirin-phospholipase.gro` and `.xtc` in its own folder, which are
 - Distance and field of view are edited in the table and the viewport. In the timeline their dots only move in time.
 - Solid representations cannot fade: they grow in and shrink away instead (see **Representations**).
 - The Representations window is locked while recording.
+- With **Keep upright**, a spin around a horizontal axis flips over at the top and bottom (the camera cannot stay level looking straight along the up axis). Roll eases as a number, so going from 170 to -170 degrees turns the long way round.

@@ -1090,16 +1090,19 @@ struct ApplicationState {
     // --- MOVIE RECORDING ---
     struct {
         bool  show_window = false;
-        bool  show_timeline_window = false;  // Opened explicitly from the window menu
+        bool  editor_timeline = true;
+        bool  editor_controls = true;
+        bool  editor_select_overlays = false;
+        int   overlay_selected = 0;
         bool  timeline_tracks[3] = {true, true, true};
         bool  timeline_param_lane = true;     // The lane of a keyed look parameter
         bool  timeline_rep_overview = true;   // When each representation is shown, as bars, grouped by name
-        std::vector<std::string> rep_groups_collapsed;   // The groups of the overview that show only their own row (not saved)
         bool  timeline_rep_lane = true;       // The lane of a keyed property of a representation, below the look parameter's
         bool  timeline_camera_lane = true;    // The camera keys, what they follow and where they spin, on one lane above the curves
         float timeline_row_ratios[8] = {1, 1, 1, 1, 1, 0.6f, 0.8f, 0.6f};
-        float timeline_lane_height = 150.0f;  // The least height of a lane, in pixels: the window scrolls when they do not fit
+        float timeline_lane_height = 150.0f;  // The height of a lane at ratio 1, in pixels, when the window scrolls instead of fitting them
         bool  timeline_fit_window = false;    // The lanes share the height of the window instead, however small
+        bool  timeline_rep_equal_rows = true; // Every system has a band of one row's height, its overlapping blocks share it
         bool  timeline_overlay_lane = true;   // The overlays as bars, below the lane of the representation
         double timeline_view_begin = 0.0;
         double timeline_view_end = 0.0;
@@ -1186,7 +1189,8 @@ struct ApplicationState {
         md_array(CameraKeyframe) keyframes = 0;
         bool animate_camera = false;
         bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
-
+        bool keep_upright = true;             // The camera stays level about up_axis, tilted only by the keys' roll
+        int  up_axis = 1;                     // The world axis that is up for keep_upright: +X, +Y, +Z, -X, -Y, -Z
         // The camera can look at the middle of these atoms rather than a fixed point (keys with 'follow')
         md_bitfield_t follow_mask = {};
         bool   key_follow     = false;        // What 'Add Keyframe' makes

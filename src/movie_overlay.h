@@ -58,7 +58,10 @@ struct MoviePlotPanel {
 struct MovieMarker {
     double time = 0.0;      // Movie time, in seconds
     char   label[48] = "";
+    uint32_t subplot = 0;   // Stable timeline subplot id; 0 draws on all timeline subplots
 };
+
+bool movie_marker_matches_subplot(const MovieMarker& marker, uint32_t subplot);
 
 // What the horizontal axis of a timeline overlay is
 enum class MoviePlotAxis : int {
@@ -91,11 +94,16 @@ struct MovieOverlay {
     float              font_points = 0.0f;    // Timeline, Distribution: the text, in points (see MovieOverlaySizeUnit), 0 follows the height
     float              line_points = 0.0f;    // Timeline, Distribution: the width of the lines, in points, 0 follows the text
     int                palette = 0;           // Timeline, Distribution: 0 the colours of the plots, else a colour set of its own (movie_plot_palette_name)
+    int                num_bins = 0;          // Distribution: 0 keeps each source series' bin count
     bool               show_markers = true;   // Timeline, Distribution: the markers of the movie, on its timelines
     bool               show_titles = false;   // Timeline, Distribution: the name of each subplot above it (when it has one)
     bool               reveal = true;         // Timeline, Distribution: only what the movie has played so far
     bool               show_value = true;     // Timeline, Distribution: the value at the frame that is shown, in the legend
 };
+
+constexpr int MOVIE_DISTRIBUTION_MIN_BINS = 2;
+constexpr int MOVIE_DISTRIBUTION_MAX_BINS = 4096;
+int movie_distribution_bins(const MovieOverlay& overlay, int source_bins);
 
 // Names of the colour sets a figure can have of its own (index 0 is the colours of the plots themselves)
 constexpr int MOVIE_PLOT_PALETTE_COUNT = 5;

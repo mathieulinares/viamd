@@ -43,7 +43,7 @@ static bool equal(const CameraKeyframe& a, const CameraKeyframe& b) {
            a.use_frame == b.use_frame && a.frame == b.frame &&
            a.spin_turns == b.spin_turns && a.spin_axis == b.spin_axis && a.spin_constant_speed == b.spin_constant_speed &&
            a.follow == b.follow && a.follow_center.x == b.follow_center.x && a.follow_center.y == b.follow_center.y &&
-           a.follow_center.z == b.follow_center.z && a.follow_atom == b.follow_atom && strcmp(a.name, b.name) == 0;
+           a.follow_center.z == b.follow_center.z && a.follow_atom == b.follow_atom && strcmp(a.name, b.name) == 0 && a.roll == b.roll;
 }
 
 static bool equal(const ParamKey& a, const ParamKey& b) {
@@ -220,6 +220,15 @@ void rep_move_interval(std::vector<RepKey>* keys, uint32_t rep, const RepInterva
     }
 }
 
+std::vector<RepInterval> rep_effective_intervals(const std::vector<RepKey>& keys, uint32_t rep, double duration, bool enabled) {
+    if (!visible_key_order(keys, rep).empty()) return rep_shown_intervals(keys, rep, duration);
+    if (!enabled || duration <= 0.0) return {};
+    RepInterval interval;
+    interval.end = duration;
+    interval.begin_is_start = true;
+    return {interval};
+}
+
 bool rep_add_interval(std::vector<RepKey>* keys, uint32_t rep, double begin, double end, double duration) {
     const std::vector<RepInterval> all = rep_shown_intervals(*keys, rep, duration);
     double next = duration;
@@ -236,10 +245,52 @@ bool rep_add_interval(std::vector<RepKey>* keys, uint32_t rep, double begin, dou
 }
 
 void rep_remove_interval(std::vector<RepKey>* keys, const RepInterval& iv) {
+    const uint32_t rep = iv.begin_key >= 0 && iv.begin_key < (int)keys->size() ? (*keys)[iv.begin_key].rep : 0;
     int a = iv.begin_key, b = iv.end_key;
     if (a < b) std::swap(a, b);
     if (a >= 0 && a < (int)keys->size()) keys->erase(keys->begin() + a);
     if (b >= 0 && b < (int)keys->size()) keys->erase(keys->begin() + b);
+    if (rep) {
+        const auto order = visible_key_order(*keys, rep);
+        if (order.empty() || ((*keys)[order.front()].time > REP_EPS && (*keys)[order.front()].value[0] >= 0.5f)) {
+            keys->push_back(hidden_key(rep, 0.0));
+        }
+    }
+}
+
+void rep_transfer_interval(std::vector<RepKey>* keys, uint32_t from, uint32_t to, const RepInterval& iv, double duration) {
+    if (from == to) return;
+    std::vector<RepInterval> intervals = rep_shown_intervals(*keys, to, duration);
+    intervals.push_back(iv);
+    intervals = rep_union_intervals(intervals);
+    rep_remove_interval(keys, iv);
+    keys->erase(std::remove_if(keys->begin(), keys->end(), [to](const RepKey& key) {
+        return key.rep == to && key.prop == (int)RepProp::Visible;
+    }), keys->end());
+    if (intervals.front().begin > REP_EPS) keys->push_back(hidden_key(to, 0.0));
+    for (const RepInterval& span : intervals) {
+        keys->push_back(shown_key(to, span.begin));
+        if (span.end < duration - REP_EPS) keys->push_back(hidden_key(to, span.end));
+    }
+}
+
+int rep_pack_blocks(std::vector<RepBlock>* blocks, double transition) {
+    std::vector<double> ends;
+    std::vector<size_t> order(blocks->size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [blocks](size_t a, size_t b) {
+        return (*blocks)[a].interval.begin < (*blocks)[b].interval.begin;
+    });
+    for (size_t i : order) {
+        RepBlock& block = (*blocks)[i];
+        size_t slot = 0;
+        while (slot < ends.size() && ends[slot] > block.interval.begin + REP_EPS) ++slot;
+        const double end = block.interval.end + std::max(transition, 0.0);
+        if (slot == ends.size()) ends.push_back(end);
+        else ends[slot] = end;
+        block.slot = (int)slot;
+    }
+    return std::max((int)ends.size(), 1);
 }
 
 void rep_swap_at(std::vector<RepKey>* keys, uint32_t from, uint32_t to, double t) {
@@ -314,6 +365,25 @@ bool rep_name_split(const char* name, std::string* group, std::string* member) {
     return false;
 }
 
+std::vector<RepRow> rep_system_rows(const std::vector<std::string>& names) {
+    std::vector<RepRow> rows;
+    for (size_t i = 0; i < names.size(); ++i) {
+        std::string group, member;
+        rep_name_split(names[i].c_str(), &group, &member);
+        auto it = std::find_if(rows.begin(), rows.end(), [&group](const RepRow& row) { return row.group == group; });
+        if (it == rows.end()) {
+            RepRow row;
+            row.rep = (int)i;
+            row.label = group;
+            row.group = group;
+            rows.push_back(row);
+        } else {
+            ++it->members;
+        }
+    }
+    return rows;
+}
+
 std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed) {
     struct Group { std::string name; std::vector<int> members; };
     std::vector<Group> groups;
@@ -363,7 +433,7 @@ static bool equal(const RepKey& a, const RepKey& b) {
 }
 
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
-    if (a.loop != b.loop || a.duration != b.duration || a.traj_begin != b.traj_begin || a.traj_end != b.traj_end ||
+    if (a.loop != b.loop || a.keep_upright != b.keep_upright || a.up_axis != b.up_axis || a.duration != b.duration || a.traj_begin != b.traj_begin || a.traj_end != b.traj_end ||
         a.start_frame != b.start_frame || a.end_frame != b.end_frame || a.camera.size() != b.camera.size() ||
         a.params.size() != b.params.size() || a.reps.size() != b.reps.size() || a.overlays.size() != b.overlays.size()) return false;
     for (size_t i = 0; i < a.camera.size(); ++i) {
@@ -380,6 +450,7 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
         const MovieOverlay& y = b.overlays[i];
         if (x.type != y.type || x.enabled != y.enabled || x.begin != y.begin || x.end != y.end ||
             x.fade_in != y.fade_in || x.fade_out != y.fade_out || x.anchor != y.anchor ||
+            x.num_bins != y.num_bins ||
             x.size != y.size || x.size_unit != y.size_unit || x.width != y.width || x.show_elapsed != y.show_elapsed || x.show_speed != y.show_speed || x.legacy_subplot_mask != y.legacy_subplot_mask || x.plot_axis != y.plot_axis || x.font_points != y.font_points || x.line_points != y.line_points || x.palette != y.palette || x.show_markers != y.show_markers || x.show_titles != y.show_titles || x.panels.size() != y.panels.size() || x.reveal != y.reveal || x.show_value != y.show_value || x.length != y.length || strcmp(x.text, y.text) != 0 || strcmp(x.path, y.path) != 0) return false;
         for (int c = 0; c < 4; ++c) {
             if (x.color[c] != y.color[c] || x.background[c] != y.background[c]) return false;
@@ -391,7 +462,8 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
     }
     if (a.markers.size() != b.markers.size()) return false;
     for (size_t i = 0; i < a.markers.size(); ++i) {
-        if (a.markers[i].time != b.markers[i].time || strcmp(a.markers[i].label, b.markers[i].label) != 0) return false;
+        if (a.markers[i].time != b.markers[i].time || a.markers[i].subplot != b.markers[i].subplot ||
+            strcmp(a.markers[i].label, b.markers[i].label) != 0) return false;
     }
     return true;
 }
@@ -522,12 +594,13 @@ std::string camera_key_label(const CameraKeyframe& key, int index) {
     return s;
 }
 
-CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop) {
+CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop, const vec3_t* upright) {
     CameraKeyframe key = {};
     ViewTransform vt;
     float fov_y;
-    camera_keyframes_evaluate(&vt, &fov_y, keys.data(), keys.size(), time, loop);
+    camera_keyframes_evaluate(&vt, &fov_y, keys.data(), keys.size(), time, loop, nullptr, nullptr, upright);
     key.transform = vt;
+    if (upright) key.roll = camera_roll(vt, *upright);
     key.fov_y = fov_y;
     key.time = time;
 

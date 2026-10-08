@@ -850,3 +850,68 @@ UTEST(viamd_camera, trajectory_frame_goes_through_the_anchors_and_the_keys) {
     EXPECT_NEAR(0.0, camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 2.0, 100.0, 1.0), 1.0e-9);
     EXPECT_NEAR(100.0, camera_keyframes_frame_with_anchors(nullptr, 0, 2.0, 0.0, 2.0, 100.0, 2.0), 1.0e-9);
 }
+
+static float v3_dist(vec3_t a, vec3_t b) { return vec3_length(a - b); }
+
+UTEST(viamd_camera, levelling_keeps_where_the_camera_looks_and_makes_it_upright) {
+    Camera c = test_camera();
+    // Upside down: rolled half a turn about where it looks
+    c.orientation = quat_normalize(c.orientation * quat_axis_angle(vec3_set(0, 0, 1), 3.0f));
+    ViewTransform t = c;
+    const vec3_t up = {0, 1, 0};
+    const vec3_t look = camera_get_look_at(t);
+    const vec3_t fwd = t.orientation * vec3_t{0, 0, -1};
+
+    camera_level(&t, up);
+    EXPECT_LT(v3_dist(t.position, c.position), 1.0e-4f);
+    EXPECT_LT(v3_dist(camera_get_look_at(t), look), 1.0e-4f);
+    EXPECT_LT(v3_dist(t.orientation * vec3_t{0, 0, -1}, fwd), 1.0e-5f);
+    EXPECT_LT(fabsf(vec3_dot(t.orientation * vec3_t{1, 0, 0}, up)), 1.0e-5f);  // The horizon is level
+    EXPECT_GT(vec3_dot(t.orientation * vec3_t{0, 1, 0}, up), 0.0f);           // and the right way up
+    EXPECT_NEAR(camera_roll(t, up), 0.0f, 1.0e-4f);
+}
+
+UTEST(viamd_camera, the_roll_that_is_set_is_the_roll_that_is_read) {
+    const vec3_t up = {0, 0, 1};
+    for (float roll : {-2.5f, -0.4f, 0.0f, 0.7f, 3.0f}) {
+        ViewTransform t = test_camera();
+        camera_level(&t, up, roll);
+        EXPECT_NEAR(camera_roll(t, up), roll, 1.0e-4f);
+    }
+    // Positive leans the camera's up to its left
+    ViewTransform t = test_camera();
+    camera_level(&t, up, 0.3f);
+    ViewTransform level = test_camera();
+    camera_level(&level, up);
+    EXPECT_LT(vec3_dot(t.orientation * vec3_t{0, 1, 0}, level.orientation * vec3_t{1, 0, 0}), 0.0f);
+}
+
+UTEST(viamd_camera, an_upright_path_stays_level_through_a_spin_and_goes_through_the_rolls) {
+    const vec3_t up = {0, 1, 0};
+    CameraKeyframe keys[2];
+    for (int i = 0; i < 2; ++i) {
+        ViewTransform t = test_camera();
+        t.position = vec3_set(10.0f * i, 2, 10);
+        camera_aim_at(&t, vec3_set(0, 0, 0));
+        keys[i].transform = t;
+        keys[i].time = 4.0 * i;
+    }
+    // The second key is upside down and tilted, but only its roll counts
+    keys[1].transform.orientation = quat_normalize(keys[1].transform.orientation * quat_axis_angle(vec3_set(0, 0, 1), 2.9f));
+    keys[1].spin_turns = 1;
+    keys[0].roll = 0.0f;
+    keys[1].roll = 0.4f;
+    for (int s = 0; s <= 8; ++s) {
+        ViewTransform vt;
+        float fov;
+        camera_keyframes_evaluate(&vt, &fov, keys, 2, 0.5 * s, false, nullptr, nullptr, &up);
+        const float r = camera_roll(vt, up);
+        EXPECT_GE(r, -1.0e-4f);
+        EXPECT_LE(r, 0.4f + 1.0e-4f);
+    }
+    ViewTransform end;
+    float fov;
+    camera_keyframes_evaluate(&end, &fov, keys, 2, 4.0, false, nullptr, nullptr, &up);
+    EXPECT_NEAR(camera_roll(end, up), 0.4f, 1.0e-4f);
+    EXPECT_LT(v3_dist(camera_get_look_at(end), camera_get_look_at(keys[1].transform)), 1.0e-3f);
+}

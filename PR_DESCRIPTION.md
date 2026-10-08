@@ -4,9 +4,12 @@
 
 This adds a **movie maker** to VIAMD. You set the length of the movie, place camera keyframes and keyed visual settings on a timeline, add overlays (text, time stamp, scale bar, time bar, images, plots of properties, the visualization of a script property, the VIAMD logo), and record. The output is an MP4 (H.264 or H.265) or a WebM (frames piped into ffmpeg) or a numbered PNG sequence.
 
-It has two new windows, both opened from **Windows**:
-- **Movie**: output settings, timing, camera keyframes, look parameters, overlays, and record.
-- **Movie Timeline**: lanes with real axes for the trajectory frame, camera distance, field of view, a look parameter, a property of a representation and the overlays. Keys and overlays can be dragged and the movie scrubbed. The lanes keep a least height (a slider) and the window scrolls (Ctrl + wheel zooms the time), or they can **Fit to window**. Which lanes are shown is saved in the workspace. It is closed on startup and when a workspace is loaded.
+It has one combined **Movie** editor, opened from **Windows**:
+- **Left:** timeline lanes with real axes, draggable keys and overlays, scrolling, frame snapping and time zoom.
+- **Right:** tabbed output, timing, camera, looks, representations and overlays. Drag the divider or collapse either side.
+- **Top:** shared preview controls and a prominent **Scene view / Movie preview** switch. Scene view hides the frame and overlays without changing playback or recording.
+- **Overlays:** compact selectable list and Content/Timing/Appearance inspector; expandable subplot and plot-style controls.
+- Distribution overlays have their own bin count (or retain source counts); markers can target an individual timeline subplot by stable id. Both settings are saved and undoable. Time bars use a grey unfilled track and new ones have a grey plate.
 
 The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspirin_phospholipase_movie.via`](docs/examples/aspirin_phospholipase_movie.via) is a finished movie that uses most of the features (its trajectory files are not in the repository).
 
@@ -33,6 +36,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - Each key stores the pose, field of view and time. Between keys the camera moves smoothly by default (monotone cubic interpolation along the shortest rotation).
 - The way into each key can be set per key: Smooth, Ease in/out, Linear or Hold.
 - **Look at**: click the button, then click an atom, and the key looks at that atom and tracks it through the trajectory. **Update position** moves the key's eye and keeps what it looks at.
+- **Keep upright** (on for new movies): the camera stays level with a chosen world axis up (**Up**, or **From view**), so loops and spins never leave it tilted or upside down; each key has a **Roll** that eases between keys. Off, a **Level** button straightens a key.
 - Extra spin turns per key, Add Orbit, a seamless loop with Close Loop, a follow target (centre of a selection), and drag-to-reorder rows.
 - **Key on Selection** adds a key that frames the selected atoms. Keys can be copied and pasted at the preview time.
 - **Snap to frames**: dragged times land on a frame of the movie.
@@ -48,9 +52,9 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 
 - The camera path in the viewport is drawn over it, with ticks at round times and chevrons that show speed and direction, brighter ahead of the preview time, sight lines, cameras at the keys, rings for spins, and a green camera with the line it looks along at the preview time. Each key has a handle on the eye and one on what it looks at: click to go to the key, drag to edit it (Ctrl moves both), Ctrl + click on the path adds a key.
 
-- The **Camera lane** of the Movie Timeline shows the camera keys (with names that are saved) as dots that can be dragged, clicked, renamed and removed, bands where the camera follows the target or an atom or spins, and the keys that pin a trajectory frame; a double click adds a key on the path without moving the camera.
+- The **Camera lane** of the editor's left timeline shows the camera keys (with names that are saved) as dots that can be dragged, clicked, renamed and removed, bands where the camera follows the target or an atom or spins, and the keys that pin a trajectory frame; a double click adds a key on the path without moving the camera.
 
-- The **Representation overview** lane of the Movie Timeline shows when each representation is shown as bars that can be dragged, resized, added and removed. Representations named alike up to the first hyphen (`protein-cartoon`, `protein-cpk`) are grouped under a row of their group, which can be folded and dragged, and a button swaps a representation with the next of its group.
+- The **Representation overview** has one row per system (name before the first hyphen), with labelled blocks coloured by representation type. Systems are separated by a gap, a divider and alternating shading. A block that starts where another ends stays on the same line and they cross-fade; only representations shown at the same time stack. **One line per system** (on by default) gives every system the same height, with stacked blocks sharing it. Blocks can be moved, resized, added and removed; their context menu switches the interval to another existing representation in the system. Target overlaps merge without disturbing other systems or property keys. Unkeyed enabled representations cover the movie; undo/redo and workspace saving retain edits.
 
 **Depth of field**
 - New focus modes: look-at point (the previous behaviour), a fixed distance that can be keyed, or the follow target.
@@ -62,7 +66,7 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - **Timeline** (wide and low, bottom center) and **distribution** (narrow and tall, middle right) draw subplots of the Timelines and Distributions windows, stacked, as the movie plays: curves and bars grow with the part of the trajectory that has been played, and the legend gives the value at the frame that is shown. A timeline's axis is the elapsed trajectory time like the time bar, so it grows to the right whichever way the trajectory is played. The axis is the whole movie and the curves are drawn from the start of the movie, whenever the overlay appears; each subplot comes in and goes at times of its own. Titles, markers (notes on the movie's timeline), text and lines in points, a colour set of its own and light or dark plate presets.
 - Subplots of the plot windows have saved ids and names, so overlays keep finding them when others are added or renamed. Workspaces from before are converted when read.
 - The **property visualization** overlay shows the atoms, geometry and labels of a script property in the viewport and in the recording, fading with the overlay's fades.
-- **Show frame** draws the frame of the movie in the viewport (dimmed outside, in its proportions) and widens the view to match the recording, so the preview of the camera and the overlays is what is recorded.
+- **Movie preview** draws the frame of the movie in the viewport (dimmed outside, in its proportions) and widens the view to match the recording; **Scene view** hides the frame and overlays for editing.
 
 **Undo/redo** (Ctrl+Z, Ctrl+Y)
 - Covers keys, overlays, length and timing.
@@ -83,19 +87,19 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - `src/plot_series.{h,cpp}`: the subplots of the Timelines and Distributions windows get a stable id and a name.
 - `src/image.{h,cpp}`: decoding of an image in memory (the logo), the bounds of its visible part a fix for dark edges of transparent images and the light grey of the icon made black for the logo; `icon/viamd.png` is baked into the executable by CMake and is the logo.
 - `Representation::id` (`viamd.h`): a stable id for each representation, saved in workspaces, which representation keys refer to.
-- `src/gfx/camera_utils.{h,cpp}` and `camera.h`: keyframe evaluation, anchors, keyed curves, `camera_aim_at`.
+- `src/gfx/camera_utils.{h,cpp}` and `camera.h`: keyframe evaluation, anchors, keyed curves, `camera_aim_at`, `camera_level` and `camera_roll` (keep upright, roll per key).
 - Most of the UI is in `src/main.cpp`. State and workspace I/O are in `viamd.{h,cpp}`.
 
 ### Tests
 New tests are in:
-- `test_camera_utils`: interpolation, easing, spin, loop, follow and anchors.
+- `test_camera_utils`: interpolation, easing, spin, loop, follow, anchors, levelling and roll.
 - `test_movie_keys`: scaling and undo, render range, frame scaling, time left, snapping, representation keys.
 - `test_frame_sink`.
 - `test_movie_overlay`: fades, sizes, the time bar, elapsed curves, ticks, histograms, subplot times, migration of older overlays, the frame fit.
 - `test_image`.
 - `test_serialization`.
 
-All 204 tests pass in a Release build on Linux.
+All 219 tests pass in a Release build on Linux (`./build/bin/viamd_test`). The newer ones cover bin overrides, marker targets, system rows and bands, overlap packing and transition tails, unkeyed visibility, block switching/removal, undo/redo, camera levelling, roll and keep upright.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on, and the screenshots in the manual come from a real run with `1ALA-500.pdb`.

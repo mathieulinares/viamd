@@ -13,6 +13,27 @@ static MovieOverlay make_overlay(double begin, double end, float fade_in, float 
     return o;
 }
 
+UTEST(viamd_movie_overlay, distribution_bins_preserve_sources_or_use_a_bounded_override) {
+    MovieOverlay overlay;
+    EXPECT_EQ(64, movie_distribution_bins(overlay, 64));
+    EXPECT_EQ(8, movie_distribution_bins(overlay, 1));
+    overlay.num_bins = 37;
+    EXPECT_EQ(37, movie_distribution_bins(overlay, 128));
+    overlay.num_bins = -1;
+    EXPECT_EQ(MOVIE_DISTRIBUTION_MIN_BINS, movie_distribution_bins(overlay, 128));
+    overlay.num_bins = 10000;
+    EXPECT_EQ(MOVIE_DISTRIBUTION_MAX_BINS, movie_distribution_bins(overlay, 128));
+}
+
+UTEST(viamd_movie_overlay, markers_target_stable_subplot_ids_or_all_subplots) {
+    MovieMarker marker;
+    EXPECT_TRUE(movie_marker_matches_subplot(marker, 1));
+    EXPECT_TRUE(movie_marker_matches_subplot(marker, 4));
+    marker.subplot = 4;
+    EXPECT_FALSE(movie_marker_matches_subplot(marker, 1));
+    EXPECT_TRUE(movie_marker_matches_subplot(marker, 4));
+}
+
 UTEST(viamd_movie_overlay, it_is_shown_only_within_its_time_range) {
     const MovieOverlay o = make_overlay(2.0, 6.0, 0.0f, 0.0f);
     EXPECT_NEAR(0.0f, movie_overlay_alpha(o, 1.99), 1.0e-6f);

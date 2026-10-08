@@ -3,6 +3,15 @@
 #include <algorithm>
 #include <math.h>
 
+bool movie_marker_matches_subplot(const MovieMarker& marker, uint32_t subplot) {
+    return marker.subplot == 0 || marker.subplot == subplot;
+}
+
+int movie_distribution_bins(const MovieOverlay& overlay, int source_bins) {
+    return overlay.num_bins == 0 ? std::max(source_bins, 8)
+        : std::clamp(overlay.num_bins, MOVIE_DISTRIBUTION_MIN_BINS, MOVIE_DISTRIBUTION_MAX_BINS);
+}
+
 MovieOverlay movie_overlay_default_logo() {
     MovieOverlay o;
     o.type = MovieOverlayType::Logo;

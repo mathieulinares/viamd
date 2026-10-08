@@ -66,4 +66,9 @@ struct CameraKeyframe {
 
     // What the user calls this key ("intro", "close-up"), shown in the lane and the table. Empty: only its number.
     char name[24] = {};
+
+    // The tilt of the view about the direction it looks in, in radians: positive leans the camera's up to the left,
+    // so the image turns clockwise. Used when the movie keeps the camera upright: then the key's stored orientation
+    // only gives where it looks.
+    float roll = 0.0f;
 };

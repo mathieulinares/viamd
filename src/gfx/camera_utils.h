@@ -110,7 +110,16 @@ void camera_interpolate_look_at(vec3_t* out_pos, quat_t* out_ori, float* out_dis
 // follow_now is where the follow target is now. The look-at point of a key with follow is then kept relative to
 // the target, blended with the plain look-at across segments between keys that do and do not follow. Without it,
 // follow is ignored.
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false, const vec3_t* follow_now = nullptr, const vec3_t* key_follow_now = nullptr);
+// With upright, the camera is kept level: its up is turned as close to *upright as it can be about the direction it
+// looks in, then by the keys' roll (interpolated). A spin around the camera's up is then a spin around *upright.
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false, const vec3_t* follow_now = nullptr, const vec3_t* key_follow_now = nullptr, const vec3_t* upright = nullptr);
+
+// Turns the camera about the direction it looks in, so that its up is as close to 'up' as it can be, then by 'roll'
+// radians (positive leans the camera's up to the left). Where it looks from and at stay. Looking along 'up', the
+// camera's right is kept instead.
+void camera_level(ViewTransform* transform, vec3_t up, float roll = 0.0f);
+// The roll that camera_level would need to give this orientation, in radians in [-pi, pi]
+float camera_roll(const ViewTransform& transform, vec3_t up);
 
 // A value that is keyed over time, with the easing of the key that ends each segment (eases[i] shapes the
 // stretch from i - 1 to i; eases[0] is not used). Times must be strictly increasing. Holds the first and

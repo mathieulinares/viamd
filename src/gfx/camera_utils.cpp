@@ -171,6 +171,46 @@ vec3_t camera_position_from_look_at(const vec3_t& look_at, const quat_t& orienta
     return look_at + orientation * vec3_t{0, 0, distance};
 }
 
+// The orientation whose right, up and backward axes are r, u and b (orthonormal)
+static quat_t quat_from_camera_axes(vec3_t r, vec3_t u, vec3_t b) {
+    mat3_t M;
+    M.col[0] = r;
+    M.col[1] = u;
+    M.col[2] = b;
+    // quat_from_mat3 reads the matrix transposed relative to the column layout used here, so take the inverse
+    quat_t q = quat_from_mat3(M);
+    q.x = -q.x; q.y = -q.y; q.z = -q.z;
+    return quat_normalize(q);
+}
+
+// The orientation looking where 'transform' looks with its up as close to 'up' as it can be
+static quat_t camera_level_orientation(const ViewTransform& transform, vec3_t up) {
+    const vec3_t f = vec3_normalize(transform.orientation * vec3_t{0, 0, -1});
+    vec3_t r = vec3_length_squared(up) > 0.0f ? vec3_cross(f, vec3_normalize(up)) : vec3_t{0, 0, 0};
+    if (vec3_length_squared(r) < 1.0e-6f) r = transform.orientation * vec3_t{1, 0, 0};
+    r = vec3_normalize(r);
+    const vec3_t u = vec3_cross(r, f);
+    return quat_from_camera_axes(r, u, -f);
+}
+
+void camera_level(ViewTransform* transform, vec3_t up, float roll) {
+    ASSERT(transform);
+    const vec3_t look = camera_get_look_at(*transform);
+    quat_t q = camera_level_orientation(*transform, up);
+    if (roll != 0.0f) q = quat_normalize(q * quat_axis_angle(vec3_t{0, 0, 1}, roll));
+    transform->orientation = q;
+    transform->position = camera_position_from_look_at(look, q, transform->distance);
+}
+
+float camera_roll(const ViewTransform& transform, vec3_t up) {
+    const quat_t level = camera_level_orientation(transform, up);
+    const vec3_t r0 = level * vec3_t{1, 0, 0};
+    const vec3_t u0 = level * vec3_t{0, 1, 0};
+    const vec3_t u = transform.orientation * vec3_t{0, 1, 0};
+    // Rolled by a, the up is cos(a) u0 - sin(a) r0
+    return atan2f(-vec3_dot(u, r0), vec3_dot(u, u0));
+}
+
 // high precision version
 static inline vec3_t highp_quat_vec3_mul(const quat_t& q, const vec3_t& v) {
     double u[4] = {q.x, q.y, q.z, q.w};
@@ -239,7 +279,7 @@ static dvec3 quat_path_tangent(const quat_t* prev, quat_t cur, const quat_t* nex
     return {catmull_slope(d0.x, d1.x, h0, h1), catmull_slope(d0.y, d1.y, h0, h1), catmull_slope(d0.z, d1.z, h0, h1)};
 }
 
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop, const vec3_t* follow_now, const vec3_t* key_follow_now) {
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop, const vec3_t* follow_now, const vec3_t* key_follow_now, const vec3_t* upright) {
     ASSERT(count > 0);
     // A key that tracks an atom of its own is moved by that atom, the others by follow_now
     auto now_of = [&](size_t k) -> const vec3_t* {
@@ -252,6 +292,7 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
         *out_transform = keys[0].transform;
         *out_fov_y = keys[0].fov_y;
         if (now_of(0) && keys[0].follow) out_transform->position = out_transform->position + (*now_of(0) - keys[0].follow_center);
+        if (upright) camera_level(out_transform, *upright, keys[0].roll);
         return;
     }
 
@@ -327,6 +368,7 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
     };
     const float dist = (float)scalar([](const CameraKeyframe& k) { return (double)k.transform.distance; });
     const float fov  = (float)scalar([](const CameraKeyframe& k) { return (double)k.fov_y; });
+    const float roll = upright ? (float)scalar([](const CameraKeyframe& k) { return (double)k.roll; }) : 0.0f;
 
     // Orientation: cubic Bezier on the sphere with control points derived from the angular velocity
     const quat_t q1 = quat_normalize(keys[i].transform.orientation);
@@ -359,7 +401,7 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
     if (keys[j].spin_turns != 0 && us > 0.0 && us < 1.0) {
         vec3_t axis = {0, 1, 0};
         switch (keys[j].spin_axis) {
-        case SpinAxis::ViewUp: axis = q1 * vec3_t{0, 1, 0}; break;
+        case SpinAxis::ViewUp: axis = upright ? *upright : q1 * vec3_t{0, 1, 0}; break;
         case SpinAxis::WorldX: axis = {1, 0, 0}; break;
         case SpinAxis::WorldZ: axis = {0, 0, 1}; break;
         default: break;
@@ -373,6 +415,7 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
     out_transform->distance = dist;
     out_transform->position = camera_position_from_look_at(vec3_t{(float)look[0], (float)look[1], (float)look[2]}, ori, dist);
     *out_fov_y = fov;
+    if (upright) camera_level(out_transform, *upright, roll);
 }
 
 double keyed_curve_evaluate(const double* times, const double* values, const KeyEase* eases, size_t n, double time) {

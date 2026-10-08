@@ -532,6 +532,35 @@ UTEST(viamd_movie_keys, markers_are_part_of_the_undo_state_and_scale_with_the_le
     EXPECT_NEAR(20.0, a.markers[0].time, 1e-9);
 }
 
+UTEST(viamd_movie_keys, bin_counts_and_marker_targets_can_be_undone_and_redone) {
+    MovieKeys cur;
+    cur.overlays.push_back(MovieOverlay{});
+    cur.overlays[0].type = MovieOverlayType::Distribution;
+    cur.markers.push_back({10.0, "water"});
+    MovieHistory history;
+    history.clear(cur);
+
+    cur.overlays[0].num_bins = 37;
+    history.update(cur, false);
+    cur.markers[0].subplot = 4;
+    history.update(cur, false);
+
+    ASSERT_TRUE(history.undo(&cur));
+    EXPECT_EQ(0u, cur.markers[0].subplot);
+    EXPECT_EQ(37, cur.overlays[0].num_bins);
+    ASSERT_TRUE(history.undo(&cur));
+    EXPECT_EQ(0, cur.overlays[0].num_bins);
+    ASSERT_TRUE(history.redo(&cur));
+    ASSERT_TRUE(history.redo(&cur));
+    EXPECT_EQ(37, cur.overlays[0].num_bins);
+    EXPECT_EQ(4u, cur.markers[0].subplot);
+
+    movie_keys_scale_time(&cur, 2.0);
+    EXPECT_NEAR(20.0, cur.markers[0].time, 1e-9);
+    EXPECT_EQ(4u, cur.markers[0].subplot);
+    EXPECT_EQ(37, cur.overlays[0].num_bins);
+}
+
 UTEST(viamd_movie_keys, the_time_of_a_panel_is_part_of_the_undo_state_and_scales_with_the_length) {
     MovieKeys a, b;
     a.overlays.push_back(MovieOverlay{});
@@ -780,6 +809,103 @@ static CameraKeyframe cam_key(double time, float distance, bool follow = false, 
     return k;
 }
 
+UTEST(viamd_movie_keys, system_rows_have_one_label_per_system_in_first_occurrence_order) {
+    const auto rows = rep_system_rows({"protein-cartoon", "ligand", "protein-cpk", "water-vdw", "ligand-vdw"});
+    ASSERT_EQ(3, (int)rows.size());
+    EXPECT_STREQ("protein", rows[0].label.c_str());
+    EXPECT_EQ(2, rows[0].members);
+    EXPECT_EQ(0, rows[0].rep);
+    EXPECT_STREQ("ligand", rows[1].label.c_str());
+    EXPECT_EQ(2, rows[1].members);
+    EXPECT_STREQ("water", rows[2].label.c_str());
+    EXPECT_TRUE(rep_system_rows({}).empty());
+}
+
+UTEST(viamd_movie_keys, overlapping_blocks_stack_and_nonoverlapping_blocks_reuse_slots) {
+    std::vector<RepBlock> blocks = {
+        {0, 0, {0.0, 10.0}}, {1, 0, {5.0, 15.0}}, {2, 0, {10.0, 20.0}}, {0, 1, {20.0, 30.0}},
+    };
+    EXPECT_EQ(2, rep_pack_blocks(&blocks, 0.0));
+    EXPECT_EQ(0, blocks[0].slot);
+    EXPECT_EQ(1, blocks[1].slot);
+    EXPECT_EQ(0, blocks[2].slot);
+    EXPECT_EQ(0, blocks[3].slot);
+    EXPECT_EQ(1, blocks[1].rep);
+    EXPECT_EQ(1, blocks[3].interval_index);
+}
+
+UTEST(viamd_movie_keys, block_packing_accounts_for_transition_tails_and_unsorted_input) {
+    std::vector<RepBlock> blocks = {{1, 0, {10.0, 20.0}}, {0, 0, {0.0, 10.0}}};
+    EXPECT_EQ(2, rep_pack_blocks(&blocks, 2.0));
+    EXPECT_EQ(0, blocks[1].slot);
+    EXPECT_EQ(1, blocks[0].slot);
+    std::vector<RepBlock> empty;
+    EXPECT_EQ(1, rep_pack_blocks(&empty, 2.0));
+}
+
+UTEST(viamd_movie_keys, unkeyed_enabled_representations_cover_the_movie_but_hidden_ones_do_not) {
+    const std::vector<RepKey> keys;
+    const auto spans = rep_effective_intervals(keys, 1, 80.0, true);
+    ASSERT_EQ(1, (int)spans.size());
+    EXPECT_EQ(0.0, spans[0].begin);
+    EXPECT_EQ(80.0, spans[0].end);
+    EXPECT_EQ(-1, spans[0].begin_key);
+    EXPECT_TRUE(rep_effective_intervals(keys, 1, 80.0, false).empty());
+    const std::vector<RepKey> hidden = {vis_key(1, 0, false)};
+    EXPECT_TRUE(rep_effective_intervals(hidden, 1, 80.0, true).empty());
+}
+
+UTEST(viamd_movie_keys, switching_a_block_merges_target_overlaps_and_preserves_other_representations) {
+    std::vector<RepKey> keys = {
+        vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false),
+        vis_key(2, 0, false), vis_key(2, 15, true), vis_key(2, 25, false),
+        vis_key(3, 0, true),
+    };
+    RepKey scale;
+    scale.rep = 2;
+    scale.prop = (int)RepProp::Scale0;
+    scale.value[0] = 2.5f;
+    keys.push_back(scale);
+    rep_transfer_interval(&keys, 1, 2, rep_shown_intervals(keys, 1, 80.0)[0], 80.0);
+    EXPECT_TRUE(rep_shown_intervals(keys, 1, 80.0).empty());
+    const auto target = rep_shown_intervals(keys, 2, 80.0);
+    ASSERT_EQ(1, (int)target.size());
+    EXPECT_EQ(10.0, target[0].begin);
+    EXPECT_EQ(25.0, target[0].end);
+    EXPECT_EQ(80.0, rep_shown_intervals(keys, 3, 80.0)[0].end);
+    float value[3] = {};
+    ASSERT_TRUE(rep_keys_evaluate(value, keys.data(), keys.size(), 2, (int)RepProp::Scale0, 12.0));
+    EXPECT_EQ(2.5f, value[0]);
+}
+
+UTEST(viamd_movie_keys, removing_initial_or_only_blocks_keeps_the_system_hidden_in_the_gap) {
+    std::vector<RepKey> keys = {vis_key(1, 0, true), vis_key(1, 10, false), vis_key(1, 20, true)};
+    rep_remove_interval(&keys, rep_shown_intervals(keys, 1, 80.0)[0]);
+    const auto spans = rep_shown_intervals(keys, 1, 80.0);
+    ASSERT_EQ(1, (int)spans.size());
+    EXPECT_EQ(20.0, spans[0].begin);
+    rep_remove_interval(&keys, spans[0]);
+    EXPECT_TRUE(rep_effective_intervals(keys, 1, 80.0, true).empty());
+    std::vector<RepKey> only = {vis_key(2, 0, true)};
+    rep_remove_interval(&only, rep_shown_intervals(only, 2, 80.0)[0]);
+    EXPECT_TRUE(rep_effective_intervals(only, 2, 80.0, true).empty());
+}
+
+UTEST(viamd_movie_keys, switching_representation_blocks_is_undoable_without_changing_other_keys) {
+    MovieKeys cur;
+    cur.reps = {vis_key(1, 0, false), vis_key(1, 10, true), vis_key(1, 20, false)};
+    const MovieKeys before = cur;
+    MovieHistory history;
+    history.clear(cur);
+    rep_transfer_interval(&cur.reps, 1, 2, rep_shown_intervals(cur.reps, 1, 80.0)[0], 80.0);
+    const MovieKeys after = cur;
+    history.update(cur, false);
+    ASSERT_TRUE(history.undo(&cur));
+    EXPECT_TRUE(movie_keys_equal(before, cur));
+    ASSERT_TRUE(history.redo(&cur));
+    EXPECT_TRUE(movie_keys_equal(after, cur));
+}
+
 UTEST(viamd_movie_keys, camera_bands_are_runs_of_keys_that_follow_the_same_thing) {
     std::vector<CameraKeyframe> keys = {
         cam_key(0, 10), cam_key(1, 10, true), cam_key(2, 10, true), cam_key(3, 10, true, 7), cam_key(4, 10, true, 7), cam_key(5, 10), cam_key(6, 10, true),
@@ -982,4 +1108,28 @@ UTEST(viamd_movie_keys, a_key_is_edited_by_its_eye_or_by_what_it_looks_at) {
     // The eye on the point it looks at cannot aim
     CameraKeyframe d = k;
     EXPECT_FALSE(camera_key_set_eye(&d, look));
+}
+
+UTEST(viamd_movie_keys, roll_and_keeping_upright_are_edits_that_can_be_undone) {
+    MovieKeys a, b;
+    a.camera = {cam_key(0, 10)};
+    b = a;
+    b.camera[0].roll = 0.2f;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    b = a;
+    b.keep_upright = !a.keep_upright;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+    b = a;
+    b.up_axis = 2;
+    EXPECT_FALSE(movie_keys_equal(a, b));
+}
+
+UTEST(viamd_movie_keys, a_key_on_an_upright_path_takes_the_roll_there) {
+    std::vector<CameraKeyframe> keys = {cam_key(0, 10), cam_key(4, 30)};
+    keys[0].roll = 0.0f;
+    keys[1].roll = 0.6f;
+    const vec3_t up = {0, 1, 0};
+    const CameraKeyframe k = camera_key_on_path(keys, 4.0, false, &up);
+    EXPECT_NEAR(k.roll, 0.6f, 1.0e-4f);
+    EXPECT_EQ(camera_key_on_path(keys, 4.0, false).roll, 0.0f);
 }

@@ -1189,6 +1189,8 @@ MovieKeys movie_keys_snapshot(const ApplicationState* app) {
     k.overlays = app->movie.overlays;
     k.markers = app->movie.markers;
     k.loop = app->movie.loop;
+    k.keep_upright = app->movie.keep_upright;
+    k.up_axis = app->movie.up_axis;
     k.duration = app->movie.duration;
     k.traj_begin = app->movie.traj_begin;
     k.traj_end = app->movie.traj_end;
@@ -1208,6 +1210,8 @@ void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
     m.overlays = keys.overlays;
     m.markers = keys.markers;
     m.loop = keys.loop;
+    m.keep_upright = keys.keep_upright;
+    m.up_axis = keys.up_axis;
     m.duration = keys.duration;
     m.traj_begin = keys.traj_begin;
     m.traj_end = keys.traj_end;
@@ -1220,7 +1224,8 @@ void movie_history_reset(ApplicationState* app) {
 }
 
 static void workspace_reset(ApplicationState* data) {
-    data->movie.show_timeline_window = false;
+    data->movie.overlay_selected = 0;
+    data->movie.editor_select_overlays = false;
     data->movie.timeline_view_duration = 0.0f;
     remove_all_selections(data);
     remove_all_representations(data);
@@ -1282,6 +1287,8 @@ static void workspace_reset(ApplicationState* data) {
         m.range_end = 0.0f;
         md_array_shrink(m.keyframes, 0);
         m.loop = false;
+        m.keep_upright = true;
+        m.up_axis = 1;
         m.animate_params = true;
         m.param_keys.clear();
         m.rep_keys.clear();
@@ -1699,6 +1706,8 @@ void load_workspace(ApplicationState* data, str_t filename) {
             // (DurationAuto), and their keys with a frame alone decided how the trajectory played
             bool legacy_auto = false;
             int  timeline_version = 1;
+            // Movies from before the camera could be kept upright went through their keys' tilts
+            m.keep_upright = false;
             while (viamd::next_entry(ident, arg, state)) {
                 if      (str_eq(ident, STR_LIT("Resolution")))     viamd::extract_enum(m.resolution, arg, (int)ScreenshotResolution::Count);
                 else if (str_eq(ident, STR_LIT("ResX")))           viamd::extract_int(m.res_x, arg);
@@ -1742,6 +1751,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     if (viamd::extract_flt(h, arg)) m.timeline_lane_height = CLAMP(h, 60.0f, 400.0f);
                 }
                 else if (str_eq(ident, STR_LIT("FitLanes")))       viamd::extract_bool(m.timeline_fit_window, arg);
+                else if (str_eq(ident, STR_LIT("RepEqualRows")))   viamd::extract_bool(m.timeline_rep_equal_rows, arg);
                 else if (str_eq(ident, STR_LIT("Overlays")))       m.overlays.clear();   // The overlays that follow are all of them
                 else if (str_eq(ident, STR_LIT("RenderRange"))) {
                     float r[3];
@@ -1795,6 +1805,18 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         }
                         md_array_push(m.keyframes, key, data->allocator.persistent);
                     }
+                }
+                else if (str_eq(ident, STR_LIT("KeyframeRoll"))) {
+                    // The roll of the key that was just read, in degrees
+                    float deg = 0.0f;
+                    if (md_array_size(m.keyframes) > 0 && viamd::extract_flt(deg, arg)) {
+                        m.keyframes[md_array_size(m.keyframes) - 1].roll = CLAMP(deg, -180.0f, 180.0f) * (3.14159265358979f / 180.0f);
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("KeepUpright")))    viamd::extract_bool(m.keep_upright, arg);
+                else if (str_eq(ident, STR_LIT("UpAxis"))) {
+                    int axis = 1;
+                    if (viamd::extract_int(axis, arg)) m.up_axis = CLAMP(axis, 0, 5);
                 }
                 else if (str_eq(ident, STR_LIT("KeyframeName"))) {
                     // The name of the key that was just read
@@ -1892,6 +1914,12 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Background"))) viamd::extract_flt_vec(o.background, 4, arg);
                 else if (str_eq(ident, STR_LIT("Length"))) viamd::extract_flt(o.length, arg);
                 else if (str_eq(ident, STR_LIT("Width")))  viamd::extract_flt(o.width, arg);
+                else if (str_eq(ident, STR_LIT("NumBins"))) {
+                    int bins = 0;
+                    if (viamd::extract_int(bins, arg)) {
+                        o.num_bins = bins == 0 ? 0 : CLAMP(bins, MOVIE_DISTRIBUTION_MIN_BINS, MOVIE_DISTRIBUTION_MAX_BINS);
+                    }
+                }
                 else if (str_eq(ident, STR_LIT("Subplot"))) {   // Older workspaces: one subplot
                     int v = 0;
                     if (viamd::extract_int(v, arg)) o.legacy_subplot_mask = 1 << CLAMP(v, 0, PLOT_MAX_SUBPLOTS - 1);
@@ -1958,6 +1986,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
             while (viamd::next_entry(ident, arg, state)) {
                 if (str_eq(ident, STR_LIT("Time"))) viamd::extract_flt(t, arg);
                 else if (str_eq(ident, STR_LIT("Label"))) viamd::extract_to_char_buf(k.label, sizeof(k.label), arg);
+                else if (str_eq(ident, STR_LIT("Subplot"))) {
+                    int subplot = 0;
+                    if (viamd::extract_int(subplot, arg)) k.subplot = (uint32_t)MAX(subplot, 0);
+                }
             }
             k.time = (double)t;
             data->movie.markers.push_back(k);
@@ -2325,10 +2357,13 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             (m.timeline_rep_overview ? 64 : 0) | 128 | (m.timeline_camera_lane ? 256 : 0) | 512);
         viamd::write_flt (state, STR_LIT("LaneHeight"), m.timeline_lane_height);
         viamd::write_bool(state, STR_LIT("FitLanes"), m.timeline_fit_window);
+        viamd::write_bool(state, STR_LIT("RepEqualRows"), m.timeline_rep_equal_rows);
         viamd::write_bool(state, STR_LIT("Overlays"), true);
         const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
         viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);
         viamd::write_bool(state, STR_LIT("Loop"), m.loop);
+        viamd::write_bool(state, STR_LIT("KeepUpright"), m.keep_upright);
+        viamd::write_int (state, STR_LIT("UpAxis"), m.up_axis);
         viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
             const CameraKeyframe& k = m.keyframes[i];
@@ -2343,6 +2378,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             };
             viamd::write_flt_vec(state, STR_LIT("KeyframeV3"), v, 21);
             if (k.name[0] != '\0') viamd::write_str(state, STR_LIT("KeyframeName"), str_from_cstr(k.name));
+            if (k.roll != 0.0f) viamd::write_flt(state, STR_LIT("KeyframeRoll"), k.roll * (180.0f / 3.14159265358979f));
         }
         if (!md_bitfield_empty(&m.follow_mask)) {
             viamd::write_bitfield(state, STR_LIT("FollowTarget"), &m.follow_mask);
@@ -2375,6 +2411,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
                 viamd::write_flt(state, STR_LIT("FontPoints"), o.font_points);
                 viamd::write_flt(state, STR_LIT("LinePoints"), o.line_points);
                 viamd::write_int(state, STR_LIT("Palette"), o.palette);
+                if (o.type == MovieOverlayType::Distribution) viamd::write_int(state, STR_LIT("NumBins"), o.num_bins);
                 for (const MoviePlotPanel& p : o.panels) {
                     const int v[2] = {(int)p.view, (int)p.subplot};
                     viamd::write_int_vec(state, STR_LIT("Panel"), v, 2);
@@ -2395,6 +2432,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_section_header(state, STR_LIT("MovieMarker"));
             viamd::write_flt(state, STR_LIT("Time"), (float)k.time);
             viamd::write_str(state, STR_LIT("Label"), str_from_cstr(k.label));
+            viamd::write_int(state, STR_LIT("Subplot"), (int)k.subplot);
         }
     }
 

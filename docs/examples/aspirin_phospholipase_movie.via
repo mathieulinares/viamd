@@ -20,36 +20,37 @@
 [Files]
 MoleculeFile=./aspirin-phospholipase.gro
 TrajectoryFile=./aspirin-phospholipase.xtc
+EnergyFile=./aspirin-phospholipase.edr
 CoarseGrained=0
 
 [Animation]
-Frame=423.55782301836746
+Frame=0
 Fps=2.94000006
 Tension=0
 Interpolation=2
 
 [Timeline]
-NumSubplots=2
+NumSubplots=4
 
 [TimelineSubplot]
 Subplot=0
 Id=1
-Name=Pocket-Aspirin distance
+Name=Pocket-Aspirin Distance
 
 [TimelineSubplot]
 Subplot=1
 Id=2
-Name=# of water at 4 Å of Aspirin
+Name=Protein-Aspirin Interaction
 
 [TimelineSubplot]
 Subplot=2
 Id=3
-Name=
+Name=# of water at 4 Å of Aspirin
 
 [TimelineSubplot]
 Subplot=3
 Id=4
-Name=
+Name=Aspirin-Water Interaction
 
 [TimelineSubplot]
 Subplot=4
@@ -100,8 +101,38 @@ ColormapAlpha=1
 Subplot=1
 Source=script
 Variant=values
+Path=script/E_prot_asp
+Color=0.890196145,0.101960793,0.10980393,1
+PlotType=line
+Marker=1
+MarkerSize=1
+BarWidth=1
+NumBins=128
+UseColormap=0
+Colormap=5
+ColormapAlpha=1
+
+[TimelineSeries]
+Subplot=2
+Source=script
+Variant=values
 Path=script/nb
 Color=0.121568635,0.470588267,0.70588237,1
+PlotType=line
+Marker=1
+MarkerSize=1
+BarWidth=1
+NumBins=128
+UseColormap=0
+Colormap=5
+ColormapAlpha=1
+
+[TimelineSeries]
+Subplot=3
+Source=script
+Variant=values
+Path=script/E_ain_water
+Color=0.792156935,0.698039234,0.839215755,1
 PlotType=line
 Marker=1
 MarkerSize=1
@@ -214,14 +245,14 @@ SimulationBoxEnabled=0
 SimulationBoxColor=0,0,0,0.5
 
 [Camera]
-Position=3.28652477,-10.653079,28.8737106
-Orientation=0.095284611,-0.126636669,0.940992355,0.299027473
-Distance=27.0439453
+Position=-2.2574625,-11.2575359,-5.36616707
+Orientation=0.911136091,-0.11805135,-0.0707517341,0.388444453
+Distance=12.4299278
 Mode=0
-FovY=0.787257731
+FovY=0.876155317
 
 [Movie]
-Resolution=0
+Resolution=3
 ResX=1920
 ResY=1080
 Fps=24
@@ -231,10 +262,11 @@ Timeline=2
 Duration=80
 TrajectoryBegin=0
 TrajectoryEnd=80
-Playhead=80
+Playhead=55.4500008
 FilenamePrefix=frame
 AnimateCamera=1
 ShowPath=0
+PathOptions=15
 Output=1
 Crf=18
 ResScale=100
@@ -242,7 +274,7 @@ AaSamples=0
 SaveCopy=1
 RepTransition=3.1500001
 SnapFrames=1
-Lanes=35
+Lanes=995
 LaneHeight=237
 FitLanes=0
 Overlays=1
@@ -251,10 +283,10 @@ Loop=0
 AnimateParams=1
 KeyframeV3=0,0.785398185,55.9218102,12.2344742,-6.63168669,57.830349,0.0936078951,-0.0430380628,0.955402792,0.276750743,1,600,0,0,0,0,1,-0.580844879,0.389476776,-0.396865845,-1
 KeyframeV3=4,0.785398185,55.9218102,12.2344742,-6.63168669,57.830349,0.0936078951,-0.0430380628,0.955402792,0.276750743,1,568,1,0,0,0,1,-0.580844879,0.389476776,-0.396865845,-1
-KeyframeV3=12,0.785398185,41.2038689,9.6120615,-47.8187714,38.6493835,0.379360795,-0.479869574,0.741440058,0.27582109,1,508,0,0,0,0,0,-2.6597023,-9.87576103,28.2816277,-1
-KeyframeV3=16,0.785398185,36.9881706,14.6639404,-38.7708473,43.5489044,0.397699475,-0.368041605,0.806790113,0.235521659,1,506,0,0,0,0,0,-2.6597023,-9.87576103,28.2816277,-1
-KeyframeV3=22,0.876155317,33.3868904,-0.454283059,-3.80049133,62.3583908,0.0101780584,-0.0166669562,0.998020768,0.0597769506,1,503,0,0,0,0,0,0,0,0,-1
-KeyframeV3=35,0.876155317,30.0390987,-22.0158157,-6.73035145,-19.2403183,0.934521616,-0.094139874,-0.319988281,0.124155045,1,304,0,0,0,0,0,0,0,0,-1
+KeyframeV3=12,0.785398185,56.441658,3.55710983,-51.7380066,36.1043854,0.352911383,-0.554926991,0.687653482,0.307639897,1,508,0,0,0,0,0,-4.56631851,3.59368134,28.4836769,-1
+KeyframeV3=18.583334,0.785398185,62.4234657,-28.308712,-1.02311063,85.2341309,-0.173277676,-0.100842938,0.951308787,0.234130546,1,503.90625,0,0,0,0,0,-4.78117752,5.88882446,27.8288269,-1
+KeyframeV3=30.333334,0.876155317,33.3868904,-0.454283059,-3.80049133,62.3583908,0.0101780584,-0.0166669562,0.998020768,0.0597769506,1,496,0,0,0,0,0,0,0,0,-1
+KeyframeV3=35,0.876155317,30.0390987,-22.0158157,-6.73035145,-19.2403183,0.934521735,-0.0941398889,-0.31998831,0.124155059,1,304,0,0,0,0,0,0,0,0,-1
 KeyframeV3=40,0.876155317,26.4837818,-5.03957939,-4.05876017,-22.6754513,0.987187505,-0.11727757,-0.101067528,0.0386307724,1,158,0,0,0,0,0,0,0,0,-1
 KeyframeV3=45,0.876155317,17.3075638,-1.60633087,-15.2569437,-8.50199509,-0.90674895,0.124606915,0.0112960348,-0.402680963,1,34,0,0,0,0,0,0,0,0,-1
 KeyframeV3=48,0.876155317,12.4299278,-1.01692247,-11.7087307,-5.20744514,0.906748891,-0.124606907,-0.0112960339,0.402680933,1,24,0,0,0,0,0,0,0,0,-1
@@ -342,7 +374,7 @@ Anchor=1
 Size=0.0390000008
 SizeUnit=0
 Color=0.649350643,0,1,1
-Background=0,0,0,0
+Background=0.15,0.15,0.15,0.65
 Length=0
 Text=
 Width=0.400000006
@@ -352,22 +384,27 @@ TimeBarLabels=3
 Type=6
 Enabled=1
 Range=18.7999992,80,0.400000006,0.400000006
-Anchor=6
-Size=0.305000007
+Anchor=3
+Size=0.600000024
 SizeUnit=0
 Color=1,1,1,1
 Background=0,0,0,0.5
 Length=0
 Text=
-Width=0.460000008
+Width=0.319999993
 PlotAxis=0
 PlotFlags=15
-FontPoints=24
+FontPoints=21
 LinePoints=0
 Palette=0
 Panel=0,1
+PanelTime=18.7999992,0
 Panel=0,2
-PanelTime=24,0
+PanelTime=19.5,0
+Panel=0,3
+PanelTime=23.958334,0
+Panel=0,4
+PanelTime=24.875,0
 
 [MovieOverlay]
 Type=7
@@ -383,11 +420,12 @@ Text=
 Width=0.219999999
 PlotAxis=0
 PlotFlags=15
-FontPoints=28
+FontPoints=21
 LinePoints=0
 Palette=0
 Panel=1,11
 PanelTitle=Dihedral angle
+NumBins=128
 
 [MovieOverlay]
 Type=8
@@ -616,16 +654,24 @@ sel1 = residue({5,9,18,21:23,27:31,44,47:48,63,100});
 d = distance(sel1,resname("AIN"));
 nb = count(resname("SOL") and within(4.0,resname("AIN")),'residue');
 dih = dihedral(1198, 1207, 1208, 1209);
+
+c_pr_ain = attr("edr/coul_sr_protein_ain");
+lj_pr_ain = attr("edr/lj_sr_protein_ain");
+E_prot_asp = c_pr_ain + lj_pr_ain ;
+
+c_ain_sol = attr("edr/coul_sr_ain_sol");
+lj_ain_sol = attr("edr/lj_sr_ain_sol");
+E_ain_water = c_ain_sol + lj_ain_sol;
 """
 
 [ActiveSelection]
 Granularity=1
 
 [Windows]
-Timelines=0
+Timelines=1
 Distributions=0
-Representations=1
-ScriptEditor=1
+Representations=0
+ScriptEditor=0
 Animation=0
 Movie=1
 Attributes=0

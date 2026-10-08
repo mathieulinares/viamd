@@ -2,11 +2,24 @@
 
 Everything here was written without being able to run the GUI. Tick a box when it works, and write what you saw next to it when it does not. Start from the example workspace `docs/examples/aspirin_phospholipase_movie.via`: put it next to `aspirin-phospholipase.gro` and `.xtc` and open it with **File > Open Workspace**.
 
-Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on startup and after loading a workspace).
+Open **Windows > Movie**: the timeline is on the left and tabbed controls on the right. Expand **Lanes and layout** for the timeline's options. In the checks below, "Movie Timeline" means this left panel; the old **Add Text**, **Add Timeline**, etc. buttons are now entries in **Overlays > Add overlay...**. Select an overlay to edit its **Content**, **Timing** or **Appearance**.
+
+## 0. Combined editor and compact inspector
+
+- [ ] Resize the editor and drag its divider: timeline left, controls right, both independently scrollable. Hide either panel with **Timeline** / **Controls**; one always stays visible. Shared playback, repeat, scrubber and Add Keyframe still work with either panel hidden.
+- [ ] Use the large top-right button to switch between **Scene view** and **Movie preview**. Scene view hides the movie frame, overlays and property highlights; Movie preview restores them. Camera-path editing stays available. Neither switch starts/stops preview playback or changes the recording settings.
+- [ ] **Output**, **Timing**, **Camera**, **Looks**, **Representations** and **Overlays** show their own controls without a long stack of sections. The viewport-mode button and editing controls are disabled during recording, while Stop/Pause/Resume remain usable.
+- [ ] **Add overlay...** offers every supported type. The list stays compact and scrollable; selecting an item shows only its settings. Enable/disable, Duplicate, Remove and undo/redo still work, including an empty list and removing its last item.
+- [ ] Clicking an overlay bar on the left selects the same overlay on the right and opens **Overlays** (also after hiding Controls). Expand a subplot to edit its timing/title; expand **Plot style** for fonts, lines, colours and plate presets.
+- [ ] A time bar has a neutral grey unfilled track, including with a purple fill. New time bars and the updated example have a grey plate behind the labels and bar. Change **Appearance > Background**, fade, preview and record: colours and transparency match.
+- [ ] Select a distribution and set **Number of bins** to 32, 37 and 128: temporal histograms use those counts. The Distributions window's own settings do not change. **Use source bin counts** restores each series' count. A script distribution only coarsens to an available divisor.
+- [ ] In **Timeline markers**, target one of the four example timeline subplots: both the line and label appear only there, including when that subplot is not first in the stack. **All timeline subplots** restores the previous behavior.
+- [ ] Bin counts and marker targets survive save/load, undo/redo and movie length changes. Rename a subplot or reorder panels: marker targets retain their identity. A missing target is reported and is not silently moved to another subplot.
+- [ ] The edited example retains its four timeline subplots, camera/representation keys, overlay positions/colours and preview time (about 55.45 s). Its distribution has 128 bins and its time bar a grey plate.
 
 ## 1. Workspace
 
-- [ ] Open the example. It loads without errors in the log, the movie is 80 s long and the playhead is at its end. Drag the playhead to 0 and play the preview.
+- [ ] Open the example. It loads without errors in the log, the movie is 80 s long and the playhead is at about 55.45 s. Drag the playhead to 0 and play the preview.
 - [ ] Save it under another name and open that. Keys, overlays (with the subplots and the in and out times of their plots), markers, representation keys, **Transition (s)**, **Scale**, **Samples per frame**, the range settings and the lanes of the Movie Timeline are all there.
 - [ ] Open an older workspace that has no `Id` on its representations, no overlays and no `Overlays` entry (for example `~/Desktop/try.via`). It loads, the logo is in the top left, and a representation key can be added.
 - [ ] Open a workspace with keyframes from before the follow target existed. The keys are unchanged.
@@ -52,7 +65,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 
 - [ ] **Show frame**: with the Movie window open the viewport shows the frame of the movie (a box with the size above it, the outside dimmed) and the view is a little wider. Set the resolution to 1920x1080, then to a tall custom size (1080x1920) and back: the box follows the proportions and the overlays are laid out in it.
 - [ ] A recording matches what the box showed: the camera, the title, the logo, the timeline and the distribution, the labels of a property overlay and their size, the scale bar length. In the video the text, the bar and the logo are the right way up, not stretched, sharp at 1920x1080 and at **Scale** 25 %.
-- [ ] Switching **Show frame** off restores the plain view. The dimming and the wider view are gone while recording and when the Movie window is closed. Clicking atoms in the viewport still selects the right one.
+- [ ] Switching to **Scene view** restores the plain view and hides overlays. The dimming and the wider view are gone while recording and when the Movie window is closed. Clicking atoms in the viewport still selects the right one.
 - [ ] Record with **Samples per frame** above 1: the overlays are not smeared or doubled.
 
 ## 3. Camera keys
@@ -68,6 +81,7 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] Double-click on the viewport aims the camera at the clicked point with the eye fixed.
 - [ ] **Add Orbit** with **Snap to frames** on: the end key is where it should be.
 - [ ] **Close Loop** and **Seamless loop**: no jump when the preview repeats.
+- [ ] **Keep upright**: a keyframe captured upside down or tilted plays level; a spin or loop never flips the camera. **Up** / **From view** pick the up axis. **Roll (deg)** tilts a keyframe and the tilt eases between keys; **0** levels it. Go To, the path cameras and Ctrl + click on the path agree with the preview. Off: the Roll column shows each key's tilt and **Level** straightens it. Undo, save and load keep all of it; an older workspace opens with it off.
 
 - [ ] Camera lane (Movie Timeline, **Camera lane**, at the top): orange dots with the key numbers on the first row; the one at the preview time is yellow.
 - [ ] Camera lane, keys: drag a dot sideways (the key moves, the preview time follows, the list re-sorts when released, **Snap to frames** applies); click a dot (the view goes to the key); Ctrl+Z undoes a drag.
@@ -92,14 +106,14 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] Drag the blue **Start** and **End** anchors: the trajectory waits before the start and holds after the end.
 - [ ] Change **Movie length (s)** to double: the pacing is the same at half the speed, the overlays and their fades scale. Undo restores it.
 - [ ] Ctrl + wheel zooms the time and dragging the background pans: all lanes move together. The plain wheel scrolls the window. **Show whole movie** resets.
-- [ ] **Lane height**: raising it makes the lanes taller and the window scrolls; every lane keeps at least that height. **Fit to window** gives the old behaviour (the lanes share the window, the wheel zooms).
+- [ ] **Lane height**: raising it makes every lane taller in proportion and the window scrolls; a long representation overview or overlay list grows only its own lane, the others keep the slider's height. Dragging a divider resizes only the two lanes beside it. **Fit to window** gives the old behaviour (the lanes share the window, the wheel zooms).
 - [ ] Resize the lanes by dragging between them.
 - [ ] Hide each lane with its box: **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane** (its picker goes too), **Representation lane**, **Representation overview**, **Overlay lane**. With all of them unticked the window says so.
 - [ ] Save and open the workspace: the ticked lanes, the lane height and **Fit to window** come back.
 - [ ] Overlay lane: one bar per overlay with its name and a colour per kind (dimmer when switched off). Drag a bar: the overlay moves (**Shown (s)** follows, a timeline's or a distribution's subplot in and out times move with it). Drag an end: only that end moves. The bars follow **Snap to frames**. The ticks in a bar are where its subplots come in, the yellow triangles are markers. Ctrl+Z undoes a drag.
 - [ ] Drag a frame pin on the trajectory track up and down: the frame changes. Distance and field of view dots only move in time.
 - [ ] Click an orange marker on the timeline of the Timelines window: the view goes to that key.
-- [ ] Open a workspace that was saved with the timeline open: it stays closed. Open it from the menu.
+- [ ] Open a workspace saved with **Movie** open: the combined editor opens according to the workspace's Movie window setting; there is no separate Movie Timeline window.
 
 ## 5. Backward trajectory
 
@@ -113,9 +127,10 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] A cartoon and a ribbon at very small sizes look right while they grow in and shrink away. A dipole or electronic-structure representation stays full size and vanishes at the end of the transition.
 - [ ] Key a scale, **Saturation**, **Tint scale** and **Tint color**: scrubbing changes the picture. The example shrinks the ball scale of the ligand from 30 s to 38 s.
 - [ ] **Base color** is seen on a representation with **Uniform** color mapping.
-- [ ] Representation overview lane (Movie Timeline, **Representation overview**): one row per representation with a bar where it is shown; the bars grow in and fade away over **Transition (s)** like the representation does when scrubbing; small triangles mark keys of other properties.
-- [ ] Overview, editing: drag a bar (moves its two keys), drag its left and its right end (only that key), the times follow **Snap to frames**; a bar stops at its neighbours (a small gap); a bar that lasted to the end of the movie can be shortened and lengthened again; a bar that began at the start can be started later (the representation stays hidden before it); a right click removes a bar; a double click on an empty place adds one; Ctrl+Z undoes each of these; the preview shows the change at once.
-- [ ] Overview, groups: name representations `protein-cartoon`, `protein-cpk` (and a plain `protein`): they are one group with a row above them and a shared colour; a name without a hyphen has a row of its own; **- protein** folds the group to its row and **+ protein** unfolds it; the row of the group shows when any member is shown; dragging the group's bar moves the members' bars that are in it, its left end the ones that start there, its right end the ones that stop there.
+- [ ] Representation overview: one row per system, with labelled blocks coloured by representation type. A plain enabled representation with no visibility keys covers the whole movie. Blocks grow in and fade away over **Transition (s)**; small triangles mark keys of other properties.
+- [ ] Overview, editing: drag a block or either edge; snapping and same-representation neighbours constrain its times, but other representations may overlap freely. Shorten/lengthen a block at the movie end and move one away from the start. Right-click > Remove block and double-click empty space > choose a representation work. Removing the first or only block leaves the representation hidden there. Ctrl+Z restores each edit.
+- [ ] Overview, systems: `protein-cartoon`, `protein-cpk`, `protein-vdw` and plain `protein` share one labelled row. Systems are clearly separated (gap, divider, alternate shading); blocks of one system sit close together. A block starting where another ends stays on the same line and cross-fades with it. **One line per system** gives every system the same height (stacked blocks split it); unticked, each stacked block gets a full line. Renaming regroups rows.
+- [ ] Right-click a CPK block and switch it to VDW in the same system: its interval transfers, overlapping target blocks merge, other systems and property keys stay intact. Undo/redo and workspace save/load retain the result. The updated example groups protein/protein-cpk/protein-vdw and ligand/ligand-vdw without changing its saved keys.
 - [ ] **Swap with the next of its group** (select a member by clicking its bar): at the preview time the selected one shrinks away while the next one grows in; with only one member the button is disabled; Ctrl+Z undoes it.
 - [ ] Clicking a bar selects that representation for the **Representation lane** below; renaming a representation regroups the rows.
 - [ ] Representation lane in the Movie Timeline: pick a representation and a property with the lists. Drag a key in time and value, double-click to add, right-click to remove. For **Visible** a double-click turns it around, and the first one also keys the state at time 0.

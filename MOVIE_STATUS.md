@@ -5,12 +5,13 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 ## Build and test
 
 - Build: `cmake --build build --target viamd -j8` and `--target viamd_test`; run `cmake -S . -B build` after adding files.
-- Tests: `./build/bin/viamd_test` (204 tests). They cover the pure logic (keys, undo, easing, overlays, plot maths, serialization helpers, the frame sink). ffmpeg is not needed: the frame sink tests use a fake script.
+- Tests: `./build/bin/viamd_test` (219 tests, all passing). They cover pure logic; ffmpeg is not needed because frame sink tests use a fake script.
+- VS Code CMake Tools: a local, gitignored `CMakeUserPresets.json` (preset `release`, binary dir `build`, unit tests on) and `.vscode/settings.json` make it configure; select the `release` preset after reloading the window. VS Code's test runner does not discover the C++ tests; run the executable.
 - The GUI could not be run while the code was written, so everything in `gui-checklist.md` is untested by the author and needs a manual check. Windows and macOS are untested too (the ffmpeg pipe uses `popen` / `_popen`).
 
 ## Where things live
 
-- Movie window, Movie Timeline window and its lanes, recording, preview, the frame guide, overlay drawing: `src/main.cpp` (`draw_movie_window`, `draw_movie_timeline_window`, `draw_movie_strip`, `draw_movie_*_lane`, `movie_overlays_draw`, `movie_figure_draw`, `movie_frame_guide`, `movie_*`)
+- Combined Movie editor, timeline lanes, recording, preview, frame guide and overlay drawing: `src/main.cpp` (`draw_movie_window`, `draw_movie_settings_panel`, `draw_movie_timeline_panel`, `draw_movie_strip`, `draw_movie_*_lane`, `movie_overlays_draw`, `movie_figure_draw`, `movie_frame_guide`, `movie_*`)
 - Movie state: `src/viamd.h` (`ApplicationState::movie`)
 - Workspace save and load: `src/viamd.cpp` (`[Movie]`, `[MovieOverlay]`, `[MovieMarker]`, `[Representation]`); the plot windows' own sections with subplot ids and names: `src/plot_series.cpp`
 - Async frame writer: `src/frame_sink.{h,cpp}`
@@ -21,11 +22,14 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 
 ## What is there
 
-- **Camera:** the path in the viewport (ticks at round times, chevrons, sight lines, cameras, spin rings, the green camera at the preview time) with handles on the eye and the look-at of each key that can be clicked and dragged, Ctrl + click to add a key on the path; keyframes with easing per segment, spin, orbit, seamless loop, follow target, a key that looks at (and tracks) an atom, depth of field focus modes, the camera path drawn in the viewport (follow-aware), **Show frame** (the frame of the movie in the viewport, the view widened to match the recording), undo and redo of everything on the timeline.
+- **Combined editor:** timeline left, tabbed controls right, resizable divider, independently scrolling and collapsible panels. Shared preview toolbar and a large top-right Scene view / Movie preview switch. Overlays use a compact list with a selected-item inspector (Content, Timing, Appearance); subplot details and plot style are expandable. Distribution overlays can override bin counts without changing source plots. Markers can target a stable timeline subplot id (0 keeps legacy all-subplot behavior). Time bars have a grey track; new ones have a grey plate. The user-edited example is retained, with only the time-bar plate and explicit 128-bin distribution added.
+- **Representation systems:** one overview row per system (name before the first hyphen), with labelled blocks coloured by representation type. Systems get bands separated by a gap, a divider and alternating shading; a block that starts where another ends stays on the same line (cross-fade), only simultaneous representations stack. **One line per system** gives each band the same height. Right-click switches a block to another existing representation or removes it; double-click empty space chooses a representation to add. Unkeyed enabled representations appear for the whole movie. Edits reuse visibility keys and undo, so no new workspace format is needed.
+
+- **Camera:** the path in the viewport (ticks at round times, chevrons, sight lines, cameras, spin rings, the green camera at the preview time) with handles on the eye and the look-at of each key that can be clicked and dragged, Ctrl + click to add a key on the path; keyframes with easing per segment, spin, orbit, seamless loop, keep upright with a roll per keyframe, follow target, a key that looks at (and tracks) an atom, depth of field focus modes, the camera path drawn in the viewport (follow-aware), **Show frame** (the frame of the movie in the viewport, the view widened to match the recording), undo and redo of everything on the timeline.
 - **Timing:** the movie length is the master value; the trajectory start and end anchors; frame pins on keys; backward trajectory; **Snap to frames**.
 - **Looks:** keyed look parameters, and keyed properties of representations (visible with a transition, scales, tint, saturation, colours; representations have stable ids).
 - **Overlays:** text, time stamp (the time that has gone since the movie started, only grows), scale bar, time bar (fills forward whichever way the trajectory plays), logo, images, **timeline** and **distribution** (subplots of the Timelines and Distributions windows, stacked, drawn as the movie plays; elapsed or trajectory-time axis; subplots that come in at their own times; the axis is the whole movie and the curves are drawn from the start of the movie, whenever the overlay appears; titles; markers; a look of their own), and the **property visualization** (atoms, geometry and labels of a script property, with fades). Size in percent or in points, fades, a background plate, **Duplicate**. Subplots of the plot windows have saved ids and names, so overlays keep finding them.
-- **Movie Timeline window:** lanes for the camera (keys with names that can be dragged, bands for follow, look-at and spin, double-click to add a key on the path), the trajectory, distance, field of view, a look parameter, a representation property, an overview of when each representation is shown (bars, grouped by the name before the first hyphen, with a swap between members of a group) and the overlays (bars that can be dragged), a least **Lane height** with scrolling or **Fit to window**, Ctrl + wheel to zoom the time, and the lanes saved in the workspace.
+- **Left timeline panel:** camera, trajectory, distance, field of view, looks, representation properties, one overview row per system with overlapping representation blocks, and overlay bars. Expand **Lanes and layout** for lane selection, lane height, **Fit to window**, **One line per system**, and the selected-system swap shortcut. Ctrl + wheel zooms time; lanes are saved in the workspace.
 - **Output:** PNG sequence, MP4 H.264 or H.265, WebM VP9, through ffmpeg; frame **Scale**, **Samples per frame**, render range, **Pause / Resume**, time left, a workspace copy next to the movie. The Representations window is locked while recording.
 - Workspaces from earlier versions are migrated when read.
 
@@ -39,6 +43,7 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 - A timeline or a distribution overlay draws at most six series of a subplot and the first member of a population; a timeline overlay has one kind of axis for all its subplots.
 - In "Follow target" depth of field mode, focus uses the global follow target, not a key's own Look at atom.
 - Distance and field of view can only be moved in time on the Movie Timeline; their values are edited in the table or the viewport.
+- With **Keep upright**, a spin around a horizontal axis flips at the poles (the camera cannot stay level looking straight along the up axis). Roll eases as a number, so 170° to -170° turns the long way.
 - Default view (code from master): a perfectly symmetric flat molecule (exact ideal benzene geometry) can settle about 10 degrees off face-on. Real coordinates are fine.
 
 ## Left for later

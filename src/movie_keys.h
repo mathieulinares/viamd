@@ -73,6 +73,8 @@ struct RepInterval {
 };
 
 std::vector<RepInterval> rep_shown_intervals(const std::vector<RepKey>& keys, uint32_t rep, double duration);
+// Without visibility keys, an enabled representation covers the whole movie.
+std::vector<RepInterval> rep_effective_intervals(const std::vector<RepKey>& keys, uint32_t rep, double duration, bool enabled);
 
 // Moves the ends of a stretch to new times, with the keys it is made of (and a hidden key at the start of the movie or at the
 // new end where there was none, so that nothing else changes). The new times are kept inside the neighbouring stretches and the
@@ -85,6 +87,9 @@ bool rep_add_interval(std::vector<RepKey>* keys, uint32_t rep, double begin, dou
 
 // Takes out the keys that make a stretch: the representation is hidden there afterwards
 void rep_remove_interval(std::vector<RepKey>* keys, const RepInterval& iv);
+
+// Transfers one interval, merging target visibility overlaps while retaining other property keys.
+void rep_transfer_interval(std::vector<RepKey>* keys, uint32_t from, uint32_t to, const RepInterval& iv, double duration);
 
 // At time t, 'from' goes and 'to' comes: a hidden key for one and a shown key for the other. A representation without keys is
 // taken to have been shown ('from') or hidden ('to') up to then.
@@ -114,6 +119,16 @@ struct RepRow {
 };
 std::vector<RepRow> rep_group_rows(const std::vector<std::string>& names, const std::vector<std::string>& collapsed);
 
+std::vector<RepRow> rep_system_rows(const std::vector<std::string>& names);
+
+struct RepBlock {
+    int rep = -1;
+    int interval_index = 0;
+    RepInterval interval;
+    int slot = 0;
+};
+int rep_pack_blocks(std::vector<RepBlock>* blocks, double transition);
+
 // ## The camera keys as a lane
 //
 // What the camera does between its keys, as spans on the timeline. Keys are sorted by time.
@@ -142,7 +157,8 @@ std::string camera_key_label(const CameraKeyframe& key, int index);
 
 // A key at 'time' that is on the path of 'keys' (not empty, sorted), so that adding it does not move the camera there:
 // the pose the path has at that time. It follows what the keys on both sides follow; it has no frame and no spin.
-CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop);
+// With upright (the movie keeps the camera level about it), it is levelled and has the roll of the path there.
+CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop, const vec3_t* upright = nullptr);
 
 // ## The camera path in the viewport
 
@@ -185,6 +201,8 @@ struct MovieKeys {
     std::vector<MovieOverlay> overlays;
     std::vector<MovieMarker> markers;
     bool loop = false;
+    bool keep_upright = false;
+    int  up_axis = 1;
     // The timing, which is scaled together with the keys
     float  duration = 0.0f;
     float  traj_begin = 0.0f;
