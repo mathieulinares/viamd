@@ -3,6 +3,7 @@
 #include <gfx/camera_utils.h>
 #include <movie_keys.h>
 
+#include <float.h>
 #include <math.h>
 
 UTEST(viamd_movie_keys, changing_length_scales_all_timing_and_can_be_undone) {
@@ -861,4 +862,124 @@ UTEST(viamd_movie_keys, renaming_a_key_is_an_edit) {
     EXPECT_TRUE(movie_keys_equal(a, b));
     strcpy(b.camera[1].name, "end");
     EXPECT_FALSE(movie_keys_equal(a, b));
+}
+
+UTEST(viamd_movie_keys, the_path_is_found_between_its_samples_and_held_outside) {
+    CameraPathSamples s;
+    s.time = {0.0, 2.0, 6.0};
+    s.eye = {{0, 0, 0}, {2, 0, 0}, {2, 4, 0}};
+    s.look = {{0, 0, 1}, {0, 0, 1}, {0, 0, 5}};
+    vec3_t e, l;
+    camera_path_at(s, 1.0, &e, &l);
+    EXPECT_NEAR(e.x, 1.0f, 1.0e-6f);
+    camera_path_at(s, 4.0, &e, &l);
+    EXPECT_NEAR(e.y, 2.0f, 1.0e-6f);
+    EXPECT_NEAR(l.z, 3.0f, 1.0e-6f);
+    camera_path_at(s, -3.0, &e, &l);
+    EXPECT_EQ(e.x, 0.0f);
+    camera_path_at(s, 99.0, &e, &l);
+    EXPECT_EQ(e.y, 4.0f);
+}
+
+UTEST(viamd_movie_keys, ticks_have_a_round_step_that_gives_few_enough_of_them) {
+    EXPECT_EQ(camera_tick_step(10.0, 30), 0.5);
+    EXPECT_EQ(camera_tick_step(30.0, 30), 1.0);
+    EXPECT_EQ(camera_tick_step(60.0, 30), 2.0);
+    EXPECT_EQ(camera_tick_step(300.0, 30), 10.0);
+    EXPECT_EQ(camera_tick_step(0.0, 30), 1.0);
+    for (double span : {0.7, 3.3, 12.0, 47.0, 1000.0}) EXPECT_LE(span / camera_tick_step(span, 20), 20.0);
+}
+
+UTEST(viamd_movie_keys, a_line_is_cut_at_the_camera) {
+    vec4_t a = {0, 0, 0, 2.0f}, b = {4, 0, 0, -2.0f};
+    EXPECT_TRUE(clip_segment_near(&a, &b));
+    EXPECT_EQ(a.w, 2.0f);
+    EXPECT_NEAR(b.w, 1.0e-3f, 1.0e-6f);
+    EXPECT_NEAR(b.x, 2.0f, 0.01f);
+    vec4_t c = {0, 0, 0, 1.0f}, d = {1, 0, 0, 3.0f};
+    EXPECT_TRUE(clip_segment_near(&c, &d));
+    EXPECT_EQ(d.x, 1.0f);
+    vec4_t e = {0, 0, 0, -1.0f}, f = {1, 0, 0, -3.0f};
+    EXPECT_FALSE(clip_segment_near(&e, &f));
+}
+
+UTEST(viamd_movie_keys, the_spin_ring_goes_through_the_eye_and_turns_the_way_of_the_axis) {
+    CameraKeyframe from = cam_key(0, 10), to = cam_key(4, 10);
+    to.spin_turns = 1;
+    to.spin_axis = SpinAxis::WorldY;
+    to.transform.position = {3, 5, 4};   // The look-at point is 10 in front of it, along -z in the camera's own frame
+    vec3_t c, u, v;
+    float r;
+    ASSERT_TRUE(camera_spin_ring(from, to, &c, &u, &v, &r));
+    const vec3_t eye = c + u * r;
+    EXPECT_NEAR(eye.x, 3.0f, 1.0e-4f);
+    EXPECT_NEAR(eye.y, 5.0f, 1.0e-4f);
+    EXPECT_NEAR(eye.z, 4.0f, 1.0e-4f);
+    EXPECT_NEAR(vec3_dot(u, vec3_t{0, 1, 0}), 0.0f, 1.0e-5f);
+    // A positive turn is counter-clockwise seen from the tip of the axis
+    const vec3_t axis = vec3_cross(u, v);
+    EXPECT_NEAR(axis.y, 1.0f, 1.0e-5f);
+
+    // The eye on the axis has no ring
+    to.transform.orientation = quat_axis_angle(vec3_t{1, 0, 0}, -1.5707963f);   // Looks straight down, so the eye is above what it looks at
+    EXPECT_FALSE(camera_spin_ring(from, to, &c, &u, &v, &r));
+}
+
+UTEST(viamd_movie_keys, a_ray_meets_a_plane_in_front_of_it) {
+    vec3_t p;
+    EXPECT_TRUE(ray_plane_hit({0, 0, 0}, {0, 0, -1}, {0, 0, -5}, {0, 0, 1}, &p));
+    EXPECT_NEAR(p.z, -5.0f, 1.0e-6f);
+    EXPECT_FALSE(ray_plane_hit({0, 0, 0}, {1, 0, 0}, {0, 0, -5}, {0, 0, 1}, &p));
+    EXPECT_FALSE(ray_plane_hit({0, 0, 0}, {0, 0, 1}, {0, 0, -5}, {0, 0, 1}, &p));
+}
+
+UTEST(viamd_movie_keys, the_nearest_point_of_a_polyline_skips_what_cannot_be_used) {
+    std::vector<vec2_t> pts = {{0, 0}, {10, 0}, {10, 10}, {20, 10}};
+    std::vector<char> ok = {1, 1, 1, 1};
+    int seg = -1;
+    float u = -1.0f;
+    float d = polyline_nearest(pts, ok, {4, 3}, &seg, &u);
+    EXPECT_NEAR(d, 3.0f, 1.0e-5f);
+    EXPECT_EQ(seg, 0);
+    EXPECT_NEAR(u, 0.4f, 1.0e-5f);
+    d = polyline_nearest(pts, ok, {12, 7}, &seg, &u);
+    EXPECT_EQ(seg, 1);
+    ok[2] = 0;   // The middle segments lose an end
+    d = polyline_nearest(pts, ok, {12, 7}, &seg, &u);
+    EXPECT_EQ(seg, 0);
+    EXPECT_NEAR(d, 7.0f * 1.0f + 0.0f, 8.0f);
+    EXPECT_EQ(polyline_nearest({}, {}, {0, 0}, &seg, &u), FLT_MAX);
+}
+
+UTEST(viamd_movie_keys, a_key_is_edited_by_its_eye_or_by_what_it_looks_at) {
+    CameraKeyframe k = cam_key(0, 10);
+    k.transform.position = {0, 0, 10};   // Looks along -z at the origin
+    const vec3_t look = camera_get_look_at(k.transform);
+
+    CameraKeyframe a = k;
+    ASSERT_TRUE(camera_key_set_eye(&a, {5, 0, 10}));
+    const vec3_t look_a = camera_get_look_at(a.transform);
+    EXPECT_NEAR(look_a.x, look.x, 1.0e-3f);
+    EXPECT_NEAR(look_a.y, look.y, 1.0e-3f);
+    EXPECT_NEAR(look_a.z, look.z, 1.0e-3f);
+    EXPECT_NEAR(a.transform.position.x, 5.0f, 1.0e-6f);
+
+    CameraKeyframe b = k;
+    ASSERT_TRUE(camera_key_set_look(&b, {4, 0, 0}));
+    EXPECT_NEAR(b.transform.position.z, 10.0f, 1.0e-6f);
+    const vec3_t look_b = camera_get_look_at(b.transform);
+    EXPECT_NEAR(look_b.x, 4.0f, 1.0e-3f);
+
+    CameraKeyframe c = k;
+    c.follow = true;
+    c.follow_center = {1, 1, 1};
+    camera_key_translate(&c, {1, 2, 3});
+    const vec3_t look_c = camera_get_look_at(c.transform);
+    EXPECT_NEAR(look_c.x, look.x + 1.0f, 1.0e-4f);
+    EXPECT_NEAR(look_c.z, look.z + 3.0f, 1.0e-4f);
+    EXPECT_NEAR(c.follow_center.y, 3.0f, 1.0e-6f);
+
+    // The eye on the point it looks at cannot aim
+    CameraKeyframe d = k;
+    EXPECT_FALSE(camera_key_set_eye(&d, look));
 }

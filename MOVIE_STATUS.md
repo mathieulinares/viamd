@@ -5,7 +5,7 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 ## Build and test
 
 - Build: `cmake --build build --target viamd -j8` and `--target viamd_test`; run `cmake -S . -B build` after adding files.
-- Tests: `./build/bin/viamd_test` (197 tests). They cover the pure logic (keys, undo, easing, overlays, plot maths, serialization helpers, the frame sink). ffmpeg is not needed: the frame sink tests use a fake script.
+- Tests: `./build/bin/viamd_test` (204 tests). They cover the pure logic (keys, undo, easing, overlays, plot maths, serialization helpers, the frame sink). ffmpeg is not needed: the frame sink tests use a fake script.
 - The GUI could not be run while the code was written, so everything in `gui-checklist.md` is untested by the author and needs a manual check. Windows and macOS are untested too (the ffmpeg pipe uses `popen` / `_popen`).
 
 ## Where things live
@@ -21,7 +21,7 @@ Branch `video`; no pull request yet. The user manual (also the text for the GitH
 
 ## What is there
 
-- **Camera:** keyframes with easing per segment, spin, orbit, seamless loop, follow target, a key that looks at (and tracks) an atom, depth of field focus modes, the camera path drawn in the viewport (follow-aware), **Show frame** (the frame of the movie in the viewport, the view widened to match the recording), undo and redo of everything on the timeline.
+- **Camera:** the path in the viewport (ticks at round times, chevrons, sight lines, cameras, spin rings, the green camera at the preview time) with handles on the eye and the look-at of each key that can be clicked and dragged, Ctrl + click to add a key on the path; keyframes with easing per segment, spin, orbit, seamless loop, follow target, a key that looks at (and tracks) an atom, depth of field focus modes, the camera path drawn in the viewport (follow-aware), **Show frame** (the frame of the movie in the viewport, the view widened to match the recording), undo and redo of everything on the timeline.
 - **Timing:** the movie length is the master value; the trajectory start and end anchors; frame pins on keys; backward trajectory; **Snap to frames**.
 - **Looks:** keyed look parameters, and keyed properties of representations (visible with a transition, scales, tint, saturation, colours; representations have stable ids).
 - **Overlays:** text, time stamp (the time that has gone since the movie started, only grows), scale bar, time bar (fills forward whichever way the trajectory plays), logo, images, **timeline** and **distribution** (subplots of the Timelines and Distributions windows, stacked, drawn as the movie plays; elapsed or trajectory-time axis; subplots that come in at their own times; the axis is the whole movie and the curves are drawn from the start of the movie, whenever the overlay appears; titles; markers; a look of their own), and the **property visualization** (atoms, geometry and labels of a script property, with fades). Size in percent or in points, fades, a background plate, **Duplicate**. Subplots of the plot windows have saved ids and names, so overlays keep finding them.

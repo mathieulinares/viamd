@@ -1715,6 +1715,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("FilenamePrefix"))) viamd::extract_to_char_buf(m.filename_prefix, sizeof(m.filename_prefix), arg);
                 else if (str_eq(ident, STR_LIT("AnimateCamera")))  viamd::extract_bool(m.animate_camera, arg);
                 else if (str_eq(ident, STR_LIT("ShowPath")))       viamd::extract_bool(m.show_path, arg);
+                else if (str_eq(ident, STR_LIT("PathOptions"))) {
+                    int bits = 0;
+                    if (viamd::extract_int(bits, arg)) m.path_options = bits & 15;
+                }
                 else if (str_eq(ident, STR_LIT("Output")))         viamd::extract_enum(m.output, arg, (int)MovieOutput::Count);
                 else if (str_eq(ident, STR_LIT("Crf")))            viamd::extract_int(m.crf, arg);
                 else if (str_eq(ident, STR_LIT("ResScale")))       viamd::extract_int(m.res_scale, arg);
@@ -2308,6 +2312,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_str (state, STR_LIT("FilenamePrefix"), str_from_cstr(m.filename_prefix));
         viamd::write_bool(state, STR_LIT("AnimateCamera"), m.animate_camera);
         viamd::write_bool(state, STR_LIT("ShowPath"), m.show_path);
+        viamd::write_int (state, STR_LIT("PathOptions"), m.path_options);
         viamd::write_int (state, STR_LIT("Output"), (int)m.output);
         viamd::write_int (state, STR_LIT("Crf"), m.crf);
         viamd::write_int (state, STR_LIT("ResScale"), m.res_scale);

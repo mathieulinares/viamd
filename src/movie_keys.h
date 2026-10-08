@@ -144,6 +144,39 @@ std::string camera_key_label(const CameraKeyframe& key, int index);
 // the pose the path has at that time. It follows what the keys on both sides follow; it has no frame and no spin.
 CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop);
 
+// ## The camera path in the viewport
+
+// Where the eye and what it looks at are along the movie, sampled in time (sorted, at least one sample)
+struct CameraPathSamples {
+    std::vector<double> time;
+    std::vector<vec3_t> eye, look;
+};
+
+// The eye and the look-at point at 'time', between the samples (held before the first and after the last)
+void camera_path_at(const CameraPathSamples& samples, double time, vec3_t* eye, vec3_t* look);
+
+// A round step (0.1, 0.2, 0.5, 1, 2, 5, 10 ... seconds) for ticks along 'span' seconds that gives at most 'max_ticks' of them
+double camera_tick_step(double span, int max_ticks);
+
+// Cuts a line between two points in clip space at the camera (where w is 0), keeping the part in front of it. False if none is.
+bool clip_segment_near(vec4_t* a, vec4_t* b);
+
+// The ring that the eye of key 'to' goes round when the camera spins in the stretch from key 'from' to it: its centre, two
+// perpendicular directions in its plane (going from u to v is a positive turn) and its radius. False if the eye is on the axis.
+bool camera_spin_ring(const CameraKeyframe& from, const CameraKeyframe& to, vec3_t* center, vec3_t* u, vec3_t* v, float* radius);
+
+// The point where a ray meets a plane. False if they are parallel or the plane is behind the ray.
+bool ray_plane_hit(vec3_t origin, vec3_t dir, vec3_t plane_point, vec3_t plane_normal, vec3_t* out);
+
+// The point of a polyline (points on the screen; 'ok' tells which of them can be used, and a segment needs both of its ends)
+// that is nearest to 'q': the distance, the segment and how far along it. FLT_MAX when there is none.
+float polyline_nearest(const std::vector<vec2_t>& points, const std::vector<char>& ok, vec2_t q, int* segment, float* along);
+
+// Editing a key by its handles in the viewport: the eye moves and what it looks at stays, the other way round, or both move
+bool camera_key_set_eye(CameraKeyframe* key, vec3_t eye);
+bool camera_key_set_look(CameraKeyframe* key, vec3_t look);
+void camera_key_translate(CameraKeyframe* key, vec3_t delta);
+
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;

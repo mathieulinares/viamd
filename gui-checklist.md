@@ -75,6 +75,17 @@ Windows: **Windows > Movie** and **Windows > Movie Timeline** (it is closed on s
 - [ ] Camera lane, double-click an empty place: a key appears there and the camera does not jump (the view stays as it was; **Show path in viewport** shows the same path). It is not added where a key already is. Not possible while recording.
 - [ ] Camera lane, bands: keys that **Follow** show a teal band over the run of keys, **Look at** an atom a blue band with the atom number, a key with **Spin** a purple band like `+2 x` over the stretch before it, a key with **with trajectory frame** a green mark with the frame. Hovering shows the details. A key added by double-click between two that follow also follows.
 
+- [ ] Path in the viewport (**Show path in viewport**, with the Movie window or the Movie Timeline open): blue eye path, yellow look-at path, brighter after the preview time than before it. Scrubbing the preview time moves the green camera: a green dot on the eye, a green ring with a cross and the words **looks at**, a thick green line with an arrow between them.
+- [ ] Path, ticks: dots at round times with labels (not on top of each other), chevrons pointing the way the camera goes, yellow diamonds on the look-at path at the same times. With an **Ease in/out** key the dots crowd together near it. Zoom the viewport in and out: the labels stay readable. **Time ticks** off removes them.
+- [ ] Path, sight lines and cameras: **Sight lines** gives thin lines from eye to look-at at each tick, **Cameras** the pyramids at the keys (orange at the preview time), **Spin rings** a purple circle with arrows and `+2 x` for a key with spin turns, the arrows turning the same way as the camera in the preview. Each can be switched off. The choices are saved in the workspace.
+- [ ] Path, keys: the eye handle is a numbered dot (name beside it), the look-at handle a ring with a cross and the number; white, teal for follow, blue for look at an atom, orange at the preview time. Hover a handle: the key lights up in the camera lane too; hover a dot in the camera lane: the handle in the viewport lights up.
+- [ ] Path, click: clicking a handle goes to that key (the viewport must not select anything or rotate while the mouse is over a handle).
+- [ ] Path, drag the eye handle: the eye follows the mouse in the plane facing you and the camera keeps looking at the same point (the ring does not move); drag the ring: what the camera looks at moves, the eye stays; Ctrl + drag moves both. Esc during a drag puts the key back. Ctrl+Z undoes a whole drag in one step. The camera lane, the table and the path follow.
+- [ ] Path, keys that follow the target or an atom: the path is computed along the trajectory as before; dragging a handle of such a key still works.
+- [ ] Path, Ctrl + click on the path (eye or look-at) shows a white ring with `add a key at ... s` and adds a key there; the camera does not jump; there is no key added where one is.
+- [ ] The path is not in the recorded frames or a screenshot; it is hidden while recording and while a key waits for **Look at** (clicking an atom still works).
+- [ ] Path with depth of field on: the pink focus frame is still drawn at the preview time.
+
 ## 4. Timing and the Movie Timeline window
 
 - [ ] **Snap to frames**: drag a key, a parameter key, a representation key, the blue anchors and the playhead. They land on frames of the movie. With it off they move freely.

@@ -46,6 +46,8 @@ The user manual with screenshots is in [`docs/movie_maker.md`](docs/movie_maker.
 - Representations now have a stable `id` (saved in the workspace, never reused), which keys refer to, so reordering, duplicating or removing representations does not break them. Removing one removes its keys.
 - The Representations window is locked while a recording is running.
 
+- The camera path in the viewport is drawn over it, with ticks at round times and chevrons that show speed and direction, brighter ahead of the preview time, sight lines, cameras at the keys, rings for spins, and a green camera with the line it looks along at the preview time. Each key has a handle on the eye and one on what it looks at: click to go to the key, drag to edit it (Ctrl moves both), Ctrl + click on the path adds a key.
+
 - The **Camera lane** of the Movie Timeline shows the camera keys (with names that are saved) as dots that can be dragged, clicked, renamed and removed, bands where the camera follows the target or an atom or spins, and the keys that pin a trajectory frame; a double click adds a key on the path without moving the camera.
 
 - The **Representation overview** lane of the Movie Timeline shows when each representation is shown as bars that can be dragged, resized, added and removed. Representations named alike up to the first hyphen (`protein-cartoon`, `protein-cpk`) are grouped under a row of their group, which can be folded and dragged, and a button swaps a representation with the next of its group.
@@ -93,7 +95,7 @@ New tests are in:
 - `test_image`.
 - `test_serialization`.
 
-All 197 tests pass in a Release build on Linux.
+All 204 tests pass in a Release build on Linux.
 
 ### Testing done and not done
 - I recorded PNG sequences and H.264 MP4s on Linux early on, and the screenshots in the manual come from a real run with `1ALA-500.pdb`.

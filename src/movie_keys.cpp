@@ -3,6 +3,7 @@
 #include <gfx/camera_utils.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 
@@ -549,4 +550,118 @@ CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, doubl
         key.follow_center = ref->follow_center;
     }
     return key;
+}
+
+void camera_path_at(const CameraPathSamples& s, double time, vec3_t* eye, vec3_t* look) {
+    *eye = vec3_t{0, 0, 0};
+    *look = vec3_t{0, 0, 0};
+    const size_t n = s.time.size();
+    if (n == 0 || s.eye.size() < n || s.look.size() < n) return;
+    if (n == 1 || time <= s.time[0]) { *eye = s.eye[0]; *look = s.look[0]; return; }
+    if (time >= s.time[n - 1]) { *eye = s.eye[n - 1]; *look = s.look[n - 1]; return; }
+    const size_t j = (size_t)(std::upper_bound(s.time.begin(), s.time.end(), time) - s.time.begin());
+    const size_t i = j - 1;
+    const float u = (float)((time - s.time[i]) / std::max(s.time[j] - s.time[i], 1.0e-12));
+    *eye = s.eye[i] + (s.eye[j] - s.eye[i]) * u;
+    *look = s.look[i] + (s.look[j] - s.look[i]) * u;
+}
+
+double camera_tick_step(double span, int max_ticks) {
+    if (span <= 0.0 || max_ticks < 1) return 1.0;
+    // In hundredths of a second, so that the steps are exact
+    int64_t decade = 1;
+    for (int k = 0; k < 10; ++k, decade *= 10) {
+        for (int64_t m : {1, 2, 5}) {
+            const double step = (double)(m * decade) / 100.0;
+            if (span / step <= (double)max_ticks) return step;
+        }
+    }
+    return span;
+}
+
+bool clip_segment_near(vec4_t* a, vec4_t* b) {
+    const float eps = 1.0e-3f;
+    const bool in_a = a->w > eps, in_b = b->w > eps;
+    if (!in_a && !in_b) return false;
+    if (in_a && in_b) return true;
+    vec4_t* out = in_a ? b : a;
+    const vec4_t in = in_a ? *a : *b;
+    const float t = (in.w - eps) / (in.w - out->w);
+    out->x = in.x + (out->x - in.x) * t;
+    out->y = in.y + (out->y - in.y) * t;
+    out->z = in.z + (out->z - in.z) * t;
+    out->w = eps;
+    return true;
+}
+
+bool camera_spin_ring(const CameraKeyframe& from, const CameraKeyframe& to, vec3_t* center, vec3_t* u, vec3_t* v, float* radius) {
+    vec3_t axis = {0, 1, 0};
+    switch (to.spin_axis) {
+    case SpinAxis::ViewUp: axis = from.transform.orientation * vec3_t{0, 1, 0}; break;
+    case SpinAxis::WorldX: axis = {1, 0, 0}; break;
+    case SpinAxis::WorldZ: axis = {0, 0, 1}; break;
+    default: break;
+    }
+    axis = vec3_normalize(axis);
+    const vec3_t look = camera_get_look_at(to.transform);
+    const vec3_t d = to.transform.position - look;
+    const float h = vec3_dot(d, axis);
+    const vec3_t w = d - axis * h;
+    const float r = vec3_length(w);
+    if (r < 1.0e-4f) return false;
+    *center = look + axis * h;
+    *u = w / r;
+    *v = vec3_cross(axis, *u);
+    *radius = r;
+    return true;
+}
+
+bool ray_plane_hit(vec3_t origin, vec3_t dir, vec3_t plane_point, vec3_t plane_normal, vec3_t* out) {
+    const float denom = vec3_dot(dir, plane_normal);
+    if (fabsf(denom) < 1.0e-6f) return false;
+    const float t = vec3_dot(plane_point - origin, plane_normal) / denom;
+    if (t < 0.0f) return false;
+    *out = origin + dir * t;
+    return true;
+}
+
+float polyline_nearest(const std::vector<vec2_t>& pts, const std::vector<char>& ok, vec2_t q, int* segment, float* along) {
+    float best = FLT_MAX;
+    for (size_t i = 1; i < pts.size() && i < ok.size(); ++i) {
+        if (!ok[i - 1] || !ok[i]) continue;
+        const float ax = pts[i - 1].x, ay = pts[i - 1].y;
+        const float dx = pts[i].x - ax, dy = pts[i].y - ay;
+        const float len2 = dx * dx + dy * dy;
+        float u = len2 > 1.0e-12f ? ((q.x - ax) * dx + (q.y - ay) * dy) / len2 : 0.0f;
+        u = std::min(std::max(u, 0.0f), 1.0f);
+        const float ex = q.x - (ax + dx * u), ey = q.y - (ay + dy * u);
+        const float dist = sqrtf(ex * ex + ey * ey);
+        if (dist < best) {
+            best = dist;
+            if (segment) *segment = (int)i - 1;
+            if (along) *along = u;
+        }
+    }
+    return best;
+}
+
+bool camera_key_set_eye(CameraKeyframe* key, vec3_t eye) {
+    const vec3_t look = camera_get_look_at(key->transform);
+    ViewTransform t = key->transform;
+    t.position = eye;
+    if (!camera_aim_at(&t, look)) return false;
+    key->transform = t;
+    return true;
+}
+
+bool camera_key_set_look(CameraKeyframe* key, vec3_t look) {
+    ViewTransform t = key->transform;
+    if (!camera_aim_at(&t, look)) return false;
+    key->transform = t;
+    return true;
+}
+
+void camera_key_translate(CameraKeyframe* key, vec3_t delta) {
+    key->transform.position = key->transform.position + delta;
+    if (key->follow) key->follow_center = key->follow_center + delta;
 }

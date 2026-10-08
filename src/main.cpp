@@ -228,7 +228,7 @@ static void movie_redo(ApplicationState* state);
 static void draw_movie_window(ApplicationState* state);
 static void draw_movie_timeline_window(ApplicationState* state);
 static void draw_movie_recording_banner(ApplicationState* state);
-static void movie_draw_camera_path(ApplicationState* state);
+static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl);
 static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view);
 static bool movie_key_look_at_atom(ApplicationState* state, int key_idx, int32_t atom);
 static bool movie_draw_timeline_markers(ApplicationState* state);
@@ -611,6 +611,8 @@ int main(int argc, char** argv) {
 
         // A keyframe waits for an atom: the click picks it, so it must not select or rotate as well
         const bool look_pick = state.movie.look_pick_key >= 0 && !movie_recording;
+        // A handle of the camera path is hovered or dragged: the viewport must not select or rotate as well
+        const bool surface_blocked = look_pick || ((state.movie.path_hot || state.movie.path_drag.active) && !movie_recording);
         if (look_pick && ImGui::IsKeyPressed(ImGuiKey_Escape)) state.movie.look_pick_key = -1;
 
         if (surface_state.hovered && !movie_recording) {
@@ -639,8 +641,8 @@ int main(int argc, char** argv) {
             event.clip_to_world = clip_to_world;
             event.world_to_clip = world_to_clip;
 
-            if (look_pick) {
-                // handled above
+            if (surface_blocked) {
+                // handled above, or by the path
             } else if (event.kind == InteractionSurfaceEventKind::RegionSelect) {
                 const md_bitfield_t* candidate_mask = &state.representation.visibility_mask;
                 if (event.selection_mode == InteractionSelectionMode::Remove) {
@@ -670,7 +672,7 @@ int main(int argc, char** argv) {
             }
             
             // Since this is the main interaction view, we still broadcast all kinds of events, even if we have handled some explicitly here.
-            if (!look_pick) viamd::event_system_broadcast_event(viamd::EventType_ViamdInteractionSurface, viamd::EventPayloadType_InteractionSurfaceEvent, &event);
+            if (!surface_blocked) viamd::event_system_broadcast_event(viamd::EventType_ViamdInteractionSurface, viamd::EventPayloadType_InteractionSurfaceEvent, &event);
         }
 
         InteractionSurfaceViewTransformArgs view_args = {
@@ -679,7 +681,7 @@ int main(int argc, char** argv) {
         };
 
         InteractionSurfaceViewTransformResult view_result = {};
-        if (!movie_recording && !look_pick) {
+        if (!movie_recording && !surface_blocked) {
             view_result = interaction_surface_view_transform_apply(&state.view.target, surface_state, view_args);
         }
         if (view_result.reset_requested) {
@@ -1097,6 +1099,7 @@ int main(int argc, char** argv) {
                 const ImVec2 size = guided ? guide_size : ImVec2((float)state.app.window.width, (float)state.app.window.height);
                 movie_overlays_draw(window->DrawList, pos, size, (double)state.movie.playhead, &state);
             }
+            if (window) movie_draw_camera_path(&state, window->DrawList);
         }
 
         if (ImGui::IsKeyPressed(KEY_RECENTER_ON_HIGHLIGHT) && !state.editor_focused) {
@@ -8121,32 +8124,6 @@ static void movie_goto_keyframe(ApplicationState* state, size_t idx) {
     state->animation.frame = movie_trajectory_frame(state, key.time);
 }
 
-static void movie_draw_frustum(immediate::Queue* q, const ViewTransform& vt, float fov_y, float aspect, float length, uint32_t color) {
-    const vec3_t eye   = vt.position;
-    const vec3_t fwd   = vt.orientation * vec3_t{0, 0, -1};
-    const vec3_t right = vt.orientation * vec3_t{1, 0, 0};
-    const vec3_t up    = vt.orientation * vec3_t{0, 1, 0};
-    const float  hh = tanf(fov_y * 0.5f) * length;
-    const float  hw = hh * aspect;
-    const vec3_t c  = eye + fwd * length;
-    const vec3_t p[4] = {
-        c - right * hw - up * hh,
-        c + right * hw - up * hh,
-        c + right * hw + up * hh,
-        c - right * hw + up * hh,
-    };
-    for (int i = 0; i < 4; ++i) {
-        immediate::line(q, eye, p[i], color);
-        immediate::line(q, p[i], p[(i + 1) % 4], color);
-    }
-    // A roof on the top edge, so that it can be told which way is up
-    const vec3_t roof = c + up * (hh * 1.4f);
-    immediate::line(q, p[2], roof, color);
-    immediate::line(q, p[3], roof, color);
-}
-
-// The camera path of the keyframes in the viewport: the eye, what it looks at, and the camera at each key.
-// Not part of what is recorded, which is why this is not called for frames that are captured.
 // What the path of the camera depends on, apart from the trajectory itself
 static uint64_t movie_path_signature(const ApplicationState* state) {
     const auto& m = state->movie;
@@ -8245,113 +8222,530 @@ static void movie_path_update(ApplicationState* state) {
     }
 }
 
-static void movie_draw_camera_path(ApplicationState* state) {
+// The camera space (where the keys are) to the pixels of the viewport, for what is drawn over the viewport with the draw list
+struct MoviePathView {
+    mat4_t mvp = {};
+    mat4_t inv = {};
+    float  w = 1.0f, h = 1.0f;
+
+    ImVec2 pixel(const vec4_t& c) const { return ImVec2((c.x / c.w * 0.5f + 0.5f) * w, (-c.y / c.w * 0.5f + 0.5f) * h); }
+
+    // False when the point is behind the camera
+    bool point(vec3_t p, ImVec2* out) const {
+        const vec4_t c = mat4_mul_vec4(mvp, vec4_from_vec3(p, 1.0f));
+        if (c.w <= 1.0e-3f) return false;
+        *out = pixel(c);
+        return true;
+    }
+
+    // A line between two points, cut where it goes behind the camera
+    bool segment(vec3_t a, vec3_t b, ImVec2* pa, ImVec2* pb) const {
+        vec4_t ca = mat4_mul_vec4(mvp, vec4_from_vec3(a, 1.0f));
+        vec4_t cb = mat4_mul_vec4(mvp, vec4_from_vec3(b, 1.0f));
+        if (!clip_segment_near(&ca, &cb)) return false;
+        *pa = pixel(ca);
+        *pb = pixel(cb);
+        return true;
+    }
+
+    // The ray through a pixel
+    void ray(ImVec2 px, vec3_t* origin, vec3_t* dir) const {
+        const float nx = px.x / w * 2.0f - 1.0f, ny = -(px.y / h * 2.0f - 1.0f);
+        const vec4_t n = mat4_mul_vec4(inv, vec4_set(nx, ny, -1.0f, 1.0f));
+        const vec4_t f = mat4_mul_vec4(inv, vec4_set(nx, ny, 1.0f, 1.0f));
+        const vec3_t a = vec3_set(n.x / n.w, n.y / n.w, n.z / n.w);
+        const vec3_t b = vec3_set(f.x / f.w, f.y / f.w, f.z / f.w);
+        *origin = a;
+        *dir = vec3_normalize(b - a);
+    }
+};
+
+static void movie_path_view(const ApplicationState* state, MoviePathView* v) {
+    Camera cam = state->view.camera;
+    ImVec2 guide_pos, guide_size;
+    if (movie_frame_guide(state, &guide_pos, &guide_size) && guide_size.y > 0.0f) {
+        cam.fov_y = movie_guide_fov_y(cam.fov_y, (float)state->app.window.height, guide_size.y);
+    }
+    const float aspect = (float)state->gbuffer.width / (float)MAX((int)state->gbuffer.height, 1);
+    mat4_t P;
+    if (state->view.mode == CameraMode::Perspective) {
+        P = camera_view_to_clip_matrix_persp(cam, aspect);
+    } else {
+        const float h = cam.distance * tanf(cam.fov_y * 0.5f);
+        const float w = aspect * h;
+        P = camera_view_to_clip_matrix_ortho(-w, w, -h, h, cam.near_plane, cam.far_plane);
+    }
+    v->mvp = P * camera_world_to_view_matrix(cam);
+    v->inv = mat4_inverse(v->mvp);
+    v->w = (float)state->app.window.width;
+    v->h = (float)state->app.window.height;
+}
+
+static bool movie_viewport_hovered() {
+    const ImGuiWindow* win = ImGui::GetCurrentContext()->HoveredWindow;
+    return win && strcmp(win->Name, "Main interaction window") == 0;
+}
+
+static ImU32 movie_path_fade(ImU32 c, float a) {
+    return (c & 0x00FFFFFFu) | ((ImU32)((float)((c >> 24) & 0xFF) * a) << 24);
+}
+
+// A camera as a pyramid from the eye, with a roof on the top edge so that it can be told which way is up
+static void movie_path_frustum(const MoviePathView& V, ImDrawList* dl, const ViewTransform& vt, float fov_y, float aspect, float length, ImU32 col, float thickness) {
+    const vec3_t eye   = vt.position;
+    const vec3_t fwd   = vt.orientation * vec3_t{0, 0, -1};
+    const vec3_t right = vt.orientation * vec3_t{1, 0, 0};
+    const vec3_t up    = vt.orientation * vec3_t{0, 1, 0};
+    const float  hh = tanf(fov_y * 0.5f) * length;
+    const float  hw = hh * aspect;
+    const vec3_t c  = eye + fwd * length;
+    const vec3_t p[4] = { c - right * hw - up * hh, c + right * hw - up * hh, c + right * hw + up * hh, c - right * hw + up * hh };
+    auto line = [&](vec3_t a, vec3_t b) {
+        ImVec2 pa, pb;
+        if (V.segment(a, b, &pa, &pb)) dl->AddLine(pa, pb, col, thickness);
+    };
+    for (int i = 0; i < 4; ++i) {
+        line(eye, p[i]);
+        line(p[i], p[(i + 1) % 4]);
+    }
+    const vec3_t roof = c + up * (hh * 1.4f);
+    line(p[2], roof);
+    line(p[3], roof);
+}
+
+// The camera's path in the viewport, drawn over it: the path of the eye (blue) and of what it looks at (yellow), brighter ahead of
+// the preview time than behind it, with ticks at round times and chevrons that show the direction. Ticks that are close together
+// are where the camera is slow. Each key has a handle on the eye and one on what it looks at, with its number and name: click one to
+// go to the key, drag it to edit the key (the eye moves and the camera keeps looking at the same point, or the other way round; with
+// Ctrl both move). Ctrl + click on the path adds a key there. The camera at the preview time is green, with the line it looks along.
+static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     auto& m = state->movie;
+    auto& d = m.path_drag;
+    m.path_hot = false;
+    m.path_hover_key = -1;
     const size_t n = md_array_size(m.keyframes);
-    if (!m.show_window || !m.show_path || n == 0) return;
+    const bool shown = m.show_path && n > 0 && (m.show_window || m.show_timeline_window) && m.state != MovieRecordingState::Recording && str_empty(state->screenshot.path_to_file);
+    if (!shown) {
+        d.active = false;
+        m.lane_hover_key = -1;
+        return;
+    }
 
-    int w = 0, h = 0;
-    movie_frame_size(state, &w, &h);
-    const float aspect = h > 0 ? (float)w / (float)h : 1.0f;
+    MoviePathView V;
+    movie_path_view(state, &V);
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 mouse = io.MousePos;
+    const bool over = movie_viewport_hovered() && ImGui::IsMousePosValid(&mouse);
+    const bool picking = m.look_pick_key >= 0;
+    const float fs = ImGui::GetFontSize();
+    const float handle_r = 9.0f;
+    CameraKeyframe* keys = m.keyframes;
+    auto handle_world = [&](int i, int kind) { return kind == 0 ? keys[i].transform.position : camera_get_look_at(keys[i].transform); };
+    if (d.active && d.key >= (int)n) d.active = false;
 
-    const uint32_t col_eye  = IM_COL32(90, 200, 255, 255);
-    const uint32_t col_look = IM_COL32(255, 200, 60, 255);
-    const uint32_t col_key  = IM_COL32(255, 255, 255, 230);
-    const uint32_t col_sel  = IM_COL32(255, 110, 40, 255);
-    const uint32_t col_head = IM_COL32(80, 255, 120, 255);
-    const uint32_t col_dim  = IM_COL32(255, 255, 255, 70);
+    // ## Handles: hover, click and drag
+    int hover_key = -1, hover_kind = 0;
+    if (over && !d.active && !picking) {
+        float best = (handle_r + 4.0f) * (handle_r + 4.0f);
+        for (int i = 0; i < (int)n; ++i) {
+            for (int kind = 0; kind < 2; ++kind) {
+                ImVec2 p;
+                if (!V.point(handle_world(i, kind), &p)) continue;
+                const float dx = p.x - mouse.x, dy = p.y - mouse.y;
+                if (dx * dx + dy * dy < best) {
+                    best = dx * dx + dy * dy;
+                    hover_key = i;
+                    hover_kind = kind;
+                }
+            }
+        }
+    }
+    if (hover_key >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        d = decltype(m.path_drag){};
+        d.active = true;
+        d.key = hover_key;
+        d.kind = hover_kind;
+        d.start = keys[hover_key];
+        d.start_x = mouse.x;
+        d.start_y = mouse.y;
+        d.plane_point = handle_world(hover_key, hover_kind);
+        d.plane_normal = state->view.camera.orientation * vec3_t{0, 0, -1};
+        vec3_t o, dir, hit;
+        V.ray(mouse, &o, &dir);
+        d.grab = ray_plane_hit(o, dir, d.plane_point, d.plane_normal, &hit) ? hit - d.plane_point : vec3_t{0, 0, 0};
+    }
+    if (d.active) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            if (d.moved) keys[d.key] = d.start;
+            d.active = false;
+        } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (!d.moved && fabsf(mouse.x - d.start_x) + fabsf(mouse.y - d.start_y) > 4.0f) d.moved = true;
+            if (d.moved) {
+                vec3_t o, dir, hit;
+                V.ray(mouse, &o, &dir);
+                if (ray_plane_hit(o, dir, d.plane_point, d.plane_normal, &hit)) {
+                    const vec3_t pos = hit - d.grab;
+                    CameraKeyframe k = d.start;
+                    if (io.KeyCtrl)         camera_key_translate(&k, pos - d.plane_point);
+                    else if (d.kind == 0)   camera_key_set_eye(&k, pos);
+                    else                    camera_key_set_look(&k, pos);
+                    keys[d.key] = k;
+                }
+            }
+        } else {
+            if (!d.moved) movie_goto_keyframe(state, (size_t)d.key);
+            d.active = false;
+        }
+    }
+    if (hover_key >= 0 || d.active) {
+        m.path_hot = true;
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    m.path_hover_key = d.active ? d.key : hover_key;
 
-    immediate::Scope scope(state->gfx.overlay, "movie camera path");
-    immediate::Queue* q = scope;
-    const CameraKeyframe* keys = m.keyframes;
-
-    // With keys that follow something, the path is where the target takes the camera through the trajectory
-    const bool following = n >= 2 && (movie_keys_track_atoms(keys, n) || (movie_keys_follow(keys, n) && !md_bitfield_empty(&m.follow_mask)));
+    // ## The path itself
+    std::vector<CameraKeyframe> sorted(keys, keys + n);
+    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    const bool following = n >= 2 && (movie_keys_track_atoms(sorted.data(), n) || (movie_keys_follow(sorted.data(), n) && !md_bitfield_empty(&m.follow_mask)));
     if (following) movie_path_update(state);
 
+    // With keys that follow something, where the target takes the camera through the trajectory. An older path stays until the new one is done.
+    const auto& sp = m.path_shown.complete && m.path_shown.num_keys == (int)n ? m.path_shown : m.path_build;
+    CameraPathSamples path;
     if (following) {
-        // An older path stays until the new one is done
-        const auto& sp = m.path_shown.complete && m.path_shown.num_keys == (int)n ? m.path_shown : m.path_build;
         const int count = sp.complete ? (int)sp.time.size() : sp.done;
-        for (int i = 1; i < count; ++i) {
-            immediate::line(q, sp.eye[i - 1],  sp.eye[i],  col_eye);
-            immediate::line(q, sp.look[i - 1], sp.look[i], col_look);
-        }
-    } else if (n >= 2) {
-        const int samples = CLAMP((int)n * 48, 64, 1024);
-        const double t0 = keys[0].time;
-        const double t1 = keys[n - 1].time;
-        vec3_t prev_eye = {}, prev_look = {};
-        for (int i = 0; i <= samples; ++i) {
-            ViewTransform vt;
-            float fov_y;
-            camera_keyframes_evaluate(&vt, &fov_y, keys, n, t0 + (t1 - t0) * (double)i / (double)samples, m.loop);
-            const vec3_t eye  = vt.position;
-            const vec3_t look = camera_get_look_at(vt);
-            if (i > 0) {
-                immediate::line(q, prev_eye,  eye,  col_eye);
-                immediate::line(q, prev_look, look, col_look);
+        path.time.assign(sp.time.begin(), sp.time.begin() + count);
+        path.eye.assign(sp.eye.begin(), sp.eye.begin() + count);
+        path.look.assign(sp.look.begin(), sp.look.begin() + count);
+    }
+    if (path.time.size() < 2) {
+        path = {};
+        const double t0 = sorted.front().time, t1 = sorted.back().time;
+        if (n >= 2 && t1 > t0) {
+            const int samples = CLAMP((int)n * 48, 64, 1024);
+            for (int i = 0; i <= samples; ++i) {
+                ViewTransform vt;
+                float fov_y;
+                const double t = t0 + (t1 - t0) * (double)i / (double)samples;
+                camera_keyframes_evaluate(&vt, &fov_y, sorted.data(), n, t, m.loop);
+                path.time.push_back(t);
+                path.eye.push_back(vt.position);
+                path.look.push_back(camera_get_look_at(vt));
             }
-            prev_eye = eye;
-            prev_look = look;
+        } else {
+            path.time.push_back(t0);
+            path.eye.push_back(sorted.front().transform.position);
+            path.look.push_back(camera_get_look_at(sorted.front().transform));
         }
     }
 
-    for (size_t i = 0; i < n; ++i) {
-        const CameraKeyframe& k = keys[i];
-        const bool selected = fabs(k.time - (double)m.playhead) < 1.0e-3;
-        movie_draw_frustum(q, k.transform, k.fov_y, aspect, k.transform.distance * 0.25f, selected ? col_sel : col_key);
+    const ImU32 col_eye  = IM_COL32(90, 200, 255, 255);
+    const ImU32 col_look = IM_COL32(255, 200, 60, 255);
+    const ImU32 col_head = IM_COL32(80, 255, 120, 255);
+    const ImU32 col_dark = IM_COL32(15, 15, 20, 255);
+    const ImU32 col_spin = IM_COL32(200, 130, 250, 255);
+    const double playhead = (double)m.playhead;
+    const float aspect = [&] { int w = 0, h = 0; movie_frame_size(state, &w, &h); return h > 0 ? (float)w / (float)h : 1.0f; }();
 
-        // What the camera looks at, and the line of sight to it
-        const vec3_t look = camera_get_look_at(k.transform);
-        const float s = k.transform.distance * 0.03f;
-        immediate::line(q, k.transform.position, look, col_dim);
-        immediate::line(q, look - vec3_t{s, 0, 0}, look + vec3_t{s, 0, 0}, col_look);
-        immediate::line(q, look - vec3_t{0, s, 0}, look + vec3_t{0, s, 0}, col_look);
-        immediate::line(q, look - vec3_t{0, 0, s}, look + vec3_t{0, 0, s}, col_look);
+    auto label = [&](ImVec2 p, const char* text, ImU32 col) {
+        const ImVec2 size = ImGui::CalcTextSize(text);
+        dl->AddRectFilled(ImVec2(p.x - 3.0f, p.y - 1.0f), ImVec2(p.x + size.x + 3.0f, p.y + size.y + 1.0f), IM_COL32(0, 0, 0, 150), 3.0f);
+        dl->AddText(p, col, text);
+    };
+
+    const size_t samples = path.time.size();
+    std::vector<vec2_t> screen_eye(samples), screen_look(samples);
+    std::vector<char> ok_eye(samples, 0), ok_look(samples, 0);
+    for (size_t i = 0; i < samples; ++i) {
+        ImVec2 p;
+        if (V.point(path.eye[i], &p))  { screen_eye[i] = vec2_set(p.x, p.y);  ok_eye[i] = 1; }
+        if (V.point(path.look[i], &p)) { screen_look[i] = vec2_set(p.x, p.y); ok_look[i] = 1; }
     }
 
-    // The camera at the playhead
-    ViewTransform vt;
-    float fov_y;
+    // Round times along the path
+    const double t_first = path.time.front(), t_last = path.time.back();
+    const double step = camera_tick_step(t_last - t_first, 30);
+    std::vector<double> ticks;
+    if (t_last > t_first) {
+        for (int64_t k = (int64_t)ceil(t_first / step - 1.0e-9); (double)k * step <= t_last + 1.0e-9; ++k) ticks.push_back((double)k * step);
+    }
+
+    // What the camera looks at from the eye, at each tick
+    if ((m.path_options & 2) && !ticks.empty()) {
+        for (double t : ticks) {
+            vec3_t e, l;
+            camera_path_at(path, t, &e, &l);
+            ImVec2 a, b;
+            if (V.segment(e, l, &a, &b)) dl->AddLine(a, b, IM_COL32(255, 255, 255, t < playhead ? 18 : 40), 1.0f);
+        }
+    }
+
+    // The two paths, dimmer before the preview time
+    auto draw_path = [&](const std::vector<vec3_t>& pts, ImU32 col, float thickness) {
+        for (size_t i = 1; i < samples; ++i) {
+            ImVec2 a, b;
+            if (!V.segment(pts[i - 1], pts[i], &a, &b)) continue;
+            const double mid = 0.5 * (path.time[i - 1] + path.time[i]);
+            dl->AddLine(a, b, mid < playhead ? movie_path_fade(col, 0.4f) : col, thickness);
+        }
+    };
+    draw_path(path.look, col_look, 2.0f);
+    draw_path(path.eye, col_eye, 3.0f);
+
+    // Ticks, labels and chevrons
+    if ((m.path_options & 1) && !ticks.empty()) {
+        auto chevron = [&](ImVec2 p, ImVec2 q, ImU32 col) {
+            ImVec2 dir(q.x - p.x, q.y - p.y);
+            const float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
+            if (len < 1.0e-3f) return;
+            dir = ImVec2(dir.x / len, dir.y / len);
+            const ImVec2 nrm(-dir.y, dir.x);
+            const ImVec2 back(p.x - dir.x * 7.0f, p.y - dir.y * 7.0f);
+            dl->AddLine(p, ImVec2(back.x + nrm.x * 5.0f, back.y + nrm.y * 5.0f), col, 2.0f);
+            dl->AddLine(p, ImVec2(back.x - nrm.x * 5.0f, back.y - nrm.y * 5.0f), col, 2.0f);
+        };
+        ImVec2 last_label(-1.0e9f, -1.0e9f), prev_tick(-1.0e9f, -1.0e9f);
+        double prev_t = 0.0;
+        bool have_prev = false;
+        for (double t : ticks) {
+            vec3_t e, l;
+            camera_path_at(path, t, &e, &l);
+            const ImU32 col = t < playhead ? movie_path_fade(col_eye, 0.5f) : col_eye;
+            ImVec2 pe;
+            if (V.point(e, &pe)) {
+                dl->AddCircleFilled(pe, 4.0f, col_dark);
+                dl->AddCircleFilled(pe, 3.0f, col);
+                const float dx = pe.x - last_label.x, dy = pe.y - last_label.y;
+                if (dx * dx + dy * dy > 60.0f * 60.0f) {
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%g s", t);
+                    label(ImVec2(pe.x + 7.0f, pe.y - fs - 3.0f), buf, col_eye);
+                    last_label = pe;
+                }
+                // A chevron half way to the previous tick, pointing the way the camera goes
+                if (have_prev) {
+                    const double tm = 0.5 * (t + prev_t);
+                    vec3_t em, lm, en, ln;
+                    camera_path_at(path, tm, &em, &lm);
+                    camera_path_at(path, tm + 0.02 * step, &en, &ln);
+                    ImVec2 pm, pn;
+                    const float dxp = pe.x - prev_tick.x, dyp = pe.y - prev_tick.y;
+                    if (dxp * dxp + dyp * dyp > 26.0f * 26.0f && V.point(em, &pm) && V.point(en, &pn)) chevron(pm, pn, col);
+                }
+                prev_tick = pe;
+                prev_t = t;
+                have_prev = true;
+            } else {
+                have_prev = false;
+            }
+            ImVec2 pl;
+            if (V.point(l, &pl)) {
+                const ImU32 lc = t < playhead ? movie_path_fade(col_look, 0.5f) : col_look;
+                dl->AddQuadFilled(ImVec2(pl.x, pl.y - 4.0f), ImVec2(pl.x + 4.0f, pl.y), ImVec2(pl.x, pl.y + 4.0f), ImVec2(pl.x - 4.0f, pl.y), lc);
+            }
+        }
+    }
+
+    // The ring that the camera goes round in a spin, turning the way the turns go
+    if (m.path_options & 8) {
+        for (const CameraBand& b : camera_bands(sorted)) {
+            if (b.kind != CameraBandKind::Spin) continue;
+            vec3_t c, u, v;
+            float r;
+            if (!camera_spin_ring(sorted[(size_t)b.first], sorted[(size_t)b.last], &c, &u, &v, &r)) continue;
+            auto on_ring = [&](float a) { return c + (u * cosf(a) + v * sinf(a)) * r; };
+            const int segments = 72;
+            for (int s = 0; s < segments; ++s) {
+                const float a0 = 6.2831853f * (float)s / (float)segments, a1 = 6.2831853f * (float)(s + 1) / (float)segments;
+                ImVec2 pa, pb;
+                if (V.segment(on_ring(a0), on_ring(a1), &pa, &pb)) dl->AddLine(pa, pb, movie_path_fade(col_spin, 0.55f), 2.0f);
+            }
+            const float dir = b.turns > 0 ? 1.0f : -1.0f;
+            for (int k = 0; k < 4; ++k) {
+                const float a = 0.7853982f + 1.5707963f * (float)k;
+                ImVec2 pa, pb;
+                if (V.point(on_ring(a), &pa) && V.point(on_ring(a + dir * 0.05f), &pb)) {
+                    ImVec2 dd(pb.x - pa.x, pb.y - pa.y);
+                    const float len = sqrtf(dd.x * dd.x + dd.y * dd.y);
+                    if (len < 1.0e-3f) continue;
+                    dd = ImVec2(dd.x / len, dd.y / len);
+                    const ImVec2 nrm(-dd.y, dd.x);
+                    const ImVec2 back(pa.x - dd.x * 8.0f, pa.y - dd.y * 8.0f);
+                    dl->AddLine(pa, ImVec2(back.x + nrm.x * 5.0f, back.y + nrm.y * 5.0f), col_spin, 2.5f);
+                    dl->AddLine(pa, ImVec2(back.x - nrm.x * 5.0f, back.y - nrm.y * 5.0f), col_spin, 2.5f);
+                }
+            }
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%+d x", b.turns);
+            ImVec2 p;
+            if (V.point(on_ring(0.0f), &p)) label(ImVec2(p.x + 8.0f, p.y + 4.0f), buf, col_spin);
+        }
+    }
+
+    // The cameras at the keys
+    if (m.path_options & 4) {
+        for (size_t i = 0; i < n; ++i) {
+            const CameraKeyframe& k = keys[i];
+            const bool at_head = fabs(k.time - playhead) < 1.0e-3;
+            movie_path_frustum(V, dl, k.transform, k.fov_y, aspect, k.transform.distance * 0.25f, at_head ? IM_COL32(255, 140, 50, 255) : IM_COL32(255, 255, 255, 190), at_head ? 2.0f : 1.0f);
+        }
+    }
+
+    // The keys: a handle on the eye and one on what it looks at, joined, with the number and the name
+    for (int i = 0; i < (int)n; ++i) {
+        const CameraKeyframe& k = keys[i];
+        const bool at_head = fabs(k.time - playhead) < 1.0e-3;
+        const bool hot = i == m.path_hover_key || i == m.lane_hover_key;
+        ImU32 fill = IM_COL32(235, 235, 235, 255);
+        if (k.follow) fill = k.follow_atom >= 0 ? IM_COL32(110, 150, 255, 255) : IM_COL32(50, 190, 175, 255);
+        if (at_head) fill = IM_COL32(255, 140, 50, 255);
+
+        const vec3_t eye = k.transform.position, look = camera_get_look_at(k.transform);
+        ImVec2 a, b;
+        if (V.segment(eye, look, &a, &b)) dl->AddLine(a, b, IM_COL32(255, 255, 255, hot ? 200 : 90), hot ? 2.0f : 1.0f);
+
+        char num[16];
+        snprintf(num, sizeof(num), "%d", i + 1);
+        const ImVec2 num_size = ImGui::CalcTextSize(num);
+        ImVec2 pe, pl;
+        if (V.point(eye, &pe)) {
+            if (hot) dl->AddCircle(pe, handle_r + 4.0f, IM_COL32(255, 235, 90, 255), 0, 2.5f);
+            dl->AddCircleFilled(pe, handle_r, fill);
+            dl->AddCircle(pe, handle_r, col_dark, 0, 1.5f);
+            dl->AddText(ImVec2(pe.x - num_size.x * 0.5f, pe.y - num_size.y * 0.5f), col_dark, num);
+            if (k.name[0] != '\0') label(ImVec2(pe.x + handle_r + 5.0f, pe.y - fs * 0.5f), k.name, IM_COL32(255, 255, 255, 255));
+        }
+        if (V.point(look, &pl)) {
+            const float r = handle_r - 2.0f;
+            if (hot) dl->AddCircle(pl, r + 4.0f, IM_COL32(255, 235, 90, 255), 0, 2.5f);
+            dl->AddCircleFilled(pl, r, IM_COL32(20, 20, 20, 140));
+            dl->AddCircle(pl, r, fill, 0, 2.5f);
+            dl->AddLine(ImVec2(pl.x - r, pl.y), ImVec2(pl.x + r, pl.y), fill, 1.5f);
+            dl->AddLine(ImVec2(pl.x, pl.y - r), ImVec2(pl.x, pl.y + r), fill, 1.5f);
+            label(ImVec2(pl.x + r + 3.0f, pl.y - fs - 2.0f), num, col_look);
+        }
+    }
+
+    // The camera at the preview time: where it is, and where it looks
+    ViewTransform head;
+    float head_fov;
     {
-        // For keys that follow, with the target where it was at the nearest sample
-        const auto& sp = m.path_shown.complete && m.path_shown.num_keys == (int)n ? m.path_shown : m.path_build;
         int j = -1;
         if (following && sp.done > 0) {
             double best = 1.0e30;
             for (int i = 0; i < (sp.complete ? (int)sp.time.size() : sp.done); ++i) {
-                const double d = fabs(sp.time[i] - (double)m.playhead);
-                if (d < best) { best = d; j = i; }
+                const double dist = fabs(sp.time[i] - playhead);
+                if (dist < best) { best = dist; j = i; }
             }
         }
         if (j >= 0) {
-            const bool atoms = movie_keys_track_atoms(keys, n);
-            const bool center = movie_keys_follow(keys, n) && !md_bitfield_empty(&m.follow_mask);
-            camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop, center ? &sp.center[j] : nullptr, atoms ? &sp.atoms[(size_t)j * n] : nullptr);
+            const bool atoms = movie_keys_track_atoms(sorted.data(), n);
+            const bool center = movie_keys_follow(sorted.data(), n) && !md_bitfield_empty(&m.follow_mask);
+            camera_keyframes_evaluate(&head, &head_fov, sorted.data(), n, playhead, m.loop, center ? &sp.center[j] : nullptr, atoms ? &sp.atoms[(size_t)j * n] : nullptr);
         } else {
-            camera_keyframes_evaluate(&vt, &fov_y, keys, n, (double)m.playhead, m.loop);
+            camera_keyframes_evaluate(&head, &head_fov, sorted.data(), n, playhead, m.loop);
         }
     }
-    movie_draw_frustum(q, vt, fov_y, aspect, vt.distance * 0.18f, col_head);
+    {
+        const vec3_t eye = head.position, look = camera_get_look_at(head);
+        movie_path_frustum(V, dl, head, head_fov, aspect, head.distance * 0.18f, col_head, 2.5f);
+        ImVec2 a, b;
+        if (V.segment(eye, look, &a, &b)) dl->AddLine(a, b, col_head, 3.0f);
+        ImVec2 pe, pl;
+        const bool have_eye = V.point(eye, &pe);
+        if (have_eye) {
+            dl->AddCircleFilled(pe, 10.0f, movie_path_fade(col_head, 0.85f));
+            dl->AddCircle(pe, 10.0f, col_dark, 0, 1.5f);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "camera %.2f s", m.playhead);
+            label(ImVec2(pe.x + 14.0f, pe.y - fs * 0.5f), buf, col_head);
+        }
+        if (V.point(look, &pl)) {
+            // The arrow head on the line of sight, at the target
+            ImVec2 dir(0.0f, 1.0f);
+            if (have_eye) dir = ImVec2(pl.x - pe.x, pl.y - pe.y);
+            else dir = ImVec2(b.x - a.x, b.y - a.y);
+            const float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
+            if (len > 1.0e-3f) {
+                dir = ImVec2(dir.x / len, dir.y / len);
+                const ImVec2 nrm(-dir.y, dir.x);
+                const ImVec2 tip(pl.x - dir.x * 14.0f, pl.y - dir.y * 14.0f);
+                dl->AddTriangleFilled(tip, ImVec2(tip.x - dir.x * 14.0f + nrm.x * 7.0f, tip.y - dir.y * 14.0f + nrm.y * 7.0f), ImVec2(tip.x - dir.x * 14.0f - nrm.x * 7.0f, tip.y - dir.y * 14.0f - nrm.y * 7.0f), col_head);
+            }
+            dl->AddCircle(pl, 13.0f, col_head, 0, 3.0f);
+            dl->AddLine(ImVec2(pl.x - 20.0f, pl.y), ImVec2(pl.x + 20.0f, pl.y), col_head, 2.0f);
+            dl->AddLine(ImVec2(pl.x, pl.y - 20.0f), ImVec2(pl.x, pl.y + 20.0f), col_head, 2.0f);
+            label(ImVec2(pl.x + 17.0f, pl.y - fs * 0.5f - 14.0f), "looks at", col_head);
+        }
 
-    if (state->visuals.dof.enabled) {
-        // Where depth of field is sharp: a frame the size of the view at that depth, and a cross where the camera looks
-        const uint32_t col_focus = IM_COL32(255, 90, 220, 255);
-        const float depth = dof_focus_depth(state, vt);
-        const vec3_t fwd   = vt.orientation * vec3_t{0, 0, -1};
-        const vec3_t right = vt.orientation * vec3_t{1, 0, 0};
-        const vec3_t up    = vt.orientation * vec3_t{0, 1, 0};
-        const vec3_t c = vt.position + fwd * depth;
-        const float hh = depth * tanf(fov_y * 0.5f);
-        const float hw = hh * aspect;
-        const vec3_t p[4] = { c - right * hw - up * hh, c + right * hw - up * hh, c + right * hw + up * hh, c - right * hw + up * hh };
-        for (int i = 0; i < 4; ++i) immediate::line(q, p[i], p[(i + 1) % 4], col_focus);
-        const float s = hh * 0.1f;
-        immediate::line(q, c - right * s, c + right * s, col_focus);
-        immediate::line(q, c - up * s,    c + up * s,    col_focus);
-        immediate::line(q, vt.position, c, col_dim);
+        if (state->visuals.dof.enabled) {
+            // Where depth of field is sharp: a frame the size of the view at that depth, and a cross where the camera looks
+            const ImU32 col_focus = IM_COL32(255, 90, 220, 255);
+            const float depth = dof_focus_depth(state, head);
+            const vec3_t fwd   = head.orientation * vec3_t{0, 0, -1};
+            const vec3_t right = head.orientation * vec3_t{1, 0, 0};
+            const vec3_t up    = head.orientation * vec3_t{0, 1, 0};
+            const vec3_t c = head.position + fwd * depth;
+            const float hh = depth * tanf(head_fov * 0.5f);
+            const float hw = hh * aspect;
+            const vec3_t p[4] = { c - right * hw - up * hh, c + right * hw - up * hh, c + right * hw + up * hh, c - right * hw + up * hh };
+            for (int i = 0; i < 4; ++i) {
+                ImVec2 pa, pb;
+                if (V.segment(p[i], p[(i + 1) % 4], &pa, &pb)) dl->AddLine(pa, pb, col_focus, 1.5f);
+            }
+            const float s = hh * 0.1f;
+            ImVec2 pa, pb;
+            if (V.segment(c - right * s, c + right * s, &pa, &pb)) dl->AddLine(pa, pb, col_focus, 1.5f);
+            if (V.segment(c - up * s, c + up * s, &pa, &pb)) dl->AddLine(pa, pb, col_focus, 1.5f);
+        }
     }
+
+    // ## Ctrl + click on the path adds a key there
+    double insert_at = -1.0;
+    if (over && io.KeyCtrl && hover_key < 0 && !d.active && !picking) {
+        int seg_e = -1, seg_l = -1;
+        float u_e = 0.0f, u_l = 0.0f;
+        const vec2_t q = vec2_set(mouse.x, mouse.y);
+        const float de = polyline_nearest(screen_eye, ok_eye, q, &seg_e, &u_e);
+        const float dl_ = polyline_nearest(screen_look, ok_look, q, &seg_l, &u_l);
+        const bool on_eye = de <= dl_;
+        const float dist = on_eye ? de : dl_;
+        const int seg = on_eye ? seg_e : seg_l;
+        const float u = on_eye ? u_e : u_l;
+        if (dist < 10.0f && seg >= 0) {
+            const double t = movie_snap_time(state, path.time[(size_t)seg] + (path.time[(size_t)seg + 1] - path.time[(size_t)seg]) * (double)u);
+            vec3_t e, l;
+            camera_path_at(path, t, &e, &l);
+            ImVec2 p;
+            if (V.point(on_eye ? e : l, &p)) {
+                m.path_hot = true;
+                dl->AddCircle(p, 11.0f, IM_COL32(255, 255, 255, 255), 0, 2.5f);
+                dl->AddLine(ImVec2(p.x - 6.0f, p.y), ImVec2(p.x + 6.0f, p.y), IM_COL32(255, 255, 255, 255), 2.0f);
+                dl->AddLine(ImVec2(p.x, p.y - 6.0f), ImVec2(p.x, p.y + 6.0f), IM_COL32(255, 255, 255, 255), 2.0f);
+                char buf[48];
+                snprintf(buf, sizeof(buf), "add a key at %.2f s", t);
+                label(ImVec2(p.x + 15.0f, p.y - fs * 0.5f), buf, IM_COL32(255, 255, 255, 255));
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) insert_at = t;
+            }
+        }
+    }
+
+    if (hover_key >= 0 && !d.active) {
+        const CameraKeyframe& k = keys[hover_key];
+        ImGui::SetTooltip("Keyframe %s at %.2f s, field of view %.1f deg\n%s\nClick to go to it. Ctrl + drag moves the whole key. Esc cancels a drag.",
+            camera_key_label(k, hover_key).c_str(), k.time, k.fov_y * MOVIE_RAD_TO_DEG,
+            hover_kind == 0 ? "Drag to move the eye: the camera keeps looking at the same point." : "Drag to move what it looks at: the eye stays.");
+    }
+
+    if (insert_at >= 0.0) {
+        bool taken = false;
+        for (size_t i = 0; i < n; ++i) taken |= fabs(keys[i].time - insert_at) < 1.0e-3;
+        if (!taken) {
+            movie_insert_key(state, camera_key_on_path(sorted, insert_at, m.loop), false);
+            m.playhead = (float)insert_at;
+        }
+    }
+    m.lane_hover_key = -1;
 }
 
 // Keyframes in the Timelines plots, which are in trajectory time. A keyframe is at a time of the movie,
@@ -8742,11 +9136,12 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
             bool clicked = false, hovered = false, held = false;
             const bool at_playhead = fabs(key.time - (double)m.playhead) < 1.0e-3;
             const ImVec4 col = at_playhead ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f) : ImVec4(1.0f, 0.45f, 0.15f, 1.0f);
-            if (ImPlot::DragPoint(9500 + (int)i, &x, &y, col, 7.0f, drag_flags, &clicked, &hovered, &held)) {
+            if (ImPlot::DragPoint(9500 + (int)i, &x, &y, col, m.path_hover_key == (int)i ? 11.0f : 7.0f, drag_flags, &clicked, &hovered, &held)) {
                 key.time = movie_snap_time(data, x);
                 edit->moved = true;
             }
             any_hovered |= hovered;
+            if (hovered) m.lane_hover_key = (int)i;
             if (held && !locked) {
                 edit->held = true;
                 m.playhead = (float)key.time;
@@ -10613,7 +11008,27 @@ static void draw_movie_window(ApplicationState* data) {
         ImGui::SetItemTooltip("Record with the camera following the keyframes, instead of staying where it is.");
         ImGui::SameLine();
         ImGui::Checkbox("Show path in viewport", &m.show_path);
-        ImGui::SetItemTooltip("The path of the camera (blue) and of what it looks at (yellow), with the camera at each keyframe.\nThe green camera is where the playhead is.");
+        ImGui::SetItemTooltip("The path of the camera (blue) and of what it looks at (yellow), with the camera at each keyframe.\nThe green camera is where the preview time is, with the line it looks along.\n"
+            "Each key has a handle on the eye (numbered) and one on what it looks at: click one to go to the key, drag it to edit the key\n"
+            "(Ctrl + drag moves both, Esc cancels). Ctrl + click on the path adds a key there.");
+        {
+            bool ticks = (m.path_options & 1) != 0, sight = (m.path_options & 2) != 0, cams = (m.path_options & 4) != 0, rings = (m.path_options & 8) != 0;
+            ImGui::BeginDisabled(!m.show_path);
+            ImGui::Indent();
+            if (ImGui::Checkbox("Time ticks", &ticks)) m.path_options = (m.path_options & ~1) | (ticks ? 1 : 0);
+            ImGui::SetItemTooltip("Dots at round times along the path, with chevrons for the direction. Dots close together are where the camera is slow.");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Sight lines", &sight)) m.path_options = (m.path_options & ~2) | (sight ? 2 : 0);
+            ImGui::SetItemTooltip("A thin line from the eye to what it looks at at each tick.");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Cameras", &cams)) m.path_options = (m.path_options & ~4) | (cams ? 4 : 0);
+            ImGui::SetItemTooltip("A camera drawn at each keyframe.");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Spin rings", &rings)) m.path_options = (m.path_options & ~8) | (rings ? 8 : 0);
+            ImGui::SetItemTooltip("The circle the camera goes round in a spin, with arrows the way it turns.");
+            ImGui::Unindent();
+            ImGui::EndDisabled();
+        }
 
         ImGui::Checkbox("Seamless loop", &m.loop);
         ImGui::SetItemTooltip("The camera path is cyclic: it moves through the end into the start without a corner.\nFor that the movie has to end in the pose it starts in, 'Close Loop' sets that up.");
@@ -10851,10 +11266,6 @@ static void render(ApplicationState* state) {
 		md_unitcell_A_extract_float(A.elem, &state->mold.state.unitcell);
         immediate::Scope scope(state->gfx.world, "simulation box");
         immediate::box_wireframe(scope, {0,0,0}, {1,1,1}, mat4_from_mat3(A), convert_color(state->simulation_box.color));
-    }
-
-    if (!movie_capture && !do_screenshot) {
-        movie_draw_camera_path(state);
     }
 
     {

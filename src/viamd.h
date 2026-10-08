@@ -1105,6 +1105,21 @@ struct ApplicationState {
         double timeline_view_end = 0.0;
         float timeline_view_duration = 0.0f;
         bool  show_path   = true;    // Draw the camera path and keyframes in the viewport
+        int   path_options = 15;     // What more the path shows: 1 time ticks, 2 sight lines, 4 cameras at the keys, 8 rings of the spins
+        bool  path_hot = false;      // The mouse is over a key's handle or the path (with Ctrl): the viewport leaves its own interaction alone
+        int   path_hover_key = -1;   // The key whose handle is hovered in the viewport, and the one hovered in the camera lane
+        int   lane_hover_key = -1;
+        struct PathDrag {
+            bool   active = false;
+            int    key = -1;
+            int    kind = 0;         // 0 the eye, 1 what it looks at
+            bool   moved = false;
+            float  start_x = 0.0f, start_y = 0.0f;
+            vec3_t grab = {};        // Where on the drag plane the handle was taken, relative to the handle
+            vec3_t plane_point = {};
+            vec3_t plane_normal = {};
+            CameraKeyframe start = {};
+        } path_drag;
 
         MovieRecordingState state = MovieRecordingState::Idle;
 
