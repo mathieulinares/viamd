@@ -395,7 +395,7 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
     if (a.markers.size() != b.markers.size()) return false;
     for (size_t i = 0; i < a.markers.size(); ++i) {
         if (a.markers[i].time != b.markers[i].time || a.markers[i].subplot != b.markers[i].subplot ||
-            strcmp(a.markers[i].label, b.markers[i].label) != 0) return false;
+            strcmp(a.markers[i].label, b.markers[i].label) != 0 || memcmp(a.markers[i].color, b.markers[i].color, sizeof(a.markers[i].color)) != 0) return false;
     }
     return true;
 }

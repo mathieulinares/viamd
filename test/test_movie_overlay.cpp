@@ -610,3 +610,139 @@ UTEST(viamd_movie_overlay, the_elapsed_time_does_not_depend_on_where_an_overlay_
     EXPECT_NEAR(first, movie_time_bar_moved(p, 6.0), 1e-12);
     EXPECT_NEAR(60.0, first, 1e-6);
 }
+
+/* Overlays shown at the same time do not overlap: the centre column keeps its place, the others move away from their edge */
+
+static MovieOverlayBox box(int anchor, float x0, float y0, float x1, float y1, double begin = 0.0, double end = 10.0) {
+    MovieOverlayBox b;
+    b.anchor = anchor;
+    b.x0 = x0; b.y0 = y0; b.x1 = x1; b.y1 = y1;
+    b.begin = begin; b.end = end;
+    return b;
+}
+
+UTEST(viamd_movie_overlay, a_bottom_left_overlay_moves_up_over_a_wide_bottom_centre_one) {
+    /* Listed first, the left one still gives way to the centre one */
+    const MovieOverlayBox b[2] = {box(6, 10, 900, 400, 980), box(7, 300, 920, 1600, 990)};
+    float dy[2] = {};
+    movie_overlay_avoid(b, 2, 8.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(0.0f, dy[1], 1e-6f);
+    EXPECT_NEAR(920.0f - 8.0f - 980.0f, dy[0], 1e-4f);
+}
+
+UTEST(viamd_movie_overlay, overlays_shown_at_different_times_keep_their_place) {
+    const MovieOverlayBox b[2] = {box(7, 300, 920, 1600, 990, 0.0, 5.0), box(6, 10, 900, 400, 980, 5.0, 10.0)};
+    float dy[2] = {1.0f, 1.0f};
+    movie_overlay_avoid(b, 2, 8.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(0.0f, dy[0], 1e-6f);
+    EXPECT_NEAR(0.0f, dy[1], 1e-6f);
+}
+
+UTEST(viamd_movie_overlay, overlays_in_the_same_top_corner_stack_downwards) {
+    const MovieOverlayBox b[3] = {box(0, 10, 10, 200, 60), box(0, 10, 10, 300, 50), box(0, 10, 10, 250, 40)};
+    float dy[3] = {};
+    movie_overlay_avoid(b, 3, 5.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(0.0f, dy[0], 1e-6f);
+    EXPECT_NEAR(55.0f, dy[1], 1e-4f);   // below the first: 60 + 5 - 10
+    EXPECT_NEAR(100.0f, dy[2], 1e-4f);  // below the second: 50 + 55 + 5 - 10
+}
+
+UTEST(viamd_movie_overlay, overlays_side_by_side_do_not_move) {
+    const MovieOverlayBox b[2] = {box(6, 10, 900, 300, 980), box(7, 600, 900, 1000, 980)};
+    float dy[2] = {};
+    movie_overlay_avoid(b, 2, 8.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(0.0f, dy[0], 1e-6f);
+    EXPECT_NEAR(0.0f, dy[1], 1e-6f);
+}
+
+UTEST(viamd_movie_overlay, a_middle_overlay_gives_way_to_a_corner_one_the_shorter_way) {
+    /* As in the example: a distribution top right and a tall timeline middle right; listed last, the corner one still stays */
+    const MovieOverlayBox b[2] = {box(5, 1300, 280, 1880, 800, 11.0, 58.0), box(2, 1500, 30, 1880, 300, 40.0, 58.0)};
+    float dy[2] = {};
+    movie_overlay_avoid(b, 2, 10.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(0.0f, dy[1], 1e-6f);
+    EXPECT_NEAR(30.0f, dy[0], 1e-4f);   // down to 300 + 10, not up past the top of the frame
+}
+
+UTEST(viamd_movie_overlay, an_overlay_is_never_pushed_out_of_the_frame) {
+    /* Top right and a tall middle right one with a bottom right one under it: there is no room, so it stays (overlapping) */
+    const MovieOverlayBox b[3] = {box(8, 1500, 950, 1880, 1050), box(5, 1300, 100, 1880, 980), box(2, 1500, 30, 1880, 300)};
+    float dy[3] = {};
+    movie_overlay_avoid(b, 3, 10.0f, 0.0f, 1080.0f, dy);
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_GE(b[i].y0 + dy[i], 0.0f);
+        EXPECT_LE(b[i].y1 + dy[i], 1080.0f);
+    }
+    EXPECT_NEAR(0.0f, dy[0], 1e-6f);
+    EXPECT_NEAR(0.0f, dy[2], 1e-6f);
+}
+
+UTEST(viamd_movie_overlay, a_top_overlay_with_no_room_below_moves_up_instead) {
+    const MovieOverlayBox b[2] = {box(1, 0, 100, 1920, 1000), box(0, 10, 300, 200, 400)};
+    float dy[2] = {};
+    movie_overlay_avoid(b, 2, 10.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(0.0f, dy[0], 1e-6f);
+    EXPECT_NEAR(0.0f, dy[1], 1e-6f);   // neither way fits: it stays
+
+    const MovieOverlayBox c[2] = {box(1, 0, 300, 1920, 1000), box(0, 10, 250, 200, 350)};
+    movie_overlay_avoid(c, 2, 10.0f, 0.0f, 1080.0f, dy);
+    EXPECT_NEAR(290.0f - 350.0f, dy[1], 1e-4f);   // above it, since below leaves the frame
+}
+
+UTEST(viamd_movie_overlay, label_goes_right_of_its_mark_in_the_first_half_and_left_in_the_second) {
+    float x0 = 0.0f;
+    EXPECT_EQ(movie_label_place(nullptr, 0, 100.0f, 50.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 3, &x0), 0);
+    EXPECT_NEAR(x0, 105.0f, 1e-4f);
+    EXPECT_EQ(movie_label_place(nullptr, 0, 900.0f, 50.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 3, &x0), 0);
+    EXPECT_NEAR(x0, 845.0f, 1e-4f);
+    // A long label is kept inside the plot
+    movie_label_place(nullptr, 0, 10.0f, 300.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 3, &x0);
+    EXPECT_NEAR(x0, 15.0f, 1e-4f);
+    movie_label_place(nullptr, 0, 600.0f, 700.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 3, &x0);
+    EXPECT_NEAR(x0, 0.0f, 1e-4f);
+}
+
+UTEST(viamd_movie_overlay, label_that_would_overlap_goes_a_line_lower_then_the_other_side_then_where_it_overlaps_least) {
+    float x0 = 0.0f;
+    const MovieLabelSpan one[] = { { 845.0f, 895.0f, 0 } };
+    // Close to the first one: a line lower, same side
+    EXPECT_EQ(movie_label_place(one, 1, 920.0f, 50.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 3, &x0), 1);
+    EXPECT_NEAR(x0, 865.0f, 1e-4f);
+    // Only one line: the other side of the mark if that is free
+    const MovieLabelSpan two[] = { { 100.0f, 200.0f, 0 } };
+    EXPECT_EQ(movie_label_place(two, 1, 600.0f, 50.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 1, &x0), 0);
+    EXPECT_NEAR(x0, 545.0f, 1e-4f);
+    const MovieLabelSpan three[] = { { 540.0f, 600.0f, 0 } };
+    EXPECT_EQ(movie_label_place(three, 1, 600.0f, 50.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 1, &x0), 0);
+    EXPECT_NEAR(x0, 605.0f, 1e-4f);
+    // Every line taken on both sides: where it overlaps least
+    const MovieLabelSpan full[] = { { 500.0f, 700.0f, 0 }, { 560.0f, 700.0f, 1 } };
+    EXPECT_EQ(movie_label_place(full, 2, 600.0f, 50.0f, 0.0f, 1000.0f, 5.0f, 4.0f, 2, &x0), 1);
+    EXPECT_NEAR(x0, 545.0f, 1e-4f);
+}
+
+UTEST(viamd_movie_overlay, markers_get_palette_colors_by_time_unless_they_have_their_own) {
+    MovieMarker mk[3];
+    mk[0].time = 5.0;
+    mk[1].time = 1.0;
+    mk[2].time = 3.0;
+    float c0[4], c1[4], c2[4];
+    movie_marker_color(mk, 3, 0, c0);
+    movie_marker_color(mk, 3, 1, c1);
+    movie_marker_color(mk, 3, 2, c2);
+    // Each its own color, the first in time with the first of the palette, whatever the order in the list
+    EXPECT_TRUE(c0[0] != c1[0] || c0[1] != c1[1] || c0[2] != c1[2]);
+    EXPECT_TRUE(c1[0] != c2[0] || c1[1] != c2[1] || c1[2] != c2[2]);
+    EXPECT_TRUE(c0[0] != c2[0] || c0[1] != c2[1] || c0[2] != c2[2]);
+    MovieMarker first;
+    float f[4];
+    movie_marker_color(&first, 1, 0, f);
+    EXPECT_NEAR(c1[0], f[0], 1e-6f);
+    EXPECT_NEAR(c1[2], f[2], 1e-6f);
+    EXPECT_NEAR(c1[3], 1.0f, 1e-6f);
+    // A color of its own wins
+    mk[2].color[0] = 0.1f; mk[2].color[1] = 0.2f; mk[2].color[2] = 0.3f; mk[2].color[3] = 1.0f;
+    movie_marker_color(mk, 3, 2, c2);
+    EXPECT_NEAR(c2[0], 0.1f, 1e-6f);
+    EXPECT_NEAR(c2[2], 0.3f, 1e-6f);
+}

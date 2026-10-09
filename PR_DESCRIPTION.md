@@ -4,7 +4,7 @@
 
 A **movie maker** for VIAMD. Set the length of the movie, place camera keyframes and keyed look settings on a timeline, add overlays, and record to MP4 (H.264 / H.265), WebM (VP9) through ffmpeg, or to a numbered PNG sequence.
 
-Everything is in one **Windows > Movie** editor: a timeline with draggable lanes on the left, tabbed controls (**Output**, **Timing**, **Camera**, **Looks**, **Representations**, **Overlays**) on the right, and shared preview playback on top. A **Scene view / Movie preview** switch gives you a free editor camera next to the movie camera, with a live picture of the movie camera while you edit.
+Everything is in one **Windows > Movie** editor: a timeline with draggable lanes on the left, tabbed controls (**Output**, **Timing**, **Camera**, **Looks**, **Representations**, **Overlays**) on the right, and shared preview playback on top. A **Scene view / Movie preview** switch gives you a free editor camera next to the movie camera, with a live picture of the movie camera while you edit. A green **Preview** button plays the movie full-viewport with every window hidden and a small control bar at the bottom.
 
 The manual is [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspirin_phospholipase_movie.via`](docs/examples/aspirin_phospholipase_movie.via) is a finished 80 s movie using most features, and [`docs/examples/aspirin_binding_movie.via`](docs/examples/aspirin_binding_movie.via) a 60 s one with a dolly zoom, a bullet-time orbit, representation hand-overs and energy plots (their trajectory files are not in the repository).
 
@@ -36,12 +36,12 @@ The manual is [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspi
 - The **Representation overview** lane shows when each representation is shown, one row per system (name before the first hyphen), with block editing and swap. The Representations window is locked while recording.
 
 **Overlays**
-- Text, time stamp, scale bar, time bar, logo, images, **timeline** and **distribution** (subplots of the Timelines and Distributions windows, drawn as the movie plays, with markers), and the visualization of a script property.
+- Text, time stamp, scale bar, time bar, logo, images, **timeline** and **distribution** (subplots of the Timelines and Distributions windows, drawn as the movie plays, with markers), and the visualization of a script property. Overlays shown at the same time are moved apart so their plates never overlap, and marker labels that would collide go on further rows.
 - Time range with fades, nine anchors, size in percent or points, color, background plate, **Duplicate**. Compact list with a Content / Timing / Appearance inspector.
 - Subplots of the plot windows get saved ids and names so overlays keep finding them.
 
 **Timeline panel**
-- Ruler, trajectory, camera, distance, field of view, look parameter, representation, overview and overlay lanes.
+- Ruler, trajectory, camera, lens (field of view and distance on two axes), look parameter, representation, overview and overlay lanes, toggled from one row with presets.
 - Pick keys, overlay bars and overview blocks (click, Ctrl + click, box) and move, stretch, nudge, delete, copy and paste them together; an inspector sets start time and ease for the whole selection.
 - Time zoom, middle-button pan, lane height / fit to window, lane selection saved in the workspace.
 

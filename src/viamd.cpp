@@ -1266,12 +1266,11 @@ static void workspace_reset(ApplicationState* data) {
         m.start_frame = 0.0;
         m.end_frame = 0.0;
         m.duration_init = false;
-        m.duration = 5.0f;
+        m.duration = 60.0f;
         m.traj_begin = 0.0f;
-        m.traj_end = 5.0f;
+        m.traj_end = 60.0f;
         m.playhead = 0.0f;
         snprintf(m.filename_prefix, sizeof(m.filename_prefix), "frame");
-        m.animate_camera = false;
         m.preview_playing = false;
         m.show_path = true;
         m.output = MovieOutput::Mp4;
@@ -1722,7 +1721,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("TrajectoryEnd")))  viamd::extract_flt(m.traj_end, arg);
                 else if (str_eq(ident, STR_LIT("Playhead")))       viamd::extract_flt(m.playhead, arg);
                 else if (str_eq(ident, STR_LIT("FilenamePrefix"))) viamd::extract_to_char_buf(m.filename_prefix, sizeof(m.filename_prefix), arg);
-                else if (str_eq(ident, STR_LIT("AnimateCamera")))  viamd::extract_bool(m.animate_camera, arg);
+                else if (str_eq(ident, STR_LIT("AnimateCamera")))  {} // Older workspaces: the camera always follows the keys now
                 else if (str_eq(ident, STR_LIT("ShowPath")))       viamd::extract_bool(m.show_path, arg);
                 else if (str_eq(ident, STR_LIT("PathOptions"))) {
                     int bits = 0;
@@ -1753,6 +1752,11 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 }
                 else if (str_eq(ident, STR_LIT("FitLanes")))       viamd::extract_bool(m.timeline_fit_window, arg);
                 else if (str_eq(ident, STR_LIT("RepEqualRows")))   viamd::extract_bool(m.timeline_rep_equal_rows, arg);
+                else if (str_eq(ident, STR_LIT("RepSeparateRows"))) viamd::extract_bool(m.timeline_rep_separate, arg);
+                else if (str_eq(ident, STR_LIT("RepBlockHeight"))) {
+                    float h = 1.0f;
+                    if (viamd::extract_flt(h, arg)) m.timeline_rep_block_height = CLAMP(h, 0.5f, 2.5f);
+                }
                 else if (str_eq(ident, STR_LIT("Overlays")))       m.overlays.clear();   // The overlays that follow are all of them
                 else if (str_eq(ident, STR_LIT("RenderRange"))) {
                     float r[3];
@@ -1990,6 +1994,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Subplot"))) {
                     int subplot = 0;
                     if (viamd::extract_int(subplot, arg)) k.subplot = (uint32_t)MAX(subplot, 0);
+                }
+                else if (str_eq(ident, STR_LIT("Color"))) {
+                    vec4_t c = {};
+                    if (viamd::extract_vec4(c, arg)) for (int i = 0; i < 4; ++i) k.color[i] = CLAMP(c.elem[i], 0.0f, 1.0f);
                 }
             }
             k.time = (double)t;
@@ -2343,7 +2351,6 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_flt (state, STR_LIT("TrajectoryEnd"), m.traj_end);
         viamd::write_flt (state, STR_LIT("Playhead"), m.playhead);
         viamd::write_str (state, STR_LIT("FilenamePrefix"), str_from_cstr(m.filename_prefix));
-        viamd::write_bool(state, STR_LIT("AnimateCamera"), m.animate_camera);
         viamd::write_bool(state, STR_LIT("ShowPath"), m.show_path);
         viamd::write_int (state, STR_LIT("PathOptions"), m.path_options);
         viamd::write_int (state, STR_LIT("Output"), (int)m.output);
@@ -2359,6 +2366,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_flt (state, STR_LIT("LaneHeight"), m.timeline_lane_height);
         viamd::write_bool(state, STR_LIT("FitLanes"), m.timeline_fit_window);
         viamd::write_bool(state, STR_LIT("RepEqualRows"), m.timeline_rep_equal_rows);
+        viamd::write_bool(state, STR_LIT("RepSeparateRows"), m.timeline_rep_separate);
+        viamd::write_flt (state, STR_LIT("RepBlockHeight"), m.timeline_rep_block_height);
         viamd::write_bool(state, STR_LIT("Overlays"), true);
         const float render_range[3] = { m.range_enabled ? 1.0f : 0.0f, m.range_begin, m.range_end };
         viamd::write_flt_vec(state, STR_LIT("RenderRange"), render_range, 3);
@@ -2434,6 +2443,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt(state, STR_LIT("Time"), (float)k.time);
             viamd::write_str(state, STR_LIT("Label"), str_from_cstr(k.label));
             viamd::write_int(state, STR_LIT("Subplot"), (int)k.subplot);
+            if (k.color[3] > 0.0f) viamd::write_vec4(state, STR_LIT("Color"), vec4_set(k.color[0], k.color[1], k.color[2], k.color[3]));
         }
     }
 
@@ -5377,7 +5387,22 @@ InteractionSurfaceViewTransformResult interaction_surface_view_transform_apply(V
                 flags |= TrackballFlags_DollyEnabled;
             }
 
+            const ViewTransform before = *target;
             camera_controller_trackball(target, input, args.trackball_param, flags);
+
+            // Zooming towards the mouse: the point under it, on the plane through the look-at point, stays under it
+            if (args.zoom_to_cursor && scroll_delta != 0.0f && !input.rotate_button && !input.pan_button && !input.dolly_button &&
+                state.surface_size.y > 0.0f && target->distance != before.distance) {
+                const float half_h = 0.5f * state.surface_size.y;
+                const float tan_half = tanf(args.camera.fov_y * 0.5f);
+                const float px = (coord.x - 0.5f * state.surface_size.x - args.center_offset.x) / half_h;
+                const float py = (0.5f * state.surface_size.y + args.center_offset.y - coord.y) / half_h;
+                const vec3_t right = quat_mul_vec3(before.orientation, vec3_set(1, 0, 0));
+                const vec3_t up    = quat_mul_vec3(before.orientation, vec3_set(0, 1, 0));
+                const vec3_t offset = (right * px + up * py) * tan_half;
+                const vec3_t look = camera_get_look_at(before) + offset * (before.distance - target->distance);
+                target->position = camera_position_from_look_at(look, target->orientation, target->distance);
+            }
 
             if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 result.reset_requested = true;

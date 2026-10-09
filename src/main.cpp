@@ -219,6 +219,7 @@ static void movie_recording_start(ApplicationState* state);
 static void movie_recording_stop(ApplicationState* state);
 static void movie_shutdown(ApplicationState* state);
 static void movie_add_keyframe(ApplicationState* state);
+static void movie_add_keyframe_from_view(ApplicationState* state);
 static void movie_copy_keyframe_at_playhead(ApplicationState* state);
 static void movie_paste_keyframe(ApplicationState* state);
 static void update_movie_recording(ApplicationState* state);
@@ -238,6 +239,7 @@ static void movie_capture_frame(ApplicationState* state);
 static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state);
 static void movie_sort_keyframes(ApplicationState* state);
 static bool movie_frame_guide(const ApplicationState* state, ImVec2* pos, ImVec2* size);
+static bool movie_frame_guide_shift(const ApplicationState* state, float* sx, float* sy);
 static void movie_frame_size(const ApplicationState* state, int* w, int* h);
 static void movie_property_vis_apply(ApplicationState* state);
 static void script_vis_text_draw(ImDrawList* dl, ImVec2 res, float scale, const ApplicationState& state);
@@ -248,6 +250,8 @@ static double movie_trajectory_frame(const ApplicationState* state, double time)
 static int movie_num_frames(const ApplicationState* state);
 static void movie_restore_state(ApplicationState* state);
 static void movie_set_scene_view(ApplicationState* state, bool scene);
+static void movie_play_mode(ApplicationState* state, bool on);
+static void draw_movie_play_bar(ApplicationState* state);
 
 // The sizes offered in the Settings menu. The stored setting is the size itself, not an
 // index into this table, so the table can change without invalidating anyone's .ini.
@@ -571,7 +575,11 @@ int main(int argc, char** argv) {
 
         viamd::event_system_broadcast_event(viamd::EventType_ViamdFrameTick, viamd::EventPayloadType_ApplicationState, &state);
 
-        // GUI
+        // GUI. In the movie's Preview only the bar that plays it is shown.
+        if (state.movie.play_mode && (!state.movie.show_window || state.movie.state == MovieRecordingState::Recording)) movie_play_mode(&state, false);
+        const bool play_mode = state.movie.play_mode;
+        if (play_mode) draw_movie_play_bar(&state);
+        if (!play_mode) {
         if (state.show_script_window) draw_script_editor_window(&state);
         if (state.show_script_reference_window) draw_script_reference_window(&state);
         if (state.load_dataset.show_window) draw_load_dataset_window(&state);
@@ -586,15 +594,16 @@ int main(int argc, char** argv) {
         if (state.show_debug_window) draw_debug_window(&state);
         if (state.animation.show_window) draw_animation_window(&state);
         if (state.movie.show_window) draw_movie_window(&state);
+        }
         draw_movie_recording_banner(&state);
 
         draw_async_task_window(&state);
-        draw_main_menu(&state);
+        if (!play_mode) draw_main_menu(&state);
         draw_notifications_window();
 
         //ImGui::ShowDemoWindow();
 
-        draw_coordinate_system_widget_window(&state.view.target, state.view.camera);
+        if (!play_mode) draw_coordinate_system_widget_window(&state.view.target, state.view.camera);
             
         ImGui::BeginCanvas("Main interaction window", true);
         ImVec2 view_size = ImGui::GetContentRegionAvail();
@@ -676,9 +685,21 @@ int main(int argc, char** argv) {
             if (!surface_blocked) viamd::event_system_broadcast_event(viamd::EventType_ViamdInteractionSurface, viamd::EventPayloadType_InteractionSurfaceEvent, &event);
         }
 
+        // In Scene view of the movie, the wheel zooms towards the mouse, around the middle of the frame. The viewport around the
+        // frame has a wider field of view than the camera's, which is the frame's.
+        float view_sx = 0.0f, view_sy = 0.0f;
+        const bool scene_view = state.movie.show_window && !state.movie.show_frame && !state.movie.play_mode;
+        if (scene_view) movie_frame_guide_shift(&state, &view_sx, &view_sy);
+        Camera view_camera = state.view.camera;
+        {
+            ImVec2 gp, gs;
+            if (movie_frame_guide(&state, &gp, &gs) && gs.y > 0.0f) view_camera.fov_y = movie_guide_fov_y(view_camera.fov_y, (float)state.app.window.height, gs.y);
+        }
         InteractionSurfaceViewTransformArgs view_args = {
-            .camera = state.view.camera,
+            .camera = view_camera,
             .trackball_param = state.view.trackball_param,
+            .zoom_to_cursor = scene_view,
+            .center_offset = {view_sx * 0.5f * surface_state.surface_size.x, -view_sy * 0.5f * surface_state.surface_size.y},
         };
 
         InteractionSurfaceViewTransformResult view_result = {};
@@ -728,18 +749,41 @@ int main(int argc, char** argv) {
                 movie_recording_stop(&state);
             }
 
-            if (state.movie.show_window && !movie_recording && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
+            // With the Movie window up, Space plays the movie (from the preview time), not the trajectory. Opening the window stops
+            // the trajectory's playback (the movie's time drives the frame then); closing it stops the movie's.
+            // Not while typing, nor while the keyboard focus outline is on a widget (Space presses that widget then).
+            {
+                static bool movie_window_was_open = false;
+                if (state.movie.show_window != movie_window_was_open) {
+                    if (state.movie.show_window) {
+                        if (state.animation.mode == PlaybackMode::Playing) {
+                            state.animation.mode = PlaybackMode::Stopped;
+                            state.mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
+                        }
+                    } else if (!state.movie.play_mode) {
+                        state.movie.preview_playing = false;
+                    }
+                    movie_window_was_open = state.movie.show_window;
+                }
+            }
+            if ((state.movie.play_mode || (state.movie.show_window && !movie_recording)) && !ImGui::GetIO().WantTextInput && !ImGui::GetIO().NavVisible && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+                state.movie.preview_playing = !state.movie.preview_playing;
+                if (state.movie.preview_playing && state.movie.playhead >= (float)movie_duration(&state)) state.movie.playhead = 0.0f;
+            }
+            if (state.movie.play_mode) {
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) movie_play_mode(&state, false);
+            } else if (state.movie.show_window && !movie_recording && ImGui::IsKeyPressed(ImGuiKey_Tab, false)) {
                 // Tab changes between Scene view and Movie preview; held, it only looks at the other one for a moment
                 movie_set_scene_view(&state, state.movie.show_frame);
                 state.movie.peek_active = true;
                 state.movie.peek_t0 = ImGui::GetTime();
             }
 
-            if (state.movie.show_window && !movie_recording && ImGui::IsKeyPressed(KEY_ADD_MOVIE_KEYFRAME, false)) {
-                movie_add_keyframe(&state);
+            if (state.movie.show_window && !movie_recording && !state.movie.play_mode && ImGui::IsKeyPressed(KEY_ADD_MOVIE_KEYFRAME, false)) {
+                movie_add_keyframe_from_view(&state);
             }
 
-            if (state.movie.show_window && !movie_recording) {
+            if (state.movie.show_window && !movie_recording && !state.movie.play_mode) {
                 if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Z)) {
                     movie_undo(&state);
                 } else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Y) || ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z)) {
@@ -761,7 +805,7 @@ int main(int argc, char** argv) {
                 state.gl.shaders = md_gl_shaders_create(shader_output_snippet);
             }
 
-            if (!movie_recording && ImGui::IsKeyPressed(KEY_PLAY_PAUSE)) {
+            if (!movie_recording && !state.movie.play_mode && !state.movie.show_window && ImGui::IsKeyPressed(KEY_PLAY_PAUSE)) {
                 switch (state.animation.mode) {
                     case PlaybackMode::Playing:
                         state.animation.mode = PlaybackMode::Stopped;
@@ -781,7 +825,7 @@ int main(int argc, char** argv) {
 
             }
 
-            if (!movie_recording && state.movie.shortcut_frame != ImGui::GetFrameCount() && (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME))) {
+            if (!movie_recording && !state.movie.play_mode && state.movie.shortcut_frame != ImGui::GetFrameCount() && (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME))) {
                 double step = ImGui::IsKeyDown(ImGuiMod_Ctrl) ? 10.0 : 1.0;
                 if (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME)) step = -step;
                 state.animation.frame = CLAMP(state.animation.frame + step, 0.0, max_frame);
@@ -1095,18 +1139,21 @@ int main(int argc, char** argv) {
                 // What is outside the frame is dimmed, and the frame is outlined
                 const ImVec2 view(0, 0), end((float)state.app.window.width, (float)state.app.window.height);
                 const ImVec2 g1(guide_pos.x + guide_size.x, guide_pos.y + guide_size.y);
-                const ImU32 dim = IM_COL32(0, 0, 0, 120);
+                // In the Preview, what is outside the frame is black, as in the movie
+                const ImU32 dim = state.movie.play_mode ? IM_COL32(0, 0, 0, 255) : IM_COL32(0, 0, 0, 120);
                 ImDrawList* dl = window->DrawList;
                 dl->AddRectFilled(view, ImVec2(end.x, guide_pos.y), dim);
                 dl->AddRectFilled(ImVec2(view.x, g1.y), end, dim);
                 dl->AddRectFilled(ImVec2(view.x, guide_pos.y), ImVec2(guide_pos.x, g1.y), dim);
                 dl->AddRectFilled(ImVec2(g1.x, guide_pos.y), ImVec2(end.x, g1.y), dim);
-                dl->AddRect(guide_pos, g1, IM_COL32(255, 255, 255, 170), 0.0f, 0, 1.5f);
-                int fw, fh;
-                movie_frame_size(&state, &fw, &fh);
-                char label[48];
-                snprintf(label, sizeof(label), "%d x %d", fw, fh);
-                dl->AddText(ImVec2(guide_pos.x + 4.0f, guide_pos.y - ImGui::GetFontSize() - 2.0f), IM_COL32(255, 255, 255, 190), label);
+                if (!state.movie.play_mode) {
+                    dl->AddRect(guide_pos, g1, IM_COL32(255, 255, 255, 170), 0.0f, 0, 1.5f);
+                    int fw, fh;
+                    movie_frame_size(&state, &fw, &fh);
+                    char label[48];
+                    snprintf(label, sizeof(label), "%d x %d", fw, fh);
+                    dl->AddText(ImVec2(guide_pos.x + 4.0f, guide_pos.y - ImGui::GetFontSize() - 2.0f), IM_COL32(255, 255, 255, 190), label);
+                }
             }
             if (window && state.movie.show_overlay_preview && !state.movie.overlays.empty() && state.movie.state != MovieRecordingState::Recording &&
                 state.movie.show_window) {
@@ -1115,7 +1162,7 @@ int main(int argc, char** argv) {
                 const ImVec2 size = guided ? guide_size : ImVec2((float)state.app.window.width, (float)state.app.window.height);
                 movie_overlays_draw(window->DrawList, pos, size, (double)state.movie.playhead, &state);
             }
-            if (window) movie_draw_camera_path(&state, window->DrawList);
+            if (window && !state.movie.play_mode) movie_draw_camera_path(&state, window->DrawList);
         }
 
         if (ImGui::IsKeyPressed(KEY_RECENTER_ON_HIGHLIGHT) && !state.editor_focused) {
@@ -1349,6 +1396,15 @@ static void update_view_param(ApplicationState* data) {
             param.matrix.inv.proj = camera_clip_to_view_matrix_ortho(-w, w, -h, h, n, f);
         }
         param.matrix.curr.proj_no_jitter = param.matrix.curr.proj;
+    }
+
+    // The frame of the movie off the centre of the viewport (beside the Movie window): the picture is moved along with it
+    float sx, sy;
+    if (movie_frame_guide_shift(data, &sx, &sy)) {
+        const mat4_t T = mat4_translate(sx, sy, 0.0f);
+        param.matrix.curr.proj = T * param.matrix.curr.proj;
+        param.matrix.curr.proj_no_jitter = T * param.matrix.curr.proj_no_jitter;
+        param.matrix.inv.proj = param.matrix.inv.proj * mat4_translate(-sx, -sy, 0.0f);
     }
 
     param.matrix.curr.norm = mat4_transpose(param.matrix.inv.view);
@@ -4350,7 +4406,7 @@ static void draw_timeline_window(ApplicationState* data) {
             ImGui::EndMenuBar();
         }
 
-        if (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(KEY_PLAY_PAUSE, false)) {
+        if (ImGui::IsWindowFocused() && !data->movie.show_window && ImGui::IsKeyPressed(KEY_PLAY_PAUSE, false)) {
             data->animation.mode = data->animation.mode == PlaybackMode::Playing ? PlaybackMode::Stopped : PlaybackMode::Playing;
         }
 
@@ -6726,7 +6782,7 @@ static void movie_apply_time_with_keys(ApplicationState* state, double time, boo
     movie_params_apply(state, time);
     movie_reps_apply(state, time);
     m.follow_pending = false;
-    if (apply_camera && m.animate_camera && num_keys > 0 && !movie_scene_view(state)) {
+    if (apply_camera && num_keys > 0 && !movie_scene_view(state)) {
         if (movie_keys_track_atoms(keys, num_keys) || (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask))) {
             // The target is not where it will be until the trajectory frame has been loaded, so the camera waits for that
             m.follow_keys.assign(keys, keys + num_keys);
@@ -6784,18 +6840,59 @@ static void movie_frame_size(const ApplicationState* state, int* w, int* h) {
     movie_scaled_size(w, h, state->movie.res_scale);
 }
 
-// Where the frame of the movie is in the viewport, fitted into it with a little room: the preview shows the movie as it will be
-// recorded, in the proportions of the frame. False while there is nothing to show (not editing the movie, recording, a screenshot).
+// The part of the viewport that the Movie window does not cover: the largest of the strips left, right, above and below it, judged
+// by how large a picture of proportions 'aspect' fits in. The whole viewport when the window is not over it, in the Preview, or when
+// it floats in the middle so that no strip beside it is worth it.
+static void movie_viewport_free_rect(const ApplicationState* state, float aspect, float* x, float* y, float* w, float* h) {
+    const auto& m = state->movie;
+    const float vw = (float)state->app.window.width, vh = (float)state->app.window.height;
+    *x = 0.0f; *y = 0.0f; *w = vw; *h = vh;
+    if (!m.show_window || m.play_mode || ImGui::GetFrameCount() - m.window_rect_frame > 2 || vw <= 0.0f || vh <= 0.0f) return;
+    const float x0 = MAX(m.window_rect[0], 0.0f), y0 = MAX(m.window_rect[1], 0.0f);
+    const float x1 = MIN(m.window_rect[2], vw), y1 = MIN(m.window_rect[3], vh);
+    if (x1 <= x0 || y1 <= y0) return;
+    auto fit_h = [aspect](float rw, float rh) { return rw > 0.0f && rh > 0.0f ? MIN(rh, rw / MAX(aspect, 1e-3f)) : 0.0f; };
+    const float cand[4][4] = {{0.0f, 0.0f, x0, vh}, {x1, 0.0f, vw - x1, vh}, {0.0f, 0.0f, vw, y0}, {0.0f, y1, vw, vh - y1}};
+    int best = -1;
+    float best_h = 0.30f * fit_h(vw, vh);
+    for (int i = 0; i < 4; ++i) {
+        const float fh = fit_h(cand[i][2], cand[i][3]);
+        if (fh > best_h) { best_h = fh; best = i; }
+    }
+    if (best < 0) return;
+    *x = cand[best][0]; *y = cand[best][1]; *w = cand[best][2]; *h = cand[best][3];
+}
+
+// Where the frame of the movie is in the viewport, fitted with a little room into the part the Movie window does not cover: the
+// preview shows the movie as it will be recorded, in the proportions of the frame. Scene view shows the same frame, so that what is
+// in it is what a key added from the view records, in both modes. False while there is nothing to show (not
+// editing the movie, recording, a screenshot).
 static bool movie_frame_guide(const ApplicationState* state, ImVec2* pos, ImVec2* size) {
     const auto& m = state->movie;
-    if ((!m.show_frame && !m.pip_pass) || m.state == MovieRecordingState::Recording || !m.show_window) return false;
+    if (m.state == MovieRecordingState::Recording || !m.show_window) return false;
     if (!str_empty(state->screenshot.path_to_file)) return false;
     int fw = 0, fh = 0;
     movie_frame_size(state, &fw, &fh);
     const float vw = (float)state->app.window.width, vh = (float)state->app.window.height;
     if (fw <= 0 || fh <= 0 || vw <= 0.0f || vh <= 0.0f) return false;
-    movie_frame_fit(vw, vh, (float)fw, (float)fh, 0.92f, &pos->x, &pos->y, &size->x, &size->y);
+    float rx = 0.0f, ry = 0.0f, rw = vw, rh = vh;
+    if (!m.pip_pass) movie_viewport_free_rect(state, (float)fw / (float)fh, &rx, &ry, &rw, &rh);
+    movie_frame_fit(rw, rh, (float)fw, (float)fh, 0.92f, &pos->x, &pos->y, &size->x, &size->y);
+    pos->x += rx;
+    pos->y += ry;
     return true;
+}
+
+// How far the frame's centre is from the viewport's, in clip space (x right, y up). The projection is shifted by as much so that the
+// frame shows the movie camera's view centred, as in the recording, wherever the frame is.
+static bool movie_frame_guide_shift(const ApplicationState* state, float* sx, float* sy) {
+    *sx = *sy = 0.0f;
+    ImVec2 gp, gs;
+    const float vw = (float)state->app.window.width, vh = (float)state->app.window.height;
+    if (vw <= 0.0f || vh <= 0.0f || !movie_frame_guide(state, &gp, &gs)) return false;
+    *sx = 2.0f * (gp.x + gs.x * 0.5f - vw * 0.5f) / vw;
+    *sy = -2.0f * (gp.y + gs.y * 0.5f - vh * 0.5f) / vh;
+    return *sx != 0.0f || *sy != 0.0f;
 }
 
 static void movie_pbo_free(ApplicationState* state) {
@@ -7356,16 +7453,30 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, co
     }
     // The markers of the movie, where the movie gets to them
     if (timeline && o.show_markers) {
-        for (const MovieMarker& mk : state->movie.markers) {
+        // Labels sit right of their marker in the first half of the plot and left of it (ending at it) in the second; one that
+        // would overlap a label already written goes a line lower (in time order, so they do not jump as the movie plays)
+        MovieLabelSpan placed[64];
+        int num_placed = 0;
+        const int max_rows = MAX(1, MIN(3, (int)((iy1 - iy0) / (fpx * 1.15f)) - 1));
+        md_array(const MovieMarker*) order = 0;
+        for (const MovieMarker& mk : state->movie.markers) md_array_push(order, &mk, frame_alloc);
+        std::sort(order, order + md_array_size(order), [](const MovieMarker* a, const MovieMarker* b) { return a->time < b->time; });
+        for (size_t mi = 0; mi < md_array_size(order); ++mi) {
+            const MovieMarker& mk = *order[mi];
             if (!movie_marker_matches_subplot(mk, sp.id)) continue;
             if ((o.reveal && mk.time > c.time) || mk.time < c.axis_begin || mk.time > c.axis_end) continue;
             const float x = sx(elapsed ? movie_time_bar_moved(prof, mk.time) - d_axis0 : movie_trajectory_quantity(state, mk.time));
             if (x < ix0 || x > ix1) continue;
-            dl->AddLine(ImVec2(x, iy0), ImVec2(x, iy1), col(oc, 0.7f), MAX(fpx * 0.08f, 1.0f));
+            float mc[4];
+            movie_marker_color(state->movie.markers.data(), state->movie.markers.size(), (size_t)(&mk - state->movie.markers.data()), mc);
+            const ImVec4 mcol(mc[0], mc[1], mc[2], mc[3]);
+            dl->AddLine(ImVec2(x, iy0), ImVec2(x, iy1), col(mcol, 0.8f), MAX(fpx * 0.1f, 1.0f));
             if ((marker_labels || mk.subplot != 0) && mk.label[0]) {
                 const float tw = font->CalcTextSizeA(fpx, FLT_MAX, 0.0f, mk.label).x;
-                const bool left = x + fpx * 0.3f + tw > ix1;
-                text(ImVec2(left ? x - fpx * 0.3f - tw : x + fpx * 0.3f, iy0 + fpx * 0.1f), col(oc), mk.label);
+                float lx = x;
+                const int row = movie_label_place(placed, (size_t)num_placed, x, tw, ix0, ix1, fpx * 0.3f, fpx * 0.4f, max_rows, &lx);
+                if (num_placed < (int)ARRAY_SIZE(placed)) placed[num_placed++] = { lx, lx + tw, row };
+                text(ImVec2(lx, iy0 + fpx * 0.1f + (float)row * fpx * 1.15f), col(mcol), mk.label);
             }
         }
     }
@@ -7388,39 +7499,51 @@ static void movie_plot_panel_draw(MoviePlotContext& c, const PlotSubplot& sp, co
     }
 }
 
-// A figure: the subplots of the Timelines and the Distributions windows that it holds, stacked, with one horizontal axis for
-// timelines that are above each other. They fill a block of the overlay's width and height at its anchor.
-static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& o, ImVec2 pos, ImVec2 size, float margin, float alpha, double time, const ApplicationState* cstate) {
-    // Resolving a series fills the caches of the application, which is why it takes it mutable
-    ApplicationState* state = const_cast<ApplicationState*>(cstate);
-
-    // The panels whose subplot is there and has series in it
-    const PlotSubplot* shown[2 * PLOT_MAX_SUBPLOTS];
-    const MoviePlotPanel* shown_panel[2 * PLOT_MAX_SUBPLOTS];
-    MoviePlotView views[2 * PLOT_MAX_SUBPLOTS];
+// The panels of a figure whose subplot is there and has series in it, at most 2 * PLOT_MAX_SUBPLOTS
+static size_t movie_figure_panels(const MovieOverlay& o, const ApplicationState* state, const PlotSubplot** shown, const MoviePlotPanel** shown_panel, MoviePlotView* views) {
     size_t k = 0;
     for (const MoviePlotPanel& panel : o.panels) {
         if ((panel.view == MoviePlotView::Timeline && o.type == MovieOverlayType::Distribution) || (panel.view == MoviePlotView::Distribution && o.type == MovieOverlayType::Timeline)) continue;
         const bool tl = panel.view == MoviePlotView::Timeline;
         const PlotSubplot* subs = tl ? state->timeline.subplots : state->distributions.subplots;
         const int idx = plot_find_subplot(subs, tl ? state->timeline.num_subplots : state->distributions.num_subplots, panel.subplot);
-        if (idx < 0 || subs[idx].count == 0 || k >= ARRAY_SIZE(shown)) continue;
-        shown[k] = &subs[idx];
-        shown_panel[k] = &panel;
-        views[k] = panel.view;
+        if (idx < 0 || subs[idx].count == 0 || k >= 2 * PLOT_MAX_SUBPLOTS) continue;
+        if (shown) shown[k] = &subs[idx];
+        if (shown_panel) shown_panel[k] = &panel;
+        if (views) views[k] = panel.view;
         k += 1;
     }
+    return k;
+}
+
+// Where a figure of 'k' panels is on the frame: its top left corner, size, text size and plate padding
+static void movie_figure_layout(const MovieOverlay& o, size_t k, ImVec2 pos, ImVec2 size, float margin, ImVec2* p0, float* plot_w, float* plot_h, float* fpx, float* pad) {
+    *plot_h = MAX(movie_overlay_size_px(o, size.y), 40.0f);
+    *plot_w = MAX(o.width * size.x, 80.0f);
+    *fpx    = o.font_points > 0.0f ? CLAMP(o.font_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 4.0f, 400.0f)
+                                   : CLAMP(*plot_h * 0.085f / sqrtf((float)MAX(k, (size_t)1)), 6.0f, 64.0f);
+    *pad    = *fpx * 0.4f;
+    const int ai = (int)o.anchor;
+    *p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - *plot_w) * 0.5f * (float)(ai % 3),
+                 pos.y + margin + (size.y - 2.0f * margin - *plot_h) * 0.5f * (float)(ai / 3));
+}
+
+// A figure: the subplots of the Timelines and the Distributions windows that it holds, stacked, with one horizontal axis for
+// timelines that are above each other. They fill a block of the overlay's width and height at its anchor, moved down by 'dy'.
+static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& o, ImVec2 pos, ImVec2 size, float margin, float dy, float alpha, double time, const ApplicationState* cstate) {
+    // Resolving a series fills the caches of the application, which is why it takes it mutable
+    ApplicationState* state = const_cast<ApplicationState*>(cstate);
+
+    const PlotSubplot* shown[2 * PLOT_MAX_SUBPLOTS];
+    const MoviePlotPanel* shown_panel[2 * PLOT_MAX_SUBPLOTS];
+    MoviePlotView views[2 * PLOT_MAX_SUBPLOTS];
+    const size_t k = movie_figure_panels(o, state, shown, shown_panel, views);
     if (k == 0) return;
 
-    const float plot_h = MAX(movie_overlay_size_px(o, size.y), 40.0f);
-    const float plot_w = MAX(o.width * size.x, 80.0f);
-    const float fpx    = o.font_points > 0.0f ? CLAMP(o.font_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 4.0f, 400.0f)
-                                              : CLAMP(plot_h * 0.085f / sqrtf((float)k), 6.0f, 64.0f);
-    const float pad    = fpx * 0.4f;
-
-    const int ai = (int)o.anchor;
-    const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - plot_w) * 0.5f * (float)(ai % 3),
-                             pos.y + margin + (size.y - 2.0f * margin - plot_h) * 0.5f * (float)(ai / 3));
+    ImVec2 p0;
+    float plot_w, plot_h, fpx, pad;
+    movie_figure_layout(o, k, pos, size, margin, &p0, &plot_w, &plot_h, &fpx, &pad);
+    p0.y += dy;
     // The panels come in and go at times of their own; a panel that is not there yet keeps its place, so the others do not move
     const MovieTimeBarProfile& prof = movie_time_bar_profile_for(state);
     const float thick = o.line_points > 0.0f ? MAX(o.line_points * size.y / MOVIE_OVERLAY_POINT_REFERENCE_HEIGHT, 1.0f) : MAX(fpx * 0.16f, 1.5f);
@@ -7462,15 +7585,150 @@ static void movie_figure_draw(ImDrawList* dl, ImFont* font, const MovieOverlay& 
     }
 }
 
+// The text of a text, time stamp or scale bar overlay at a movie time, and the length of the scale bar in pixels. False when
+// there is nothing to draw.
+static bool movie_overlay_text(const MovieOverlay& o, ImVec2 size, double time, const ApplicationState* state, char* buf, size_t cap, float* bar_px) {
+    buf[0] = '\0';
+    *bar_px = 0.0f;
+    switch (o.type) {
+    case MovieOverlayType::Text:
+        snprintf(buf, cap, "%s", o.text);
+        break;
+    case MovieOverlayType::Timestamp: {
+        // The time that has gone since the movie started, which only grows whichever way the trajectory plays
+        const double elapsed = movie_time_bar_moved(movie_time_bar_profile_for(state), time);
+        if (md_array_size(state->timeline.x_values) > 0) {
+            char unit_buf[32] = "";
+            if (!md_unit_is_none(state->timeline.time_unit)) md_unit_print(unit_buf, sizeof(unit_buf), state->timeline.time_unit);
+            snprintf(buf, cap, "%.1f %s", elapsed, unit_buf);
+        } else {
+            snprintf(buf, cap, "%d frames", (int)(elapsed + 0.5));
+        }
+        break;
+    }
+    case MovieOverlayType::ScaleBar: {
+        const double upp = movie_units_per_pixel(state->view.camera.distance, state->view.camera.fov_y, size.y);
+        const float len = o.length > 0.0f ? o.length : movie_scale_bar_length(upp, size.x, 0.2);
+        if (len <= 0.0f || upp <= 0.0) return false;
+        *bar_px = (float)((double)len / upp);
+        snprintf(buf, cap, "%g \xC3\x85", (double)len);
+        break;
+    }
+    default: return false;
+    }
+    return true;
+}
+
+// The block (without plate) of a text, time stamp or scale bar overlay
+static ImVec2 movie_overlay_text_block(ImFont* font, const MovieOverlay& o, float font_px, const char* buf, float bar_px, ImVec2* text_size) {
+    *text_size = font->CalcTextSizeA(font_px, FLT_MAX, 0.0f, buf);
+    const float bar_h = MAX(font_px * 0.18f, 2.0f);
+    const float gap   = font_px * 0.2f;
+    return o.type == MovieOverlayType::ScaleBar ? ImVec2(MAX(bar_px, text_size->x), text_size->y + gap + bar_h) : *text_size;
+}
+
+// The size of the time bar's block, and whether it has labels
+static ImVec2 movie_time_bar_block(const MovieOverlay& o, ImVec2 size, float font_px) {
+    const float bar_w = MAX(o.width * size.x, 8.0f);
+    const float bar_h = MAX(font_px * 0.3f, 3.0f);
+    const bool labels = o.show_elapsed || o.show_speed;
+    return ImVec2(bar_w, (labels ? font_px + font_px * 0.25f : 0.0f) + bar_h);
+}
+
+static ImVec2 movie_anchor_pos(MovieOverlayAnchor anchor, ImVec2 pos, ImVec2 size, float margin, ImVec2 block) {
+    const int a = (int)anchor;
+    return ImVec2(pos.x + margin + (size.x - 2.0f * margin - block.x) * 0.5f * (float)(a % 3),
+                  pos.y + margin + (size.y - 2.0f * margin - block.y) * 0.5f * (float)(a / 3));
+}
+
+// The rectangle an overlay takes on the frame, with its plate, at its anchor. False for one that is not on the frame.
+static bool movie_overlay_rect(const MovieOverlay& o, ImFont* font, ImVec2 pos, ImVec2 size, float margin, double time, const ApplicationState* state, ImVec2* r0, ImVec2* r1) {
+    const bool plate = o.background[3] > 0.0f;
+    ImVec2 block, pad;
+    switch (o.type) {
+    case MovieOverlayType::TimeBar: {
+        const float font_px = MAX(movie_overlay_size_px(o, size.y), 4.0f);
+        block = movie_time_bar_block(o, size, font_px);
+        pad = plate ? ImVec2(font_px * 0.3f, font_px * 0.18f) : ImVec2(0, 0);
+        break;
+    }
+    case MovieOverlayType::Timeline:
+    case MovieOverlayType::Distribution:
+    case MovieOverlayType::Figure: {
+        const size_t k = movie_figure_panels(o, state, nullptr, nullptr, nullptr);
+        if (k == 0) return false;
+        ImVec2 p0;
+        float plot_w, plot_h, fpx, fpad;
+        movie_figure_layout(o, k, pos, size, margin, &p0, &plot_w, &plot_h, &fpx, &fpad);
+        const float e = plate ? fpad : 0.0f;
+        *r0 = ImVec2(p0.x - e, p0.y - e);
+        *r1 = ImVec2(p0.x + plot_w + e, p0.y + plot_h + e);
+        return true;
+    }
+    case MovieOverlayType::Logo:
+    case MovieOverlayType::Image: {
+        float aspect = 4.0f;
+        const GLuint tex = o.type == MovieOverlayType::Logo ? movie_logo_texture(&aspect) : movie_image_texture(o.path, &aspect);
+        if (!tex) return false;
+        const float logo_h = MAX(movie_overlay_size_px(o, size.y), 4.0f);
+        block = ImVec2(logo_h * aspect, logo_h);
+        pad = plate ? ImVec2(logo_h * 0.15f, logo_h * 0.15f) : ImVec2(0, 0);
+        break;
+    }
+    case MovieOverlayType::Text:
+    case MovieOverlayType::Timestamp:
+    case MovieOverlayType::ScaleBar: {
+        char buf[160];
+        float bar_px = 0.0f;
+        if (!movie_overlay_text(o, size, time, state, buf, sizeof(buf), &bar_px)) return false;
+        const float font_px = MAX(movie_overlay_size_px(o, size.y), 4.0f);
+        ImVec2 ts;
+        block = movie_overlay_text_block(font, o, font_px, buf, bar_px, &ts);
+        pad = plate ? ImVec2(font_px * 0.3f, font_px * 0.18f) : ImVec2(0, 0);
+        break;
+    }
+    default: return false;
+    }
+    const ImVec2 p0 = movie_anchor_pos(o.anchor, pos, size, margin, block);
+    *r0 = ImVec2(p0.x - pad.x, p0.y - pad.y);
+    *r1 = ImVec2(p0.x + block.x + pad.x, p0.y + block.y + pad.y);
+    return true;
+}
+
+// How far each overlay is moved down (up when negative) so that overlays shown at the same time do not overlap
+static void movie_overlays_offsets(ImFont* font, ImVec2 pos, ImVec2 size, float margin, double time, const ApplicationState* state, float* dy) {
+    const auto& ovs = state->movie.overlays;
+    md_allocator_i* arena = frame_alloc;
+    MovieOverlayBox* boxes = (MovieOverlayBox*)md_alloc(arena, sizeof(MovieOverlayBox) * MAX(ovs.size(), (size_t)1));
+    size_t* index = (size_t*)md_alloc(arena, sizeof(size_t) * MAX(ovs.size(), (size_t)1));
+    float* box_dy = (float*)md_alloc(arena, sizeof(float) * MAX(ovs.size(), (size_t)1));
+    size_t n = 0;
+    for (size_t i = 0; i < ovs.size(); ++i) {
+        dy[i] = 0.0f;
+        const MovieOverlay& o = ovs[i];
+        if (!o.enabled || o.end <= o.begin) continue;
+        ImVec2 r0, r1;
+        if (!movie_overlay_rect(o, font, pos, size, margin, time, state, &r0, &r1)) continue;
+        boxes[n] = MovieOverlayBox{ (int)o.anchor, r0.x, r0.y, r1.x, r1.y, o.begin, o.end };
+        index[n++] = i;
+    }
+    movie_overlay_avoid(boxes, n, 0.012f * size.y, pos.y, pos.y + size.y, box_dy);
+    for (size_t j = 0; j < n; ++j) dy[index[j]] = box_dy[j];
+}
+
 // The overlays that are visible at a movie time, drawn into the rectangle (pos, size) of a frame. Everything scales with the
-// height of the frame, so a frame looks the same at any resolution.
+// height of the frame, so a frame looks the same at any resolution. Overlays shown at the same time are moved apart.
 static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double time, const ApplicationState* state) {
     const auto& m = state->movie;
     ImFont* font = ImGui::GetFont();
     if (!font || size.x <= 0.0f || size.y <= 0.0f) return;
 
     const float margin = 0.035f * size.y;
-    for (const MovieOverlay& o : m.overlays) {
+    float* offsets = (float*)md_alloc(frame_alloc, sizeof(float) * MAX(m.overlays.size(), (size_t)1));
+    movie_overlays_offsets(font, pos, size, margin, time, state, offsets);
+    for (size_t oi = 0; oi < m.overlays.size(); ++oi) {
+        const MovieOverlay& o = m.overlays[oi];
+        const float dy = offsets[oi];
         const float alpha = movie_overlay_alpha(o, time);
         if (alpha <= 0.0f) continue;
 
@@ -7482,10 +7740,9 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             const float gap = font_px * 0.25f;
             const bool labels = o.show_elapsed || o.show_speed;
             const float label_h = labels ? font_px : 0.0f;
-            const ImVec2 block(bar_w, label_h + (labels ? gap : 0.0f) + bar_h);
-            const int ta = (int)o.anchor;
-            const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - block.x) * 0.5f * (float)(ta % 3),
-                                     pos.y + margin + (size.y - 2.0f * margin - block.y) * 0.5f * (float)(ta / 3));
+            const ImVec2 block = movie_time_bar_block(o, size, font_px);
+            ImVec2 p0 = movie_anchor_pos(o.anchor, pos, size, margin, block);
+            p0.y += dy;
             const float progress = (float)CLAMP(movie_time_bar_progress(profile, time), 0.0, 1.0);
 
             const ImU32 col_fill  = ImGui::ColorConvertFloat4ToU32(ImVec4(o.color[0], o.color[1], o.color[2], o.color[3] * alpha));
@@ -7529,7 +7786,7 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
         }
 
         if (o.type == MovieOverlayType::Timeline || o.type == MovieOverlayType::Distribution || o.type == MovieOverlayType::Figure) {
-            movie_figure_draw(dl, font, o, pos, size, margin, alpha, time, state);
+            movie_figure_draw(dl, font, o, pos, size, margin, dy, alpha, time, state);
             continue;
         }
         if (o.type == MovieOverlayType::PropertyVis) continue;   // In the viewport, not on the plane of the frame
@@ -7540,9 +7797,8 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
             if (!tex) continue;
             const float logo_h = MAX(movie_overlay_size_px(o, size.y), 4.0f);
             const ImVec2 logo_size(logo_h * aspect, logo_h);
-            const int la = (int)o.anchor;
-            const ImVec2 lp = ImVec2(pos.x + margin + (size.x - 2.0f * margin - logo_size.x) * 0.5f * (float)(la % 3),
-                                     pos.y + margin + (size.y - 2.0f * margin - logo_size.y) * 0.5f * (float)(la / 3));
+            ImVec2 lp = movie_anchor_pos(o.anchor, pos, size, margin, logo_size);
+            lp.y += dy;
             if (o.background[3] > 0.0f) {
                 const float pad = logo_size.y * 0.15f;
                 const ImU32 plate = ImGui::ColorConvertFloat4ToU32(ImVec4(o.background[0], o.background[1], o.background[2], o.background[3] * alpha));
@@ -7558,47 +7814,15 @@ static void movie_overlays_draw(ImDrawList* dl, ImVec2 pos, ImVec2 size, double 
         const ImU32 shadow = IM_COL32(0, 0, 0, (int)(160.0f * o.color[3] * alpha));
         const float soff   = MAX(font_px * 0.05f, 1.0f);
 
-        char buf[160] = "";
+        char buf[160];
         float bar_px = 0.0f;   // Scale bar only
-        switch (o.type) {
-        case MovieOverlayType::Text:
-            snprintf(buf, sizeof(buf), "%s", o.text);
-            break;
-        case MovieOverlayType::Timestamp: {
-            // The time that has gone since the movie started, which only grows whichever way the trajectory plays
-            const double elapsed = movie_time_bar_moved(movie_time_bar_profile_for(state), time);
-            if (md_array_size(state->timeline.x_values) > 0) {
-                char unit_buf[32] = "";
-                if (!md_unit_is_none(state->timeline.time_unit)) md_unit_print(unit_buf, sizeof(unit_buf), state->timeline.time_unit);
-                snprintf(buf, sizeof(buf), "%.1f %s", elapsed, unit_buf);
-            } else {
-                snprintf(buf, sizeof(buf), "%d frames", (int)(elapsed + 0.5));
-            }
-            break;
-        }
-        case MovieOverlayType::ScaleBar: {
-            const double upp = movie_units_per_pixel(state->view.camera.distance, state->view.camera.fov_y, size.y);
-            const float len = o.length > 0.0f ? o.length : movie_scale_bar_length(upp, size.x, 0.2);
-            if (len <= 0.0f || upp <= 0.0) continue;
-            bar_px = (float)((double)len / upp);
-            snprintf(buf, sizeof(buf), "%g \xC3\x85", (double)len);
-            break;
-        }
-        default: break;
-        }
-
-        const ImVec2 text_size = font->CalcTextSizeA(font_px, FLT_MAX, 0.0f, buf);
+        if (!movie_overlay_text(o, size, time, state, buf, sizeof(buf), &bar_px)) continue;
+        ImVec2 text_size;
+        const ImVec2 block = movie_overlay_text_block(font, o, font_px, buf, bar_px, &text_size);
         const float bar_h = MAX(font_px * 0.18f, 2.0f);
         const float gap   = font_px * 0.2f;
-        const ImVec2 block = o.type == MovieOverlayType::ScaleBar
-            ? ImVec2(MAX(bar_px, text_size.x), text_size.y + gap + bar_h)
-            : text_size;
-
-        const int ai = (int)o.anchor;
-        const float fx = 0.5f * (float)(ai % 3);
-        const float fy = 0.5f * (float)(ai / 3);
-        const ImVec2 p0 = ImVec2(pos.x + margin + (size.x - 2.0f * margin - block.x) * fx,
-                                 pos.y + margin + (size.y - 2.0f * margin - block.y) * fy);
+        ImVec2 p0 = movie_anchor_pos(o.anchor, pos, size, margin, block);
+        p0.y += dy;
 
         if (o.background[3] > 0.0f) {
             const float pad = font_px * 0.3f;
@@ -7806,7 +8030,7 @@ static void movie_recording_start(ApplicationState* state) {
     m.prev_playback_mode = state->animation.mode;
     state->animation.mode = PlaybackMode::Stopped;
 
-    m.camera_was_animated = m.animate_camera && md_array_size(m.keyframes) > 0;
+    m.camera_was_animated = md_array_size(m.keyframes) > 0;
     m.prev_view_target = state->view.target;
     m.prev_fov_y = state->view.camera.fov_y;
 
@@ -7852,7 +8076,7 @@ static void update_movie_preview(ApplicationState* state) {
     if (!m.preview_playing) return;
 
     const float len = (float)movie_duration(state);
-    if (m.state == MovieRecordingState::Recording || len <= 0.0f || run_num_frames(state) == 0) {
+    if (m.state == MovieRecordingState::Recording || len <= 0.0f || run_num_frames(state) == 0 || (!m.show_window && !m.play_mode)) {
         m.preview_playing = false;
         return;
     }
@@ -7965,25 +8189,26 @@ static void movie_insert_key(ApplicationState* state, CameraKeyframe key, bool k
     movie_sort_keyframes(state);
 }
 
-// The movie camera: the viewport in Movie preview, where the path has it at the preview time (or where it was last in Movie preview, with no keys) in Scene view
+// The pose a new key gets: what the viewport shows in the frame, in Scene view as in Movie preview
 static void movie_camera_pose(const ApplicationState* state, ViewTransform* vt, float* fov_y) {
-    const auto& m = state->movie;
-    const size_t n = md_array_size(m.keyframes);
-    if (movie_scene_view(state)) {
-        if (n > 0) {
-            std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
-            std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
-            camera_keyframes_evaluate(vt, fov_y, sorted.data(), n, (double)m.playhead, m.loop, nullptr, nullptr, movie_upright(state));
-            return;
-        }
-        if (m.pose_movie.valid) {
-            *vt = m.pose_movie.target;
-            *fov_y = m.pose_movie.fov_y;
-            return;
-        }
-    }
     *vt = state->view.target;
     *fov_y = state->view.camera.fov_y;
+}
+
+// A key at the preview time where the path already has the camera, so that the path keeps its shape (the view is not used)
+static void movie_add_keyframe_on_path(ApplicationState* state) {
+    auto& m = state->movie;
+    const size_t n = md_array_size(m.keyframes);
+    if (n == 0) {
+        movie_add_keyframe(state);
+        return;
+    }
+    std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
+    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    const double t = movie_snap_time(state, (double)m.playhead);
+    CameraKeyframe key = camera_key_on_path(sorted, t, m.loop, movie_upright(state));
+    key.time = t;
+    movie_insert_key(state, key, false);
 }
 
 // The movie camera as it is now, at the playhead
@@ -7991,6 +8216,9 @@ static CameraKeyframe movie_current_key(ApplicationState* state) {
     auto& m = state->movie;
     CameraKeyframe key = {};
     movie_camera_pose(state, &key.transform, &key.fov_y);
+    // With Keep upright the movie camera is levelled and tilted by the key's roll only: the view's own tilt goes into the roll,
+    // so that the key plays back as it was seen
+    if (const vec3_t* up = movie_upright(state)) key.roll = camera_roll(key.transform, *up);
     key.time = movie_snap_time(state, (double)m.playhead);
     if (m.key_includes_frame) {
         key.use_frame = true;
@@ -8004,6 +8232,28 @@ static CameraKeyframe movie_current_key(ApplicationState* state) {
 
 static void movie_add_keyframe(ApplicationState* state) {
     movie_insert_key(state, movie_current_key(state), true);
+}
+
+// K / Add Keyframe: a key of the view at the preview time, or 2 s later when there is a key there already (and the preview time
+// moves along), so that a key is never replaced by mistake
+static void movie_add_keyframe_from_view(ApplicationState* state) {
+    auto& m = state->movie;
+    const double len = movie_duration(state);
+    double t = movie_snap_time(state, (double)m.playhead);
+    auto taken = [&](double time) {
+        const double half_frame = 0.5 / MAX((double)m.fps, 1.0);
+        for (size_t i = 0; i < md_array_size(m.keyframes); ++i) if (fabs(m.keyframes[i].time - time) <= half_frame) return true;
+        return false;
+    };
+    while (taken(t)) {
+        t = movie_snap_time(state, t + 2.0);
+        if (t > len + 1.0e-6) {
+            VIAMD_LOG_ERROR("There is a key at the preview time and no room 2 s later: move the preview time or lengthen the movie");
+            return;
+        }
+    }
+    m.playhead = (float)t;
+    movie_add_keyframe(state);
 }
 
 // Remembers the key at the playhead (the nearest one within half a frame), to paste somewhere else
@@ -8211,20 +8461,38 @@ static void movie_scene_fit_path(ApplicationState* state) {
             pts.push_back(camera_get_look_at(vt));
         }
     }
-    vec3_t lo = pts[0], hi = pts[0];
-    for (const vec3_t& p : pts) {
-        lo = vec3_set(MIN(lo.x, p.x), MIN(lo.y, p.y), MIN(lo.z, p.z));
-        hi = vec3_set(MAX(hi.x, p.x), MAX(hi.y, p.y), MAX(hi.z, p.z));
-    }
-    const vec3_t center = (lo + hi) * 0.5f;
+    // Framed in the part of the viewport the Movie window leaves free (the picture is shifted there, see movie_frame_guide_shift),
+    // as seen from the current direction: centred on the path's extent across the view, as close as its width and height allow
     ViewTransform t = state->view.target;
-    t.distance = MAX(camera_fit_distance(pts.data(), nullptr, pts.size(), center, t.orientation, state->view.camera.fov_y) * 1.1f, 2.0f);
-    t.position = camera_position_from_look_at(center, t.orientation, t.distance);
+    const vec3_t right = quat_mul_vec3(t.orientation, vec3_set(1, 0, 0));
+    const vec3_t up = quat_mul_vec3(t.orientation, vec3_set(0, 1, 0));
+    const vec3_t back = quat_mul_vec3(t.orientation, vec3_set(0, 0, 1));
+    float x0 = FLT_MAX, x1 = -FLT_MAX, y0 = FLT_MAX, y1 = -FLT_MAX, z0 = FLT_MAX, z1 = -FLT_MAX;
+    for (const vec3_t& p : pts) {
+        const float x = vec3_dot(p, right), y = vec3_dot(p, up), z = vec3_dot(p, back);
+        x0 = MIN(x0, x); x1 = MAX(x1, x); y0 = MIN(y0, y); y1 = MAX(y1, y); z0 = MIN(z0, z); z1 = MAX(z1, z);
+    }
+    const vec3_t look = right * ((x0 + x1) * 0.5f) + up * ((y0 + y1) * 0.5f) + back * ((z0 + z1) * 0.5f);
+    // The frame has the camera's field of view across its height (see movie_guide_fov_y)
+    ImVec2 gp, gs;
+    float aspect = (float)MAX(state->app.window.width, 1) / (float)MAX(state->app.window.height, 1);
+    if (movie_frame_guide(state, &gp, &gs) && gs.y > 0.0f) aspect = gs.x / gs.y;
+    const float tan_half = tanf(state->view.camera.fov_y * 0.5f) * 0.94f;
+    const float tan_x = tan_half * aspect, tan_y = tan_half;
+    float dist = 2.0f;
+    for (const vec3_t& p : pts) {
+        const vec3_t d = p - look;
+        const float dz = vec3_dot(d, back) + 1.0f;
+        dist = MAX(dist, dz + fabsf(vec3_dot(d, right)) / tan_x);
+        dist = MAX(dist, dz + fabsf(vec3_dot(d, up)) / tan_y);
+    }
+    t.distance = dist;
+    t.position = camera_position_from_look_at(look, t.orientation, t.distance);
     state->view.target = t;
 }
 
 // Changes between Scene view and Movie preview. Each keeps its own viewport pose: the first time Scene view is entered it frames the
-// whole path, afterwards it is where it was left; Movie preview goes back to the movie camera (at the preview time with Animate camera).
+// whole path, afterwards it is where it was left; Movie preview goes back to the movie camera.
 static void movie_set_scene_view(ApplicationState* state, bool scene) {
     auto& m = state->movie;
     if (m.state == MovieRecordingState::Recording || scene == !m.show_frame) return;
@@ -8251,6 +8519,89 @@ static void movie_set_scene_view(ApplicationState* state, bool scene) {
         if (m.pose_movie.valid) restore(m.pose_movie);
         movie_apply_time(state, (double)m.playhead, true);
     }
+}
+
+// The Preview: the movie plays in the viewport through the movie camera, with the frame and the overlays, and every window is
+// hidden but a small bar. Leaving it stops the playback and goes back to Scene view if that was shown.
+static void movie_play_mode(ApplicationState* state, bool on) {
+    auto& m = state->movie;
+    if (on == m.play_mode) return;
+    if (on) {
+        if (m.state == MovieRecordingState::Recording || !m.show_window) return;
+        m.play_mode_scene = !m.show_frame;
+        movie_set_scene_view(state, false);
+        // Watching the movie: from its start, whatever the preview time
+        m.playhead = 0.0f;
+        movie_apply_time(state, 0.0, true);
+        m.preview_playing = true;
+        m.play_mode = true;
+        m.play_mode_moved_t = ImGui::GetTime();
+    } else {
+        m.play_mode = false;
+        m.preview_playing = false;
+        if (m.play_mode_scene) movie_set_scene_view(state, true);
+    }
+}
+
+// The bar at the bottom of the viewport in the Preview: play and pause, back to the start, the time, Repeat and Exit. It hides while the
+// mouse is still during playback.
+static void draw_movie_play_bar(ApplicationState* state) {
+    auto& m = state->movie;
+    const float len = (float)movie_duration(state);
+    const ImGuiIO& io = ImGui::GetIO();
+    const double now = ImGui::GetTime();
+    if (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || ImGui::IsAnyMouseDown() || !m.preview_playing) m.play_mode_moved_t = now;
+    static bool hovered = false;
+    if (!hovered && now - m.play_mode_moved_t > 2.5) return;
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float fs = ImGui::GetFontSize();
+    const float w = CLAMP(vp->WorkSize.x * 0.5f, MIN(fs * 34.0f, vp->WorkSize.x), vp->WorkSize.x);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y - fs * 1.2f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.75f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, fs * 0.5f);
+    if (ImGui::Begin("##movie_play_bar", nullptr, flags)) {
+        hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+        const ImVec2 bs(ImGui::GetFrameHeight() * 1.3f, ImGui::GetFrameHeight());
+        if (ImGui::Button(m.preview_playing ? (const char*)ICON_FA_PAUSE : (const char*)ICON_FA_PLAY, bs)) {
+            m.preview_playing = !m.preview_playing;
+            if (m.preview_playing && m.playhead >= len) m.playhead = 0.0f;
+        }
+        ImGui::SetItemTooltip(m.preview_playing ? "Pause (Space)" : "Play (Space)");
+        ImGui::SameLine();
+        if (ImGui::Button((const char*)ICON_FA_BACKWARD_STEP, bs)) {
+            m.playhead = 0.0f;
+            movie_apply_time(state, 0.0, true);
+        }
+        ImGui::SetItemTooltip("Back to the start");
+        ImGui::SameLine();
+        const float exit_w = ImGui::CalcTextSize("Exit preview").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float repeat_w = ImGui::GetFrameHeight() + ImGui::CalcTextSize("Repeat").x + ImGui::GetStyle().ItemInnerSpacing.x;
+        ImGui::SetNextItemWidth(MAX(ImGui::GetContentRegionAvail().x - exit_w - repeat_w - ImGui::GetStyle().ItemSpacing.x * 2.0f, fs * 6.0f));
+        char fmt[48];
+        snprintf(fmt, sizeof(fmt), "%%.2f / %.2f s", (double)len);
+        if (ImGui::SliderFloat("##play_time", &m.playhead, 0.0f, len, fmt)) movie_apply_time(state, (double)m.playhead, true);
+        if (ImGui::IsItemActivated()) {
+            m.play_mode_scrub_resume = m.preview_playing;
+            m.preview_playing = false;
+        }
+        if (ImGui::IsItemDeactivated() && m.play_mode_scrub_resume) {
+            m.preview_playing = m.playhead < len || m.preview_loop;
+            m.play_mode_scrub_resume = false;
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Repeat", &m.preview_loop);
+        ImGui::SameLine();
+        if (ImGui::Button("Exit preview")) movie_play_mode(state, false);
+        ImGui::SetItemTooltip("Back to the editor (Esc)");
+    } else {
+        hovered = false;
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 // What the path of the camera depends on, apart from the trajectory itself
@@ -8404,6 +8755,8 @@ static void movie_path_view(const ApplicationState* state, MoviePathView* v) {
         const float w = aspect * h;
         P = camera_view_to_clip_matrix_ortho(-w, w, -h, h, cam.near_plane, cam.far_plane);
     }
+    float sx, sy;
+    if (movie_frame_guide_shift(state, &sx, &sy)) P = mat4_translate(sx, sy, 0.0f) * P;
     v->mvp = P * camera_world_to_view_matrix(cam);
     v->inv = mat4_inverse(v->mvp);
     v->w = (float)state->app.window.width;
@@ -9211,6 +9564,28 @@ static void movie_lane_title(const char* text) {
 
 // The time ruler: the seconds of the axis, a tick for every frame of the movie when they are far enough apart (numbered), the notes
 // of the movie as triangles (click one to go there), and clicking or dragging anywhere in it moves the preview time.
+// Numbers on the lanes' axes and in the mouse readout, short: two decimals at most (one from 100, none from 10000, three significant
+// digits below 1), without trailing zeros
+static int movie_lane_number_format(double value, char* buf, int size, void*) {
+    const double a = fabs(value);
+    int len;
+    if (a < 1e-9) len = snprintf(buf, (size_t)size, "0");
+    else if (a < 1.0) len = snprintf(buf, (size_t)size, "%.3g", value);
+    else len = snprintf(buf, (size_t)size, "%.*f", a >= 10000.0 ? 0 : a >= 100.0 ? 1 : 2, value);
+    if (len > 0 && len < size && strchr(buf, '.') && !strchr(buf, 'e')) {
+        while (len > 0 && buf[len - 1] == '0') buf[--len] = '\0';
+        if (len > 0 && buf[len - 1] == '.') buf[--len] = '\0';
+    }
+    if (len == 2 && buf[0] == '-' && buf[1] == '0') { buf[0] = '0'; buf[1] = '\0'; len = 1; }
+    return len;
+}
+
+static void movie_lane_axes_format(bool y2 = false) {
+    ImPlot::SetupAxisFormat(ImAxis_X1, movie_lane_number_format);
+    ImPlot::SetupAxisFormat(ImAxis_Y1, movie_lane_number_format);
+    if (y2) ImPlot::SetupAxisFormat(ImAxis_Y2, movie_lane_number_format);
+}
+
 static void draw_movie_ruler(ApplicationState* data, float movie_len, bool locked) {
     auto& m = data->movie;
     if (movie_len <= 0.0f) return;
@@ -9218,6 +9593,7 @@ static void draw_movie_ruler(ApplicationState* data, float movie_len, bool locke
     static bool scrubbing = false;
     if (!ImPlot::BeginPlot("##movie_ruler", ImVec2(-1, -1), plot_flags)) return;
     ImPlot::SetupAxes(nullptr, nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations);
+    movie_lane_axes_format();
     ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
     ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 1.0, ImPlotCond_Always);
     ImPlot::SetupFinish();
@@ -9252,13 +9628,31 @@ static void draw_movie_ruler(ApplicationState* data, float movie_len, bool locke
     }
 
     // The notes of the movie
+    // Their labels go right of the note in the first half of the lane, left of it in the second, and a line lower
+    // (above the frame numbers) when they would overlap one written before
     int hovered_marker = -1;
-    for (int i = 0; i < (int)m.markers.size(); ++i) {
+    md_array(int) note_order = 0;
+    for (int i = 0; i < (int)m.markers.size(); ++i) md_array_push(note_order, i, frame_alloc);
+    std::sort(note_order, note_order + md_array_size(note_order), [&m](int a, int b) { return m.markers[a].time < m.markers[b].time; });
+    md_array(MovieLabelSpan) note_labels = 0;
+    const float note_lo = ImPlot::GetPlotPos().x, note_hi = note_lo + ImPlot::GetPlotSize().x;
+    const int note_rows = MAX(1, (int)((size.y - fs - 5.0f) / fs));
+    for (size_t k = 0; k < md_array_size(note_order); ++k) {
+        const int i = note_order[k];
         const MovieMarker& mk = m.markers[i];
         const float x = ImPlot::PlotToPixels(mk.time, 0.0).x;
         const float y = p0.y + 4.0f;
-        dl->AddTriangleFilled(ImVec2(x - 5.0f, y), ImVec2(x + 5.0f, y), ImVec2(x, y + 9.0f), IM_COL32(255, 220, 90, 240));
-        if (mk.label[0] != '\0') dl->AddText(ImVec2(x + 7.0f, y - 2.0f), IM_COL32(255, 230, 140, 230), mk.label);
+        float mc[4];
+        movie_marker_color(m.markers.data(), m.markers.size(), (size_t)i, mc);
+        const ImU32 mcol = ImGui::ColorConvertFloat4ToU32(ImVec4(mc[0], mc[1], mc[2], 0.95f));
+        dl->AddTriangleFilled(ImVec2(x - 5.0f, y), ImVec2(x + 5.0f, y), ImVec2(x, y + 9.0f), mcol);
+        if (mk.label[0] != '\0' && x >= note_lo && x <= note_hi) {
+            const float tw = ImGui::CalcTextSize(mk.label).x;
+            float lx = x;
+            const int row = movie_label_place(note_labels, md_array_size(note_labels), x, tw, note_lo, note_hi, 7.0f, fs * 0.4f, note_rows, &lx);
+            md_array_push(note_labels, (MovieLabelSpan{ lx, lx + tw, row }), frame_alloc);
+            dl->AddText(ImVec2(lx, y - 2.0f + (float)row * fs), mcol, mk.label);
+        }
         if (ImPlot::IsPlotHovered() && fabsf(io.MousePos.x - x) < 7.0f && io.MousePos.y > y - 3.0f && io.MousePos.y < y + 13.0f) hovered_marker = i;
     }
 
@@ -9339,7 +9733,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
     static bool resort_pending = false;
 
-    const char* titles[3] = {"Trajectory", "Camera distance", "Field of view"};
+    const char* titles[3] = {"Trajectory", "Distance", "Field of view"};
     const char* axes[3] = {"Trajectory frame", distance_axis, "Field of view (deg)"};
     const ImVec4 colors[3] = {ImVec4(0.4f, 0.9f, 0.4f, 1), ImVec4(0.35f, 0.8f, 1, 1), ImVec4(1, 0.8f, 0.25f, 1)};
     int rows = 0;
@@ -9349,13 +9743,13 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     auto add_row = [&](int slot) { ratio_slot[rows] = slot; ratios[rows] = m.timeline_row_ratios[slot]; return rows++; };
     if (m.timeline_ruler) add_row(8);
     if (m.timeline_camera_lane) camera_row = add_row(7);
-    for (int track = 0; track < 3; ++track) {
-        if (m.timeline_tracks[track]) add_row(track);
-    }
-    if (m.timeline_param_lane) add_row(3);
-    if (m.timeline_rep_lane) add_row(4);
+    if (m.timeline_tracks[0]) add_row(0);
+    const bool lens_lane = m.timeline_tracks[1] || m.timeline_tracks[2];
+    if (lens_lane) add_row(1);
     if (m.timeline_rep_overview) overview_row = add_row(6);
     if (m.timeline_overlay_lane) overlay_row = add_row(5);
+    if (m.timeline_rep_lane) add_row(4);
+    if (m.timeline_param_lane) add_row(3);
     const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoLegend;
     if (rows == 0) {
         ImGui::TextDisabled("No lane is ticked.");
@@ -9396,30 +9790,45 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
     if (ImPlot::BeginSubplots("##movie_tracks", rows, 1, size, ImPlotSubplotFlags_NoTitle, ratios)) {
       if (m.timeline_ruler) draw_movie_ruler(data, movie_len, locked);
       if (m.timeline_camera_lane) draw_movie_camera_lane(data, movie_len, locked, sorted, &camera_edit);
-      for (int track = 0; track < 3; ++track) {
-        if (!m.timeline_tracks[track]) continue;
-        if (!ImPlot::BeginPlot(titles[track], ImVec2(-1, -1), plot_flags)) continue;
-        ImPlot::SetupAxes(nullptr, axes[track]);
+      // The trajectory lane, then the camera lens lane: field of view on the left axis, distance on the right
+      for (int lane_i = 0; lane_i < 2; ++lane_i) {
+        if (lane_i == 0 ? !m.timeline_tracks[0] : !lens_lane) continue;
+        int curves[2];
+        int num_curves = 0;
+        if (lane_i == 0) curves[num_curves++] = 0;
+        else {
+            if (m.timeline_tracks[2]) curves[num_curves++] = 2;
+            if (m.timeline_tracks[1]) curves[num_curves++] = 1;
+        }
+        const bool lens = lane_i == 1;
+        if (!ImPlot::BeginPlot(lens ? "Camera lens" : titles[0], ImVec2(-1, -1), lens && num_curves > 1 ? ImPlotFlags_NoBoxSelect : plot_flags)) continue;
+        ImPlot::SetupAxes(nullptr, axes[curves[0]]);
+        if (num_curves > 1) ImPlot::SetupAxis(ImAxis_Y2, axes[curves[1]], ImPlotAxisFlags_AuxDefault);
+        movie_lane_axes_format(num_curves > 1);
+        if (lens && num_curves > 1) ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_Horizontal | ImPlotLegendFlags_NoButtons);
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
-        const float* values = track == 0 ? frm : track == 1 ? dist : fov;
-        double lo = values[0], hi = values[0];
-        for (int i = 1; i < N; ++i) {
-            lo = MIN(lo, (double)values[i]);
-            hi = MAX(hi, (double)values[i]);
+        for (int ci = 0; ci < num_curves; ++ci) {
+            const int track = curves[ci];
+            const float* values = track == 0 ? frm : track == 1 ? dist : fov;
+            double lo = values[0], hi = values[0];
+            for (int i = 1; i < N; ++i) {
+                lo = MIN(lo, (double)values[i]);
+                hi = MAX(hi, (double)values[i]);
+            }
+            const double padding = MAX((hi - lo) * 0.08, MAX(fabs(hi) * 0.05, 1.0e-3));
+            // Refit when the curve's range changes (keys added, a workspace loaded), but not while something is dragged
+            static double fitted[3][2] = {{1, 0}, {1, 0}, {1, 0}};
+            const bool range_changed = fitted[track][0] != lo || fitted[track][1] != hi;
+            const bool refit = range_changed && !ImGui::IsMouseDown(ImGuiMouseButton_Left);
+            if (refit) {
+                fitted[track][0] = lo;
+                fitted[track][1] = hi;
+            }
+            ImPlot::SetupAxisLimits(ci == 0 ? ImAxis_Y1 : ImAxis_Y2, lo - padding, hi + padding, refit ? ImPlotCond_Always : ImPlotCond_Once);
         }
-        const double padding = MAX((hi - lo) * 0.08, MAX(fabs(hi) * 0.05, 1.0e-3));
-        // Refit when the curve's range changes (keys added, a workspace loaded), but not while something is dragged
-        static double fitted[3][2] = {{1, 0}, {1, 0}, {1, 0}};
-        const bool range_changed = fitted[track][0] != lo || fitted[track][1] != hi;
-        const bool refit = range_changed && !ImGui::IsMouseDown(ImGuiMouseButton_Left);
-        if (refit) {
-            fitted[track][0] = lo;
-            fitted[track][1] = hi;
-        }
-        ImPlot::SetupAxisLimits(ImAxis_Y1, lo - padding, hi + padding, refit ? ImPlotCond_Always : ImPlotCond_Once);
 
         bool anchors_held = false;
-        if (track == 0) {
+        if (lane_i == 0) {
             const double tb = (double)m.traj_begin;
             const double te = (double)m.traj_end;
 
@@ -9440,38 +9849,52 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             ImPlot::PlotText("End", m.traj_end, m.end_frame, ImVec2(-16, -12));
         }
 
-        ImPlot::PushStyleColor(ImPlotCol_Line, colors[track]);
-        ImPlot::PlotLine(titles[track], xs, track == 0 ? frm : track == 1 ? dist : fov, N);
-        ImPlot::PopStyleColor();
-
         bool any_held = false, over_key = false;
-        KeyShift lane;
-        lane.lane = track == 0 ? KeyLane::Frame : track == 1 ? KeyLane::Distance : KeyLane::Fov;
-        lane.lo = 0.0;
-        lane.hi = last_frame;
-        lane.unit = distance_scale;
-        lane.step_ratio = track == 1;
-        for (size_t i = 0; i < n; ++i) {
-            const CameraKeyframe key = m.keyframes[i];
-            if (track == 0 && !key.use_frame) continue;
-            const double key_y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
-            const MovieKeyPointResult r = movie_key_point(data, locked, KeyKind::Camera, 0, key.time, key_y, 2000 + (int)i, ImVec4(1.0f, 0.45f, 0.15f, 1.0f), 7.0f, lane, &any_held);
-            over_key |= r.hovered;
-            char label[16];
-            snprintf(label, sizeof(label), "%d", (int)i + 1);
-            ImPlot::PlotText(label, key.time, key_y, ImVec2(0, -14));
-            if (r.hovered && !r.held) {
-                ImGui::SetTooltip("Keyframe %d: %.2f s\n%s: %.2f\nDrag to change the time and the value. Click picks it, Ctrl + click adds it to the picked keys:\nthey move together. Drag the background to pick with a box.", (int)i + 1, key.time, axes[track], key_y);
+        for (int ci = 0; ci < num_curves; ++ci) {
+            const int track = curves[ci];
+            ImPlot::SetAxes(ImAxis_X1, ci == 0 ? ImAxis_Y1 : ImAxis_Y2);
+            ImPlot::PushStyleColor(ImPlotCol_Line, colors[track]);
+            ImPlot::PlotLine(titles[track], xs, track == 0 ? frm : track == 1 ? dist : fov, N);
+            ImPlot::PopStyleColor();
+
+            KeyShift lane;
+            lane.lane = track == 0 ? KeyLane::Frame : track == 1 ? KeyLane::Distance : KeyLane::Fov;
+            lane.lo = 0.0;
+            lane.hi = last_frame;
+            lane.unit = distance_scale;
+            lane.step_ratio = track == 1;
+            // On the lens lane each curve's keys have its colour, so it is clear which axis a key is read on
+            const ImVec4 key_col = lens ? colors[track] : ImVec4(1.0f, 0.45f, 0.15f, 1.0f);
+            for (size_t i = 0; i < n; ++i) {
+                const CameraKeyframe key = m.keyframes[i];
+                if (track == 0 && !key.use_frame) continue;
+                const double key_y = track == 0 ? key.frame : track == 1 ? key.transform.distance * distance_scale : key.fov_y * MOVIE_RAD_TO_DEG;
+                const MovieKeyPointResult r = movie_key_point(data, locked, KeyKind::Camera, 0, key.time, key_y, 2000 + 2 * (int)i + ci, key_col, 7.0f, lane, &any_held);
+                over_key |= r.hovered;
+                char label[16];
+                snprintf(label, sizeof(label), "%d", (int)i + 1);
+                ImPlot::PlotText(label, key.time, key_y, ImVec2(0, -14));
+                if (r.hovered && !r.held) {
+                    ImGui::SetTooltip("Keyframe %d: %.2f s\n%s: %.2f\nDrag to change the time and the value. Click picks it, Ctrl + click adds it to the picked keys:\nthey move together. Drag the background to pick with a box.", (int)i + 1, key.time, axes[track], key_y);
+                }
             }
         }
+        ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
         {
             double vlines[3] = {(double)m.playhead, (double)m.traj_begin, (double)m.traj_end};
-            movie_lane_box(data, locked, 10 + track, over_key, vlines, track == 0 ? 3 : 1, [&](double x0, double x1, double y0, double y1) {
+            movie_lane_box(data, locked, 10 + lane_i, over_key, vlines, lane_i == 0 ? 3 : 1, [&](double x0, double x1, double y0, double y1) {
+                // The box is in the units of the left axis; a key of the right axis is in it when its pixel is
+                const float py0 = ImPlot::PlotToPixels(x0, y0, ImAxis_X1, ImAxis_Y1).y, py1 = ImPlot::PlotToPixels(x0, y1, ImAxis_X1, ImAxis_Y1).y;
                 for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
                     const CameraKeyframe& k = m.keyframes[i];
-                    if (track == 0 && !k.use_frame) continue;
-                    const double ky = track == 0 ? k.frame : track == 1 ? k.transform.distance * distance_scale : k.fov_y * MOVIE_RAD_TO_DEG;
-                    if (k.time >= x0 && k.time <= x1 && ky >= y0 && ky <= y1) m.sel.add(KeyKind::Camera, 0, k.time);
+                    if (k.time < x0 || k.time > x1) continue;
+                    for (int ci = 0; ci < num_curves; ++ci) {
+                        const int track = curves[ci];
+                        if (track == 0 && !k.use_frame) continue;
+                        const double ky = track == 0 ? k.frame : track == 1 ? k.transform.distance * distance_scale : k.fov_y * MOVIE_RAD_TO_DEG;
+                        const float py = ImPlot::PlotToPixels(k.time, ky, ImAxis_X1, ci == 0 ? ImAxis_Y1 : ImAxis_Y2).y;
+                        if (py >= MIN(py0, py1) && py <= MAX(py0, py1)) m.sel.add(KeyKind::Camera, 0, k.time);
+                    }
                 }
             });
         }
@@ -9495,10 +9918,10 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             movie_apply_time_with_keys(data, (double)m.playhead, true, sorted.data(), sorted.size());
         }
       }
-      if (m.timeline_param_lane) draw_movie_param_lane(data, movie_len, locked);
-      if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
       if (m.timeline_rep_overview) draw_movie_rep_overview_lane(data, movie_len, locked);
       if (m.timeline_overlay_lane) draw_movie_overlay_lane(data, movie_len, locked);
+      if (m.timeline_rep_lane) draw_movie_rep_lane(data, movie_len, locked);
+      if (m.timeline_param_lane) draw_movie_param_lane(data, movie_len, locked);
       if (ImPlot::IsSubplotsHovered() && !ImGui::GetIO().KeyCtrl) {
           const ImGuiIO& io = ImGui::GetIO();
           const double wheel = io.MouseWheelH != 0.0f ? (double)io.MouseWheelH : io.KeyShift ? -(double)io.MouseWheel : 0.0;
@@ -9568,6 +9991,7 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
 
     if (ImPlot::BeginPlot("##camera_lane", ImVec2(-1, -1), plot_flags)) {
         ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_Invert);
+        movie_lane_axes_format();
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.6, 3.6, ImPlotCond_Always);
         ImPlot::SetupAxisTicks(ImAxis_Y1, row_pos, 4, row_labels);
@@ -9582,6 +10006,23 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
         // Spans between keys
         ImPlot::PushPlotClipRect();
         std::string band_tip;
+        // After the last key (and before the first) the camera holds still: shaded, so that a Preview there is not
+        // mistaken for a camera that does not move
+        if (!sorted.empty()) {
+            const ImU32 hold_fill = IM_COL32(128, 128, 128, 40), hold_line = IM_COL32(160, 160, 160, 70);
+            auto hold_span = [&](double t0, double t1, const char* tip) {
+                if (t1 - t0 <= 1.0e-6) return;
+                const ImVec2 a = px(t0, -0.5), c = px(t1, 3.5);
+                dl->AddRectFilled(a, c, hold_fill);
+                const float step = ImGui::GetFontSize() * 0.8f;
+                dl->PushClipRect(a, c, true);
+                for (float x = a.x - (c.y - a.y); x < c.x; x += step) dl->AddLine(ImVec2(x, c.y), ImVec2(x + (c.y - a.y), a.y), hold_line);
+                dl->PopClipRect();
+                if (plot_hovered && mouse.x >= a.x && mouse.x <= c.x && mouse.y >= a.y && mouse.y <= c.y) band_tip = tip;
+            };
+            hold_span(0.0, sorted.front().time, "Before the first key the camera holds still on it");
+            hold_span(sorted.back().time, (double)movie_len, "After the last key the camera holds still: add keys here for it to move,\nor shorten the movie (Timing > Movie length)");
+        }
         for (const CameraBand& b : camera_bands(sorted)) {
             const int row = b.kind == CameraBandKind::Spin ? 2 : 1;
             ImVec2 a = px(b.begin, (double)row - 0.3), c = px(b.end, (double)row + 0.3);
@@ -9733,6 +10174,7 @@ static void draw_movie_param_lane(ApplicationState* data, float movie_len, bool 
     const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
     if (ImPlot::BeginPlot("##param_lane", ImVec2(-1, -1), plot_flags)) {
         ImPlot::SetupAxes("Movie time (s)", d.color ? nullptr : d.label, 0, ImPlotAxisFlags_Lock | (d.color ? ImPlotAxisFlags_NoDecorations : 0));
+        movie_lane_axes_format();
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         if (d.color) {
             ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 1.0, ImPlotCond_Always);
@@ -9888,6 +10330,7 @@ static void draw_movie_rep_lane(ApplicationState* data, float movie_len, bool lo
     const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
     if (ImPlot::BeginPlot("##rep_lane", ImVec2(-1, -1), plot_flags)) {
         ImPlot::SetupAxes("Movie time (s)", color_prop ? nullptr : axis, 0, ImPlotAxisFlags_Lock | (color_prop ? ImPlotAxisFlags_NoDecorations : 0));
+        movie_lane_axes_format();
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         const double pad = 0.1 * (double)(hi - lo);
         ImPlot::SetupAxisLimits(ImAxis_Y1, (double)lo - pad, (double)hi + pad, ImPlotCond_Always);
@@ -10016,6 +10459,7 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
 
     if (ImPlot::BeginPlot("##overlay_lane", ImVec2(-1, -1), plot_flags)) {
         ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoDecorations | ImPlotAxisFlags_Invert);
+        movie_lane_axes_format();
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -0.7, (double)MAX(n, 1) - 0.3, ImPlotCond_Always);
         movie_lane_title("Overlays");
@@ -10090,9 +10534,12 @@ static void draw_movie_overlay_lane(ApplicationState* data, float movie_len, boo
         {
             ImPlot::PushPlotClipRect();
             ImDrawList* dl = ImPlot::GetPlotDrawList();
-            for (const MovieMarker& mk : m.markers) {
+            for (size_t mi = 0; mi < m.markers.size(); ++mi) {
+                const MovieMarker& mk = m.markers[mi];
+                float mc[4];
+                movie_marker_color(m.markers.data(), m.markers.size(), mi, mc);
                 const ImVec2 p = ImPlot::PlotToPixels(mk.time, (double)n - 0.35);
-                dl->AddTriangleFilled(ImVec2(p.x - 4.0f, p.y), ImVec2(p.x + 4.0f, p.y), ImVec2(p.x, p.y - 7.0f), IM_COL32(255, 220, 90, 230));
+                dl->AddTriangleFilled(ImVec2(p.x - 4.0f, p.y), ImVec2(p.x + 4.0f, p.y), ImVec2(p.x, p.y - 7.0f), ImGui::ColorConvertFloat4ToU32(ImVec4(mc[0], mc[1], mc[2], 0.9f)));
             }
             ImPlot::PopPlotClipRect();
         }
@@ -10155,9 +10602,21 @@ static RepOverviewLayout movie_rep_overview_layout(const ApplicationState* data,
     double y = 0.0;
     for (const RepRow& row : l.rows) {
         l.blocks.push_back(movie_rep_system_blocks(data, row.group, duration));
-        // Fades are not counted, so a block that starts where another ends cross-fades with it on the same line
-        l.slots.push_back(rep_pack_blocks(&l.blocks.back(), 0.0));
-        const double h = data->movie.timeline_rep_equal_rows ? REP_OVERVIEW_EQUAL_BAND : (double)l.slots.back();
+        double h = 0.0;
+        if (data->movie.timeline_rep_separate) {
+            // A line for each representation of the system, in the order of the Representations window
+            const std::vector<int> members = movie_rep_group_members(data, row.group);
+            for (RepBlock& b : l.blocks.back()) {
+                b.slot = (int)(std::find(members.begin(), members.end(), b.rep) - members.begin());
+            }
+            l.slots.push_back(MAX((int)members.size(), 1));
+            h = (double)l.slots.back();
+        } else {
+            // Fades are not counted, so a block that starts where another ends cross-fades with it on the same line
+            l.slots.push_back(rep_pack_blocks(&l.blocks.back(), 0.0));
+            h = data->movie.timeline_rep_equal_rows ? REP_OVERVIEW_EQUAL_BAND : (double)l.slots.back();
+        }
+        h *= (double)CLAMP(data->movie.timeline_rep_block_height, 0.5f, 2.5f);
         l.band_begin.push_back(y);
         l.band_height.push_back(h);
         y += h + REP_OVERVIEW_SYSTEM_GAP;
@@ -10200,6 +10659,7 @@ static void draw_movie_rep_overview_lane(ApplicationState* data, float movie_len
 
     if (ImPlot::BeginPlot("##rep_overview", ImVec2(-1, -1), plot_flags)) {
         ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_Invert);
+        movie_lane_axes_format();
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
         ImPlot::SetupAxisLimits(ImAxis_Y1, -half_gap, layout.total + half_gap, ImPlotCond_Always);
         if (n > 0) ImPlot::SetupAxisTicks(ImAxis_Y1, label_pos.data(), n, label_ptr.data());
@@ -10458,69 +10918,117 @@ static void draw_movie_preview_controls(ApplicationState* data) {
         m.preview_playing = !m.preview_playing;
         if (m.preview_playing && m.playhead >= movie_len) m.playhead = 0.0f;
     }
-    ImGui::SetItemTooltip("Plays the movie in the viewport at the speed it will have, without recording.");
+    ImGui::SetItemTooltip("Plays the movie in the viewport at the speed it will have, from the preview time, without recording. Space");
+    ImGui::SameLine();
+    if (ImGui::Button("Play from start")) {
+        m.playhead = 0.0f;
+        movie_apply_time(data, 0.0, true);
+        m.preview_playing = true;
+    }
+    ImGui::SetItemTooltip("Plays the movie from its beginning.");
     ImGui::SameLine();
     ImGui::Checkbox("Repeat", &m.preview_loop);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(MAX(ImGui::GetContentRegionAvail().x - fs * 14.0f, fs * 8.0f));
+    ImGui::SetNextItemWidth(CLAMP(ImGui::GetContentRegionAvail().x, fs * 8.0f, fs * 18.0f));
     if (ImGui::SliderFloat("##timeline_playhead", &m.playhead, 0.0f, movie_len, "%.2f s")) {
         movie_apply_time(data, (double)m.playhead, true);
     }
-    ImGui::SetItemTooltip("Scrub the movie: shows the trajectory frame, the camera with 'Animate camera' on, and the keyed look parameters.");
-    ImGui::SameLine();
-    if (ImGui::Button("Add Keyframe")) {
-        movie_add_keyframe(data);
-    }
-    ImGui::SetItemTooltip("Adds a keyframe of the movie camera at the playhead: the viewport in Movie preview, the camera as the path has it\nat the preview time in Scene view. Shortcut: K");
+    ImGui::SetItemTooltip("Scrub the movie: shows the trajectory frame, the camera (in Movie preview) and the keyed looks.");
     ImGui::EndDisabled();
 }
 
+// Which lanes are shown, as a row of toggles with presets, and the layout settings in a popup
 static void draw_movie_timeline_options(ApplicationState* data) {
     auto& m = data->movie;
     const bool recording = m.state == MovieRecordingState::Recording;
     const float movie_len = (float)movie_duration(data);
     const float fs = ImGui::GetFontSize();
-    const char* track_names[3] = {"Trajectory", "Distance", "Field of view"};
-    for (int track = 0; track < 3; ++track) {
-        if (track > 0) ImGui::SameLine();
-        ImGui::Checkbox(track_names[track], &m.timeline_tracks[track]);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Show whole movie")) {
-        m.timeline_view_begin = -0.03 * movie_len;
-        m.timeline_view_end = 1.03 * movie_len;
-    }
-    ImGui::SameLine();
-    ImGui::Checkbox("Snap to frames", &m.snap_frames);
-    ImGui::SetItemTooltip("Keys, the playhead and the trajectory's start and end that are dragged here land on a frame of the movie (at the Output FPS).");
     const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
     m.param_selected = CLAMP(m.param_selected, 0, num_params - 1);
-    ImGui::Checkbox("Ruler", &m.timeline_ruler);
-    ImGui::SetItemTooltip("The time ruler above the lanes: a tick for every frame when they are far enough apart, the notes of the movie, and click or drag to move the preview time.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Camera lane", &m.timeline_camera_lane);
-    ImGui::SetItemTooltip("The camera keys with their names, where the camera follows the target or an atom, where it spins and the keys that pin a\ntrajectory frame. Drag a key sideways to change when, click it to go there, right click for its name and removal,\ndouble click on an empty place to add a key on the path without moving the camera.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Look parameter lane", &m.timeline_param_lane);
-    if (m.timeline_param_lane) {
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(fs * 14.0f);
-        if (ImGui::BeginCombo("Look parameter", movie_param_table[m.param_selected].label)) {
-            for (int i = 0; i < num_params; ++i) {
-                if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
-            }
-            ImGui::EndCombo();
+
+    bool lens = m.timeline_tracks[1] || m.timeline_tracks[2];
+    struct Chip { const char* label; bool* on; const char* tip; };
+    const Chip chips[] = {
+        {"Ruler",      &m.timeline_ruler,        "Time ruler: a tick per frame when zoomed in, the notes of the movie; click or drag to move the preview time."},
+        {"Camera",     &m.timeline_camera_lane,  "Camera keys with their names, follow / look-at / spin bands and frame pins. Drag a key to change when,\nclick to go there, right click to rename or remove, double click to add a key on the path."},
+        {"Trajectory", &m.timeline_tracks[0],    "The trajectory frame over the movie, with its blue Start and End and the keys that pin a frame."},
+        {"Lens",       &lens,                    "Field of view (left axis) and camera distance (right axis) over the movie, with the camera keys on both."},
+        {"Representations", &m.timeline_rep_overview, "When each representation is shown: a band per system with a block for each stretch. Drag to move or resize,\nright click to switch or remove, double click on empty space to add. Lines and block height are in Layout..."},
+        {"Overlays",   &m.timeline_overlay_lane, "The overlays as bars, one row each: drag a bar to move it, its ends to change when it is shown."},
+        {"Rep keys",   &m.timeline_rep_lane,     "The value of one property (color, radius, ...) of one representation over the movie, with its keys\n(the property and representation are picked next to the lanes)."},
+        {"Look",       &m.timeline_param_lane,   "The keys of one look parameter (picked next to the lanes)."},
+    };
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("Lanes");
+    for (const Chip& c : chips) {
+        ImGui::SameLine(0.0f, fs * 0.25f);
+        const bool on = *c.on;
+        if (on) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
         }
+        if (ImGui::SmallButton(c.label)) *c.on = !on;
+        if (on) ImGui::PopStyleColor(2);
+        ImGui::SetItemTooltip("%s", c.tip);
     }
-    ImGui::Checkbox("Representation lane", &m.timeline_rep_lane);
-    ImGui::SameLine();
-    ImGui::Checkbox("Representation overview", &m.timeline_rep_overview);
-    ImGui::SetItemTooltip("One row per system, grouped by the name before the first hyphen (protein-cartoon, protein-cpk).\nColoured blocks show each representation. Overlapping blocks stack within the same row.\nDrag to move or resize; right-click to change representation or remove; double-click empty space to add.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Overlay lane", &m.timeline_overlay_lane);
-    ImGui::SetItemTooltip("The overlays as bars below the other lanes, one row each: drag a bar to move it, its ends to change when it is shown.");
-    if (m.timeline_rep_overview) {
-        ImGui::TextWrapped("One row per system. Right-click a block to change representation; double-click empty space to add one. Overlaps are allowed.");
+    if (lens != (m.timeline_tracks[1] || m.timeline_tracks[2])) m.timeline_tracks[1] = m.timeline_tracks[2] = lens;
+
+    auto preset = [&](bool ruler, bool camera, bool traj, bool lens_on, bool look, bool rep, bool overview, bool overlays) {
+        m.timeline_ruler = ruler; m.timeline_camera_lane = camera; m.timeline_tracks[0] = traj;
+        m.timeline_tracks[1] = m.timeline_tracks[2] = lens_on; m.timeline_param_lane = look;
+        m.timeline_rep_lane = rep; m.timeline_rep_overview = overview; m.timeline_overlay_lane = overlays;
+    };
+    // The presets and the layout on a line of their own, under the lanes
+    ImGui::Dummy(ImVec2(ImGui::CalcTextSize("Lanes").x, 0.0f));
+    ImGui::SameLine(0.0f, fs * 0.25f);
+    if (ImGui::SmallButton("All")) preset(true, true, true, true, true, true, true, true);
+    ImGui::SetItemTooltip("Shows every lane.");
+    ImGui::SameLine(0.0f, fs * 0.25f);
+    if (ImGui::SmallButton("Camera work")) preset(true, true, true, true, false, false, false, false);
+    ImGui::SetItemTooltip("Ruler, camera, trajectory and lens.");
+    ImGui::SameLine(0.0f, fs * 0.25f);
+    if (ImGui::SmallButton("Scene work")) preset(true, false, false, false, true, true, true, true);
+    ImGui::SetItemTooltip("Ruler, representations, overlays, representation keys and look parameter.");
+    ImGui::SameLine(0.0f, fs);
+    if (ImGui::SmallButton("Layout...")) ImGui::OpenPopup("movie_lane_layout");
+    ImGui::SetItemTooltip("Lane height, fit to window, snapping, the representations lane's lines and block height.");
+    if (ImGui::BeginPopup("movie_lane_layout")) {
+        ImGui::SetNextItemWidth(fs * 9.0f);
+        ImGui::SliderFloat("Lane height", &m.timeline_lane_height, 60.0f, 400.0f, "%.0f px");
+        ImGui::SetItemTooltip("The height of a lane at ratio 1, in pixels. Lanes keep their height and the window scrolls (the mouse wheel scrolls, Ctrl + wheel zooms the time). Lanes listing systems or overlays grow to fit them.");
+        ImGui::Checkbox("Fit to window", &m.timeline_fit_window);
+        ImGui::SetItemTooltip("The lanes share the height of the window, however small, with the mouse wheel zooming the time.");
+        ImGui::Checkbox("Snap to frames", &m.snap_frames);
+        ImGui::SetItemTooltip("Keys, the playhead and the trajectory's start and end that are dragged here land on a frame of the movie (at the Output FPS).");
+        if (ImGui::Button("Show whole movie")) {
+            m.timeline_view_begin = -0.03 * movie_len;
+            m.timeline_view_end = 1.03 * movie_len;
+        }
+        ImGui::SeparatorText("Representations lane");
+        {
+            int mode = m.timeline_rep_separate ? 2 : (m.timeline_rep_equal_rows ? 0 : 1);
+            ImGui::TextUnformatted("Lines");
+            ImGui::SameLine();
+            bool changed = ImGui::RadioButton("Compact", &mode, 0);
+            ImGui::SetItemTooltip("One line per system: blocks that overlap in time share its height.");
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("Stacked", &mode, 1);
+            ImGui::SetItemTooltip("A system gets another line only where its blocks overlap in time.");
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("Separate", &mode, 2);
+            ImGui::SetItemTooltip("A line for each representation, grouped by system.");
+            if (changed) {
+                m.timeline_rep_separate = mode == 2;
+                if (mode != 2) m.timeline_rep_equal_rows = mode == 0;
+            }
+            ImGui::BeginDisabled(m.timeline_fit_window);
+            ImGui::SetNextItemWidth(fs * 9.0f);
+            ImGui::SliderFloat("Block height", &m.timeline_rep_block_height, 0.5f, 2.5f, "x%.2f");
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip(m.timeline_fit_window
+                ? "With Fit to window the lanes share the window's height; untick it to set the block height."
+                : "How tall the blocks are, times the usual. The lane grows or shrinks with it.");
+        }
         const int overview_reps = (int)md_array_size(data->representation.reps);
         std::vector<int> siblings;
         if (overview_reps > 0) {
@@ -10539,15 +11047,19 @@ static void draw_movie_timeline_options(ApplicationState* data) {
         }
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("At the preview time the selected representation goes and the next one of its group (named alike up to the first hyphen) comes,\nwith the transition: e.g. protein-cartoon shrinks away while protein-cpk grows in.");
+        ImGui::TextDisabled("Drag between lanes to resize them.");
+        ImGui::EndPopup();
     }
+
+    // What the look parameter and representation lanes show
     const int num_reps = (int)md_array_size(data->representation.reps);
-    if (m.timeline_rep_lane && num_reps > 0) {
+    const bool rep_pickers = m.timeline_rep_lane && num_reps > 0;
+    if (rep_pickers) {
         m.rep_selected = CLAMP(m.rep_selected, 0, num_reps - 1);
         const Representation& rep = data->representation.reps[m.rep_selected];
         float lo, hi;
         m.rep_prop_selected = CLAMP(m.rep_prop_selected, 0, (int)RepProp::Count - 1);
         if (!movie_rep_prop_label(rep, m.rep_prop_selected, &lo, &hi)) m.rep_prop_selected = (int)RepProp::Visible;
-        ImGui::SameLine();
         ImGui::SetNextItemWidth(fs * 10.0f);
         if (ImGui::BeginCombo("##timeline_rep", rep.name)) {
             for (int i = 0; i < num_reps; ++i) {
@@ -10557,6 +11069,7 @@ static void draw_movie_timeline_options(ApplicationState* data) {
             }
             ImGui::EndCombo();
         }
+        ImGui::SetItemTooltip("The representation in the Rep keys lane.");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(fs * 9.0f);
         if (ImGui::BeginCombo("##timeline_rep_prop", movie_rep_prop_label(rep, m.rep_prop_selected, &lo, &hi))) {
@@ -10567,17 +11080,19 @@ static void draw_movie_timeline_options(ApplicationState* data) {
             }
             ImGui::EndCombo();
         }
+        ImGui::SetItemTooltip("Its property in the Rep keys lane.");
     }
-    ImGui::SetNextItemWidth(fs * 9.0f);
-    ImGui::SliderFloat("Lane height", &m.timeline_lane_height, 60.0f, 400.0f, "%.0f px");
-    ImGui::SetItemTooltip("The height of a lane at ratio 1, in pixels. Lanes keep their height and the window scrolls (the mouse wheel scrolls, Ctrl + wheel zooms the time). Lanes listing systems or overlays grow to fit them.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Fit to window", &m.timeline_fit_window);
-    ImGui::SetItemTooltip("The lanes share the height of the window, however small, with the mouse wheel zooming the time.");
-    ImGui::SameLine();
-    ImGui::Checkbox("One line per system", &m.timeline_rep_equal_rows);
-    ImGui::SetItemTooltip("In the representation overview, every system gets the same height and its overlapping blocks share it.\nOff: each overlapping block gets a full line.");
-    ImGui::TextDisabled("Drag between lanes to resize. Keys of the look parameter and the representation: double-click to add, right-click to remove.");
+    if (m.timeline_param_lane) {
+        if (rep_pickers) ImGui::SameLine(0.0f, fs);
+        ImGui::SetNextItemWidth(fs * 12.0f);
+        if (ImGui::BeginCombo("##look_param", movie_param_table[m.param_selected].label)) {
+            for (int i = 0; i < num_params; ++i) {
+                if (ImGui::Selectable(movie_param_table[i].label, i == m.param_selected)) m.param_selected = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetItemTooltip("The look parameter in the Look lane.");
+    }
 }
 
 static void draw_movie_timeline_panel(ApplicationState* data) {
@@ -10594,10 +11109,7 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         m.timeline_view_end = 1.03 * movie_len;
         m.timeline_view_duration = movie_len;
     }
-    if (ImGui::TreeNode("Lanes and layout")) {
-        draw_movie_timeline_options(data);
-        ImGui::TreePop();
-    }
+    draw_movie_timeline_options(data);
     {
         // The picked keys: what can be done with them is also on the keyboard, with the mouse over the lanes
         const size_t picked = m.sel.size();
@@ -11073,7 +11585,7 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     }
 
     if (ImGui::TreeNode("Timeline markers")) {
-        ImGui::TextWrapped("Notes placed on all timeline subplots or on one selected subplot.");
+        ImGui::TextWrapped("Notes placed on all timeline subplots or on one selected subplot. Each has its color, for its line and label in the overlays and its triangle in the lanes.");
         if (ImGui::Button("Add marker at the preview time")) {
             MovieMarker k;
             k.time = (double)m.playhead;
@@ -11093,6 +11605,18 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
         for (int i = 0; i < (int)m.markers.size(); ++i) {
             MovieMarker& k = m.markers[i];
             ImGui::PushID(i);
+            float shown[4];
+            movie_marker_color(m.markers.data(), m.markers.size(), (size_t)i, shown);
+            if (ImGui::ColorEdit4("##color", shown, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha)) {
+                for (int c = 0; c < 3; ++c) k.color[c] = shown[c];
+                k.color[3] = 1.0f;
+            }
+            if (ImGui::BeginPopupContextItem("marker_color_menu")) {
+                if (ImGui::MenuItem("Automatic color", nullptr, false, k.color[3] > 0.0f)) k.color[3] = 0.0f;
+                ImGui::EndPopup();
+            }
+            ImGui::SetItemTooltip(k.color[3] > 0.0f ? "Its own color (right click: back to automatic)." : "Automatic: a color of its own by its place in time. Click to pick one.");
+            ImGui::SameLine();
             float t = (float)k.time;
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
             if (ImGui::DragFloat("##time", &t, 0.05f, 0.0f, movie_len, "%.2f s")) k.time = (double)CLAMP(t, 0.0f, movie_len);
@@ -11151,12 +11675,12 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, fs * 1.8f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
         ImGui::TableSetupColumn("Time (s)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
-        ImGui::TableSetupColumn("FOV (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
-        ImGui::TableSetupColumn("Roll (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
-        ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableSetupColumn("Frame", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
+        ImGui::TableSetupColumn("FOV (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 7.5f);
+        ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 36.0f);
+        ImGui::TableSetupColumn("Roll (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableHeadersRow();
 
         for (int i = 0; i < (int)md_array_size(m.keyframes); ++i) {
@@ -11196,44 +11720,6 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             resort |= ImGui::IsItemDeactivatedAfterEdit();
 
             ImGui::TableNextColumn();
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            float fov_deg = key.fov_y * MOVIE_RAD_TO_DEG;
-            if (ImGui::DragFloat("##fov", &fov_deg, 0.1f, 1.0f, 170.0f, "%.1f")) {
-                key.fov_y = fov_deg * MOVIE_DEG_TO_RAD;
-            }
-
-            ImGui::TableNextColumn();
-            if (m.keep_upright) {
-                ImGui::SetNextItemWidth(fs * 3.5f);
-                float roll_deg = key.roll * MOVIE_RAD_TO_DEG;
-                if (ImGui::DragFloat("##roll", &roll_deg, 0.5f, -180.0f, 180.0f, "%.0f")) key.roll = CLAMP(roll_deg, -180.0f, 180.0f) * MOVIE_DEG_TO_RAD;
-                ImGui::SetItemTooltip("The tilt of the camera at this keyframe, positive leaning it to the left.\nThe movie keeps the camera upright and goes smoothly from one keyframe's roll to the next.");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("0")) key.roll = 0.0f;
-                ImGui::SetItemTooltip("Level: no tilt");
-            } else {
-                const float tilt = camera_roll(key.transform, *movie_up_vector(data)) * MOVIE_RAD_TO_DEG;
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("%.0f", tilt);
-                ImGui::SetItemTooltip("The tilt of this keyframe's camera about %s up. 'Keep upright' (in Camera) makes it a setting.", movie_up_axis_str[CLAMP(m.up_axis, 0, 5)]);
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Level")) camera_level(&key.transform, *movie_up_vector(data));
-                ImGui::SetItemTooltip("Turn this keyframe's camera about where it looks so that it is level, %s being up.", movie_up_axis_str[CLAMP(m.up_axis, 0, 5)]);
-            }
-            ImGui::TableNextColumn();
-            if (i == 0) {
-                ImGui::TextDisabled("-");
-                ImGui::SetItemTooltip("How the movie gets to a keyframe is set on that keyframe, so the first has none.");
-            } else {
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                int ease = (int)key.ease;
-                if (ImGui::Combo("##ease", &ease, key_ease_str, (int)KeyEase::Count)) key.ease = (KeyEase)ease;
-                ImGui::SetItemTooltip("How the camera, and the trajectory frame if it is keyed, move in the stretch leading to this keyframe.\n"
-                    "Smooth: through the keys without stopping. Ease in/out: starts and ends slowly.\n"
-                    "Linear: constant speed. Hold: stays as it was until the key, then jumps.");
-            }
-
-            ImGui::TableNextColumn();
             bool use_frame = key.use_frame;
             if (ImGui::Checkbox("##useframe", &use_frame)) {
                 // Taken from the movie as it is, so that switching it on does not change anything
@@ -11251,6 +11737,84 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
                     ImGui::SetItemTooltip("Behind the previous frame: the trajectory plays backward to here.");
                 }
                 prev_frame = key.frame;
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            float fov_deg = key.fov_y * MOVIE_RAD_TO_DEG;
+            if (ImGui::DragFloat("##fov", &fov_deg, 0.1f, 1.0f, 170.0f, "%.1f")) {
+                key.fov_y = fov_deg * MOVIE_DEG_TO_RAD;
+            }
+
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton(ICON_FA_ARROW_RIGHT_TO_BRACKET "##goto")) movie_goto_keyframe(data, (size_t)i);
+            ImGui::SetItemTooltip("Go to: move the view to this keyframe");
+            ImGui::SameLine();
+            const bool picking_this = m.look_pick_key == i;
+            if (picking_this) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::SmallButton(ICON_FA_CROSSHAIRS "##look")) m.look_pick_key = picking_this ? -1 : i;
+            if (picking_this) ImGui::PopStyleColor();
+            if (picking_this) ImGui::SetItemTooltip("Click an atom in the viewport. Esc cancels.");
+            else if (key.follow && key.follow_atom >= 0) ImGui::SetItemTooltip("Look at: looks at atom %d, tracked through the trajectory.\nClick to pick another atom in the viewport. Esc cancels.", key.follow_atom + 1);
+            else ImGui::SetItemTooltip("Look at: click an atom in the viewport for this keyframe to look at. It is tracked through the trajectory. Esc cancels.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_CAMERA "##update")) {
+                // The camera moves to the current view's eye, still looking at the point the keyframe looks at
+                const vec3_t look = camera_get_look_at(key.transform);
+                ViewTransform t = data->view.target;
+                if (camera_aim_at(&t, look)) {
+                    key.transform = t;
+                    if (const vec3_t* up = movie_upright(data)) key.roll = camera_roll(t, *up);
+                }
+                key.fov_y = data->view.camera.fov_y;
+                if (key.use_frame) key.frame = data->animation.frame;
+            }
+            ImGui::SetItemTooltip("Update position: move this keyframe's camera to the current view's position. What it looks at stays.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_ELLIPSIS "##more")) ImGui::OpenPopup("##key_more");
+            ImGui::SetItemTooltip("Follow, Duplicate, Copy, Remove");
+            if (ImGui::BeginPopup("##key_more")) {
+            if (ImGui::MenuItem(key.follow ? "Unfollow" : "Follow target")) {
+                if (key.follow) {
+                    key.follow = false;
+                    key.follow_atom = -1;
+                } else {
+                    vec3_t center;
+                    if (md_bitfield_empty(&m.follow_mask)) {
+                        VIAMD_LOG_ERROR("Set a follow target first (Set Follow Target, in the Camera Keyframes section)");
+                    } else if (fabs(data->animation.frame - movie_trajectory_frame(data, key.time)) > 0.5) {
+                        VIAMD_LOG_ERROR("Go to keyframe %d first: the target is taken where it is at the frame of the keyframe", i + 1);
+                    } else if (movie_follow_center(data, &center)) {
+                        key.follow = true;
+                        key.follow_center = center;
+                        key.follow_atom = -1;
+                    }
+                }
+            }
+            ImGui::SetItemTooltip("Makes this keyframe look at a point that moves with the follow target, kept where it is relative to the target\nnow. Go to the key first, so that the trajectory is at the frame of the keyframe. Unfollow makes it fixed again.");
+            if (ImGui::MenuItem(ICON_FA_CLONE " Duplicate")) dup_idx = i;
+            ImGui::SetItemTooltip("Copy it to one second later");
+            if (ImGui::MenuItem(ICON_FA_COPY " Copy")) {
+                m.key_clipboard = key;
+                m.has_key_clipboard = true;
+            }
+            ImGui::SetItemTooltip("Remember this keyframe, to put it in at the preview time with 'Paste Keyframe'");
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_FA_TRASH_CAN " Remove")) remove_idx = i;
+            ImGui::EndPopup();
+            }
+
+            ImGui::TableNextColumn();
+            if (i == 0) {
+                ImGui::TextDisabled("-");
+                ImGui::SetItemTooltip("How the movie gets to a keyframe is set on that keyframe, so the first has none.");
+            } else {
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int ease = (int)key.ease;
+                if (ImGui::Combo("##ease", &ease, key_ease_str, (int)KeyEase::Count)) key.ease = (KeyEase)ease;
+                ImGui::SetItemTooltip("How the camera, and the trajectory frame if it is keyed, move in the stretch leading to this keyframe.\n"
+                    "Smooth: through the keys without stopping. Ease in/out: starts and ends slowly.\n"
+                    "Linear: constant speed. Hold: stays as it was until the key, then jumps.");
             }
 
             ImGui::TableNextColumn();
@@ -11275,55 +11839,23 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             }
 
             ImGui::TableNextColumn();
-            if (ImGui::SmallButton("Go To")) movie_goto_keyframe(data, (size_t)i);
-            ImGui::SetItemTooltip("Move the view to this keyframe");
-            ImGui::SameLine();
-            const bool picking_this = m.look_pick_key == i;
-            if (ImGui::SmallButton(picking_this ? "Click atom" : "Look at")) m.look_pick_key = picking_this ? -1 : i;
-            if (key.follow && key.follow_atom >= 0) ImGui::SetItemTooltip("Looks at atom %d, tracked through the trajectory.\nClick to pick another atom in the viewport. Esc cancels.", key.follow_atom + 1);
-            else ImGui::SetItemTooltip("Click an atom in the viewport for this keyframe to look at. It is tracked through the trajectory. Esc cancels.");
-            ImGui::SameLine();
-            ImGui::BeginDisabled(movie_scene_view(data));
-            if (ImGui::SmallButton("Update position")) {
-                // The camera moves to the current view's eye, still looking at the point the keyframe looks at
-                const vec3_t look = camera_get_look_at(key.transform);
-                ViewTransform t = data->view.target;
-                if (camera_aim_at(&t, look)) key.transform = t;
-                key.fov_y = data->view.camera.fov_y;
-                if (key.use_frame) key.frame = data->animation.frame;
+            if (m.keep_upright) {
+                ImGui::SetNextItemWidth(fs * 3.5f);
+                float roll_deg = key.roll * MOVIE_RAD_TO_DEG;
+                if (ImGui::DragFloat("##roll", &roll_deg, 0.5f, -180.0f, 180.0f, "%.0f")) key.roll = CLAMP(roll_deg, -180.0f, 180.0f) * MOVIE_DEG_TO_RAD;
+                ImGui::SetItemTooltip("The tilt of the camera at this keyframe, positive leaning it to the left.\nThe movie keeps the camera upright and goes smoothly from one keyframe's roll to the next.");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("0")) key.roll = 0.0f;
+                ImGui::SetItemTooltip("Level: no tilt");
+            } else {
+                const float tilt = camera_roll(key.transform, *movie_up_vector(data)) * MOVIE_RAD_TO_DEG;
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%.0f", tilt);
+                ImGui::SetItemTooltip("The tilt of this keyframe's camera about %s up. 'Keep upright' (in Camera) makes it a setting.", movie_up_axis_str[CLAMP(m.up_axis, 0, 5)]);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Level")) camera_level(&key.transform, *movie_up_vector(data));
+                ImGui::SetItemTooltip("Turn this keyframe's camera about where it looks so that it is level, %s being up.", movie_up_axis_str[CLAMP(m.up_axis, 0, 5)]);
             }
-            ImGui::EndDisabled();
-            ImGui::SetItemTooltip("Move this keyframe's camera to the current view's position. What it looks at stays.\nIn Scene view the viewport is not the movie camera: switch to Movie preview, or drag the key's handles in the viewport.");
-            ImGui::SameLine();
-            if (ImGui::SmallButton(key.follow ? "Unfollow" : "Follow")) {
-                if (key.follow) {
-                    key.follow = false;
-                    key.follow_atom = -1;
-                } else {
-                    vec3_t center;
-                    if (md_bitfield_empty(&m.follow_mask)) {
-                        VIAMD_LOG_ERROR("Set a follow target first (Set Follow Target, in the Camera Keyframes section)");
-                    } else if (fabs(data->animation.frame - movie_trajectory_frame(data, key.time)) > 0.5) {
-                        VIAMD_LOG_ERROR("Press Go To on keyframe %d first: the target is taken where it is at the frame of the keyframe", i + 1);
-                    } else if (movie_follow_center(data, &center)) {
-                        key.follow = true;
-                        key.follow_center = center;
-                        key.follow_atom = -1;
-                    }
-                }
-            }
-            ImGui::SetItemTooltip("Makes this keyframe look at a point that moves with the follow target, kept where it is relative to the target\nnow. Press Go To first, so that the trajectory is at the frame of the keyframe. Unfollow makes it fixed again.");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Dup")) dup_idx = i;
-            ImGui::SetItemTooltip("Copy it to one second later");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Copy")) {
-                m.key_clipboard = key;
-                m.has_key_clipboard = true;
-            }
-            ImGui::SetItemTooltip("Remember this keyframe, to put it in at the preview time with 'Paste Keyframe'");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Remove")) remove_idx = i;
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -11642,24 +12174,8 @@ static void draw_movie_settings_panel(ApplicationState* data) {
     int range_first = 0, range_last = 0;
     movie_render_range(data, &range_first, &range_last);
 
-    // --- Recording ---
-    if (!recording) {
-        const bool can_start = !str_empty(m.output_dir) && !m.sink;
-        ImGui::BeginDisabled(!can_start);
-        if (ImGui::Button("Start Recording")) {
-            movie_recording_start(data);
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (str_empty(m.output_dir)) {
-            ImGui::TextDisabled("Select an output folder first");
-        } else if (m.sink) {
-            const frame_sink::Status st = frame_sink::status(m.sink);
-            ImGui::TextDisabled("Still writing the previous movie, %d frame(s) left", st.queued);
-        } else {
-            ImGui::TextDisabled("%d of %d frames, %.2f s, %dx%d", range_last - range_first + 1, movie_num_frames(data), movie_duration(data), frame_w, frame_h);
-        }
-    } else {
+    // --- Recording (started from the Output tab) ---
+    if (recording) {
         if (ImGui::Button("Stop Recording")) {
             movie_recording_stop(data);
         }
@@ -11689,6 +12205,51 @@ static void draw_movie_settings_panel(ApplicationState* data) {
     ImGui::SetItemTooltip("Ctrl+Y or Ctrl+Shift+Z");
     ImGui::EndDisabled();
     ImGui::EndDisabled();
+
+    // --- Keyframes: what is needed all the time, whatever the tab ---
+    ImGui::SeparatorText("Keyframes");
+    ImGui::BeginDisabled(recording);
+    if (ImGui::Button("Add Keyframe")) {
+        movie_add_keyframe_from_view(data);
+    }
+    if (ImGui::BeginPopupContextItem("add_key_menu")) {
+        if (ImGui::MenuItem("Add a key on the path", nullptr, false, md_array_size(m.keyframes) > 0)) movie_add_keyframe_on_path(data);
+        ImGui::SetItemTooltip("A key at the preview time where the path already has the camera: the path keeps its shape.\nDouble click in the Camera lane does the same at another time.");
+        ImGui::EndPopup();
+    }
+    ImGui::SetItemTooltip("Adds a keyframe at the preview time with what the viewport shows in the frame, in Scene view as in Movie preview.\n"
+        "When there is a key at the preview time already, the new one goes 2 s later and the preview time moves there.\nRight click: a key on the path instead. Shortcut: K");
+    ImGui::SameLine();
+    ImGui::Checkbox("with trajectory frame", &m.key_includes_frame);
+    ImGui::SetItemTooltip("Also key the trajectory frame shown now. Keys with a frame decide how the trajectory plays,\nso the speed can change between them.");
+    ImGui::SameLine();
+    if (ImGui::Button("Key on Selection")) {
+        movie_add_selection_keyframe(data);
+    }
+    ImGui::SetItemTooltip("Adds a keyframe at the preview time that frames the selected atoms, seen from the direction the camera\nhas now, and moves the view there.");
+    {
+        const size_t follow_count = md_bitfield_popcount(&m.follow_mask);
+        if (ImGui::Button("Set Follow Target")) {
+            md_bitfield_copy(&m.follow_mask, &data->selection.selection_mask);
+            m.key_follow = md_bitfield_popcount(&m.follow_mask) > 0;
+        }
+        ImGui::SetItemTooltip("Uses the atoms selected now as what the camera can follow: it then looks at their middle.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(follow_count == 0);
+        if (ImGui::Button("Clear##follow")) {
+            md_bitfield_clear(&m.follow_mask);
+            m.key_follow = false;
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("keys follow target", &m.key_follow);
+        ImGui::SetItemTooltip("New keyframes look at a point that moves with the target, kept where it is relative to the target.\nBetween a following key and a fixed one the camera blends from one to the other.");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (follow_count > 0) ImGui::TextDisabled("%zu atoms", follow_count);
+        else                  ImGui::TextDisabled("no target");
+    }
+    ImGui::EndDisabled();
+    ImGui::Spacing();
 
     if (!ImGui::BeginTabBar("Movie settings")) return;
     ImGui::BeginDisabled(recording);
@@ -11800,6 +12361,25 @@ static void draw_movie_settings_panel(ApplicationState* data) {
 
         ImGui::Checkbox("Save a workspace copy with the movie", &m.save_copy);
         ImGui::SetItemTooltip("Writes '<prefix>.via' next to the movie, with the camera path, looks, overlays and settings it was made from.\nOpening it and recording again gives the same movie.");
+
+        ImGui::Separator();
+        {
+            const bool can_start = !str_empty(m.output_dir) && !m.sink;
+            ImGui::BeginDisabled(!can_start);
+            if (ImGui::Button("Start Recording")) {
+                movie_recording_start(data);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (str_empty(m.output_dir)) {
+                ImGui::TextDisabled("Select an output folder first");
+            } else if (m.sink) {
+                const frame_sink::Status st = frame_sink::status(m.sink);
+                ImGui::TextDisabled("Still writing the previous movie, %d frame(s) left", st.queued);
+            } else {
+                ImGui::TextDisabled("%d of %d frames, %.2f s, %dx%d", range_last - range_first + 1, movie_num_frames(data), movie_duration(data), frame_w, frame_h);
+            }
+        }
         ImGui::EndTabItem();
     }
 
@@ -11851,15 +12431,12 @@ static void draw_movie_settings_panel(ApplicationState* data) {
 
     if (ImGui::BeginTabItem("Camera")) {
         ImGui::BeginDisabled(recording);
-        ImGui::Checkbox("Animate camera", &m.animate_camera);
-        ImGui::SetItemTooltip("Record with the camera following the keyframes, instead of staying where it is.");
-        ImGui::SameLine();
-        ImGui::Checkbox("Show path in viewport", &m.show_path);
-        ImGui::SetItemTooltip("The path of the camera (blue) and of what it looks at (yellow), with the camera at each keyframe.\nThe green camera is where the preview time is, with the line it looks along.\n"
-            "Each key has a handle on the eye (numbered) and one on what it looks at: click one to go to the key, drag it to edit the key\n"
-            "(Ctrl + drag moves both, Esc cancels). Ctrl + click on the path adds a key there.");
         {
             bool ticks = (m.path_options & 1) != 0, sight = (m.path_options & 2) != 0, cams = (m.path_options & 4) != 0, rings = (m.path_options & 8) != 0;
+            ImGui::TextDisabled("Path in the viewport (Show path at the top)");
+            ImGui::SetItemTooltip("The path of the camera (blue) and of what it looks at (yellow), with the camera at each keyframe.\nThe green camera is where the preview time is, with the line it looks along.\n"
+                "Each key has a handle on the eye (numbered) and one on what it looks at: click one to go to the key, drag it to edit the key\n"
+                "(Ctrl + drag moves both, Esc cancels). Ctrl + click on the path adds a key there.");
             ImGui::BeginDisabled(!m.show_path);
             ImGui::Indent();
             if (ImGui::Checkbox("Time ticks", &ticks)) m.path_options = (m.path_options & ~1) | (ticks ? 1 : 0);
@@ -11872,10 +12449,6 @@ static void draw_movie_settings_panel(ApplicationState* data) {
             ImGui::SetItemTooltip("A camera drawn at each keyframe.");
             ImGui::SameLine();
             if (ImGui::Checkbox("Spin rings", &rings)) m.path_options = (m.path_options & ~8) | (rings ? 8 : 0);
-            ImGui::SameLine();
-            bool preview = (m.path_options & 16) != 0;
-            if (ImGui::Checkbox("In Movie preview", &preview)) m.path_options = (m.path_options & ~16) | (preview ? 16 : 0);
-            ImGui::SetItemTooltip("The path is always drawn in Scene view. In Movie preview, where you look through the movie camera, it is hidden unless this is ticked.");
             ImGui::SetItemTooltip("The circle the camera goes round in a spin, with arrows the way it turns.");
             ImGui::Unindent();
             ImGui::EndDisabled();
@@ -11907,46 +12480,12 @@ static void draw_movie_settings_panel(ApplicationState* data) {
             m.up_axis = best;
         }
         ImGui::SetItemTooltip("Up is the world axis closest to the view's up now.");
-        if (m.preview_playing && !m.animate_camera && md_array_size(m.keyframes) > 0) {
-            ImGui::TextDisabled("'Animate camera' is off, only the trajectory plays");
-        }
-
-        ImGui::Checkbox("with trajectory frame", &m.key_includes_frame);
-        ImGui::SetItemTooltip("Also key the trajectory frame shown now. Keys with a frame decide how the trajectory plays,\nso the speed can change between them.");
-
-        if (ImGui::Button("Key on Selection")) {
-            movie_add_selection_keyframe(data);
-        }
-        ImGui::SetItemTooltip("Adds a keyframe at the preview time that frames the selected atoms, seen from the direction the camera\nhas now, and moves the view there.");
-        ImGui::SameLine();
         ImGui::BeginDisabled(!m.has_key_clipboard);
         if (ImGui::Button("Paste Keyframe")) {
             movie_paste_keyframe(data);
         }
         ImGui::EndDisabled();
         ImGui::SetItemTooltip("Puts the keyframe that was copied in the table at the preview time (replacing one that is there).\nCtrl+C copies the keyframe at the preview time, Ctrl+V pastes.");
-
-        {
-            const size_t follow_count = md_bitfield_popcount(&m.follow_mask);
-            if (ImGui::Button("Set Follow Target")) {
-                md_bitfield_copy(&m.follow_mask, &data->selection.selection_mask);
-                m.key_follow = md_bitfield_popcount(&m.follow_mask) > 0;
-            }
-            ImGui::SetItemTooltip("Uses the atoms selected now as what the camera can follow: it then looks at their middle.");
-            ImGui::SameLine();
-            ImGui::BeginDisabled(follow_count == 0);
-            if (ImGui::Button("Clear##follow")) {
-                md_bitfield_clear(&m.follow_mask);
-                m.key_follow = false;
-            }
-            ImGui::SameLine();
-            ImGui::Checkbox("keys follow target", &m.key_follow);
-            ImGui::SetItemTooltip("New keyframes look at a point that moves with the target, kept where it is relative to the target.\nBetween a following key and a fixed one the camera blends from one to the other.");
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (follow_count > 0) ImGui::TextDisabled("%zu atoms", follow_count);
-            else                  ImGui::TextDisabled("no target");
-        }
 
         const float fs = ImGui::GetFontSize();
         ImGui::SetNextItemWidth(fs * 5.5f);
@@ -12005,8 +12544,7 @@ static void draw_movie_window(ApplicationState* data) {
     if (!m.duration_init && max_frame > 0.0) {
         m.start_frame = 0.0;
         m.end_frame = max_frame;
-        const double fps = fabs((double)data->animation.fps);
-        m.duration = (float)CLAMP(fps > 0.0 ? max_frame / fps : 10.0, 1.0, 3600.0);
+        m.duration = 60.0f;
         m.traj_begin = 0.0f;
         m.traj_end = m.duration;
         m.duration_init = true;
@@ -12014,23 +12552,62 @@ static void draw_movie_window(ApplicationState* data) {
     }
     ImGui::SetNextWindowSize(ImVec2(1280, 800), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSizeConstraints(ImVec2(720, 480), ImVec2(FLT_MAX, FLT_MAX));
-    if (ImGui::Begin("Movie", &m.show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
+    const bool movie_open = ImGui::Begin("Movie", &m.show_window, ImGuiWindowFlags_NoFocusOnAppearing);
+    {
+        // Only a window over the main viewport covers it, not one moved out into a window of its own
+        const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+        if (ImGui::GetWindowViewport() == ImGui::GetMainViewport()) {
+            const ImVec2 o = ImGui::GetMainViewport()->Pos;
+            m.window_rect[0] = wp.x - o.x; m.window_rect[1] = wp.y - o.y;
+            m.window_rect[2] = wp.x + ws.x - o.x; m.window_rect[3] = wp.y + ws.y - o.y;
+            m.window_rect_frame = ImGui::GetFrameCount();
+        }
+    }
+    if (movie_open) {
         ImGui::Checkbox("Timeline", &m.editor_timeline);
         ImGui::SameLine();
         ImGui::Checkbox("Controls", &m.editor_controls);
         if (!m.editor_timeline && !m.editor_controls) m.editor_controls = true;
         ImGui::SameLine();
-        ImGui::BeginDisabled(m.show_frame || md_array_size(m.keyframes) == 0 || m.state == MovieRecordingState::Recording);
-        if (ImGui::Button("Fit path")) movie_scene_fit_path(data);
-        ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Scene view: move the view back so that the whole camera path is in sight.");
-        ImGui::SameLine();
-        ImGui::BeginDisabled(m.show_frame);
-        ImGui::Checkbox("Preview", &m.pip_enabled);
-        ImGui::EndDisabled();
-        ImGui::SetItemTooltip("Scene view: a small live picture of the movie camera in the lower right corner of this window (right click it for the size).\nIt costs one more render of the scene when something changes, and every half second otherwise.");
+        if (!m.show_frame) {
+            ImGui::BeginDisabled(md_array_size(m.keyframes) == 0 || m.state == MovieRecordingState::Recording);
+            if (ImGui::Button("Fit path")) movie_scene_fit_path(data);
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Move the view so that the whole camera path is in sight, in the part of the viewport this window leaves free.");
+            ImGui::SameLine();
+        }
+        {
+            // In Scene view the path is drawn whenever it is on; in Movie preview, where you look through the movie camera, only if asked too
+            bool shown = m.show_path && (!m.show_frame || (m.path_options & 16));
+            if (ImGui::Checkbox("Show path", &shown)) {
+                if (!m.show_frame) m.show_path = shown;
+                else {
+                    if (shown) m.show_path = true;
+                    m.path_options = (m.path_options & ~16) | (shown ? 16 : 0);
+                }
+            }
+            ImGui::SetItemTooltip(m.show_frame
+                ? "Draw the camera path in Movie preview too (Scene view has its own setting). How it is drawn is in the Camera tab."
+                : "Draw the camera path in the viewport: blue for the camera, yellow for what it looks at, with a handle on each key.\nHow it is drawn is in the Camera tab.");
+        }
+        if (!m.show_frame) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Live picture", &m.pip_enabled);
+            ImGui::SetItemTooltip("Scene view: a small live picture of the movie camera in the lower right corner of this window (right click it for the size).\nIt costs one more render of the scene when something changes, and every half second otherwise.");
+        }
         const float button_width = ImGui::GetFontSize() * 15.0f;
-        ImGui::SameLine(MAX(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width));
+        const float play_width = ImGui::GetFontSize() * 7.0f;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SameLine(MAX(ImGui::GetCursorPosX(), ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width - play_width - spacing));
+        ImGui::BeginDisabled(m.state == MovieRecordingState::Recording || movie_duration(data) <= 0.0);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.68f, 0.32f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.12f, 0.45f, 0.20f, 1.0f));
+        if (ImGui::Button((const char*)ICON_FA_PLAY " Preview", ImVec2(play_width, ImGui::GetFrameHeight() * 1.4f))) movie_play_mode(data, true);
+        ImGui::PopStyleColor(3);
+        ImGui::SetItemTooltip("Plays the movie from its start in the viewport as it will be recorded, with every window hidden.\nA bar at the bottom plays, pauses and scrubs it (Space plays and pauses); Exit preview or Esc goes back.");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
         ImGui::BeginDisabled(m.state == MovieRecordingState::Recording);
         if (ImGui::Button(m.show_frame ? "Switch to Scene view" : "Switch to Movie preview",
                           ImVec2(button_width, ImGui::GetFrameHeight() * 1.4f))) {
@@ -12061,6 +12638,19 @@ static void draw_movie_window(ApplicationState* data) {
         // the panels; the scene is rendered for it by movie_render_pip as long as this is asked for every frame.
         if (m.pip_enabled && movie_scene_view(data)) {
             m.pip_requested_frame = ImGui::GetFrameCount();
+            {
+                // A part of the window's width, so that it grows on a large screen, but never more than about 45 % of its height
+                static const float parts[4] = {0.18f, 0.26f, 0.36f, 0.50f};
+                static const float least[4] = {200.0f, 280.0f, 360.0f, 480.0f};
+                int fw = 0, fh = 0;
+                movie_frame_size(data, &fw, &fh);
+                const float aspect = (float)MAX(fw, 1) / (float)MAX(fh, 1);
+                const ImVec2 ws = ImGui::GetWindowSize();
+                const int s = CLAMP(m.pip_size, 0, 3);
+                float w = MAX(parts[s] * ws.x, least[s]);
+                w = MIN(w, MIN(0.45f * ws.y * aspect, 0.7f * ws.x));
+                m.pip_target_w = MAX(64, ((int)w + 8) / 16 * 16);
+            }
             if (m.pip_valid && m.pip_tex) {
                 const ImVec2 size((float)m.pip_w, (float)m.pip_h);
                 const ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
@@ -12086,6 +12676,7 @@ static void draw_movie_window(ApplicationState* data) {
                         if (ImGui::RadioButton("Small", m.pip_size == 0)) m.pip_size = 0;
                         if (ImGui::RadioButton("Medium", m.pip_size == 1)) m.pip_size = 1;
                         if (ImGui::RadioButton("Large", m.pip_size == 2)) m.pip_size = 2;
+                        if (ImGui::RadioButton("Extra large", m.pip_size == 3)) m.pip_size = 3;
                         if (ImGui::MenuItem("Hide")) m.pip_enabled = false;
                         ImGui::EndPopup();
                     }
@@ -12204,8 +12795,8 @@ static void movie_render_pip(ApplicationState* state) {
 
     int frame_w = 0, frame_h = 0;
     movie_frame_size(state, &frame_w, &frame_h);
-    static const int widths[3] = {240, 360, 480};
-    const int w = widths[CLAMP(m.pip_size, 0, 2)];
+    static const int widths[4] = {240, 360, 480, 720};
+    const int w = m.pip_target_w > 0 ? m.pip_target_w : widths[CLAMP(m.pip_size, 0, 3)];
     const int h = MAX(1, (int)((double)w * (double)frame_h / (double)MAX(frame_w, 1) + 0.5));
     if (m.pip_w != w || m.pip_h != h || !m.pip_tex) {
         movie_pip_free(state);

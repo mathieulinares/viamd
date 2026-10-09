@@ -35,12 +35,12 @@ Numbers that are saved and must never be renumbered, only added to: parameter id
 
 ## What is there
 
-- **Editor:** one window, timeline left and tabbed controls right, resizable and collapsible; shared playback; Scene view / Movie preview switch (Tab) with separate poses, **Fit path** and a live picture of the movie camera.
+- **Editor:** one window, timeline left and tabbed controls right, resizable and collapsible; shared playback; Scene view / Movie preview switch (Tab); frame placed beside the Movie window with a shifted projection; Show path / Fit path / Live picture on the top row; green Preview button plays the movie with the windows hidden and a bottom control bar (Space, Esc) with separate poses, **Fit path** and a live picture of the movie camera.
 - **Timing:** movie length as the master value, trajectory start/end anchors, frame pins, backward trajectory, **Match Animation speed**, **Snap to frames**.
 - **Camera:** keys with ease, spin, orbit, loops, keep upright with roll, follow target, look-at-atom, names; depth of field focus modes; the path in the viewport with draggable handles.
 - **Looks and representations:** keyed look parameters; keyed representation properties (visibility with transition, scales, tint, saturation, colors) with stable representation ids; the overview lane by system with block editing and swap.
-- **Overlays:** text, time stamp, scale bar, time bar, logo, image, timeline, distribution, property visualization; markers; subplot ids and names.
-- **Timeline panel:** ruler, trajectory, camera, distance, FOV, look parameter, representation lane, overview and overlay lanes; multi-select across all of them with group move, stretch, inspector, keyboard and copy/paste; lane layout saved in the workspace.
+- **Overlays:** text, time stamp, scale bar, time bar, logo, image, timeline, distribution, property visualization; markers (labels on up to three rows); subplot ids and names; overlays shown together are moved apart (`movie_overlay_avoid`).
+- **Timeline panel:** lane toggles with presets and a Layout popup; ruler, trajectory, camera, lens (FOV and distance on two axes), look parameter, representation lane, overview and overlay lanes; multi-select across all of them with group move, stretch, inspector, keyboard and copy/paste; lane layout saved in the workspace.
 - **Output:** PNG sequence, MP4 H.264 / H.265, WebM VP9 via ffmpeg; scale, samples, render range, pause/resume, time left, workspace copy.
 - Undo/redo for everything on the timeline. Workspaces from earlier versions are migrated on read.
 

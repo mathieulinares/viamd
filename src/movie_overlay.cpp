@@ -7,6 +7,36 @@ bool movie_marker_matches_subplot(const MovieMarker& marker, uint32_t subplot) {
     return marker.subplot == 0 || marker.subplot == subplot;
 }
 
+void movie_marker_color(const MovieMarker* markers, size_t n, size_t i, float out[4]) {
+    // Light colors that read on the dark plate of an overlay and in the editor's lanes
+    static const float palette[][3] = {
+        {1.00f, 0.86f, 0.35f}, // yellow
+        {0.40f, 0.85f, 1.00f}, // sky blue
+        {1.00f, 0.55f, 0.30f}, // orange
+        {0.55f, 0.95f, 0.50f}, // green
+        {1.00f, 0.55f, 0.80f}, // pink
+        {0.75f, 0.65f, 1.00f}, // lavender
+        {0.35f, 0.95f, 0.85f}, // turquoise
+        {1.00f, 0.45f, 0.45f}, // red
+    };
+    const size_t num = sizeof(palette) / sizeof(palette[0]);
+    if (i >= n) {
+        out[0] = out[1] = out[2] = out[3] = 1.0f;
+        return;
+    }
+    const MovieMarker& mk = markers[i];
+    if (mk.color[3] > 0.0f) {
+        for (int c = 0; c < 4; ++c) out[c] = mk.color[c];
+        return;
+    }
+    size_t rank = 0;
+    for (size_t j = 0; j < n; ++j) {
+        if (markers[j].time < mk.time || (markers[j].time == mk.time && j < i)) rank += 1;
+    }
+    const float* p = palette[rank % num];
+    out[0] = p[0]; out[1] = p[1]; out[2] = p[2]; out[3] = 1.0f;
+}
+
 int movie_distribution_bins(const MovieOverlay& overlay, int source_bins) {
     return overlay.num_bins == 0 ? std::max(source_bins, 8)
         : std::clamp(overlay.num_bins, MOVIE_DISTRIBUTION_MIN_BINS, MOVIE_DISTRIBUTION_MAX_BINS);
@@ -315,4 +345,97 @@ double movie_time_bar_progress(const MovieTimeBarProfile& p, double time) {
 double movie_quantity_speed(const std::function<double(double)>& quantity_at, double time, double step) {
     if (step <= 0.0) return 0.0;
     return fabs(quantity_at(time + step) - quantity_at(time - step)) / (2.0 * step);
+}
+
+void movie_overlay_avoid(const MovieOverlayBox* boxes, size_t n, float gap, float frame_y0, float frame_y1, float* dy_out) {
+    if (!boxes || !dy_out) return;
+    auto rank = [&](const MovieOverlayBox& b) { return (b.anchor / 3 == 1 ? 2 : 0) + (b.anchor % 3 == 1 ? 0 : 1); };
+    std::vector<size_t> order;
+    order.reserve(n);
+    for (int r = 0; r < 4; ++r) {
+        for (size_t i = 0; i < n; ++i) {
+            if (rank(boxes[i]) == r) order.push_back(i);
+        }
+    }
+    std::vector<size_t> placed;
+    placed.reserve(n);
+    // Where the box ends up moving only up or only down, or false when it leaves the frame on the way
+    auto push = [&](const MovieOverlayBox& b, bool up, float* dy_res) {
+        float dy = 0.0f;
+        // Each step clears at least one placed box, which it cannot hit again in the same direction
+        for (size_t step = 0; step <= placed.size(); ++step) {
+            bool moved = false;
+            for (size_t j : placed) {
+                const MovieOverlayBox& p = boxes[j];
+                const float py0 = p.y0 + dy_out[j], py1 = p.y1 + dy_out[j];
+                const bool same_time = b.begin < p.end && p.begin < b.end;
+                const bool overlap = b.x0 < p.x1 && p.x0 < b.x1 && b.y0 + dy < py1 && py0 < b.y1 + dy;
+                if (!same_time || !overlap) continue;
+                dy = up ? py0 - gap - b.y1 : py1 + gap - b.y0;
+                moved = true;
+            }
+            if (!moved) break;
+        }
+        *dy_res = dy;
+        return b.y0 + dy >= frame_y0 - 0.5f && b.y1 + dy <= frame_y1 + 0.5f;
+    };
+    for (size_t i : order) {
+        const MovieOverlayBox& b = boxes[i];
+        const int row = b.anchor / 3;
+        float dy_up = 0.0f, dy_down = 0.0f;
+        const bool ok_up = push(b, true, &dy_up);
+        const bool ok_down = push(b, false, &dy_down);
+        float dy = 0.0f;
+        if (row == 1) {
+            if (ok_up && (!ok_down || -dy_up < dy_down)) dy = dy_up;
+            else if (ok_down) dy = dy_down;
+        } else {
+            const bool prefer_up = row == 2;
+            if (prefer_up ? ok_up : ok_down) dy = prefer_up ? dy_up : dy_down;
+            else if (prefer_up ? ok_down : ok_up) dy = prefer_up ? dy_down : dy_up;
+        }
+        dy_out[i] = dy;
+        placed.push_back(i);
+    }
+}
+
+int movie_label_place(const MovieLabelSpan* placed, size_t n, float x, float w, float lo, float hi, float offset, float gap, int max_rows, float* x0_out) {
+    max_rows = max_rows < 1 ? 1 : max_rows;
+    const bool prefer_left = x > 0.5f * (lo + hi);
+    float start[2];
+    for (int side = 0; side < 2; ++side) {
+        const bool left = (side == 0) == prefer_left;
+        float lx = left ? x - offset - w : x + offset;
+        if (lx + w > hi) lx = hi - w;
+        if (lx < lo) lx = lo;
+        start[side] = lx;
+    }
+    auto overlap = [&](float lx, int row) {
+        float sum = 0.0f;
+        for (size_t j = 0; j < n; ++j) {
+            if (placed[j].row != row) continue;
+            const float a = lx > placed[j].x0 - gap ? lx : placed[j].x0 - gap;
+            const float b = lx + w < placed[j].x1 + gap ? lx + w : placed[j].x1 + gap;
+            if (b > a) sum += b - a;
+        }
+        return sum;
+    };
+    int best_row = 0;
+    float best_x = start[0], best = -1.0f;
+    for (int side = 0; side < 2; ++side) {
+        for (int row = 0; row < max_rows; ++row) {
+            const float o = overlap(start[side], row);
+            if (o <= 0.0f) {
+                *x0_out = start[side];
+                return row;
+            }
+            if (best < 0.0f || o < best) {
+                best = o;
+                best_row = row;
+                best_x = start[side];
+            }
+        }
+    }
+    *x0_out = best_x;
+    return best_row;
 }

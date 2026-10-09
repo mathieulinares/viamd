@@ -12,35 +12,44 @@ Contents: [The editor](#the-editor) · [Quick start](#quick-start) · [Output](#
 
 Open it with **Windows > Movie**. One window holds everything:
 
-- **Left, the timeline:** lanes on a shared time axis for the trajectory frame, camera, distance, field of view, looks, representations and overlays.
+- **Left, the timeline:** lanes on a shared time axis for the trajectory frame, camera, lens (field of view and distance), looks, representations and overlays.
 - **Right, the controls:** tabs **Output**, **Timing**, **Camera**, **Looks**, **Representations** and **Overlays**.
 - Drag the divider to resize the panels. Each scrolls on its own. The **Timeline** and **Controls** boxes hide either one (one always stays).
-- **Top:** playback (**Play Preview**, **Repeat**), the preview-time scrubber, **Add Keyframe**, and **Start Recording** with a summary of frames, seconds and pixel size.
-- **Undo** and **Redo** (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z) cover everything on the movie: camera keys, look and representation keys, overlays, the length and the trajectory timing.
+- **Top:** playback (**Play Preview**, **Play from start**, **Repeat**) and the preview-time scrubber.
+- **Right, above the tabs:** **Undo** and **Redo** (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z) cover everything on the movie: camera keys, look and representation keys, overlays, the length and the trajectory timing. Below them the **Keyframes** section: **Add Keyframe**, **with trajectory frame**, **Key on Selection** and the follow target (see [Camera](#camera)). While recording, **Stop Recording**, **Pause** and the progress are shown there too.
+- **Start Recording** is at the bottom of the **Output** tab, with a summary of frames, seconds and pixel size.
 
-### Scene view and Movie preview
+### Scene view, Movie preview and Preview
 
 The large button at the top right (or **Tab**; hold Tab to peek at the other one) switches the viewport between two views. Neither changes the keys, the playback or the recording, and the switch is disabled while recording.
 
 | | **Scene view** | **Movie preview** |
 |---|---|---|
 | Camera | Your own editor camera | The movie camera |
-| Shows | The camera path and key handles | The recording frame (outside dimmed), the overlays, and the path only if **In Movie preview** is ticked |
-| Scrubbing and playing | The green movie camera moves along the path; the trajectory plays; your view stays | The viewport follows the movie camera (with **Animate camera**) |
+| Shows | The recording frame (outside dimmed), the camera path and key handles | The recording frame (outside dimmed), the overlays, and the path only if **Show path** is ticked in this mode |
+| Scrubbing and playing | The green movie camera moves along the path; the trajectory plays; your view stays | The viewport is the movie camera, following the keys: a camera turning around the system looks like the system turning |
 
-Each mode remembers its own view. The first time you enter Scene view it frames the whole camera path, seen from where you were looking; **Fit path** does that again. In Scene view **Add Keyframe** (K) adds a key of the *movie* camera at the preview time, on the path. To key a new pose, switch to Movie preview, fly there and add it, or drag the key handles in the viewport.
+Each mode remembers its own view. The first time you enter Scene view it frames the whole camera path, seen from where you were looking; **Fit path** does that again. Both frame it, close and centred, in the frame. Both modes show the same recording frame, the same size and in the same place (in the part of the viewport the Movie window leaves free, beside, above or below it), with what is outside dimmed: what is in the frame is what a key added from the view records, so keys are aimed the same way in both modes. The view turns around the middle of the frame, and in Scene view the mouse wheel zooms towards the point under the mouse. **Add Keyframe** (K) adds a key at the preview time with what the frame shows, in both modes; **Update position** in the key table works in both too. To add a key where the path already has the camera, without changing the path's shape, right click **Add Keyframe** > **Add a key on the path**, or double click the Camera lane at that time.
 
-**Preview** (the box next to **Fit path**) shows a small live picture of the movie camera, with overlays, in the lower right of the Movie window, so you can drag the path in the viewport and watch the shot at the same time. Right-click it for its size or to hide it. It costs one extra render when the picture changes (at most about 20 times a second), so switch it off on very large systems. It has no temporal anti-aliasing or sharpening, and no property visualization.
+Next to the Timeline and Controls boxes: **Fit path** (Scene view only), **Show path** and **Live picture** (Scene view only). **Show path** has a setting of its own in each mode: in Scene view it draws the path, in Movie preview it adds the path over the movie camera's view.
+
+In Movie preview the frame is placed in the part of the viewport the Movie window leaves free, so the window never hides the picture, with the movie camera's view centred in the frame as in the recording (the projection is shifted with the frame; the camera and the keys do not change). Move the window and the frame moves along. When the window floats in the middle, or is moved out of the main window, the frame is centred in the whole viewport.
+
+**Live picture** shows a small live picture of the movie camera, with overlays, in the lower right of the Movie window, so you can drag the path in the viewport and watch the shot at the same time. Right-click it for its size (**Small**, **Medium**, **Large**, **Extra large**) or to hide it. The sizes are a part of the Movie window's width, so the picture grows on a large screen, at most about 45 % of the window's height. It costs one extra render when the picture changes (at most about 20 times a second), so switch it off on very large systems. It has no temporal anti-aliasing or sharpening, and no property visualization.
+
+### Preview: watch the movie
+
+The green **Preview** button next to the switch plays the movie in the viewport as it will be recorded, with every window, the menu and the camera path hidden and black outside the frame. It always starts from the beginning of the movie. A bar at the bottom has play/pause, back to the start, the time slider (scrubbing pauses, release resumes), **Repeat** and **Exit preview**. It hides after a moment while the mouse is still and the movie plays; move the mouse to bring it back. **Space** plays and pauses, **Esc** leaves. Whenever the Movie window is up, **Space** plays and pauses the movie (as **Play Preview**), not the trajectory; in a text field it types a space. Opening the Movie window stops the trajectory if it was playing; closing it stops the movie, and **Space** plays the trajectory again. Leaving stops the playback and goes back to Scene view if that was shown. It cannot be entered while recording.
 
 ## Quick start
 
 1. Load a trajectory and open **Windows > Movie**.
 2. **Output:** click **Select Output Folder...** and pick a format.
-3. **Movie length (s)** (Output or Timing): type it and press Enter. At first the trajectory fills the movie.
+3. **Movie length (s)** (Output or Timing): 60 s for a new movie; type another and press Enter. At first the trajectory fills the movie.
 4. Set the preview time to 0, set up the view, press **K** (**Add Keyframe**).
 5. Move the preview time, set up another view, press **K** again. Repeat.
-6. In **Camera**, tick **Animate camera** and press **Play Preview**. Switch to **Movie preview** to see the frame and overlays.
-7. **Start Recording**. Esc or **Stop Recording** stops early.
+6. Press **Play Preview** (or **Play from start**). Switch to **Movie preview** to see the frame and overlays, or press the green **Preview** to watch it without the windows.
+7. **Start Recording** (bottom of **Output**). Esc or **Stop Recording** stops early.
 
 When the recording ends, your own view, the animation playback and the screenshot settings are restored.
 
@@ -80,15 +89,20 @@ To vary the speed, pin frames on camera keyframes (**Frame** column below): betw
 
 A keyframe is a camera (eye position, look-at point, distance, field of view) at a time. Between keys the camera moves smoothly; before the first and after the last it holds still.
 
-### Buttons
+In Movie preview, previewing and recording always follow the keys; in Scene view your own camera stays and the green movie camera moves along the path.
 
-- **Animate camera:** previewing and recording follow the keys. Off, the camera stays where you leave it and only the trajectory plays.
-- **Add Keyframe (current view)** (**K**): key of the current view at the preview time (a key at the same time is replaced). **with trajectory frame** also pins the frame shown now.
+### Keyframes section (above the tabs)
+
+- **Add Keyframe** (**K**): key of what the frame shows at the preview time. When there is a key at the preview time already, the new one goes **2 s later** and the preview time moves there (refused past the movie end). Right click: **Add a key on the path**. **with trajectory frame** also pins the frame shown now.
 - **Key on Selection:** key at the preview time framing the selected atoms, from the current direction, and moves the viewport there. Molecules split by the periodic cell are framed as one.
+- **Set Follow Target**, **Clear**, **keys follow target:** see [Follow target](#follow-target).
+
+### Camera tab
+
 - **Add Orbit:** fields for turns, duration and axis (**Camera up**, **World X/Y/Z**) set a key at the preview time and another one *duration* later after the camera has gone round the look-at point. Refused if it would run past the movie end.
 - **Seamless loop** and **Close Loop:** make the path cyclic so a repeating movie does not jump. **Close Loop** adds a final key in the first key's pose and turns the loop on.
-- **Keep upright** (on for new movies), **Up**, **From view:** the camera stays level with the chosen world axis up on screen, so loops and spins cannot leave it tilted. **From view** picks the axis closest to the view's up. Keys then give only where the camera looks from and at; the tilt is the key's **Roll (deg)** (positive leans left, 0 levels), eased smoothly. A spin around **Camera up** turns around the up axis. Off, the keys' own tilts are used, as in old workspaces; the **Roll** column then shows each tilt with a **Level** button.
-- **Paste Keyframe**, **Set Follow Target**, **keys follow target:** see below.
+- **Keep upright** (on for new movies), **Up**, **From view:** the camera stays level with the chosen world axis up on screen, so loops and spins cannot leave it tilted. **From view** picks the axis closest to the view's up. Keys then give only where the camera looks from and at; the tilt is the key's **Roll (deg)** (positive leans left, 0 levels), eased smoothly. A key made from the view (**K**, **Add Keyframe**, **Key on Selection**, **Update position**) takes the view's own tilt as its Roll, so it plays back as it was seen; set Roll to 0 to level it. A spin around **Camera up** turns around the up axis. Off, the keys' own tilts are used, as in old workspaces; the **Roll** column then shows each tilt with a **Level** button.
+- **Paste Keyframe:** puts in the key copied from the table (see below).
 
 ### The keyframe table
 
@@ -101,20 +115,21 @@ Columns resize by dragging their borders; the table scrolls sideways when wider 
 | **#** | The key's number. Drag it onto another row to move the key's pose there; times stay. |
 | **Name** | A name of up to 23 characters ("intro", "close-up"), shown in the camera lane and saved. |
 | **Time (s)** | When. The list re-sorts when you finish editing. |
-| **FOV (deg)** | Field of view. Narrow it to zoom without moving. |
-| **Roll (deg)** | See **Keep upright**. |
-| **Ease** | How the movie gets *to* this key: **Smooth** passes without stopping, **Ease in/out** slows at both ends, **Linear** is constant speed, **Hold** stays then jumps. |
 | **Frame** | Tick to pin a trajectory frame to the key, then drag the number. A frame lower than the previous pin plays backwards. |
+| **FOV (deg)** | Field of view. Narrow it to zoom without moving. |
+| **Actions** | Three icon buttons and a **⋯** menu, each with a tooltip: |
+| ↦ **Go to** | Moves the viewport to the key. Clicking a key's orange marker in the **Timelines** window does the same. |
+| ⌖ **Look at** | Click, then click an atom: the key looks at it and **tracks it through the trajectory**. Esc cancels. |
+| 📷 **Update position** | Moves the key's eye to the viewport camera, still looking at the same point; also takes the FOV and, if pinned, the frame. |
+| ⋯ **Follow target** / **Unfollow** | Look at a point that moves with the follow target, kept at its offset from the target now (go to the key first, so the trajectory is at the key's frame). **Unfollow** makes it fixed. |
+| ⋯ **Duplicate** | Copies the key to one second later. |
+| ⋯ **Copy** | Remembers the key. **Paste Keyframe** puts it in at the preview time, replacing one that is there. Ctrl+C / Ctrl+V do the same for the key at the preview time. |
+| ⋯ **Remove** | Deletes the key. |
+| **Ease** | How the movie gets *to* this key: **Smooth** passes without stopping, **Ease in/out** slows at both ends, **Linear** is constant speed, **Hold** stays then jumps. |
 | **Spin** | Extra whole turns around the look-at point on the way to this key. **...** opens the axis and **Constant speed**. |
-| **Go To** | Moves the viewport to the key. Clicking a key's orange marker in the **Timelines** window does the same. |
-| **Look at** | Click, then click an atom: the key looks at it and **tracks it through the trajectory**. Esc cancels. |
-| **Update position** | Moves the key's eye to the viewport camera, still looking at the same point; also takes the FOV and, if pinned, the frame. |
-| **Follow** / **Unfollow** | Look at a point that moves with the follow target, kept at its offset from the target now (press **Go To** first, so the trajectory is at the key's frame). **Unfollow** makes it fixed. |
-| **Dup** | Copies the key to one second later. |
-| **Copy** | Remembers the key. **Paste Keyframe** puts it in at the preview time, replacing one that is there. Ctrl+C / Ctrl+V do the same for the key at the preview time. |
-| **Remove** | Deletes the key. |
+| **Roll (deg)** | See **Keep upright**. |
 
-To edit a key: **Go To** it, move around, **Update position**, and **Look at** to choose the target. A line below the table shows the eye, look-at point and distance at the preview time (and the focus distance with depth of field).
+To edit a key: go to it, move around, **Update position**, and **Look at** to choose the target. A line below the table shows the eye, look-at point and distance at the preview time (and the focus distance with depth of field).
 
 ### Follow target
 
@@ -122,7 +137,7 @@ To edit a key: **Go To** it, move around, **Update position**, and **Look at** t
 
 ### The camera path in the viewport
 
-**Show path in viewport** draws the path over the viewport while the editor is open (not in recorded frames). Path options (what to draw) are under it.
+**Show path** (at the top of the Movie window) draws the path over the viewport while the editor is open (not in recorded frames). What to draw (time ticks, sight lines, cameras, spin rings) is set here in the Camera tab.
 
 - The eye's path is blue, the look-at path yellow; each is brighter ahead of the preview time than behind.
 - **Time ticks:** dots at round times (the step adapts to the movie length) with the time written at some, and chevrons for the direction. Close dots mean slow, far apart mean fast, so the easing can be read off. Yellow diamonds mark the same times on the look-at path.
@@ -162,7 +177,7 @@ A key belongs to a representation by an id that survives moving, duplicating or 
 
 ### The overview lane
 
-The **Representation overview** lane has one row per system (protein, ligand, water, ...). A colored block is a stretch where one representation is shown; colors identify types. A block that starts where another ends stays on the same line and the two cross-fade; only representations shown at the same time stack. With **One line per system** (default) each system has the same height; untick it to give every stacked block a full line (the lane grows unless **Fit to window** is on). A representation enabled without keys has a block over the whole movie.
+The **Representations** lane (the representation overview) has one band per system (protein, ligand, water, ...). A colored block is a stretch where one representation is shown; colors identify types. A block that starts where another ends stays on the same line and the two cross-fade; only representations shown at the same time stack. **Layout... > Lines** sets how a system is drawn: **Compact** (default), one line per system with overlapping blocks sharing its height; **Stacked**, another full line only where blocks overlap; **Separate**, a line for each representation, grouped by system. Stacked and Separate make the lane grow unless **Fit to window** is on. **Block height** (×0.5 to ×2.5) makes the blocks taller or flatter, and the lane with them; it has no effect with **Fit to window**. A representation enabled without keys has a block over the whole movie.
 
 - **Drag** a bar to move it, or an end to change when it starts or stops. Times land on frames with **Snap to frames**; a bar stays between its neighbours.
 - **Double-click** empty space in a system row to add one of its existing representations (a tenth of the movie long, up to that representation's next block); it may overlap others.
@@ -184,6 +199,7 @@ Overlays are drawn in recorded frames and in **Movie preview**. In the **Overlay
 - **Position:** one of nine anchors.
 - **Size:** a part of the frame height, or in points (a point is a pixel of a 1080-high frame, scaled with the frame so it looks the same at any resolution). Text: its height; logo and image: their height; timeline and distribution: the whole stack.
 - **Color** and **Background** plate (none while its opacity is 0).
+- Overlays shown at the same time never overlap. Those in the top and bottom rows keep their place before those in the middle row, and the centre column before the sides. One that would hit a placed one moves past it: up from the bottom row, down from the top row, the shorter way in the middle row. So a bottom-left time bar sits above a wide bottom-centre timeline, and a tall middle-right timeline moves down a little under a top-right distribution. An overlay is never pushed out of the frame; when there is no room it stays where it is. Overlays shown at different times do not push each other, and an overlay keeps the same place for its whole range.
 
 ### Kinds
 
@@ -210,20 +226,20 @@ Overlays are drawn in recorded frames and in **Movie preview**. In the **Overlay
 
 *Titles and look.* **Titles** writes a title above each subplot: the **Title** in its row, else the subplot's name, else none. **Text (points)** and **Lines (points)** set sizes in points (0 follows the height). **Colours** gives series colors of their own instead of those in the plots, and two buttons set light text on a dark plate or dark text on a light plate. **Width** is a part of the frame width.
 
-*Markers.* Expand **Timeline markers** under the overlay inspector. **Add marker at the preview time** or **Add one at each camera key**, then set time, label and target. **All timeline subplots** puts the line and label on every timeline; choosing a subplot puts them on that subplot only, in any timeline overlay containing it. Targets use stable subplot identities, survive renaming and save/load, and a missing one is reported, not reassigned. **Markers** in an overlay hides its markers. Marker times scale with the movie length. Markers also appear as yellow triangles in the ruler and overlay lane.
+*Markers.* Expand **Timeline markers** under the overlay inspector. **Add marker at the preview time** or **Add one at each camera key**, then set time, label and target. **All timeline subplots** puts the line and label on every timeline; choosing a subplot puts them on that subplot only, in any timeline overlay containing it. Targets use stable subplot identities, survive renaming and save/load, and a missing one is reported, not reassigned. **Markers** in an overlay hides its markers. Marker times scale with the movie length. Each marker has a color of its own: the swatch before its time picks one, right click goes back to automatic, which gives markers different colors from a palette in time order. Its line and label in the overlays and its triangle in the ruler and overlay lane have that color. Older workspaces load with automatic colors. A label starts at its marker and runs right in the first half of the plot; in the second half it ends at its marker and runs left, so labels near the end stay readable. A label that would run into one written before (on the same subplot) goes on a lower row (up to three, as room allows); if every row is taken it goes on the other side of the marker, and only if that is taken too does it overlap, where it overlaps least. Labels never run past the plot's edges. The marker labels in the editor's ruler are placed the same way, on lines above the frame numbers.
 
 ## The timeline
 
 ![The Movie timeline](images/movie/movie_timeline.png)
 
-The lanes share the time axis; the yellow line is the playhead. **Lanes and layout** (expand it) chooses lanes, snapping, zoom reset and lane height.
+The lanes share the time axis; the yellow line is the playhead. Above them, **Lanes** is a row of toggles, one per lane (lit when shown): **Ruler**, **Camera**, **Trajectory**, **Lens**, **Representations**, **Overlays**, **Rep keys** and **Look**, in the order the lanes are drawn. On the line below, **All**, **Camera work** and **Scene work** are presets and **Layout...** opens lane height, **Fit to window**, **Snap to frames**, **Show whole movie** and the representations lane's **Lines** and **Block height**. When the **Rep keys** or **Look** lanes are on, a second row picks what they show. Numbers on the lanes' axes and in the mouse readout are short: at most two decimals, without trailing zeros.
 
 ### Lanes
 
 - **Ruler:** the time axis with a tick per frame once frames are a few pixels apart, the movie's markers as yellow triangles (click to go there), and the preview time. Click or drag in it to move the preview time. Every lane has its name in its top left corner.
 - **Trajectory:** the frame shown at each moment. Drag the blue **Start** and **End** lines. Orange dots are keys with a pinned frame: drag sideways for time, up or down for frame.
-- **Camera lane:** the camera on one lane. The first row has keys as orange dots with number and name (yellow at the preview time). Drag sideways to change when, click to go there, right-click for **Go to** and **Remove** (and the name), double-click an empty spot to add a key there on the path, without moving the camera. Row **Look at**: a band over keys that look at the follow target (teal) or at an atom of their own (blue, with its number). Row **Spin**: a purple band over stretches with extra turns (`+2 x`). Row **Frame**: a green mark, with the frame number, at each key that pins a frame. A key added by double-click follows what its two neighbours follow; a spin's turns stay with the part ending at the later key.
-- **Camera distance** and **Field of view:** drag dots sideways for time and up or down for value (distance moves the camera along its line of sight; FOV is 1 to 170 degrees).
+- **Camera lane:** the camera on one lane. Before the first key and after the last one the lane is hatched grey: the camera holds still there. The first row has keys as orange dots with number and name (yellow at the preview time). Drag sideways to change when, click to go there, right-click for **Go to** and **Remove** (and the name), double-click an empty spot to add a key there on the path, without moving the camera. Row **Look at**: a band over keys that look at the follow target (teal) or at an atom of their own (blue, with its number). Row **Spin**: a purple band over stretches with extra turns (`+2 x`). Row **Frame**: a green mark, with the frame number, at each key that pins a frame. A key added by double-click follows what its two neighbours follow; a spin's turns stay with the part ending at the later key.
+- **Lens:** field of view (left axis, degrees, 1 to 170) and camera distance (right axis) on one plot, with a legend. Drag dots sideways for time and up or down for value; each dot belongs to its curve's axis (distance moves the camera along its line of sight).
 - **Look parameter lane:** the parameter chosen at the top. Double-click adds a key, drag changes it, right-click removes.
 - **Representation lane:** the property chosen with the two lists next to it. The line is the value, dots are keys; same editing. For **Visible**, double-click turns it around at that time; the first one on a representation without keys also keys its present state at 0 so it holds until then.
 - **Representation overview:** see [above](#the-overview-lane).
@@ -231,7 +247,7 @@ The lanes share the time axis; the yellow line is the playhead. **Lanes and layo
 
 ### Picking and moving things together
 
-Camera keys, trajectory, distance, FOV, look-parameter and representation-lane keys, overlay bars and overview blocks can be picked and moved as a group.
+Camera keys, trajectory, lens (distance and FOV), look-parameter and representation-lane keys, overlay bars and overview blocks can be picked and moved as a group.
 
 - **Pick:** click an item (a white ring shows it). **Ctrl + click** adds or removes. **Drag on a lane's empty background** draws a box (Ctrl or Shift: adds; in the camera lane it picks by time only). A click on the background puts all down. **Pick all** (Ctrl + A) picks the camera keys and the shown look and representation keys. A camera key is one key in every lane it appears in. Clicking a key's handle in the viewport picks it too.
 - **Move:** drag a picked item and all move by the same time and, in lanes with a value, by the same amount (frame, distance, FOV, parameter value, property value; colors and **Visible** move in time only). A tooltip shows how far (`5 keys: +1.20 s  +0.5`). The group stays inside the movie, keeping the spacing, and lands on frames with **Snap to frames**. Dragging an unpicked key picks it alone. One drag is one undo step. A key landing on another in the same lane replaces it on release.
@@ -244,7 +260,7 @@ Camera keys, trajectory, distance, FOV, look-parameter and representation-lane k
 
 - Ctrl + wheel zooms time; **Show whole movie** resets. Because dragging on the background picks, pan with the **middle mouse button**, **Shift + wheel** or sideways scrolling.
 - **Lane height** (60 to 400 px) times each lane's proportion (drag between lanes to change it). The window scrolls with the wheel when lanes do not fit; the overview, overlay and camera lanes grow to fit their rows without making others taller. **Fit to window** shares the window height among the lanes instead, and then the wheel zooms.
-- Untick **Ruler**, **Camera lane**, **Trajectory**, **Distance**, **Field of view**, **Look parameter lane**, **Representation lane**, **Representation overview** or **Overlay lane** to hide a lane.
+- The **Lanes** toggles hide or show a lane; the settings below are in **Layout...**.
 - **Snap to frames** (default on): dragged keys, the playhead, the trajectory start and end, and keys added at the preview time land on a frame at the **Output FPS**.
 
 ## Saving

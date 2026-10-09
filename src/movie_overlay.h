@@ -59,9 +59,14 @@ struct MovieMarker {
     double time = 0.0;      // Movie time, in seconds
     char   label[48] = "";
     uint32_t subplot = 0;   // Stable timeline subplot id; 0 draws on all timeline subplots
+    float  color[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // RGBA; alpha 0 picks one from the palette by the marker's place in time
 };
 
 bool movie_marker_matches_subplot(const MovieMarker& marker, uint32_t subplot);
+
+// The color of marker i: its own, or else the palette's, by its place in time among the markers (so that markers close in time
+// differ and keep their color as the movie plays)
+void movie_marker_color(const MovieMarker* markers, size_t n, size_t i, float out[4]);
 
 // What the horizontal axis of a timeline overlay is
 enum class MoviePlotAxis : int {
@@ -121,6 +126,32 @@ void movie_overlay_plot_defaults(MovieOverlay* o);
 // ids of those subplots (given by position for each window), and a Figure is split into a Timeline and a Distribution overlay,
 // each of the panels of its kind and with the place and size of its kind (everything else is kept).
 void movie_overlays_migrate(std::vector<MovieOverlay>* overlays, const uint32_t* timeline_ids, int num_timeline, const uint32_t* distribution_ids, int num_distribution);
+
+// The rectangle an overlay takes on the frame (with its plate), at its anchor, and the movie times it is shown
+struct MovieOverlayBox {
+    int    anchor = 0;   // MovieOverlayAnchor
+    float  x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+    double begin = 0.0, end = 0.0;
+};
+
+// How far down (positive) or up each box is moved so that boxes shown at the same time do not overlap. Boxes in the top and
+// bottom rows keep their place before those in the middle row, and in each the centre column before the others, then list
+// order. A box that hits a placed one moves past it, 'gap' pixels clear: away from its edge of the frame in the top and
+// bottom rows, the shorter way in the middle row. A box is never moved out of the frame [frame_y0, frame_y1]: it tries the
+// other way, and stays where it is (overlapping) when neither fits.
+void movie_overlay_avoid(const MovieOverlayBox* boxes, size_t n, float gap, float frame_y0, float frame_y1, float* dy_out);
+
+// A label written on a line of text, from x0 to x1
+struct MovieLabelSpan {
+    float x0, x1;
+    int row;
+};
+
+// Where the label (width w) of a mark at x goes, between lo and hi: right of the mark in the first half, left of it
+// (ending at the mark) in the second half. It takes the first line where it does not come within 'gap' of a label
+// placed before; then the other side of the mark; if every line is taken, where it overlaps least.
+// Returns the line (0 is the top one) and writes where the label starts.
+int movie_label_place(const MovieLabelSpan* placed, size_t n, float x, float w, float lo, float hi, float offset, float gap, int max_rows, float* x0_out);
 
 // The logo in the top left corner for the whole movie, which a movie starts with
 MovieOverlay movie_overlay_default_logo();

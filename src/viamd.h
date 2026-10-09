@@ -1104,6 +1104,8 @@ struct ApplicationState {
         float timeline_lane_height = 150.0f;  // The height of a lane at ratio 1, in pixels, when the window scrolls instead of fitting them
         bool  timeline_fit_window = false;    // The lanes share the height of the window instead, however small
         bool  timeline_rep_equal_rows = true; // Every system has a band of one row's height, its overlapping blocks share it
+        float timeline_rep_block_height = 1.0f; // Height of the blocks in the representations lane, times the usual
+        bool  timeline_rep_separate = false;  // Every representation has a line of its own, grouped by system (before the above)
         bool  timeline_overlay_lane = true;   // The overlays as bars, below the lane of the representation
         double timeline_view_begin = 0.0;
         double timeline_view_end = 0.0;
@@ -1165,9 +1167,17 @@ struct ApplicationState {
         ViewPose pose_scene, pose_movie;
         bool   peek_active = false;       // Tab is held to look at the other mode for a moment
         double peek_t0 = 0.0;
+        // Preview: the windows are hidden and the movie plays in the viewport, with a small bar to control it (not saved)
+        bool   play_mode = false;
+        bool   play_mode_scene = false;   // Scene view was shown before, to go back to
+        double play_mode_moved_t = 0.0;   // When the mouse last moved, to hide the bar while it is still
+        bool   play_mode_scrub_resume = false;
         // A small live preview of the movie camera in the Movie window while Scene view is shown (not saved)
         bool     pip_enabled = true;
-        int      pip_size = 1;            // 0 small, 1 medium, 2 large
+        int      pip_size = 1;            // 0 small, 1 medium, 2 large, 3 extra large
+        float    window_rect[4] = {};     // Where the Movie window was last drawn (x0, y0, x1, y1), to keep the frame clear of it
+        int      window_rect_frame = -10;
+        int      pip_target_w = 0;        // Width in pixels for the size and the Movie window's width now (0: not known yet)
         bool     pip_pass = false;        // The scene is being rendered for it
         bool     pip_valid = false;
         uint32_t pip_fbo = 0, pip_tex = 0;
@@ -1237,10 +1247,9 @@ struct ApplicationState {
         str_t  output_dir = {};
         char   filename_prefix[64] = "frame";
 
-        // Kept sorted by time. While recording with animate_camera set, the camera follows
+        // Kept sorted by time. While recording or previewing the movie, the camera follows
         // these (smoothly, through every one of them) instead of staying where the user left it.
         md_array(CameraKeyframe) keyframes = 0;
-        bool animate_camera = false;
         bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
         bool keep_upright = true;             // The camera stays level about up_axis, tilted only by the keys' roll
         int  up_axis = 1;                     // The world axis that is up for keep_upright: +X, +Y, +Z, -X, -Y, -Z
@@ -2462,6 +2471,10 @@ bool interaction_surface_hit_extract(PickingHit* out_hit, const InteractionSurfa
 struct InteractionSurfaceViewTransformArgs {
     const Camera& camera;
     const TrackballControllerParam& trackball_param = {};
+    // The wheel zooms towards the point under the mouse instead of the middle of the picture
+    bool zoom_to_cursor = false;
+    // Where the middle of the picture is, from the middle of the surface, in pixels (x right, y down)
+    vec2_t center_offset = {0, 0};
 };
 
 struct InteractionSurfaceViewTransformResult {
