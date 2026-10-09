@@ -34,67 +34,309 @@ UTEST(viamd_movie_keys, independent_position_does_not_depend_on_legacy_aim) {
     EXPECT_NEAR(10.0f, movie_position_evaluate(keys, 2, 10, false).x, 1.0e-5f);
 }
 
-UTEST(viamd_movie_keys, independent_look_times_and_live_selection) {
-    std::vector<MovieTargetKey> keys(2);
-    keys[0].time = 2; keys[1].time = 6;
-    keys[1].ease = KeyEase::Linear;
-    keys[1].mode = MovieTargetMode::Selection;
-    std::vector<vec3_t> points = {vec3_set(0, 0, 0), vec3_set(8, 0, 0)};
-    EXPECT_NEAR(0.0f, movie_target_evaluate(keys, points, 0).x, 1.0e-5f);
-    EXPECT_NEAR(4.0f, movie_target_evaluate(keys, points, 4).x, 1.0e-5f);
-    points[1].x = 12;
-    EXPECT_NEAR(6.0f, movie_target_evaluate(keys, points, 4).x, 1.0e-5f);
-    EXPECT_NEAR(12.0f, movie_target_evaluate(keys, points, 20).x, 1.0e-5f);
+static CameraKeyframe plain_key(double time, vec3_t eye, float distance) {
+    CameraKeyframe key;
+    key.time = time;
+    key.transform.orientation = quat_t{0, 0, 0, 1};
+    key.transform.position = eye;
+    key.transform.distance = distance;
+    return key;
 }
 
-UTEST(viamd_movie_keys, independent_focus_switches_target_and_disables_blur) {
+UTEST(viamd_movie_keys, atom_sets_are_shared_sorted_and_pruned_when_no_key_uses_them) {
+    std::vector<MovieAtomSet> sets;
+    const uint32_t a = movie_atoms_add(&sets, {4, 1, 4});
+    EXPECT_EQ(a, movie_atoms_add(&sets, {1, 4}));
+    ASSERT_EQ((size_t)1, sets.size());
+    ASSERT_EQ((size_t)2, sets[0].atoms.size());
+    EXPECT_EQ((uint32_t)1, sets[0].atoms[0]);
+    EXPECT_EQ((uint32_t)4, sets[0].atoms[1]);
+    const uint32_t b = movie_atoms_add(&sets, {7});
+    EXPECT_NE(a, b);
+    EXPECT_EQ((uint32_t)0, movie_atoms_add(&sets, {}));
+    EXPECT_TRUE(movie_atoms_find(sets, 0) == nullptr);
+    ASSERT_TRUE(movie_atoms_find(sets, b) != nullptr);
+
+    CameraKeyframe keys[2];
+    keys[0].look_set = a;
+    keys[1].focus_on = true;
+    keys[1].focus_target = FocusTarget::Selection;
+    keys[1].focus_set = b;
+    movie_atoms_prune(&sets, keys, 2);
+    EXPECT_EQ((size_t)2, sets.size());
+    keys[1].focus_target = FocusTarget::LookAt;   // The set is no longer the focus
+    movie_atoms_prune(&sets, keys, 2);
+    ASSERT_EQ((size_t)1, sets.size());
+    EXPECT_EQ(a, sets[0].id);
+}
+
+UTEST(viamd_movie_keys, look_at_is_keyed_through_the_points_the_keys_aim_at) {
+    CameraKeyframe keys[2];
+    keys[0].time = 2; keys[1].time = 6;
+    keys[1].ease = KeyEase::Linear;
+    vec3_t looks[2] = {vec3_set(0, 0, 0), vec3_set(8, 0, 0)};
+    EXPECT_NEAR(0.0f, movie_look_evaluate(keys, 2, looks, 0).x, 1.0e-5f);
+    EXPECT_NEAR(4.0f, movie_look_evaluate(keys, 2, looks, 4).x, 1.0e-5f);
+    looks[1].x = 12;   // The atoms the second key tracks have moved
+    EXPECT_NEAR(6.0f, movie_look_evaluate(keys, 2, looks, 4).x, 1.0e-5f);
+    EXPECT_NEAR(12.0f, movie_look_evaluate(keys, 2, looks, 20).x, 1.0e-5f);
+}
+
+UTEST(viamd_movie_keys, the_eye_goes_through_the_keys_and_the_aim_through_their_look_at) {
+    CameraKeyframe keys[2] = {plain_key(0, vec3_set(0, 0, 40), 32), plain_key(10, vec3_set(10, 0, 40), 32)};
+    keys[1].ease = KeyEase::Linear;
+    vec3_t looks[2] = {vec3_set(0, 0, 8), vec3_set(10, 0, 8)};
+    ViewTransform view;
+    float fov;
+    movie_keys_pose(&view, &fov, keys, 2, 5, looks, nullptr, vec3_set(0, 1, 0));
+    EXPECT_NEAR(5.0f, view.position.x, 1.0e-4f);
+    EXPECT_NEAR(40.0f, view.position.z, 1.0e-4f);
+    EXPECT_NEAR(5.0f, camera_get_look_at(view).x, 1.0e-3f);
+    EXPECT_NEAR(8.0f, camera_get_look_at(view).z, 1.0e-3f);
+    // Where the second key looks decides the aim, not the eye
+    looks[1] = vec3_set(10, 0, 0);
+    movie_keys_pose(&view, &fov, keys, 2, 10, looks, nullptr, vec3_set(0, 1, 0));
+    EXPECT_NEAR(10.0f, view.position.x, 1.0e-4f);
+    EXPECT_NEAR(40.0f, view.position.z, 1.0e-4f);
+    EXPECT_NEAR(0.0f, camera_get_look_at(view).z, 1.0e-3f);
+}
+
+static ViewTransform front_camera() {
     ViewTransform camera = {};
     camera.orientation = quat_t{0, 0, 0, 1};
     camera.position = vec3_set(0, 0, 40);
     camera.distance = 32;
-    std::vector<MovieTargetKey> keys(3);
-    keys[0].mode = MovieTargetMode::LookAt;
-    keys[1].time = 10;
-    keys[1].mode = MovieTargetMode::Selection;
-    keys[1].atoms = {2};
-    keys[1].transition = 2;
-    keys[1].blur = 4;
-    keys[1].ease = KeyEase::Linear;
-    keys[2].time = 15;
-    keys[2].mode = MovieTargetMode::Distance;
-    keys[2].distance = 48;
-    keys[2].blur = 0;
-    keys[2].transition = 0;
-    std::vector<vec3_t> points = {{}, vec3_set(4, 0, -8), {}};
+    return camera;
+}
+
+UTEST(viamd_movie_keys, the_focus_is_what_the_camera_looks_at_until_a_key_sets_it) {
+    const ViewTransform camera = front_camera();
+    CameraKeyframe keys[2];
+    EXPECT_FALSE(movie_focus_keys_exist(keys, 2));
     float blur;
-    EXPECT_NEAR(32.0f, movie_focus_evaluate(keys, points, 0, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(32.0f, movie_focus_depth(keys, 2, nullptr, 1.5f, 3, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(1.5f, blur, 1.0e-5f);   // The blur of the Depth of Field settings
+
+    keys[1].time = 4;
+    keys[1].focus_on = true;
+    keys[1].focus_target = FocusTarget::Distance;
+    keys[1].focus_distance = 48;
+    keys[1].focus_blur = 3;
+    keys[1].focus_transition = 2;
+    keys[1].focus_ease = KeyEase::Linear;
+    EXPECT_TRUE(movie_focus_keys_exist(keys, 2));
+    EXPECT_NEAR(32.0f, movie_focus_depth(keys, 2, nullptr, 1.5f, 4, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(1.5f, blur, 1.0e-5f);
+    EXPECT_NEAR(40.0f, movie_focus_depth(keys, 2, nullptr, 1.5f, 5, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(2.25f, blur, 1.0e-5f);
+    EXPECT_NEAR(48.0f, movie_focus_depth(keys, 2, nullptr, 1.5f, 9, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(3.0f, blur, 1.0e-5f);   // A key that sets nothing leaves it so
+}
+
+UTEST(viamd_movie_keys, the_focus_switches_between_targets_and_follows_atoms) {
+    const ViewTransform camera = front_camera();
+    CameraKeyframe keys[3];
+    keys[0].focus_on = true;
+    keys[0].focus_target = FocusTarget::LookAt;
+    keys[0].focus_blur = 0; keys[0].focus_transition = 0;
+    keys[1].time = 10;
+    keys[1].focus_on = true;
+    keys[1].focus_target = FocusTarget::Selection;
+    keys[1].focus_transition = 2;
+    keys[1].focus_blur = 4;
+    keys[1].focus_ease = KeyEase::Linear;
+    keys[2].time = 15;
+    keys[2].focus_on = true;
+    keys[2].focus_target = FocusTarget::Distance;
+    keys[2].focus_distance = 48;
+    keys[2].focus_blur = 0;
+    keys[2].focus_transition = 0;
+    vec3_t points[3] = {{}, vec3_set(4, 0, -8), {}};   // Where the atoms of the second key are
+    float blur;
+    EXPECT_NEAR(32.0f, movie_focus_depth(keys, 3, points, 1.0f, 0, camera, &blur), 1.0e-5f);
     EXPECT_NEAR(0.0f, blur, 1.0e-5f);
-    EXPECT_NEAR(32.0f, movie_focus_evaluate(keys, points, 10, camera, &blur), 1.0e-5f);
-    EXPECT_NEAR(40.0f, movie_focus_evaluate(keys, points, 11, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(32.0f, movie_focus_depth(keys, 3, points, 1.0f, 10, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(40.0f, movie_focus_depth(keys, 3, points, 1.0f, 11, camera, &blur), 1.0e-5f);
     EXPECT_NEAR(2.0f, blur, 1.0e-5f);
-    EXPECT_NEAR(48.0f, movie_focus_evaluate(keys, points, 12, camera, &blur), 1.0e-5f);
-    points[1].z = 0;
-    EXPECT_NEAR(40.0f, movie_focus_evaluate(keys, points, 14, camera, &blur), 1.0e-5f);
-    EXPECT_NEAR(48.0f, movie_focus_evaluate(keys, points, 15, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(48.0f, movie_focus_depth(keys, 3, points, 1.0f, 12, camera, &blur), 1.0e-5f);
+    points[1].z = 0;   // The atoms moved
+    EXPECT_NEAR(40.0f, movie_focus_depth(keys, 3, points, 1.0f, 14, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(48.0f, movie_focus_depth(keys, 3, points, 1.0f, 15, camera, &blur), 1.0e-5f);
     EXPECT_NEAR(0.0f, blur, 1.0e-5f);
-    EXPECT_NEAR(40.0f, camera.position.z, 1.0e-5f);
+    EXPECT_NEAR(40.0f, camera.position.z, 1.0e-5f);   // The camera itself is not touched
     EXPECT_NEAR(32.0f, camera.distance, 1.0e-5f);
 }
 
-UTEST(viamd_movie_keys, independent_focus_transition_finishes_before_next_key) {
-    ViewTransform camera = {};
-    camera.orientation = quat_t{0, 0, 0, 1};
-    camera.position = vec3_set(0, 0, 40);
-    std::vector<MovieTargetKey> keys(3);
-    keys[1].time = 10; keys[1].transition = 8; keys[1].ease = KeyEase::Linear; keys[1].blur = 4;
-    keys[2].time = 12; keys[2].transition = 2; keys[2].ease = KeyEase::Linear;
-    std::vector<vec3_t> points = {vec3_set(0, 0, 0), vec3_set(0, 0, 8), vec3_set(0, 0, -8)};
+UTEST(viamd_movie_keys, a_focus_transition_finishes_before_the_next_key_that_sets_the_focus) {
+    const ViewTransform camera = front_camera();
+    CameraKeyframe keys[3];
+    keys[0].focus_on = true;
+    keys[0].focus_target = FocusTarget::LookAt;
+    keys[0].focus_blur = 0; keys[0].focus_transition = 0;
+    keys[1].time = 10; keys[1].focus_on = true; keys[1].focus_target = FocusTarget::Point;
+    keys[1].focus_transition = 8; keys[1].focus_ease = KeyEase::Linear; keys[1].focus_blur = 4;
+    keys[2].time = 12; keys[2].focus_on = true; keys[2].focus_target = FocusTarget::Point;
+    keys[2].focus_transition = 2; keys[2].focus_ease = KeyEase::Linear; keys[2].focus_blur = 0;
+    vec3_t points[3] = {vec3_set(0, 0, 8), vec3_set(0, 0, 0), vec3_set(0, 0, 8)};
     float blur;
-    EXPECT_NEAR(36.0f, movie_focus_evaluate(keys, points, 11, camera, &blur), 1.0e-5f);
+    // The first key's change would take until 18, but the next key that sets the focus is at 12: it is done by then
+    EXPECT_NEAR(36.0f, movie_focus_depth(keys, 3, points, 0.0f, 11, camera, &blur), 1.0e-5f);
     EXPECT_NEAR(2.0f, blur, 1.0e-5f);
-    EXPECT_NEAR(32.0f, movie_focus_evaluate(keys, points, 12, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(40.0f, movie_focus_depth(keys, 3, points, 0.0f, 12, camera, &blur), 1.0e-5f);
     EXPECT_NEAR(4.0f, blur, 1.0e-5f);
-    EXPECT_NEAR(40.0f, movie_focus_evaluate(keys, points, 13, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(36.0f, movie_focus_depth(keys, 3, points, 0.0f, 13, camera, &blur), 1.0e-5f);
+    EXPECT_NEAR(2.0f, blur, 1.0e-5f);
+}
+
+UTEST(viamd_movie_keys, camera_bands_follow_the_sets_a_run_of_keys_look_at_and_their_spins) {
+    std::vector<CameraKeyframe> keys(4);
+    for (int i = 0; i < 4; ++i) keys[i].time = 2.0 * i;
+    keys[0].look_set = keys[1].look_set = 3;
+    keys[3].spin_turns = 2;
+    int look = 0, spin = 0;
+    for (const CameraBand& b : camera_bands(keys)) {
+        if (b.kind == CameraBandKind::LookAtSet) {
+            ++look;
+            EXPECT_EQ((uint32_t)3, b.set);
+            EXPECT_EQ(0, b.first);
+            EXPECT_EQ(1, b.last);
+            EXPECT_NEAR(0.0, b.begin, 1.0e-9);
+            EXPECT_NEAR(2.0, b.end, 1.0e-9);
+        } else {
+            ++spin;
+            EXPECT_EQ(2, b.turns);
+            EXPECT_EQ(3, b.last);
+        }
+    }
+    EXPECT_EQ(1, look);
+    EXPECT_EQ(1, spin);
+}
+
+UTEST(viamd_movie_keys, keys_that_followed_a_target_of_an_older_workspace_look_at_its_atoms) {
+    std::vector<CameraKeyframe> keys(3);
+    keys[0].follow = true;
+    keys[1].follow = true; keys[1].follow_atom = 5;
+    std::vector<MovieAtomSet> sets;
+    movie_keys_from_follow(&keys, &sets, {3, 2});
+    EXPECT_FALSE(keys[0].follow);
+    EXPECT_FALSE(keys[1].follow);
+    ASSERT_TRUE(keys[0].look_set != 0 && keys[1].look_set != 0);
+    EXPECT_NE(keys[0].look_set, keys[1].look_set);
+    EXPECT_EQ((uint32_t)0, keys[2].look_set);
+    const MovieAtomSet* target = movie_atoms_find(sets, keys[0].look_set);
+    ASSERT_TRUE(target != nullptr);
+    ASSERT_EQ((size_t)2, target->atoms.size());
+    EXPECT_EQ((uint32_t)2, target->atoms[0]);
+    EXPECT_EQ((uint32_t)5, movie_atoms_find(sets, keys[1].look_set)->atoms[0]);
+}
+
+UTEST(viamd_movie_keys, the_focus_of_a_key_is_saved_and_values_no_key_could_have_are_refused) {
+    md_allocator_i* alloc = md_vm_arena_create(1024 * 1024);
+    viamd::serialization_state_t writer = {};
+    writer.sb = md_strb_create(alloc);
+    CameraKeyframe key;
+    key.focus_on = true;
+    key.focus_target = FocusTarget::Selection;
+    key.focus_point = vec3_set(1, 2, 3);
+    key.focus_distance = 7.5f;
+    key.focus_blur = 3.5f;
+    key.focus_transition = 2;
+    key.focus_ease = KeyEase::Linear;
+    key.focus_set = 4;
+    viamd::write_section_header(writer, STR_LIT("Movie"));
+    const auto encoded = movie_focus_encode(key);
+    viamd::write_flt_vec(writer, STR_LIT("KeyframeFocus"), encoded.data(), encoded.size());
+    viamd::deserialization_state_t reader = {};
+    reader.text = md_strb_to_str(writer.sb);
+    str_t section, ident, arg;
+    ASSERT_TRUE(viamd::next_section_header(section, reader));
+    ASSERT_TRUE(viamd::next_entry(ident, arg, reader));
+    float values[9];
+    ASSERT_TRUE(viamd::extract_flt_vec(values, 9, arg));
+    CameraKeyframe restored;
+    ASSERT_TRUE(movie_focus_decode(&restored, values));
+    EXPECT_TRUE(restored.focus_on);
+    EXPECT_EQ((int)key.focus_target, (int)restored.focus_target);
+    EXPECT_NEAR(key.focus_point.z, restored.focus_point.z, 1.0e-6f);
+    EXPECT_NEAR(key.focus_distance, restored.focus_distance, 1.0e-6f);
+    EXPECT_NEAR(key.focus_blur, restored.focus_blur, 1.0e-6f);
+    EXPECT_NEAR(key.focus_transition, restored.focus_transition, 1.0e-6f);
+    EXPECT_EQ((int)key.focus_ease, (int)restored.focus_ease);
+    EXPECT_EQ((uint32_t)4, restored.focus_set);
+    values[0] = 99;
+    EXPECT_FALSE(movie_focus_decode(&restored, values));
+    values[0] = (float)FocusTarget::Point; values[7] = 99;
+    EXPECT_FALSE(movie_focus_decode(&restored, values));
+    values[7] = 0; values[1] = NAN;
+    EXPECT_FALSE(movie_focus_decode(&restored, values));
+    md_vm_arena_destroy(alloc);
+}
+
+UTEST(viamd_movie_keys, look_and_focus_are_part_of_the_history_and_scale_with_the_length) {
+    MovieKeys keys;
+    CameraKeyframe key;
+    key.time = 3; key.look_set = 1; key.focus_on = true; key.focus_target = FocusTarget::Selection;
+    key.focus_set = 2; key.focus_transition = 2;
+    keys.camera.push_back(key);
+    keys.sets.push_back({1, {1, 4}});
+    keys.sets.push_back({2, {6}});
+    MovieHistory history;
+    history.clear(keys);
+    movie_keys_scale_time(&keys, 2);
+    EXPECT_NEAR(6.0, keys.camera[0].time, 1.0e-6);
+    EXPECT_NEAR(4.0f, keys.camera[0].focus_transition, 1.0e-6f);
+    history.update(keys, false);
+    ASSERT_TRUE(history.undo(&keys));
+    EXPECT_NEAR(3.0, keys.camera[0].time, 1.0e-6);
+    EXPECT_NEAR(2.0f, keys.camera[0].focus_transition, 1.0e-6f);
+    ASSERT_TRUE(history.redo(&keys));
+    EXPECT_NEAR(4.0f, keys.camera[0].focus_transition, 1.0e-6f);
+    EXPECT_EQ((uint32_t)4, keys.sets[0].atoms[1]);
+    MovieKeys changed = keys;
+    changed.sets[0].atoms[1] = 5;
+    EXPECT_FALSE(movie_keys_equal(changed, keys));
+    changed = keys;
+    changed.camera[0].focus_blur += 1.0f;
+    EXPECT_FALSE(movie_keys_equal(changed, keys));
+    changed = keys;
+    changed.camera[0].look_set = 2;
+    EXPECT_FALSE(movie_keys_equal(changed, keys));
+}
+
+UTEST(viamd_movie_keys, a_key_keeps_its_look_and_focus_when_moved_copied_and_deleted) {
+    MovieKeys start;
+    start.duration = 20;
+    CameraKeyframe key;
+    key.time = 2; key.look_set = 1; key.focus_on = true; key.focus_target = FocusTarget::Selection;
+    key.focus_set = 2; key.focus_transition = 2; key.focus_blur = 3;
+    start.camera.push_back(key);
+    key.time = 8; key.look_set = 0; key.focus_on = false;
+    start.camera.push_back(key);
+    KeySelection selection;
+    selection.add(KeyKind::Camera, 0, 2);
+    MovieKeys shifted = start;
+    KeySelection moved = selection;
+    movie_keys_shift(&shifted, &moved, start, selection, 3, KeyShift{}, 20);
+    EXPECT_NEAR(5.0, shifted.camera[0].time, 1.0e-6);
+    EXPECT_EQ((uint32_t)1, shifted.camera[0].look_set);
+    EXPECT_EQ((uint32_t)2, shifted.camera[0].focus_set);
+    EXPECT_TRUE(moved.contains(KeyKind::Camera, 0, 5));
+    KeyClip copied = movie_keys_copy(shifted, moved);
+    ASSERT_FALSE(copied.empty());
+    movie_keys_paste(&shifted, &moved, copied, 12, 20);
+    ASSERT_EQ((size_t)3, shifted.camera.size());
+    int pasted = -1;
+    for (size_t i = 0; i < shifted.camera.size(); ++i) if (fabs(shifted.camera[i].time - 12.0) < 1.0e-6) pasted = (int)i;
+    ASSERT_TRUE(pasted >= 0);
+    EXPECT_EQ((uint32_t)1, shifted.camera[pasted].look_set);
+    EXPECT_TRUE(shifted.camera[pasted].focus_on);
+    EXPECT_NEAR(3.0f, shifted.camera[pasted].focus_blur, 1.0e-6f);
+    movie_keys_delete(&shifted, &moved);
+    EXPECT_EQ((size_t)2, shifted.camera.size());
+    MovieKeys scaled = start;
+    movie_keys_scale(&scaled, &moved, start, selection, 0, 2, 20);
+    EXPECT_NEAR(4.0, scaled.camera[0].time, 1.0e-6);
+    EXPECT_NEAR(4.0f, scaled.camera[0].focus_transition, 1.0e-6f);
 }
 
 UTEST(viamd_movie_keys, independent_spin_orbits_the_new_look_target) {
@@ -113,66 +355,6 @@ UTEST(viamd_movie_keys, independent_spin_orbits_the_new_look_target) {
     ViewTransform stationary = unspun;
     movie_camera_independent(&stationary, unspun, look, nullptr, 0);
     EXPECT_NEAR(0.0f, vec3_length(stationary.position - unspun.position), 1.0e-4f);
-}
-
-UTEST(viamd_movie_keys, independent_track_history_and_duration_scaling) {
-    MovieKeys keys;
-    keys.independent_tracks = true;
-    MovieTargetKey target;
-    target.time = 3; target.transition = 2; target.mode = MovieTargetMode::Selection; target.atoms = {1, 4};
-    keys.look.push_back(target); keys.focus.push_back(target);
-    MovieHistory history;
-    history.clear(keys);
-    movie_keys_scale_time(&keys, 2);
-    EXPECT_NEAR(6.0, keys.look[0].time, 1.0e-6);
-    EXPECT_NEAR(4.0f, keys.focus[0].transition, 1.0e-6f);
-    history.update(keys, false);
-    ASSERT_TRUE(history.undo(&keys));
-    EXPECT_NEAR(3.0, keys.look[0].time, 1.0e-6);
-    ASSERT_TRUE(history.redo(&keys));
-    EXPECT_NEAR(6.0, keys.focus[0].time, 1.0e-6);
-    EXPECT_EQ((uint32_t)4, keys.focus[0].atoms[1]);
-    MovieKeys changed = keys;
-    changed.focus[0].atoms[1] = 5;
-    EXPECT_FALSE(movie_keys_equal(changed, keys));
-}
-
-UTEST(viamd_movie_keys, independent_tracks_group_edit_copy_and_delete) {
-    MovieKeys start;
-    start.independent_tracks = true;
-    start.duration = 20;
-    MovieTargetKey key;
-    key.time = 2; key.atoms = {2, 4}; key.mode = MovieTargetMode::Selection; key.transition = 2;
-    start.look.push_back(key);
-    key.time = 4;
-    start.focus.push_back(key);
-    KeySelection selection;
-    selection.add(KeyKind::Look, 0, 2);
-    selection.add(KeyKind::Focus, 0, 4);
-    MovieKeys shifted = start;
-    KeySelection moved = selection;
-    movie_keys_shift(&shifted, &moved, start, selection, 3, KeyShift{}, 20);
-    EXPECT_NEAR(5.0, shifted.look[0].time, 1.0e-6);
-    EXPECT_NEAR(7.0, shifted.focus[0].time, 1.0e-6);
-    EXPECT_TRUE(moved.contains(KeyKind::Focus, 0, 7));
-    KeyClip copied = movie_keys_copy(shifted, moved);
-    ASSERT_FALSE(copied.empty());
-    movie_keys_paste(&shifted, &moved, copied, 10, 20);
-    ASSERT_EQ((size_t)2, shifted.look.size());
-    ASSERT_EQ((size_t)2, shifted.focus.size());
-    EXPECT_NEAR(10.0, shifted.look[1].time, 1.0e-6);
-    EXPECT_NEAR(12.0, shifted.focus[1].time, 1.0e-6);
-    EXPECT_EQ((uint32_t)4, shifted.focus[1].atoms[1]);
-    movie_keys_delete(&shifted, &moved);
-    EXPECT_EQ((size_t)1, shifted.look.size());
-    EXPECT_EQ((size_t)1, shifted.focus.size());
-    MovieKeys scaled = start;
-    movie_keys_scale(&scaled, &moved, start, selection, 0, 2, 20);
-    EXPECT_NEAR(4.0, scaled.look[0].time, 1.0e-6);
-    EXPECT_NEAR(8.0, scaled.focus[0].time, 1.0e-6);
-    EXPECT_NEAR(4.0f, scaled.focus[0].transition, 1.0e-6f);
-    key_selection_prune(&moved, scaled);
-    EXPECT_EQ((size_t)2, moved.ids.size());
 }
 
 UTEST(viamd_movie_keys, independent_spin_exports_axis_even_with_upright_roll) {
@@ -199,51 +381,7 @@ UTEST(viamd_movie_keys, independent_spin_exports_axis_even_with_upright_roll) {
     EXPECT_NEAR(1.0f, spin.w, 1.0e-5f);
 }
 
-UTEST(viamd_movie_keys, independent_target_workspace_roundtrip_and_invalid_values) {
-    md_allocator_i* alloc = md_vm_arena_create(1024 * 1024);
-    viamd::serialization_state_t writer = {};
-    writer.sb = md_strb_create(alloc);
-    MovieTargetKey key;
-    key.time = 3.25; key.mode = MovieTargetMode::Selection; key.point = vec3_set(1, 2, 3);
-    key.blur = 3.5f; key.transition = 2; key.ease = KeyEase::Linear;
-    viamd::write_section_header(writer, STR_LIT("Movie"));
-    auto encoded = movie_target_encode(key);
-    viamd::write_flt_vec(writer, STR_LIT("FocusKey"), encoded.data(), encoded.size());
-    md_bitfield_t mask = {};
-    md_bitfield_init(&mask, alloc);
-    md_bitfield_set_bit(&mask, 2);
-    md_bitfield_set_bit(&mask, 8);
-    viamd::write_bitfield(writer, STR_LIT("FocusAtoms"), &mask);
-    viamd::deserialization_state_t reader = {};
-    reader.text = md_strb_to_str(writer.sb);
-    str_t section, ident, arg;
-    ASSERT_TRUE(viamd::next_section_header(section, reader));
-    ASSERT_TRUE(viamd::next_entry(ident, arg, reader));
-    float values[10];
-    ASSERT_TRUE(viamd::extract_flt_vec(values, 10, arg));
-    MovieTargetKey restored;
-    ASSERT_TRUE(movie_target_decode(&restored, values, true));
-    EXPECT_NEAR(key.time, restored.time, 1.0e-6);
-    EXPECT_NEAR(key.point.z, restored.point.z, 1.0e-6f);
-    EXPECT_NEAR(key.blur, restored.blur, 1.0e-6f);
-    EXPECT_EQ((int)key.mode, (int)restored.mode);
-    EXPECT_EQ((int)key.ease, (int)restored.ease);
-    ASSERT_TRUE(viamd::next_entry(ident, arg, reader));
-    md_bitfield_clear(&mask);
-    ASSERT_TRUE(viamd::extract_bitfield(&mask, arg));
-    EXPECT_EQ((size_t)2, md_bitfield_popcount(&mask));
-    EXPECT_TRUE(md_bitfield_test_bit(&mask, 8));
-    values[9] = 2;
-    EXPECT_FALSE(movie_target_decode(&restored, values, true));
-    values[9] = 1; values[1] = (float)MovieTargetMode::Distance;
-    EXPECT_FALSE(movie_target_decode(&restored, values, false));
-    EXPECT_TRUE(movie_target_decode(&restored, values, true));
-    values[0] = NAN;
-    EXPECT_FALSE(movie_target_decode(&restored, values, true));
-    md_vm_arena_destroy(alloc);
-}
-
-UTEST(viamd_movie_keys, optics_example_separates_fov_and_independent_focus) {
+UTEST(viamd_movie_keys, optics_example_of_separate_tracks_becomes_keys_with_their_own_look_and_focus) {
     const auto dir = std::filesystem::path(__FILE__).parent_path().parent_path() / "docs/examples";
     std::ifstream input(dir / "fov_and_focus.via");
     ASSERT_TRUE(input.good());
@@ -254,22 +392,20 @@ UTEST(viamd_movie_keys, optics_example_separates_fov_and_independent_focus) {
     md_bitfield_t mask = {};
     md_bitfield_init(&mask, alloc);
     std::vector<CameraKeyframe> keys;
-    std::vector<ParamKey> params;
-    std::vector<MovieTargetKey> focus;
-    std::vector<vec3_t> focus_points;
+    std::vector<MovieLegacyTarget> look, focus;
     str_t section, ident, arg;
     int focus_mode = -1;
     while (viamd::next_section_header(section, reader)) {
         while (viamd::next_entry(ident, arg, reader)) {
             if (str_eq(section, STR_LIT("Movie")) && str_eq(ident, STR_LIT("FocusAtoms"))) {
                 ASSERT_TRUE(viamd::extract_bitfield(&mask, arg));
-            } else if (str_eq(section, STR_LIT("Movie")) && str_eq(ident, STR_LIT("FocusKey"))) {
+            } else if (str_eq(section, STR_LIT("Movie")) && (str_eq(ident, STR_LIT("FocusKey")) || str_eq(ident, STR_LIT("LookKey")))) {
+                const bool is_focus = str_eq(ident, STR_LIT("FocusKey"));
                 float v[10];
                 ASSERT_TRUE(viamd::extract_flt_vec(v, 10, arg));
-                MovieTargetKey key;
-                ASSERT_TRUE(movie_target_decode(&key, v, true));
-                EXPECT_NEAR(1.0f, v[9], 1.0e-6f);
-                focus.push_back(key); focus_points.push_back(key.point);
+                MovieLegacyTarget key;
+                ASSERT_TRUE(movie_legacy_target_decode(&key, v, is_focus));
+                (is_focus ? focus : look).push_back(key);
             } else if (str_eq(section, STR_LIT("RenderSettings")) && str_eq(ident, STR_LIT("DofFocusMode"))) {
                 ASSERT_TRUE(viamd::extract_int(focus_mode, arg));
             } else if (str_eq(section, STR_LIT("Movie")) && str_eq(ident, STR_LIT("KeyframeV3"))) {
@@ -286,34 +422,45 @@ UTEST(viamd_movie_keys, optics_example_separates_fov_and_independent_focus) {
                 key.ease = (KeyEase)(int)v[15];
                 EXPECT_NEAR(0.0f, v[16], 1.0e-6f);
                 keys.push_back(key);
-            } else if (str_eq(section, STR_LIT("Movie")) && str_eq(ident, STR_LIT("ParamKey"))) {
-                float v[6];
-                ASSERT_TRUE(viamd::extract_flt_vec(v, 6, arg));
-                ParamKey key;
-                key.param = (int)v[0];
-                key.time = v[1];
-                key.value[0] = v[2];
-                key.ease = (KeyEase)(int)v[5];
-                params.push_back(key);
             }
         }
     }
     EXPECT_EQ(0, focus_mode);
+    ASSERT_EQ((size_t)1, look.size());
     ASSERT_EQ((size_t)4, focus.size());
     EXPECT_EQ((size_t)1, md_bitfield_popcount(&mask));
     EXPECT_TRUE(md_bitfield_test_bit(&mask, 2));
     ASSERT_EQ((size_t)8, keys.size());
+    for (MovieLegacyTarget& f : focus) if (f.target == FocusTarget::Selection) f.atoms = {2};
+
+    // The tracks become keys: the camera keys, and one where each focus key is that no camera key has
+    std::vector<MovieAtomSet> sets;
+    movie_keys_from_tracks(&keys, &sets, look, focus, nullptr, vec3_set(0, 1, 0));
+    ASSERT_EQ((size_t)10, keys.size());
+    ASSERT_EQ((size_t)1, sets.size());
+    int sets_focus = 0;
+    for (const CameraKeyframe& k : keys) {
+        EXPECT_EQ((uint32_t)0, k.look_set);
+        sets_focus += k.focus_on ? 1 : 0;
+    }
+    EXPECT_EQ(4, sets_focus);
+
+    std::vector<vec3_t> looks, points;
+    for (const CameraKeyframe& k : keys) {
+        looks.push_back(camera_get_look_at(k.transform));
+        points.push_back(k.focus_point);
+    }
     for (double time : {0.0, 7.0, 13.0, 18.0, 22.5, 31.5, 36.0}) {
         ViewTransform view;
         float fov;
-        camera_keyframes_evaluate(&view, &fov, keys.data(), keys.size(), time);
-        EXPECT_NEAR(40.0f, view.position.z, 1.0e-4f);
-        EXPECT_NEAR(0.0f, view.position.x, 1.0e-4f);
-        EXPECT_NEAR(8.0f, camera_get_look_at(view).z, 1.0e-4f);
+        movie_keys_pose(&view, &fov, keys.data(), keys.size(), time, looks.data(), nullptr, vec3_set(0, 1, 0));
+        EXPECT_NEAR(40.0f, view.position.z, 1.0e-3f);
+        EXPECT_NEAR(0.0f, view.position.x, 1.0e-3f);
+        EXPECT_NEAR(8.0f, camera_get_look_at(view).z, 1.0e-3f);
         const float degrees = fov * 180.0f / 3.14159265358979f;
-        EXPECT_NEAR(time == 7.0 ? 20.0f : time == 13.0 ? 70.0f : 45.0f, degrees, 1.0e-3f);
+        EXPECT_NEAR(time == 7.0 ? 20.0f : time == 13.0 ? 70.0f : 45.0f, degrees, 1.0e-2f);
         float blur;
-        movie_focus_evaluate(focus, focus_points, time, view, &blur);
+        movie_focus_point(keys.data(), keys.size(), points.data(), 0.0f, time, view, &blur);
         EXPECT_NEAR(time <= 18.0 || time >= 35.0 ? 0.0f : 3.5f, blur, 1.0e-4f);
     }
     md_xyz_data_t xyz = {};
@@ -1264,29 +1411,29 @@ UTEST(viamd_movie_keys, switching_representation_blocks_is_undoable_without_chan
     EXPECT_TRUE(movie_keys_equal(after, cur));
 }
 
-static CameraKeyframe cam_key(double time, float distance, bool follow = false, int atom = -1) {
+static CameraKeyframe cam_key(double time, float distance, uint32_t look_set = 0) {
     CameraKeyframe k = {};
     k.time = time;
     k.transform.distance = distance;
-    k.follow = follow;
-    k.follow_atom = atom;
+    k.look_set = look_set;
     return k;
 }
 
-UTEST(viamd_movie_keys, camera_bands_are_runs_of_keys_that_follow_the_same_thing) {
+UTEST(viamd_movie_keys, camera_bands_are_runs_of_keys_that_look_at_the_same_atoms) {
     std::vector<CameraKeyframe> keys = {
-        cam_key(0, 10), cam_key(1, 10, true), cam_key(2, 10, true), cam_key(3, 10, true, 7), cam_key(4, 10, true, 7), cam_key(5, 10), cam_key(6, 10, true),
+        cam_key(0, 10), cam_key(1, 10, 1), cam_key(2, 10, 1), cam_key(3, 10, 2), cam_key(4, 10, 2), cam_key(5, 10), cam_key(6, 10, 1),
     };
     const std::vector<CameraBand> bands = camera_bands(keys);
     ASSERT_EQ(bands.size(), (size_t)3);
-    EXPECT_EQ(bands[0].kind, CameraBandKind::FollowTarget);
+    EXPECT_EQ(bands[0].kind, CameraBandKind::LookAtSet);
+    EXPECT_EQ(bands[0].set, (uint32_t)1);
     EXPECT_EQ(bands[0].first, 1);
     EXPECT_EQ(bands[0].last, 2);
-    EXPECT_EQ(bands[1].kind, CameraBandKind::LookAtAtom);
-    EXPECT_EQ(bands[1].atom, 7);
+    EXPECT_EQ(bands[1].kind, CameraBandKind::LookAtSet);
+    EXPECT_EQ(bands[1].set, (uint32_t)2);
     EXPECT_EQ(bands[1].begin, 3.0);
     EXPECT_EQ(bands[1].end, 4.0);
-    EXPECT_EQ(bands[2].kind, CameraBandKind::FollowTarget);
+    EXPECT_EQ(bands[2].set, (uint32_t)1);
     EXPECT_EQ(bands[2].first, 6);
     EXPECT_EQ(bands[2].last, 6);
 }
@@ -1315,39 +1462,31 @@ UTEST(viamd_movie_keys, a_key_on_the_path_does_not_move_the_camera) {
     std::vector<CameraKeyframe> keys = {cam_key(0, 10), cam_key(4, 30), cam_key(8, 20)};
     keys[1].spin_turns = 1;
     keys[1].use_frame = true;
+    keys[1].focus_on = true;
     strcpy(keys[1].name, "mid");
-    const CameraKeyframe k = camera_key_on_path(keys, 2.0, false);
     ViewTransform vt;
     float fov;
     camera_keyframes_evaluate(&vt, &fov, keys.data(), keys.size(), 2.0, false);
+    const CameraKeyframe k = camera_key_on_path(vt, fov, keys, 2.0);
     EXPECT_EQ(k.time, 2.0);
     EXPECT_EQ(k.transform.distance, vt.distance);
     EXPECT_EQ(k.fov_y, fov);
     EXPECT_EQ(k.spin_turns, 0);
     EXPECT_FALSE(k.use_frame);
+    EXPECT_FALSE(k.focus_on);   // The focus holds from the key before: nothing to say here
     EXPECT_EQ(k.name[0], '\0');
-    EXPECT_FALSE(k.follow);
+    EXPECT_EQ(k.look_set, (uint32_t)0);
 }
 
-UTEST(viamd_movie_keys, a_key_between_keys_that_follow_follows_too) {
-    std::vector<CameraKeyframe> keys = {cam_key(0, 10, true, 5), cam_key(4, 10, true, 5), cam_key(8, 10)};
-    keys[0].follow_center = {0, 0, 0};
-    keys[1].follow_center = {4, 0, 0};
-    CameraKeyframe k = camera_key_on_path(keys, 1.0, false);
-    EXPECT_TRUE(k.follow);
-    EXPECT_EQ(k.follow_atom, 5);
-    EXPECT_NEAR(k.follow_center.x, 1.0f, 1.0e-5f);
-
-    // Between a key that follows and one that does not it stays fixed, and so it does when the keys on one side follow nothing
-    EXPECT_FALSE(camera_key_on_path(keys, 6.0, false).follow);
-
+UTEST(viamd_movie_keys, a_key_between_keys_that_look_at_the_same_atoms_looks_at_them_too) {
+    std::vector<CameraKeyframe> keys = {cam_key(0, 10, 5), cam_key(4, 10, 5), cam_key(8, 10)};
+    const ViewTransform pose = {};
+    EXPECT_EQ(camera_key_on_path(pose, 0.8f, keys, 1.0).look_set, (uint32_t)5);
+    // Between keys that look at different things it looks at a point, and so it does when the keys on one side look at none
+    EXPECT_EQ(camera_key_on_path(pose, 0.8f, keys, 6.0).look_set, (uint32_t)0);
     // Outside the keys it holds what the end key does
-    keys[2].follow = true;
-    keys[2].follow_atom = 5;
-    keys[2].follow_center = {9, 0, 0};
-    k = camera_key_on_path(keys, 10.0, false);
-    EXPECT_TRUE(k.follow);
-    EXPECT_NEAR(k.follow_center.x, 9.0f, 1.0e-5f);
+    keys[2].look_set = 5;
+    EXPECT_EQ(camera_key_on_path(pose, 0.8f, keys, 10.0).look_set, (uint32_t)5);
 }
 
 UTEST(viamd_movie_keys, renaming_a_key_is_an_edit) {
@@ -1496,9 +1635,12 @@ UTEST(viamd_movie_keys, a_key_on_an_upright_path_takes_the_roll_there) {
     keys[0].roll = 0.0f;
     keys[1].roll = 0.6f;
     const vec3_t up = {0, 1, 0};
-    const CameraKeyframe k = camera_key_on_path(keys, 4.0, false, &up);
+    ViewTransform vt;
+    float fov;
+    camera_keyframes_evaluate(&vt, &fov, keys.data(), keys.size(), 4.0, false, nullptr, nullptr, &up);
+    const CameraKeyframe k = camera_key_on_path(vt, fov, keys, 4.0, &up);
     EXPECT_NEAR(k.roll, 0.6f, 1.0e-4f);
-    EXPECT_EQ(camera_key_on_path(keys, 4.0, false).roll, 0.0f);
+    EXPECT_EQ(camera_key_on_path(vt, fov, keys, 4.0).roll, 0.0f);
 }
 
 /* Selecting and moving keys together */

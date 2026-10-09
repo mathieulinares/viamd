@@ -1268,9 +1268,7 @@ MovieKeys movie_keys_snapshot(const ApplicationState* app) {
     const CameraKeyframe* keys = app->movie.keyframes;
     k.camera.assign(keys, keys + md_array_size(app->movie.keyframes));
     k.params = app->movie.param_keys;
-    k.independent_tracks = app->movie.independent_tracks;
-    k.look = app->movie.look_keys;
-    k.focus = app->movie.focus_keys;
+    k.sets = app->movie.atom_sets;
     k.reps = app->movie.rep_keys;
     k.overlays = app->movie.overlays;
     k.markers = app->movie.markers;
@@ -1292,10 +1290,7 @@ void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
         md_array_push(m.keyframes, k, app->allocator.persistent);
     }
     m.param_keys = keys.params;
-    m.independent_tracks = keys.independent_tracks;
-    m.look_keys = keys.look;
-    m.focus_keys = keys.focus;
-    m.target_drag.active = false;
+    m.atom_sets = keys.sets;
     m.invalid_target_reported = false;
     m.rep_keys = keys.reps;
     m.overlays = keys.overlays;
@@ -1384,17 +1379,13 @@ static void workspace_reset(ApplicationState* data) {
         m.up_axis = 1;
         m.animate_params = true;
         m.param_keys.clear();
-        m.independent_tracks = false;
+        m.atom_sets.clear();
         m.invalid_target_reported = false;
-        m.look_keys.clear();
-        m.focus_keys.clear();
-        m.target_drag = {};
         m.rep_keys.clear();
         m.rep_saved.clear();
         m.overlays = { movie_overlay_default_logo() };
         m.markers.clear();
         md_bitfield_clear(&m.follow_mask);
-        m.key_follow = false;
         m.follow_pending = false;
         for (int i = 0; i < MOVIE_MAX_PARAMS; ++i) m.param_saved_valid[i] = false;
     }
@@ -1855,7 +1846,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
             // (DurationAuto), and their keys with a frame alone decided how the trajectory played
             bool legacy_auto = false;
             int  timeline_version = 1;
-            bool target_atoms_allowed[2] = {};
+            // The separate look-at and focus tracks of the previous version are put on the camera keys when the movie is read
+            std::vector<MovieLegacyTarget> legacy_look, legacy_focus;
+            bool legacy_atoms_allowed[2] = {};
+            uint32_t atom_set_id = 0;   // The set that AtomSetAtoms is for
             // Movies from before the camera could be kept upright went through their keys' tilts
             m.keep_upright = false;
             while (viamd::next_entry(ident, arg, state)) {
@@ -1983,27 +1977,58 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Loop")))          viamd::extract_bool(m.loop, arg);
                 else if (str_eq(ident, STR_LIT("FollowTarget")))  pending.has_follow_target = deserialize_mask(&pending.follow_target, arg);
                 else if (str_eq(ident, STR_LIT("AnimateParams"))) viamd::extract_bool(m.animate_params, arg);
-                else if (str_eq(ident, STR_LIT("IndependentTracks"))) viamd::extract_bool(m.independent_tracks, arg);
+                else if (str_eq(ident, STR_LIT("IndependentTracks"))) {}   // Gone: a key has its own look-at and focus now
                 else if (str_eq(ident, STR_LIT("LookKey")) || str_eq(ident, STR_LIT("FocusKey"))) {
                     float v[10] = {};
-                    MovieTargetKey key;
+                    MovieLegacyTarget key;
                     const int track = str_eq(ident, STR_LIT("FocusKey")) ? 1 : 0;
-                    target_atoms_allowed[track] = false;
-                    if (viamd::extract_flt_vec(v, 10, arg) && movie_target_decode(&key, v, str_eq(ident, STR_LIT("FocusKey")))) {
-                        (str_eq(ident, STR_LIT("LookKey")) ? m.look_keys : m.focus_keys).push_back(key);
-                        target_atoms_allowed[track] = key.mode == MovieTargetMode::Selection;
+                    legacy_atoms_allowed[track] = false;
+                    if (viamd::extract_flt_vec(v, 10, arg) && movie_legacy_target_decode(&key, v, track == 1)) {
+                        (track == 0 ? legacy_look : legacy_focus).push_back(key);
+                        legacy_atoms_allowed[track] = key.target == FocusTarget::Selection;
                     } else VIAMD_LOG_ERROR("Invalid movie target key in workspace");
                 }
                 else if (str_eq(ident, STR_LIT("LookAtoms")) || str_eq(ident, STR_LIT("FocusAtoms"))) {
                     md_bitfield_t mask = {};
                     md_bitfield_init(&mask, temp_alloc);
-                    auto& track = str_eq(ident, STR_LIT("LookAtoms")) ? m.look_keys : m.focus_keys;
-                    const int track_id = str_eq(ident, STR_LIT("FocusAtoms")) ? 1 : 0;
-                    if (target_atoms_allowed[track_id] && !track.empty() && deserialize_mask(&mask, arg)) {
+                    const int track = str_eq(ident, STR_LIT("FocusAtoms")) ? 1 : 0;
+                    auto& keys = track == 0 ? legacy_look : legacy_focus;
+                    if (legacy_atoms_allowed[track] && !keys.empty() && deserialize_mask(&mask, arg)) {
                         md_bitfield_iter_t it = md_bitfield_iter_create(&mask);
-                        while (md_bitfield_iter_next(&it)) track.back().atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
+                        while (md_bitfield_iter_next(&it)) keys.back().atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
                     } else VIAMD_LOG_ERROR("Invalid movie target selection in workspace");
-                    target_atoms_allowed[track_id] = false;
+                    legacy_atoms_allowed[track] = false;
+                }
+                else if (str_eq(ident, STR_LIT("AtomSet"))) {
+                    int id = 0;
+                    atom_set_id = 0;
+                    if (viamd::extract_int(id, arg) && id > 0 && !movie_atoms_find(m.atom_sets, (uint32_t)id)) {
+                        atom_set_id = (uint32_t)id;
+                        m.atom_sets.push_back({atom_set_id, {}});
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("AtomSetAtoms"))) {
+                    md_bitfield_t mask = {};
+                    md_bitfield_init(&mask, temp_alloc);
+                    if (atom_set_id != 0 && deserialize_mask(&mask, arg)) {
+                        auto& atoms = m.atom_sets.back().atoms;
+                        md_bitfield_iter_t it = md_bitfield_iter_create(&mask);
+                        while (md_bitfield_iter_next(&it)) atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
+                    } else VIAMD_LOG_ERROR("Invalid set of atoms in workspace");
+                    atom_set_id = 0;
+                }
+                else if (str_eq(ident, STR_LIT("KeyframeLook"))) {
+                    // The set of atoms that the key that was just read looks at
+                    int id = 0;
+                    if (md_array_size(m.keyframes) > 0 && viamd::extract_int(id, arg) && id > 0) {
+                        m.keyframes[md_array_size(m.keyframes) - 1].look_set = (uint32_t)id;
+                    }
+                }
+                else if (str_eq(ident, STR_LIT("KeyframeFocus"))) {
+                    // What is sharp from the key that was just read on
+                    float v[9] = {};
+                    if (md_array_size(m.keyframes) > 0 && viamd::extract_flt_vec(v, 9, arg) && movie_focus_decode(&m.keyframes[md_array_size(m.keyframes) - 1], v)) {}
+                    else VIAMD_LOG_ERROR("Invalid focus of a movie key in workspace");
                 }
                 else if (str_eq(ident, STR_LIT("RepKey"))) {
                     // representation id, property, time, value, ease, then the other two numbers of a colour
@@ -2041,19 +2066,18 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 }
             }
             m.res_x = CLAMP(m.res_x, 640, 16384);
-            MovieKeys target_keys;
-            target_keys.look = std::move(m.look_keys);
-            target_keys.focus = std::move(m.focus_keys);
-            const size_t target_count = target_keys.look.size() + target_keys.focus.size();
-            movie_keys_resolve(&target_keys, KeySelection{});
-            if (target_count != target_keys.look.size() + target_keys.focus.size())
-                VIAMD_LOG_ERROR("Overlapping movie target keys in workspace: keeping one key per track/time");
-            m.look_keys = std::move(target_keys.look);
-            m.focus_keys = std::move(target_keys.focus);
             m.res_y = CLAMP(m.res_y, 480, 16384);
             m.fps = CLAMP(m.fps, 1.0f, 240.0f);
             std::stable_sort(m.keyframes, m.keyframes + md_array_size(m.keyframes),
                 [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+            if ((!legacy_look.empty() || !legacy_focus.empty()) && md_array_size(m.keyframes) > 0) {
+                static const vec3_t up_axes[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+                std::vector<CameraKeyframe> keys(m.keyframes, m.keyframes + md_array_size(m.keyframes));
+                movie_keys_from_tracks(&keys, &m.atom_sets, legacy_look, legacy_focus, m.keep_upright ? &up_axes[m.up_axis] : nullptr, up_axes[m.up_axis]);
+                md_array_shrink(m.keyframes, 0);
+                for (const CameraKeyframe& k : keys) md_array_push(m.keyframes, k, data->allocator.persistent);
+                VIAMD_LOG_INFO("Workspace: the look-at and focus tracks were put on camera keys, so that every key has its own look-at and focus");
+            }
             if (timeline_version < 2) {
                 if (legacy_auto) {
                     const double fps = fabs((double)data->animation.fps);
@@ -2361,6 +2385,21 @@ void load_workspace(ApplicationState* data, str_t filename) {
     if (pending.has_follow_target && mask_fits(&pending.follow_target)) {
         md_bitfield_copy(&data->movie.follow_mask, &pending.follow_target);
     }
+    {
+        // Keys that followed the movie's follow target, or an atom, look at the centre of those atoms
+        auto& m = data->movie;
+        bool any = false;
+        for (size_t i = 0; i < md_array_size(m.keyframes); ++i) any |= m.keyframes[i].follow;
+        if (any) {
+            std::vector<uint32_t> atoms;
+            md_bitfield_iter_t it = md_bitfield_iter_create(&data->movie.follow_mask);
+            while (md_bitfield_iter_next(&it)) atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
+            std::vector<CameraKeyframe> keys(m.keyframes, m.keyframes + md_array_size(m.keyframes));
+            movie_keys_from_follow(&keys, &m.atom_sets, atoms);
+            for (size_t i = 0; i < keys.size(); ++i) m.keyframes[i] = keys[i];
+            movie_history_reset(data);
+        }
+    }
     if (pending.has_focus_target) {
         if (mask_fits(&pending.focus_target)) {
             md_bitfield_copy(&data->visuals.dof.target_mask, &pending.focus_target);
@@ -2571,17 +2610,17 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("KeepUpright"), m.keep_upright);
         viamd::write_int (state, STR_LIT("UpAxis"), m.up_axis);
         viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
-        viamd::write_bool(state, STR_LIT("IndependentTracks"), m.independent_tracks);
-        for (int track = 0; track < 2; ++track) {
-            for (const auto& k : track == 0 ? m.look_keys : m.focus_keys) {
-                const auto v = movie_target_encode(k);
-                viamd::write_flt_vec(state, track == 0 ? STR_LIT("LookKey") : STR_LIT("FocusKey"), v.data(), v.size());
-                if (k.mode == MovieTargetMode::Selection && !k.atoms.empty()) {
-                    md_bitfield_t mask = {};
-                    md_bitfield_init(&mask, temp_alloc);
-                    for (uint32_t atom : k.atoms) md_bitfield_set_bit(&mask, atom);
-                    viamd::write_bitfield(state, track == 0 ? STR_LIT("LookAtoms") : STR_LIT("FocusAtoms"), &mask);
-                }
+        {
+            // What the keys look at and focus on: the atoms, by id
+            std::vector<MovieAtomSet> sets = m.atom_sets;
+            movie_atoms_prune(&sets, m.keyframes, md_array_size(m.keyframes));
+            for (const MovieAtomSet& set : sets) {
+                if (set.atoms.empty()) continue;
+                viamd::write_int(state, STR_LIT("AtomSet"), (int)set.id);
+                md_bitfield_t mask = {};
+                md_bitfield_init(&mask, temp_alloc);
+                for (uint32_t atom : set.atoms) md_bitfield_set_bit(&mask, atom);
+                viamd::write_bitfield(state, STR_LIT("AtomSetAtoms"), &mask);
             }
         }
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
@@ -2598,6 +2637,11 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             viamd::write_flt_vec(state, STR_LIT("KeyframeV3"), v, 21);
             if (k.name[0] != '\0') viamd::write_str(state, STR_LIT("KeyframeName"), str_from_cstr(k.name));
             if (k.roll != 0.0f) viamd::write_flt(state, STR_LIT("KeyframeRoll"), k.roll * (180.0f / 3.14159265358979f));
+            if (k.look_set != 0) viamd::write_int(state, STR_LIT("KeyframeLook"), (int)k.look_set);
+            if (k.focus_on) {
+                const auto f = movie_focus_encode(k);
+                viamd::write_flt_vec(state, STR_LIT("KeyframeFocus"), f.data(), f.size());
+            }
         }
         if (!md_bitfield_empty(&m.follow_mask)) {
             viamd::write_bitfield(state, STR_LIT("FollowTarget"), &m.follow_mask);

@@ -1275,38 +1275,16 @@ struct ApplicationState {
         // Kept sorted by time. While recording or previewing the movie, the camera follows
         // these (smoothly, through every one of them) instead of staying where the user left it.
         md_array(CameraKeyframe) keyframes = 0;
-        bool independent_tracks = false;
+        std::vector<MovieAtomSet> atom_sets;     // The atoms that keys look at or focus on, by id
         mutable bool invalid_target_reported = false;
-        std::vector<MovieTargetKey> look_keys, focus_keys;
-        int path_track = 0; // Camera, look-at, focus.
-        struct {
-            bool active = false, moved = false;
-            int track = 0, key = -1;
-            vec3_t start = {}, plane = {}, normal = {}, grab = {};
-        } target_drag;
         bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
         bool keep_upright = true;             // The camera stays level about up_axis, tilted only by the keys' roll
         int  up_axis = 1;                     // The world axis that is up for keep_upright: +X, +Y, +Z, -X, -Y, -Z
         // The camera can look at the middle of these atoms rather than a fixed point (keys with 'follow')
         md_bitfield_t follow_mask = {};
-        bool   key_follow     = false;        // What 'Add Keyframe' makes
         bool   follow_pending = false;        // The camera waits for the system state of follow_time
         double follow_time    = 0.0;
         std::vector<CameraKeyframe> follow_keys;
-
-        // The camera path of keys that follow something is sampled along the movie, as where the target is depends on
-        // the trajectory frame. 'build' is being made, a few samples each frame, and replaces 'shown' when it is done.
-        struct PathSamples {
-            uint64_t signature = 0;          // What it was made from
-            int      num_keys = 0;
-            std::vector<double> time;
-            std::vector<vec3_t> eye, look;   // The path of the eye and of what it looks at
-            std::vector<vec3_t> center;      // Where the follow target was
-            std::vector<vec3_t> atoms;       // Where the atom of each key was, per sample then per key
-            int      done = 0;
-            bool     complete = false;
-        };
-        PathSamples path_shown, path_build;
 
         // Look parameters (background, depth of field, clipping ...) keyed over time
         std::vector<ParamKey> param_keys;
@@ -1344,6 +1322,7 @@ struct ApplicationState {
         CameraKeyframe key_clipboard = {};    // Copied with 'Copy' in the keyframe table, put in with 'Paste'
         bool     has_key_clipboard  = false;
         int      look_pick_key      = -1;   // The keyframe waiting for an atom to be clicked to look at, or -1
+        int      focus_pick_key     = -1;   // ... to focus on
         int      orbit_turns        = 1;
         float    orbit_duration     = 6.0f;
         SpinAxis orbit_axis         = SpinAxis::ViewUp;

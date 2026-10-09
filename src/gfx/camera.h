@@ -39,6 +39,15 @@ enum class SpinAxis : int {
     Count,
 };
 
+// What is sharp from a key on
+enum class FocusTarget : int {
+    Point,       // A fixed point
+    Selection,   // The centre of a set of atoms, tracked through the trajectory
+    LookAt,      // What the camera looks at
+    Distance,    // A distance from the camera
+    Count,
+};
+
 // A camera pose that a movie passes through at 'time' seconds on the movie timeline.
 struct CameraKeyframe {
     ViewTransform transform = {};
@@ -71,4 +80,20 @@ struct CameraKeyframe {
     // so the image turns clockwise. Used when the movie keeps the camera upright: then the key's stored orientation
     // only gives where it looks.
     float roll = 0.0f;
+
+    // Where the key looks at is the point its pose aims at, unless 'look_set' names a set of atoms (an id in the movie's table
+    // of atom sets): then it looks at the centre of the set wherever it is in the trajectory, and the point the pose aims at
+    // is only where that was when the key was made.
+    uint32_t look_set = 0;
+
+    // What is sharp from this key on. A key without 'focus_on' leaves the focus as the key before it set it; before the first
+    // that sets it, what the camera looks at is sharp. The change takes 'focus_transition' seconds from the key's time.
+    bool        focus_on = false;
+    FocusTarget focus_target = FocusTarget::LookAt;
+    uint32_t    focus_set = 0;                 // Selection: the atoms
+    vec3_t      focus_point = {0, 0, 0};       // Point, and where the set was when Selection was made
+    float       focus_distance = 10.0f;        // Distance
+    float       focus_blur = 2.0f;             // The blur, in percent of the height of the view; 0: everything is sharp
+    float       focus_transition = 1.0f;
+    KeyEase     focus_ease = KeyEase::EaseInOut;
 };

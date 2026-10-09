@@ -5,9 +5,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <array>
 #include <string>
 #include <vector>
-#include <array>
 
 struct md_system_t;
 struct md_system_state_t;
@@ -19,29 +19,81 @@ struct md_allocator_i;
 bool movie_target_center(vec3_t* out, const md_system_t& system, const md_system_state_t& state,
                          const md_bitfield_t& mask, const mat4_t& world_transform, md_allocator_i* alloc);
 
-enum class MovieTargetMode : int { Point, Selection, LookAt, Distance, Count };
+// ## What a key looks at and what is sharp
+//
+// A key has a pose (where the eye is), a look-at and a focus, and the look-at and the focus are set on the key without touching
+// the rest. The atoms that a key tracks are kept in a table of the movie, by id, so that a key stays a plain value.
 
-struct MovieTargetKey {
+struct MovieAtomSet {
+    uint32_t id = 0;
+    std::vector<uint32_t> atoms;   // Sorted, without duplicates
+};
+
+// The id of a set with these atoms: one the table has already, or a new one. 0 for no atoms.
+uint32_t movie_atoms_add(std::vector<MovieAtomSet>* sets, std::vector<uint32_t> atoms);
+const MovieAtomSet* movie_atoms_find(const std::vector<MovieAtomSet>& sets, uint32_t id);
+// Takes out the sets that no key uses
+void movie_atoms_prune(std::vector<MovieAtomSet>* sets, const CameraKeyframe* keys, size_t count);
+
+// The focus of a key as numbers, for the workspace: target, point (3), distance, blur, transition, ease, set. The decoder is
+// false for values that no key could have made (not finite, an unknown target or ease).
+std::array<float, 9> movie_focus_encode(const CameraKeyframe& key);
+bool movie_focus_decode(CameraKeyframe* key, const float (&values)[9]);
+
+// The look-at at 'time': through the points where the keys aim ('looks', aligned with 'keys', which are sorted by time and have
+// different times; the caller resolves those that track atoms), with the easing of the key each stretch leads to.
+vec3_t movie_look_evaluate(const CameraKeyframe* keys, size_t count, const vec3_t* looks, double time);
+
+// The eye at 'time': through the keys' positions, with their easing.
+vec3_t movie_position_evaluate(const CameraKeyframe* keys, size_t count, double time, bool loop);
+
+// The camera at 'time': the eye from the positions of the keys, the aim from the look-at points, the field of view, the roll
+// and the spin from the keys. A spin turns the eye about the look-at. With 'upright' the camera is kept level about it.
+void movie_keys_pose(ViewTransform* out, float* fov_y, const CameraKeyframe* keys, size_t count, double time,
+                       const vec3_t* looks, const vec3_t* upright, vec3_t up_axis);
+
+// Turns a camera to look at 'look' from the eye of 'unspun' turned about 'look' by 'spin' (or by how the camera is turned from
+// 'unspun' when none is given), kept level about 'up' and tilted by 'roll' when there is one.
+void movie_camera_independent(ViewTransform* camera, const ViewTransform& unspun, vec3_t look, const vec3_t* up, float roll, const quat_t* spin = nullptr);
+
+// ## Workspaces from before a key had its own look-at and focus
+
+// A key of the separate look-at or focus track of an earlier version: its own time, a target and, for the focus, a blur.
+struct MovieLegacyTarget {
     double time = 0.0;
+    FocusTarget target = FocusTarget::Point;
     vec3_t point = {};
-    MovieTargetMode mode = MovieTargetMode::Point;
-    std::vector<uint32_t> atoms;
     float distance = 10.0f;
     float blur = 0.0f;
     float transition = 1.0f;
     KeyEase ease = KeyEase::EaseInOut;
+    std::vector<uint32_t> atoms;   // Selection
 };
-std::array<float, 10> movie_target_encode(const MovieTargetKey& key);
-bool movie_target_decode(MovieTargetKey* key, const float (&values)[10], bool focus);
+bool movie_legacy_target_decode(MovieLegacyTarget* key, const float (&values)[10], bool focus);
 
-// Resolved points are in camera space, in the same order as keys. Selection points can change at each frame.
-vec3_t movie_target_evaluate(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points, double time);
-float movie_focus_evaluate(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points,
-                           double time, const ViewTransform& camera, float* blur);
-vec3_t movie_focus_point(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points,
+// Puts the look-at and focus tracks of an earlier version on the camera keys: a camera key is added (on the path, so that the
+// movie goes the same way) at every time a track has a key, and each key then looks at what the look-at track gives at its time
+// (a set of atoms where the track key is a selection) and sets the focus of the focus key that is at its time. 'keys' must be
+// sorted and not empty.
+void movie_keys_from_tracks(std::vector<CameraKeyframe>* keys, std::vector<MovieAtomSet>* sets, const std::vector<MovieLegacyTarget>& look,
+                            const std::vector<MovieLegacyTarget>& focus, const vec3_t* upright, vec3_t up_axis);
+
+// Keys that followed the movie's follow target (or an atom of their own) of an earlier version look at the centre of those atoms
+void movie_keys_from_follow(std::vector<CameraKeyframe>* keys, std::vector<MovieAtomSet>* sets, const std::vector<uint32_t>& target_atoms);
+
+// Whether any key sets the focus
+bool movie_focus_keys_exist(const CameraKeyframe* keys, size_t count);
+
+// What is sharp at 'time', from the keys that set the focus: the point (in the space of the camera) and the blur in percent.
+// 'points' are aligned with 'keys': where the atoms of a Selection focus are now. Before the first key that sets it, what the
+// camera looks at is sharp with 'default_blur'. A key's change starts at its time and takes its transition, shortened to end
+// at the next key that sets the focus.
+vec3_t movie_focus_point(const CameraKeyframe* keys, size_t count, const vec3_t* points, float default_blur,
+                         double time, const ViewTransform& camera, float* blur);
+
+// The depth in front of the camera of that point
+float movie_focus_depth(const CameraKeyframe* keys, size_t count, const vec3_t* points, float default_blur,
                         double time, const ViewTransform& camera, float* blur);
-void movie_camera_independent(ViewTransform* camera, const ViewTransform& unspun, vec3_t look, const vec3_t* up, float roll, const quat_t* spin = nullptr);
-vec3_t movie_position_evaluate(const CameraKeyframe* keys, size_t count, double time, bool loop);
 
 // What is keyed on a movie's timeline besides the camera: look parameters (background, depth of field,
 // clipping ...), each with its own keys. The application has a table of the parameters, a key refers to
@@ -161,31 +213,30 @@ int rep_pack_blocks(std::vector<RepBlock>* blocks, double transition);
 // What the camera does between its keys, as spans on the timeline. Keys are sorted by time.
 
 enum class CameraBandKind : int {
-    FollowTarget,   // The look-at point moves with the movie's follow target
-    LookAtAtom,     // ... with an atom of its own
+    LookAtSet,      // The key looks at the centre of a set of atoms, tracked through the trajectory
     Spin,           // Extra turns around what is looked at, in the stretch leading to a key
 };
 
 struct CameraBand {
-    CameraBandKind kind = CameraBandKind::FollowTarget;
-    int    first = 0;      // The keys it starts and ends at (the same one for a single key that follows)
-    int    last = 0;
-    double begin = 0.0;
-    double end = 0.0;
-    int    atom = -1;      // LookAtAtom
-    int    turns = 0;      // Spin
+    CameraBandKind kind = CameraBandKind::LookAtSet;
+    int      first = 0;    // The keys it starts and ends at (the same one for a single key that tracks)
+    int      last = 0;
+    double   begin = 0.0;
+    double   end = 0.0;
+    uint32_t set = 0;      // LookAtSet
+    int      turns = 0;    // Spin
 };
 
-// One follow band for each run of keys that follow the same thing, one spin band for each key with turns
+// One band for each run of keys that look at the same set, one spin band for each key with turns
 std::vector<CameraBand> camera_bands(const std::vector<CameraKeyframe>& keys);
 
 // "3", or "3 intro" for a key with a name. 'index' counts from 0.
 std::string camera_key_label(const CameraKeyframe& key, int index);
 
-// A key at 'time' that is on the path of 'keys' (not empty, sorted), so that adding it does not move the camera there:
-// the pose the path has at that time. It follows what the keys on both sides follow; it has no frame and no spin.
-// With upright (the movie keeps the camera level about it), it is levelled and has the roll of the path there.
-CameraKeyframe camera_key_on_path(const std::vector<CameraKeyframe>& keys, double time, bool loop, const vec3_t* upright = nullptr);
+// A key at 'time' with the pose 'pose' (and field of view), that the path of 'keys' (not empty, sorted) has there, so that adding it
+// does not move the camera. It looks at what the keys on both sides look at, if that is the same set of atoms; it has no frame and
+// no spin, and leaves the focus as it is. With upright (the movie keeps the camera level about it), it has the roll of the pose.
+CameraKeyframe camera_key_on_path(const ViewTransform& pose, float fov_y, const std::vector<CameraKeyframe>& keys, double time, const vec3_t* upright = nullptr);
 
 // ## The camera path in the viewport
 
@@ -223,8 +274,7 @@ void camera_key_translate(CameraKeyframe* key, vec3_t delta);
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;
-    bool independent_tracks = false;
-    std::vector<MovieTargetKey> look, focus;
+    std::vector<MovieAtomSet> sets;     // The atoms that the keys look at and focus on
     std::vector<ParamKey> params;
     std::vector<RepKey> reps;
     std::vector<MovieOverlay> overlays;
@@ -250,7 +300,7 @@ void movie_keys_scale_time(MovieKeys* keys, double scale);
 
 // Overlay: a bar of the overlay lane (subject: its place in the list, time: when it starts, end: when it stops).
 // Block: a stretch of the representation overview where a representation is shown (subject: its id, time and end as the stretch).
-enum class KeyKind : int { Camera, Param, Rep, Overlay, Block, Look, Focus };
+enum class KeyKind : int { Camera, Param, Rep, Overlay, Block };
 
 // What a key of a parameter or of a property of a representation belongs to
 inline int64_t rep_key_subject(uint32_t rep, int prop) { return ((int64_t)rep << 8) | (int64_t)prop; }
@@ -328,11 +378,10 @@ void movie_keys_delete(MovieKeys* keys, KeySelection* sel);
 // Selected keys remembered to be put in somewhere else
 struct KeyClip {
     std::vector<CameraKeyframe> camera;
-    std::vector<MovieTargetKey> look, focus;
     std::vector<ParamKey> params;
     std::vector<RepKey> reps;
     double begin = 0.0;         // The time of the first
-    bool empty() const { return camera.empty() && look.empty() && focus.empty() && params.empty() && reps.empty(); }
+    bool empty() const { return camera.empty() && params.empty() && reps.empty(); }
 };
 
 KeyClip movie_keys_copy(const MovieKeys& keys, const KeySelection& sel);

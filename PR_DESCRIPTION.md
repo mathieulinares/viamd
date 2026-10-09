@@ -25,9 +25,9 @@ The manual is [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspi
 - Movable trajectory start/end anchors (fly-over before the dynamics, hold at the end); frame pins on keys vary the speed and allow backward play; **Match Animation speed**; **Snap to frames**.
 
 **Camera**
-- Keys with per-key ease (Smooth, Ease in/out, Linear, Hold), field of view, names, spin turns, **Add Orbit**, seamless loop, follow target, **Look at** an atom (tracked through the trajectory), **Key on Selection**, copy/paste.
+- Keys with per-key ease (Smooth, Ease in/out, Linear, Hold), field of view, names, spin turns, **Add Orbit**, seamless loop, a per-key **Look at** (a fixed point or atoms, tracked through the trajectory) and **Focus on** (what is sharp, with blur, transition and ease; the look-at point by default), three viewport paths (camera, look-at, focus), **Key on Selection**, copy/paste.
 - **Keep upright** with a roll per key, so loops and spins never tilt the camera.
-- Depth of field focus on the look-at point, a keyable distance, or the follow target.
+- Depth of field focus on the look-at point, a keyable distance or a focus target; a movie's keys can set the focus themselves.
 - The camera path is drawn in the viewport (ticks at round times, chevrons, sight lines, cameras, spin rings, the green camera at the preview time) with handles on the eye and the look-at point of each key: click to go there, drag to edit (Ctrl moves both), Ctrl + click on the path adds a key.
 
 **Looks and representations**
@@ -77,6 +77,6 @@ New suites: `test_camera_utils`, `test_movie_keys`, `test_frame_sink`, `test_mov
 ### Known limits
 - Solid representations cannot fade; they grow in and shrink away.
 - Tint and saturation keys recolor atoms every frame: slow for very large systems.
-- **Follow target** depth of field uses the global follow target, not a key's own **Look at** atom.
+- Workspaces with separate look-at / focus tracks or follow keys are converted to per-key look-at and focus on load; the eye path of such a movie can change slightly.
 - Timeline / distribution overlays draw at most six series per subplot and the first member of a population.
 - Picked overlay bars and representation blocks move with picked keys but are not copied or pasted.

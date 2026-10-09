@@ -236,8 +236,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl);
 static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view);
 static bool movie_target_center(const ApplicationState* state, const md_bitfield_t* mask, const md_system_state_t& system_state, vec3_t* out);
 static bool movie_key_look_at_atom(ApplicationState* state, int key_idx, int32_t atom);
-static std::vector<vec3_t> movie_target_points(const ApplicationState* state, const std::vector<MovieTargetKey>& keys);
-static void movie_target_insert(std::vector<MovieTargetKey>& keys, MovieTargetKey key);
+static bool movie_key_focus_on_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms);
 static bool movie_draw_timeline_markers(ApplicationState* state);
 static void movie_blit_preview(ApplicationState* state);
 static void movie_capture_frame(ApplicationState* state);
@@ -628,10 +627,10 @@ int main(int argc, char** argv) {
         PickingHit hit = {};
 
         // A keyframe waits for an atom: the click picks it, so it must not select or rotate as well
-        const bool look_pick = state.movie.look_pick_key >= 0 && !movie_recording;
+        const bool look_pick = (state.movie.look_pick_key >= 0 || state.movie.focus_pick_key >= 0) && !movie_recording;
         // A handle of the camera path is hovered or dragged: the viewport must not select or rotate as well
-        const bool surface_blocked = look_pick || ((state.movie.path_hot || state.movie.path_drag.active || state.movie.target_drag.active) && !movie_recording);
-        if (look_pick && ImGui::IsKeyPressed(ImGuiKey_Escape)) state.movie.look_pick_key = -1;
+        const bool surface_blocked = look_pick || ((state.movie.path_hot || state.movie.path_drag.active) && !movie_recording);
+        if (look_pick && ImGui::IsKeyPressed(ImGuiKey_Escape)) state.movie.look_pick_key = state.movie.focus_pick_key = -1;
 
         if (surface_state.hovered && !movie_recording) {
             InteractionSurfaceHitArgs args = {
@@ -648,8 +647,9 @@ int main(int argc, char** argv) {
             if (look_pick) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hit.domain == PickingDomain_Atom) {
-                    movie_key_look_at_atom(&state, state.movie.look_pick_key, (int32_t)hit.local_idx);
-                    state.movie.look_pick_key = -1;
+                    if (state.movie.look_pick_key >= 0) movie_key_look_at_atom(&state, state.movie.look_pick_key, (int32_t)hit.local_idx);
+                    else movie_key_focus_on_atoms(&state, state.movie.focus_pick_key, {(uint32_t)hit.local_idx});
+                    state.movie.look_pick_key = state.movie.focus_pick_key = -1;
                 }
             }
 
@@ -1571,13 +1571,19 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Checkbox("Depth of Field", &data->visuals.dof.enabled);
             if (data->visuals.dof.enabled) {
                 int mode = (int)data->visuals.dof.focus_mode;
-                if (ImGui::Combo("Focus", &mode, "Look-at point\0Distance\0Follow target\0Focus target\0")) {
-                    data->visuals.dof.focus_mode = (DofFocusMode)mode;
+                static const char* const focus_modes[4] = {"Look-at point", "Distance", "Follow target", "Focus target"};
+                if (ImGui::BeginCombo("Focus", focus_modes[CLAMP(mode, 0, 3)])) {
+                    // The follow target is no longer set anywhere: it is offered only to a workspace that has one
+                    for (int k = 0; k < 4; ++k) {
+                        if (k == 2 && mode != 2) continue;
+                        if (ImGui::Selectable(focus_modes[k], k == mode)) data->visuals.dof.focus_mode = (DofFocusMode)k;
+                    }
+                    ImGui::EndCombo();
                 }
                 ImGui::SetItemTooltip("What is sharp.\n"
                     "Look-at point: what the camera looks at (the point it orbits).\n"
                     "Distance: a distance from the camera that you set, and can key in the Movie window.\n"
-                    "Follow target: the middle of the movie's follow target, even when the camera looks elsewhere.\n"
+                    "Follow target: the middle of the follow target of an older workspace.\n"
                     "Focus target: an independent atom or group; changes sharpness without moving or aiming the camera.");
                 if (data->visuals.dof.focus_mode == DofFocusMode::Distance) {
                     ImGui::SliderFloat("Focus distance", &data->visuals.dof.focus_distance, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
@@ -6699,14 +6705,35 @@ static void movie_reps_restore(ApplicationState* state) {
     m.rep_saved.clear();
 }
 
-// Where the follow target is now, in the space the camera is in. False when there is no target, or it
-// holds atoms that are not in the system.
+// Where a selection is now: its centre, made whole across periodic boundaries, in the space the camera is in
 static bool movie_target_center(const ApplicationState* state, const md_bitfield_t* mask, const md_system_state_t& system_state, vec3_t* out) {
     return movie_target_center(out, state->mold.sys, system_state, *mask, state->mold.unitcell_transform, state->allocator.frame);
 }
 
+// Where the movie's follow target is now (the global depth of field can follow it). False when there is none, or it
+// holds atoms that are not in the system.
 static bool movie_follow_center(const ApplicationState* state, vec3_t* out) {
     return movie_target_center(state, &state->movie.follow_mask, state->mold.state, out);
+}
+
+// Where a set of atoms of the movie is now
+static bool movie_set_center(const ApplicationState* state, uint32_t id, vec3_t* out) {
+    const MovieAtomSet* set = movie_atoms_find(state->movie.atom_sets, id);
+    if (!set) return false;
+    md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
+    defer { md_temp_end(temp); };
+    md_bitfield_t mask = {};
+    md_bitfield_init(&mask, md_temp_allocator(temp));
+    for (uint32_t atom : set->atoms) md_bitfield_set_bit(&mask, atom);
+    return movie_target_center(state, &mask, state->mold.state, out);
+}
+
+// The atoms of the selection
+static std::vector<uint32_t> movie_selection_atoms(const ApplicationState* state) {
+    std::vector<uint32_t> atoms;
+    md_bitfield_iter_t it = md_bitfield_iter_create(&state->selection.selection_mask);
+    while (md_bitfield_iter_next(&it)) atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
+    return atoms;
 }
 
 // Where an atom is now, in the space the camera is in
@@ -6716,28 +6743,167 @@ static bool movie_atom_position(const ApplicationState* state, int32_t atom, vec
     return true;
 }
 
-// Makes a keyframe look at an atom and track it through the trajectory. The eye stays where it is.
-static bool movie_key_look_at_atom(ApplicationState* state, int key_idx, int32_t atom) {
+static const vec3_t movie_up_axes[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
+static const char* movie_up_axis_str[6] = {"+X", "+Y", "+Z", "-X", "-Y", "-Z"};
+
+static const vec3_t* movie_up_vector(const ApplicationState* state) {
+    return &movie_up_axes[CLAMP(state->movie.up_axis, 0, 5)];
+}
+
+// The world up the movie keeps the camera level about, or null when it does not
+static const vec3_t* movie_upright(const ApplicationState* state) {
+    return state->movie.keep_upright ? movie_up_vector(state) : nullptr;
+}
+
+// The keys, sorted by time, with where each of them looks at and focuses on now: the centre of its set of atoms where it has one
+// (the saved point where the atoms are not in this system, which is reported once), otherwise its fixed point.
+struct MovieResolved {
+    std::vector<CameraKeyframe> keys;
+    std::vector<vec3_t> look, focus;
+};
+
+static MovieResolved movie_resolve(const ApplicationState* state, const CameraKeyframe* keys, size_t n) {
+    MovieResolved r;
+    r.keys.assign(keys, keys + n);
+    std::stable_sort(r.keys.begin(), r.keys.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    auto missing = [&]() {
+        if (state->movie.invalid_target_reported) return;
+        VIAMD_LOG_ERROR("A movie key looks at or focuses on atoms that are not in this system: its saved point is used. Set them again with Look at / Focus on in the key table.");
+        state->movie.invalid_target_reported = true;
+    };
+    for (const CameraKeyframe& k : r.keys) {
+        vec3_t look = camera_get_look_at(k.transform), focus = k.focus_point;
+        if (k.look_set != 0 && !movie_set_center(state, k.look_set, &look)) {
+            look = camera_get_look_at(k.transform);
+            missing();
+        }
+        if (k.focus_on && k.focus_target == FocusTarget::Selection && !movie_set_center(state, k.focus_set, &focus)) {
+            focus = k.focus_point;
+            missing();
+        }
+        r.look.push_back(look);
+        r.focus.push_back(focus);
+    }
+    return r;
+}
+
+// Whether any key tracks atoms: then the camera can only be placed once the trajectory frame is loaded
+static bool movie_keys_track_atoms(const CameraKeyframe* keys, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (keys[i].look_set != 0 || (keys[i].focus_on && keys[i].focus_target == FocusTarget::Selection)) return true;
+    }
+    return false;
+}
+
+static void movie_pose(const ApplicationState* state, const MovieResolved& r, double time, ViewTransform* vt, float* fov_y) {
+    movie_keys_pose(vt, fov_y, r.keys.data(), r.keys.size(), time, r.look.data(), movie_upright(state), *movie_up_vector(state));
+}
+
+// The camera the keys give at a time. 'keys' need not be sorted, and are not empty.
+static void movie_camera_evaluate(const ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, ViewTransform* vt, float* fov_y) {
+    movie_pose(state, movie_resolve(state, keys, num_keys), time, vt, fov_y);
+}
+
+// What is sharp, and how much it is blurred, for a camera at a time, from the keys that set the focus: the point, the depth in
+// front of the camera and the blur in percent. Before the first of them what the camera looks at is sharp, with the blur of the
+// Depth of Field settings.
+static float movie_default_blur(const ApplicationState* state) {
+    return state->visuals.dof.enabled ? state->visuals.dof.aperture : 0.0f;
+}
+
+static vec3_t movie_focus_evaluate(const ApplicationState* state, const MovieResolved& r, double time, const ViewTransform& camera, float* blur) {
+    return movie_focus_point(r.keys.data(), r.keys.size(), r.focus.data(), movie_default_blur(state), time, camera, blur);
+}
+
+// Whether the movie decides what is sharp: while it is edited or recorded and a key sets the focus
+static bool movie_focus_active(const ApplicationState* state) {
+    const auto& m = state->movie;
+    return (m.show_window || m.state == MovieRecordingState::Recording) &&
+        movie_focus_keys_exist(m.keyframes, md_array_size(m.keyframes));
+}
+
+static double movie_focus_time(const ApplicationState* state) {
+    return state->movie.state == MovieRecordingState::Recording ? state->movie.cur_time : (double)state->movie.playhead;
+}
+
+// Aims a key, from where its eye is, at the centre of a set of atoms that it then tracks through the trajectory
+static bool movie_key_look_at_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms) {
     auto& m = state->movie;
-    vec3_t pos;
-    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || !movie_atom_position(state, atom, &pos)) return false;
+    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || atoms.empty()) return false;
+    const uint32_t id = movie_atoms_add(&m.atom_sets, atoms);
+    vec3_t center;
+    if (!movie_set_center(state, id, &center)) {
+        VIAMD_LOG_ERROR("These atoms are not in the current system");
+        return false;
+    }
     CameraKeyframe& key = m.keyframes[key_idx];
-    ViewTransform t = key.transform;
-    if (!camera_aim_at(&t, pos)) return false;
-    key.transform = t;
-    key.follow = true;
-    key.follow_atom = atom;
-    key.follow_center = pos;
+    if (!camera_key_set_look(&key, center)) return false;
+    key.look_set = id;
+    m.invalid_target_reported = false;
     return true;
 }
 
-// How far from the camera depth of field is sharp, for a camera, from the focus mode
+// Makes a keyframe look at an atom and track it through the trajectory. The eye stays where it is.
+static bool movie_key_look_at_atom(ApplicationState* state, int key_idx, int32_t atom) {
+    vec3_t pos;
+    if (atom < 0 || !movie_atom_position(state, atom, &pos)) return false;
+    return movie_key_look_at_atoms(state, key_idx, {(uint32_t)atom});
+}
+
+// Makes a keyframe look at a fixed point. The eye stays where it is.
+static bool movie_key_look_at_point(ApplicationState* state, int key_idx, vec3_t point) {
+    auto& m = state->movie;
+    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes)) return false;
+    CameraKeyframe& key = m.keyframes[key_idx];
+    if (!camera_key_set_look(&key, point)) return false;
+    key.look_set = 0;
+    return true;
+}
+
+// What a key that starts to set the focus begins with: the blur there is where it is, or the one of the Depth of Field settings
+static void movie_key_focus_begin(ApplicationState* state, int key_idx) {
+    auto& m = state->movie;
+    CameraKeyframe& key = m.keyframes[key_idx];
+    if (key.focus_on) return;
+    float blur = movie_default_blur(state);
+    if (movie_focus_keys_exist(m.keyframes, md_array_size(m.keyframes))) {
+        const MovieResolved r = movie_resolve(state, m.keyframes, md_array_size(m.keyframes));
+        ViewTransform vt;
+        float fov;
+        movie_pose(state, r, key.time, &vt, &fov);
+        movie_focus_evaluate(state, r, key.time, vt, &blur);
+    }
+    key.focus_on = true;
+    key.focus_target = FocusTarget::LookAt;
+    key.focus_blur = blur > 0.0f ? blur : 2.0f;
+}
+
+static bool movie_key_focus_on_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms) {
+    auto& m = state->movie;
+    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || atoms.empty()) return false;
+    const uint32_t id = movie_atoms_add(&m.atom_sets, atoms);
+    vec3_t center;
+    if (!movie_set_center(state, id, &center)) {
+        VIAMD_LOG_ERROR("These atoms are not in the current system");
+        return false;
+    }
+    movie_key_focus_begin(state, key_idx);
+    CameraKeyframe& key = m.keyframes[key_idx];
+    key.focus_target = FocusTarget::Selection;
+    key.focus_set = id;
+    key.focus_point = center;
+    m.invalid_target_reported = false;
+    return true;
+}
+
+// How far from the camera depth of field is sharp, for a camera: from the movie's focus keys when it has some, otherwise from the
+// focus mode of the Depth of Field settings
 static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view) {
-    if (state->movie.independent_tracks && !state->movie.focus_keys.empty() &&
-        (state->movie.show_window || state->movie.state == MovieRecordingState::Recording)) {
+    if (movie_focus_active(state)) {
         float blur;
-        return movie_focus_evaluate(state->movie.focus_keys, movie_target_points(state, state->movie.focus_keys),
-            state->movie.state == MovieRecordingState::Recording ? state->movie.cur_time : state->movie.playhead, view, &blur);
+        const auto& m = state->movie;
+        const MovieResolved r = movie_resolve(state, m.keyframes, md_array_size(m.keyframes));
+        return MAX(camera_depth_of_point(view, movie_focus_evaluate(state, r, movie_focus_time(state), view, &blur)), 1.0e-3f);
     }
     const auto& dof = state->visuals.dof;
     float depth = view.distance;
@@ -6755,86 +6921,10 @@ static float dof_focus_depth(const ApplicationState* state, const ViewTransform&
     return MAX(depth, 1.0e-3f);
 }
 
-static std::vector<vec3_t> movie_target_points(const ApplicationState* state, const std::vector<MovieTargetKey>& keys) {
-    std::vector<vec3_t> points;
-    md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
-    defer { md_temp_end(temp); };
-    md_bitfield_t mask = {};
-    md_bitfield_init(&mask, md_temp_allocator(temp));
-    for (const MovieTargetKey& key : keys) {
-        vec3_t point = key.point;
-        if (key.mode == MovieTargetMode::Selection) {
-            md_bitfield_clear(&mask);
-            for (uint32_t atom : key.atoms) md_bitfield_set_bit(&mask, atom);
-            if (!movie_target_center(state, &mask, state->mold.state, &point) && !state->movie.invalid_target_reported) {
-                VIAMD_LOG_ERROR("Movie target selection is empty or unavailable in this system; using its saved point. Replace the selection in Camera > Independent tracks.");
-                state->movie.invalid_target_reported = true;
-            }
-        }
-        points.push_back(point);
-    }
-    return points;
-}
-
-static bool movie_keys_follow(const CameraKeyframe* keys, size_t num_keys) {
-    for (size_t i = 0; i < num_keys; ++i) {
-        if (keys[i].follow) return true;
-    }
-    return false;
-}
-
-static bool movie_keys_track_atoms(const CameraKeyframe* keys, size_t num_keys) {
-    for (size_t i = 0; i < num_keys; ++i) {
-        if (keys[i].follow && keys[i].follow_atom >= 0) return true;
-    }
-    return false;
-}
-
-static const vec3_t movie_up_axes[6] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}};
-static const char* movie_up_axis_str[6] = {"+X", "+Y", "+Z", "-X", "-Y", "-Z"};
-
-static const vec3_t* movie_up_vector(const ApplicationState* state) {
-    return &movie_up_axes[CLAMP(state->movie.up_axis, 0, 5)];
-}
-
-// The world up the movie keeps the camera level about, or null when it does not
-static const vec3_t* movie_upright(const ApplicationState* state) {
-    return state->movie.keep_upright ? movie_up_vector(state) : nullptr;
-}
-
-// The camera the keys give at a time, with the follow target where it is now
-static void movie_camera_evaluate(const ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now, ViewTransform* vt, float* fov_y, const std::vector<vec3_t>* resolved_look = nullptr) {
-    // Keys that look at an atom of their own are moved by where that atom is now. One that cannot be found stays put.
-    std::vector<vec3_t> atom_now;
-    if (movie_keys_track_atoms(keys, num_keys)) {
-        atom_now.resize(num_keys);
-        for (size_t i = 0; i < num_keys; ++i) {
-            atom_now[i] = keys[i].follow_center;
-            if (keys[i].follow && keys[i].follow_atom >= 0 ) movie_atom_position(state, keys[i].follow_atom, &atom_now[i]);
-        }
-    }
-    camera_keyframes_evaluate(vt, fov_y, keys, num_keys, time, state->movie.loop, follow_now, atom_now.empty() ? nullptr : atom_now.data(), movie_upright(state));
-    if (state->movie.independent_tracks) {
-        std::vector<CameraKeyframe> position_keys(keys, keys + num_keys);
-        for (auto& key : position_keys) key.follow = false;
-        quat_t spin;
-        camera_keyframes_evaluate(vt, fov_y, position_keys.data(), num_keys, time, false, nullptr, nullptr, movie_upright(state), &spin);
-        for (auto& key : position_keys) key.spin_turns = 0;
-        ViewTransform unspun;
-        float unused;
-        camera_keyframes_evaluate(&unspun, &unused, position_keys.data(), num_keys, time, false, nullptr, nullptr, movie_upright(state));
-        const float roll = camera_roll(unspun, *movie_up_vector(state));
-        unspun.position = movie_position_evaluate(keys, num_keys, time, false);
-        const vec3_t look = state->movie.look_keys.empty() ? camera_get_look_at(keys[0].transform) :
-            movie_target_evaluate(state->movie.look_keys, resolved_look ? *resolved_look : movie_target_points(state, state->movie.look_keys), time);
-        movie_camera_independent(vt, unspun, look, movie_upright(state), roll, &spin);
-    }
-}
-
-static void movie_camera_apply(ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys, const vec3_t* follow_now) {
+static void movie_camera_apply(ApplicationState* state, double time, const CameraKeyframe* keys, size_t num_keys) {
     ViewTransform vt;
     float fov_y;
-    movie_camera_evaluate(state, time, keys, num_keys, follow_now, &vt, &fov_y);
+    movie_camera_evaluate(state, time, keys, num_keys, &vt, &fov_y);
     state->view.target = vt;
     state->view.camera = vt;
     state->view.camera.fov_y = fov_y;
@@ -6856,25 +6946,23 @@ static void movie_apply_time_with_keys(ApplicationState* state, double time, boo
     movie_reps_apply(state, time);
     m.follow_pending = false;
     if (apply_camera && num_keys > 0 && !movie_scene_view(state)) {
-        if (m.independent_tracks || movie_keys_track_atoms(keys, num_keys) || (movie_keys_follow(keys, num_keys) && !md_bitfield_empty(&m.follow_mask))) {
-            // The target is not where it will be until the trajectory frame has been loaded, so the camera waits for that
+        if (movie_keys_track_atoms(keys, num_keys)) {
+            // The atoms are not where they will be until the trajectory frame has been loaded, so the camera waits for that
             m.follow_keys.assign(keys, keys + num_keys);
             m.follow_time = time;
             m.follow_pending = true;
         } else {
-            movie_camera_apply(state, time, keys, num_keys, nullptr);
+            movie_camera_apply(state, time, keys, num_keys);
         }
     }
 }
 
-// Runs once the frame of the movie's time is in the system state: puts the camera where the keys say, around the target
+// Runs once the frame of the movie's time is in the system state: puts the camera where the keys say, around the atoms they track
 static void movie_follow_update(ApplicationState* state) {
     auto& m = state->movie;
     if (!m.follow_pending) return;
     m.follow_pending = false;
-    vec3_t center;
-    const bool have = movie_follow_center(state, &center);
-    movie_camera_apply(state, m.follow_time, m.follow_keys.data(), m.follow_keys.size(), have ? &center : nullptr);
+    movie_camera_apply(state, m.follow_time, m.follow_keys.data(), m.follow_keys.size());
 }
 
 // Shows the movie at a time on its timeline: the trajectory frame and, if enabled, the camera.
@@ -8276,17 +8364,12 @@ static void movie_add_keyframe_on_path(ApplicationState* state) {
         movie_add_keyframe(state);
         return;
     }
-    std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
-    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    const MovieResolved r = movie_resolve(state, m.keyframes, n);
     const double t = movie_snap_time(state, (double)m.playhead);
-    CameraKeyframe key = camera_key_on_path(sorted, t, m.loop, movie_upright(state));
-    if (m.independent_tracks) {
-        movie_camera_evaluate(state, t, sorted.data(), n, nullptr, &key.transform, &key.fov_y);
-        key.transform.position = movie_position_evaluate(sorted.data(), n, t, false);
-        key.follow = false;
-    }
-    key.time = t;
-    movie_insert_key(state, key, false);
+    ViewTransform pose;
+    float fov_y;
+    movie_pose(state, r, t, &pose, &fov_y);
+    movie_insert_key(state, camera_key_on_path(pose, fov_y, r.keys, t, movie_upright(state)), false);
 }
 
 // The movie camera as it is now, at the playhead
@@ -8301,9 +8384,6 @@ static CameraKeyframe movie_current_key(ApplicationState* state) {
     if (m.key_includes_frame) {
         key.use_frame = true;
         key.frame = state->animation.frame;
-    }
-    if (!m.independent_tracks && m.key_follow && movie_follow_center(state, &key.follow_center)) {
-        key.follow = true;
     }
     return key;
 }
@@ -8386,7 +8466,6 @@ static void movie_add_selection_keyframe(ApplicationState* state) {
     t.distance = camera_fit_distance(xyz, nullptr, count, center, t.orientation, key.fov_y);
     t.position = camera_position_from_look_at(mat4_mul_vec3(state->mold.unitcell_transform, center, 1.0f), t.orientation, t.distance);
     key.transform = t;
-    key.follow = false;
     movie_insert_key(state, key, true);
     if (!movie_scene_view(state)) state->view.target = t;
 }
@@ -8512,8 +8591,7 @@ static void movie_goto_keyframe(ApplicationState* state, size_t idx) {
         state->view.camera.fov_y = key.fov_y;
     }
     m.playhead = CLAMP((float)key.time, 0.0f, (float)movie_duration(state));
-    if (m.independent_tracks) movie_apply_time(state, key.time, true);
-    else state->animation.frame = movie_trajectory_frame(state, key.time);
+    movie_apply_time(state, key.time, true);
 }
 
 // Moves the viewport back so that the whole camera path (the eye, what it looks at, and the keys) is in view, seen from the direction
@@ -8522,35 +8600,23 @@ static void movie_scene_fit_path(ApplicationState* state) {
     auto& m = state->movie;
     const size_t n = md_array_size(m.keyframes);
     if (n == 0) return;
-    std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
-    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
+    const MovieResolved r = movie_resolve(state, m.keyframes, n);
     std::vector<vec3_t> pts;
-    const auto look_points = movie_target_points(state, m.look_keys);
-    const auto focus_points = movie_target_points(state, m.focus_keys);
-    for (const CameraKeyframe& k : sorted) {
-        pts.push_back(k.transform.position);
-        pts.push_back(camera_get_look_at(k.transform));
+    for (size_t i = 0; i < n; ++i) {
+        pts.push_back(r.keys[i].transform.position);
+        pts.push_back(r.look[i]);
+        if (r.keys[i].focus_on) pts.push_back(r.focus[i]);
     }
-    const double t0 = m.independent_tracks ? 0.0 : sorted.front().time;
-    const double t1 = m.independent_tracks ? movie_duration(state) : sorted.back().time;
-    if ((n >= 2 || m.independent_tracks) && t1 > t0) {
+    const double t0 = r.keys.front().time, t1 = r.keys.back().time;
+    if (n >= 2 && t1 > t0) {
         const int samples = CLAMP((int)n * 8, 16, 256);
         for (int i = 0; i <= samples; ++i) {
             ViewTransform vt;
             float fov_y;
-            movie_camera_evaluate(state, t0 + (t1 - t0) * (double)i / (double)samples, sorted.data(), n, nullptr, &vt, &fov_y, &look_points);
+            const double t = t0 + (t1 - t0) * (double)i / (double)samples;
+            movie_pose(state, r, t, &vt, &fov_y);
             pts.push_back(vt.position);
             pts.push_back(camera_get_look_at(vt));
-            if (m.independent_tracks && !m.focus_keys.empty()) {
-                float blur;
-                pts.push_back(movie_focus_point(m.focus_keys, focus_points, t0 + (t1 - t0) * i / samples, vt, &blur));
-            }
-        }
-        if (m.independent_tracks) {
-            for (auto* track : {&m.look_keys, &m.focus_keys}) {
-                const auto targets = movie_target_points(state, *track);
-                pts.insert(pts.end(), targets.begin(), targets.end());
-            }
         }
     }
     // Framed in the part of the viewport the Movie window leaves free (the picture is shifted there, see movie_frame_guide_shift),
@@ -8696,104 +8762,6 @@ static void draw_movie_play_bar(ApplicationState* state) {
     ImGui::PopStyleVar();
 }
 
-// What the path of the camera depends on, apart from the trajectory itself
-static uint64_t movie_path_signature(const ApplicationState* state) {
-    const auto& m = state->movie;
-    uint64_t h = md_hash64(m.keyframes, md_array_size(m.keyframes) * sizeof(CameraKeyframe), 1);
-    const double scalars[] = {
-        (double)m.loop, (double)m.duration, (double)m.traj_begin, (double)m.traj_end, m.start_frame, m.end_frame,
-        (double)run_num_frames(state), (double)md_bitfield_popcount(&m.follow_mask),
-    };
-    h = md_hash64_combine(h, md_hash64(scalars, sizeof(scalars), 2));
-    h = md_hash64_combine(h, md_bitfield_hash64(&m.follow_mask, 3));
-    h = md_hash64_combine(h, md_hash64(&state->mold.unitcell_transform, sizeof(state->mold.unitcell_transform), 4));
-    return h;
-}
-
-// Makes the path of the camera for keys that follow a target or an atom: at times along the movie, where the target
-// is at the trajectory frame of that time. A few samples each call so that the interface keeps going.
-static void movie_path_update(ApplicationState* state) {
-    auto& m = state->movie;
-    const size_t n = md_array_size(m.keyframes);
-    const bool atoms = movie_keys_track_atoms(m.keyframes, n);
-    const bool center = movie_keys_follow(m.keyframes, n) && !md_bitfield_empty(&m.follow_mask);
-    const size_t num_atoms = state->mold.sys.atom.count;
-    if (n < 2 || (!atoms && !center) || run_num_frames(state) == 0 || num_atoms == 0) return;
-
-    const uint64_t sig = movie_path_signature(state);
-    auto& b = m.path_build;
-    if (b.signature != sig || b.num_keys != (int)n) {
-        if (m.path_shown.signature == sig && m.path_shown.complete) return;
-        const int samples = CLAMP((int)n * 24, 64, 300);
-        b = {};
-        b.signature = sig;
-        b.num_keys = (int)n;
-        b.time.resize(samples + 1);
-        b.eye.resize(samples + 1);
-        b.look.resize(samples + 1);
-        b.center.resize(samples + 1);
-        b.atoms.resize((size_t)(samples + 1) * n);
-        const double t0 = m.keyframes[0].time, t1 = m.keyframes[n - 1].time;
-        for (int i = 0; i <= samples; ++i) b.time[i] = t0 + (t1 - t0) * (double)i / (double)samples;
-    }
-    if (b.complete) return;
-
-    const auto begin = std::chrono::steady_clock::now();
-    md_allocator_i* alloc = state->allocator.frame;
-    vec3_t* temp_xyz = (vec3_t*)md_vm_arena_push(alloc, sizeof(vec3_t) * ALIGN_TO(num_atoms, 16));
-    vec4_t* xyzw = center ? (vec4_t*)md_vm_arena_push(alloc, sizeof(vec4_t) * md_bitfield_popcount(&m.follow_mask)) : nullptr;
-    int64_t loaded = -1;
-    md_system_state_t temp_state = {};
-    temp_state.num_atoms = num_atoms;
-    temp_state.xyz = temp_xyz;
-
-    const int total = (int)b.time.size();
-    while (b.done < total) {
-        if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count() > 4.0) break;
-        const int i = b.done;
-        const int64_t frame = (int64_t)(movie_trajectory_frame(state, b.time[i]) + 0.5);
-        if (frame != loaded) {
-            if (!extract_frame(state, frame, &temp_state)) { b.done = total; break; }
-            loaded = frame;
-        }
-
-        vec3_t c = {};
-        bool have_center = false;
-        if (center) {
-            uint64_t first = 0, last = 0;
-            const size_t count = md_bitfield_popcount(&m.follow_mask);
-            if (md_bitfield_get_range(&first, &last, &m.follow_mask) && last < num_atoms) {
-                md_util_system_extract_xyzw_from_mask(xyzw, &m.follow_mask, &state->mold.sys, &temp_state);
-                vec3_t com = vec3_zero();
-                md_util_deperiodize_self_vec4(xyzw, count, &temp_state.unitcell, &com);
-                c = mat4_mul_vec3(state->mold.unitcell_transform, com, 1.0f);
-                have_center = true;
-            }
-        }
-        b.center[i] = c;
-
-        vec3_t* row = &b.atoms[(size_t)i * n];
-        for (size_t k = 0; k < n; ++k) {
-            row[k] = m.keyframes[k].follow_center;
-            const int32_t atom = m.keyframes[k].follow_atom;
-            if (m.keyframes[k].follow && atom >= 0 && (size_t)atom < num_atoms) {
-                row[k] = mat4_mul_vec3(state->mold.unitcell_transform, temp_xyz[atom], 1.0f);
-            }
-        }
-
-        ViewTransform vt;
-        float fov_y;
-        camera_keyframes_evaluate(&vt, &fov_y, m.keyframes, n, b.time[i], m.loop, have_center ? &c : nullptr, atoms ? row : nullptr);
-        b.eye[i] = vt.position;
-        b.look[i] = camera_get_look_at(vt);
-        b.done += 1;
-    }
-    if (b.done >= total) {
-        b.complete = true;
-        m.path_shown = b;
-    }
-}
-
 // The camera space (where the keys are) to the pixels of the viewport, for what is drawn over the viewport with the draw list
 struct MoviePathView {
     mat4_t mvp = {};
@@ -8887,188 +8855,13 @@ static void movie_path_frustum(const MoviePathView& V, ImDrawList* dl, const Vie
     line(p[3], roof);
 }
 
-// The camera's path in the viewport, drawn over it: the path of the eye (blue) and of what it looks at (yellow), brighter ahead of
-// the preview time than behind it, with ticks at round times and chevrons that show the direction. Ticks that are close together
-// are where the camera is slow. Each key has a handle on the eye and one on what it looks at, with its number and name: click one to
-// go to the key, drag it to edit the key (the eye moves and the camera keeps looking at the same point, or the other way round; with
-// Ctrl both move). Ctrl + click on the path adds a key there. The camera at the preview time is green, with the line it looks along.
-static void movie_draw_independent_paths(ApplicationState* state, ImDrawList* dl) {
-    auto& m = state->movie;
-    const size_t n = md_array_size(m.keyframes);
-    if (n == 0) return;
-    MoviePathView view;
-    movie_path_view(state, &view);
-    const auto look = movie_target_points(state, m.look_keys);
-    const auto focus = movie_target_points(state, m.focus_keys);
-    const double duration = movie_duration(state);
-    std::vector<vec3_t> path[3];
-    auto pose = [&](double time, ViewTransform* camera) {
-        float fov;
-        movie_camera_evaluate(state, time, m.keyframes, n, nullptr, camera, &fov, &look);
-    };
-    for (int i = 0; i <= 160; ++i) {
-        const double time = duration * i / 160.0;
-        ViewTransform camera;
-        pose(time, &camera);
-        path[0].push_back(camera.position);
-        path[1].push_back(camera_get_look_at(camera));
-        float blur;
-        path[2].push_back(m.focus_keys.empty() ? camera_get_look_at(camera) :
-            movie_focus_point(m.focus_keys, focus, time, camera, &blur));
-    }
-    const ImU32 colors[] = {IM_COL32(70, 155, 255, 255), IM_COL32(255, 220, 65, 255), IM_COL32(255, 90, 220, 255)};
-    const auto& io = ImGui::GetIO();
-    const bool over = movie_viewport_hovered();
-    std::vector<vec2_t> screen;
-    std::vector<char> valid;
-    for (int track = 0; track < 3; ++track) {
-        for (size_t i = 1; i < path[track].size(); ++i) {
-            ImVec2 a, b;
-            if (view.segment(path[track][i - 1], path[track][i], &a, &b)) dl->AddLine(a, b, colors[track], track == m.path_track ? 3.0f : 1.5f);
-        }
-        if (track == m.path_track) for (vec3_t point : path[track]) {
-            ImVec2 p = {};
-            bool ok = view.point(point, &p);
-            screen.push_back(vec2_set(p.x, p.y));
-            valid.push_back(ok);
-        }
-    }
-    const double tick_step = camera_tick_step(duration, 30);
-    if (tick_step > 0) for (double time = 0; time <= duration; time += tick_step) {
-        ViewTransform camera;
-        pose(time, &camera);
-        ImVec2 a, b;
-        if ((m.path_options & 2) && view.segment(camera.position, camera_get_look_at(camera), &a, &b))
-            dl->AddLine(a, b, IM_COL32(255, 220, 65, 70), 1);
-        if ((m.path_options & 1) && view.point(camera.position, &a)) {
-            dl->AddCircleFilled(a, 2.5f, colors[0]);
-            char text[32];
-            snprintf(text, sizeof(text), "%.0f s", time);
-            dl->AddText(ImVec2(a.x + 4, a.y + 4), colors[0], text);
-        }
-    }
-    int fw, fh;
-    movie_frame_size(state, &fw, &fh);
-    const float aspect = fh > 0 ? (float)fw / fh : 1;
-    if (m.path_options & 4) for (size_t i = 0; i < n; ++i) {
-        ViewTransform camera;
-        float fov;
-        movie_camera_evaluate(state, m.keyframes[i].time, m.keyframes, n, nullptr, &camera, &fov, &look);
-        movie_path_frustum(view, dl, camera, fov, aspect, camera.distance * 0.25f, IM_COL32(255, 255, 255, 180), 1);
-    }
-    auto& drag = m.target_drag;
-    int hovered = -1;
-    auto& target_keys = m.path_track == 1 ? m.look_keys : m.focus_keys;
-    const size_t count = m.path_track == 0 ? n : target_keys.size();
-    auto handle = [&](int index) {
-        if (m.path_track == 0) return m.keyframes[index].transform.position;
-        ViewTransform camera;
-        pose(target_keys[index].time, &camera);
-        if (m.path_track == 1) return look[index];
-        const auto& key = target_keys[index];
-        if (key.mode == MovieTargetMode::LookAt) return camera_get_look_at(camera);
-        if (key.mode == MovieTargetMode::Distance) return camera.position + camera.orientation * vec3_t{0, 0, -key.distance};
-        return focus[index];
-    };
-    for (int i = 0; i < (int)count; ++i) {
-        ImVec2 p;
-        if (!view.point(handle(i), &p)) continue;
-        dl->AddCircleFilled(p, 6.0f, colors[m.path_track]);
-        char label[32];
-        snprintf(label, sizeof(label), "%c%d", m.path_track == 0 ? 'C' : m.path_track == 1 ? 'L' : 'F', i + 1);
-        dl->AddText(ImVec2(p.x + 9, p.y - 8), colors[m.path_track], label);
-        if (over && !drag.active && ImLengthSqr(io.MousePos - p) < 144.0f) hovered = i;
-    }
-    if (hovered >= 0) {
-        m.path_hot = true;
-        ImGui::SetTooltip("Click: go to key. Drag: move this track only.\nDragging a tracked target makes this key a fixed point. Esc cancels.");
-        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            drag = {};
-            drag.active = true;
-            drag.track = m.path_track;
-            drag.key = hovered;
-            drag.start = drag.plane = handle(hovered);
-            drag.normal = state->view.camera.orientation * vec3_t{0, 0, -1};
-            vec3_t origin, dir, hit;
-            view.ray(io.MousePos, &origin, &dir);
-            if (ray_plane_hit(origin, dir, drag.plane, drag.normal, &hit)) drag.grab = hit - drag.plane;
-        }
-    }
-    if (drag.active) {
-        m.path_hot = true;
-        if (drag.track != m.path_track || drag.key >= (int)count) drag.active = false;
-        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            // Edits are applied only when the drag is released.
-            drag.active = false;
-        } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            if (ImLengthSqr(io.MouseDelta) > 0) drag.moved = true;
-            vec3_t origin, dir, hit;
-            view.ray(io.MousePos, &origin, &dir);
-            if (ray_plane_hit(origin, dir, drag.plane, drag.normal, &hit)) {
-                ImVec2 p;
-                if (view.point(hit - drag.grab, &p)) dl->AddCircle(p, 10, IM_COL32_WHITE, 0, 2);
-            }
-        } else {
-            if (drag.moved) {
-                vec3_t origin, dir, hit;
-                view.ray(io.MousePos, &origin, &dir);
-                if (ray_plane_hit(origin, dir, drag.plane, drag.normal, &hit)) {
-                    if (m.path_track == 0) m.keyframes[drag.key].transform.position = hit - drag.grab;
-                    else {
-                        auto& key = target_keys[drag.key];
-                        key.point = hit - drag.grab;
-                        key.mode = MovieTargetMode::Point;
-                        key.atoms.clear();
-                    }
-                }
-            } else {
-                m.playhead = (float)(m.path_track == 0 ? m.keyframes[drag.key].time : target_keys[drag.key].time);
-                movie_apply_time(state, m.playhead, true);
-            }
-            drag.active = false;
-            movie_apply_time(state, m.playhead, true);
-        }
-    }
-    if (over && io.KeyCtrl && hovered < 0 && !drag.active) {
-        int segment;
-        float u;
-        if (polyline_nearest(screen, valid, vec2_set(io.MousePos.x, io.MousePos.y), &segment, &u) < 10.0f && segment >= 0) {
-            m.path_hot = true;
-            const double time = movie_snap_time(state, duration * (segment + u) / 160.0);
-            ImGui::SetTooltip("Ctrl + click: add a key on the selected path at %.2f s", time);
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                ViewTransform camera;
-                float fov;
-                movie_camera_evaluate(state, time, m.keyframes, n, nullptr, &camera, &fov);
-                if (m.path_track == 0) {
-                    CameraKeyframe key;
-                    key.time = time;
-                    key.transform = camera;
-                    key.fov_y = fov;
-                    key.roll = camera_roll(camera, *movie_up_vector(state));
-                    movie_insert_key(state, key, false);
-                } else {
-                    MovieTargetKey key;
-                    key.time = time;
-                    key.point = path[m.path_track][segment] * (1 - u) + path[m.path_track][segment + 1] * u;
-                    if (m.path_track == 2 && !m.focus_keys.empty()) movie_focus_evaluate(m.focus_keys, focus, time, camera, &key.blur);
-                    movie_target_insert(target_keys, key);
-                }
-                m.playhead = (float)time;
-            }
-        }
-    }
-    ViewTransform camera;
-    pose(m.playhead, &camera);
-    ImVec2 a, b;
-    if (view.segment(camera.position, camera_get_look_at(camera), &a, &b)) dl->AddLine(a, b, IM_COL32(80, 255, 100, 220), 3);
-    if (!m.focus_keys.empty()) {
-        float blur;
-        vec3_t point = movie_focus_point(m.focus_keys, focus, m.playhead, camera, &blur);
-        if (view.point(point, &a)) dl->AddCircle(a, 12, colors[2], 0, 3);
-    }
-}
-
+// The camera's paths in the viewport, drawn over it: the path of the eye (blue), of what it looks at (yellow) and of what is sharp
+// (magenta, when a key sets the focus), brighter ahead of the preview time than behind it, with ticks at round times and chevrons
+// that show the direction. Ticks that are close together are where the camera is slow. Each key has a handle on the eye, one on what
+// it looks at and, when it sets the focus, one on what is sharp, with its number and name: click one to go to the key, drag it to
+// edit that part of the key (the others stay; with Ctrl the key moves as a whole). Ctrl + click on a path adds a key there.
+// The camera at the preview time is green, with the line it looks along. Where a key tracks atoms the paths are made with the atoms
+// where they are at the trajectory frame shown.
 static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     auto& m = state->movie;
     auto& d = m.path_drag;
@@ -9078,12 +8871,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     const bool shown = m.show_path && n > 0 && m.show_window && (movie_scene_view(state) || (m.path_options & 16)) && m.state != MovieRecordingState::Recording && str_empty(state->screenshot.path_to_file);
     if (!shown) {
         d.active = false;
-        m.target_drag.active = false;
         m.lane_hover_key = -1;
-        return;
-    }
-    if (m.independent_tracks) {
-        movie_draw_independent_paths(state, dl);
         return;
     }
 
@@ -9092,11 +8880,18 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     const ImGuiIO& io = ImGui::GetIO();
     const ImVec2 mouse = io.MousePos;
     const bool over = movie_viewport_hovered() && ImGui::IsMousePosValid(&mouse);
-    const bool picking = m.look_pick_key >= 0;
+    const bool picking = m.look_pick_key >= 0 || m.focus_pick_key >= 0;
     const float fs = ImGui::GetFontSize();
     const float handle_r = 9.0f;
     CameraKeyframe* keys = m.keyframes;
-    auto handle_world = [&](int i, int kind) { return kind == 0 ? keys[i].transform.position : camera_get_look_at(keys[i].transform); };
+    const MovieResolved R = movie_resolve(state, keys, n);
+    auto focus_world = [&](int i) {
+        const CameraKeyframe& k = keys[i];
+        if (k.focus_target == FocusTarget::LookAt) return R.look[(size_t)i];
+        if (k.focus_target == FocusTarget::Distance) return k.transform.position + k.transform.orientation * vec3_t{0, 0, -k.focus_distance};
+        return R.focus[(size_t)i];
+    };
+    auto handle_world = [&](int i, int kind) { return kind == 0 ? keys[i].transform.position : kind == 1 ? R.look[(size_t)i] : focus_world(i); };
     if (d.active && d.key >= (int)n) d.active = false;
 
     // ## Handles: hover, click and drag
@@ -9104,7 +8899,8 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     if (over && !d.active && !picking) {
         float best = (handle_r + 4.0f) * (handle_r + 4.0f);
         for (int i = 0; i < (int)n; ++i) {
-            for (int kind = 0; kind < 2; ++kind) {
+            for (int kind = 0; kind < 3; ++kind) {
+                if (kind == 2 && !keys[i].focus_on) continue;
                 ImVec2 p;
                 if (!V.point(handle_world(i, kind), &p)) continue;
                 const float dx = p.x - mouse.x, dy = p.y - mouse.y;
@@ -9145,7 +8941,14 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
                     CameraKeyframe k = d.start;
                     if (io.KeyCtrl)         camera_key_translate(&k, pos - d.plane_point);
                     else if (d.kind == 0)   camera_key_set_eye(&k, pos);
-                    else                    camera_key_set_look(&k, pos);
+                    else if (d.kind == 1) {
+                        // A tracked look-at that is dragged becomes the fixed point it is dropped on
+                        if (camera_key_set_look(&k, pos)) k.look_set = 0;
+                    } else {
+                        k.focus_target = FocusTarget::Point;
+                        k.focus_set = 0;
+                        k.focus_point = pos;
+                    }
                     keys[d.key] = k;
                 }
             }
@@ -9160,44 +8963,41 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     }
     m.path_hover_key = d.active ? d.key : hover_key;
 
-    // ## The path itself
-    std::vector<CameraKeyframe> sorted(keys, keys + n);
-    std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
-    const bool following = n >= 2 && (movie_keys_track_atoms(sorted.data(), n) || (movie_keys_follow(sorted.data(), n) && !md_bitfield_empty(&m.follow_mask)));
-    if (following) movie_path_update(state);
-
-    // With keys that follow something, where the target takes the camera through the trajectory. An older path stays until the new one is done.
-    const auto& sp = m.path_shown.complete && m.path_shown.num_keys == (int)n ? m.path_shown : m.path_build;
-    CameraPathSamples path;
-    if (following) {
-        const int count = sp.complete ? (int)sp.time.size() : sp.done;
-        path.time.assign(sp.time.begin(), sp.time.begin() + count);
-        path.eye.assign(sp.eye.begin(), sp.eye.begin() + count);
-        path.look.assign(sp.look.begin(), sp.look.begin() + count);
-    }
-    if (path.time.size() < 2) {
-        path = {};
-        const double t0 = sorted.front().time, t1 = sorted.back().time;
-        if (n >= 2 && t1 > t0) {
-            const int samples = CLAMP((int)n * 48, 64, 1024);
+    // ## The paths themselves, made again when the keys or what they track change
+    const std::vector<CameraKeyframe>& sorted = R.keys;
+    const bool have_focus = movie_focus_keys_exist(sorted.data(), n);
+    static uint64_t path_signature = 0;
+    static CameraPathSamples path;
+    static std::vector<vec3_t> path_focus;
+    {
+        uint64_t h = md_hash64(sorted.data(), n * sizeof(CameraKeyframe), 21);
+        h = md_hash64_combine(h, md_hash64(R.look.data(), n * sizeof(vec3_t), 22));
+        h = md_hash64_combine(h, md_hash64(R.focus.data(), n * sizeof(vec3_t), 23));
+        const double scalars[] = {(double)m.up_axis, (double)m.keep_upright, (double)movie_default_blur(state)};
+        h = md_hash64_combine(h, md_hash64(scalars, sizeof(scalars), 24));
+        if (h != path_signature || path.time.empty()) {
+            path_signature = h;
+            path = {};
+            path_focus.clear();
+            const double t0 = sorted.front().time, t1 = sorted.back().time;
+            const int samples = n >= 2 && t1 > t0 ? CLAMP((int)n * 24, 64, 400) : 0;
             for (int i = 0; i <= samples; ++i) {
                 ViewTransform vt;
                 float fov_y;
-                const double t = t0 + (t1 - t0) * (double)i / (double)samples;
-                camera_keyframes_evaluate(&vt, &fov_y, sorted.data(), n, t, m.loop);
+                const double t = samples > 0 ? t0 + (t1 - t0) * (double)i / (double)samples : t0;
+                movie_pose(state, R, t, &vt, &fov_y);
                 path.time.push_back(t);
                 path.eye.push_back(vt.position);
                 path.look.push_back(camera_get_look_at(vt));
+                float blur;
+                path_focus.push_back(have_focus ? movie_focus_evaluate(state, R, t, vt, &blur) : path.look.back());
             }
-        } else {
-            path.time.push_back(t0);
-            path.eye.push_back(sorted.front().transform.position);
-            path.look.push_back(camera_get_look_at(sorted.front().transform));
         }
     }
 
     const ImU32 col_eye  = IM_COL32(90, 200, 255, 255);
     const ImU32 col_look = IM_COL32(255, 200, 60, 255);
+    const ImU32 col_focus = IM_COL32(255, 90, 220, 255);
     const ImU32 col_head = IM_COL32(80, 255, 120, 255);
     const ImU32 col_dark = IM_COL32(15, 15, 20, 255);
     const ImU32 col_spin = IM_COL32(200, 130, 250, 255);
@@ -9211,12 +9011,13 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
     };
 
     const size_t samples = path.time.size();
-    std::vector<vec2_t> screen_eye(samples), screen_look(samples);
-    std::vector<char> ok_eye(samples, 0), ok_look(samples, 0);
+    std::vector<vec2_t> screen_eye(samples), screen_look(samples), screen_focus(samples);
+    std::vector<char> ok_eye(samples, 0), ok_look(samples, 0), ok_focus(samples, 0);
     for (size_t i = 0; i < samples; ++i) {
         ImVec2 p;
         if (V.point(path.eye[i], &p))  { screen_eye[i] = vec2_set(p.x, p.y);  ok_eye[i] = 1; }
         if (V.point(path.look[i], &p)) { screen_look[i] = vec2_set(p.x, p.y); ok_look[i] = 1; }
+        if (have_focus && V.point(path_focus[i], &p)) { screen_focus[i] = vec2_set(p.x, p.y); ok_focus[i] = 1; }
     }
 
     // Round times along the path
@@ -9237,7 +9038,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         }
     }
 
-    // The two paths, dimmer before the preview time
+    // The paths, dimmer before the preview time
     auto draw_path = [&](const std::vector<vec3_t>& pts, ImU32 col, float thickness) {
         for (size_t i = 1; i < samples; ++i) {
             ImVec2 a, b;
@@ -9246,6 +9047,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
             dl->AddLine(a, b, mid < playhead ? movie_path_fade(col, 0.4f) : col, thickness);
         }
     };
+    if (have_focus) draw_path(path_focus, col_focus, 2.0f);
     draw_path(path.look, col_look, 2.0f);
     draw_path(path.eye, col_eye, 3.0f);
 
@@ -9350,16 +9152,16 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         }
     }
 
-    // The keys: a handle on the eye and one on what it looks at, joined, with the number and the name
+    // The keys: a handle on the eye and one on what it looks at, joined, with the number and the name, and one on what is sharp
     for (int i = 0; i < (int)n; ++i) {
         const CameraKeyframe& k = keys[i];
         const bool at_head = fabs(k.time - playhead) < 1.0e-3;
         const bool hot = i == m.path_hover_key || i == m.lane_hover_key;
         ImU32 fill = IM_COL32(235, 235, 235, 255);
-        if (k.follow) fill = k.follow_atom >= 0 ? IM_COL32(110, 150, 255, 255) : IM_COL32(50, 190, 175, 255);
+        if (k.look_set != 0) fill = IM_COL32(110, 150, 255, 255);
         if (at_head) fill = IM_COL32(255, 140, 50, 255);
 
-        const vec3_t eye = k.transform.position, look = camera_get_look_at(k.transform);
+        const vec3_t eye = k.transform.position, look = R.look[(size_t)i];
         ImVec2 a, b;
         if (V.segment(eye, look, &a, &b)) dl->AddLine(a, b, IM_COL32(255, 255, 255, hot ? 200 : 90), hot ? 2.0f : 1.0f);
 
@@ -9384,28 +9186,25 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
             dl->AddLine(ImVec2(pl.x, pl.y - r), ImVec2(pl.x, pl.y + r), fill, 1.5f);
             label(ImVec2(pl.x + r + 3.0f, pl.y - fs - 2.0f), num, col_look);
         }
+        if (k.focus_on) {
+            // What is sharp from here on: a diamond, joined to the eye; at the look-at point when it is the look-at that is sharp
+            ImVec2 pf;
+            if (V.point(focus_world(i), &pf)) {
+                const float r = handle_r - 1.0f;
+                if (V.point(eye, &pe)) dl->AddLine(pe, pf, movie_path_fade(col_focus, hot ? 0.8f : 0.3f), 1.0f);
+                if (hot) dl->AddCircle(pf, r + 5.0f, IM_COL32(255, 235, 90, 255), 0, 2.5f);
+                const ImVec2 dia[4] = {ImVec2(pf.x, pf.y - r), ImVec2(pf.x + r, pf.y), ImVec2(pf.x, pf.y + r), ImVec2(pf.x - r, pf.y)};
+                dl->AddConvexPolyFilled(dia, 4, IM_COL32(20, 20, 20, 160));
+                dl->AddPolyline(dia, 4, col_focus, ImDrawFlags_Closed, 2.5f);
+                label(ImVec2(pf.x + r + 3.0f, pf.y + 2.0f), num, col_focus);
+            }
+        }
     }
 
     // The camera at the preview time: where it is, and where it looks
     ViewTransform head;
     float head_fov;
-    {
-        int j = -1;
-        if (following && sp.done > 0) {
-            double best = 1.0e30;
-            for (int i = 0; i < (sp.complete ? (int)sp.time.size() : sp.done); ++i) {
-                const double dist = fabs(sp.time[i] - playhead);
-                if (dist < best) { best = dist; j = i; }
-            }
-        }
-        if (j >= 0) {
-            const bool atoms = movie_keys_track_atoms(sorted.data(), n);
-            const bool center = movie_keys_follow(sorted.data(), n) && !md_bitfield_empty(&m.follow_mask);
-            camera_keyframes_evaluate(&head, &head_fov, sorted.data(), n, playhead, m.loop, center ? &sp.center[j] : nullptr, atoms ? &sp.atoms[(size_t)j * n] : nullptr, movie_upright(state));
-        } else {
-            camera_keyframes_evaluate(&head, &head_fov, sorted.data(), n, playhead, m.loop, nullptr, nullptr, movie_upright(state));
-        }
-    }
+    movie_pose(state, R, playhead, &head, &head_fov);
     {
         const vec3_t eye = head.position, look = camera_get_look_at(head);
         movie_path_frustum(V, dl, head, head_fov, aspect, head.distance * 0.18f, col_head, 2.5f);
@@ -9438,9 +9237,8 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
             label(ImVec2(pl.x + 17.0f, pl.y - fs * 0.5f - 14.0f), "looks at", col_head);
         }
 
-        if (state->visuals.dof.enabled) {
-            // Where depth of field is sharp: a frame the size of the view at that depth, and a cross where the camera looks
-            const ImU32 col_focus = IM_COL32(255, 90, 220, 255);
+        if (have_focus || state->visuals.dof.enabled) {
+            // Where it is sharp: a frame the size of the view at that depth, and a cross where the focus is
             const float depth = dof_focus_depth(state, head);
             const vec3_t fwd   = head.orientation * vec3_t{0, 0, -1};
             const vec3_t right = head.orientation * vec3_t{1, 0, 0};
@@ -9460,24 +9258,24 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         }
     }
 
-    // ## Ctrl + click on the path adds a key there
+    // ## Ctrl + click on a path adds a key there
     double insert_at = -1.0;
+    int insert_path = 0;
     if (over && io.KeyCtrl && hover_key < 0 && !d.active && !picking) {
-        int seg_e = -1, seg_l = -1;
-        float u_e = 0.0f, u_l = 0.0f;
+        int seg[3] = {-1, -1, -1};
+        float u[3] = {}, dist[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
         const vec2_t q = vec2_set(mouse.x, mouse.y);
-        const float de = polyline_nearest(screen_eye, ok_eye, q, &seg_e, &u_e);
-        const float dl_ = polyline_nearest(screen_look, ok_look, q, &seg_l, &u_l);
-        const bool on_eye = de <= dl_;
-        const float dist = on_eye ? de : dl_;
-        const int seg = on_eye ? seg_e : seg_l;
-        const float u = on_eye ? u_e : u_l;
-        if (dist < 10.0f && seg >= 0) {
-            const double t = movie_snap_time(state, path.time[(size_t)seg] + (path.time[(size_t)seg + 1] - path.time[(size_t)seg]) * (double)u);
-            vec3_t e, l;
-            camera_path_at(path, t, &e, &l);
+        dist[0] = polyline_nearest(screen_eye, ok_eye, q, &seg[0], &u[0]);
+        dist[1] = polyline_nearest(screen_look, ok_look, q, &seg[1], &u[1]);
+        if (have_focus) dist[2] = polyline_nearest(screen_focus, ok_focus, q, &seg[2], &u[2]);
+        int best = 0;
+        for (int k = 1; k < 3; ++k) if (dist[k] < dist[best]) best = k;
+        if (dist[best] < 10.0f && seg[best] >= 0) {
+            const double t = movie_snap_time(state, path.time[(size_t)seg[best]] + (path.time[(size_t)seg[best] + 1] - path.time[(size_t)seg[best]]) * (double)u[best]);
+            const std::vector<vec3_t>& pts = best == 0 ? path.eye : best == 1 ? path.look : path_focus;
+            const vec3_t at = pts[(size_t)seg[best]] + (pts[(size_t)seg[best] + 1] - pts[(size_t)seg[best]]) * u[best];
             ImVec2 p;
-            if (V.point(on_eye ? e : l, &p)) {
+            if (V.point(at, &p)) {
                 m.path_hot = true;
                 dl->AddCircle(p, 11.0f, IM_COL32(255, 255, 255, 255), 0, 2.5f);
                 dl->AddLine(ImVec2(p.x - 6.0f, p.y), ImVec2(p.x + 6.0f, p.y), IM_COL32(255, 255, 255, 255), 2.0f);
@@ -9485,7 +9283,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
                 char buf[48];
                 snprintf(buf, sizeof(buf), "add a key at %.2f s", t);
                 label(ImVec2(p.x + 15.0f, p.y - fs * 0.5f), buf, IM_COL32(255, 255, 255, 255));
-                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) insert_at = t;
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { insert_at = t; insert_path = best; }
             }
         }
     }
@@ -9494,14 +9292,28 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         const CameraKeyframe& k = keys[hover_key];
         ImGui::SetTooltip("Keyframe %s at %.2f s, field of view %.1f deg\n%s\nClick to go to it. Ctrl + drag moves the whole key. Esc cancels a drag.",
             camera_key_label(k, hover_key).c_str(), k.time, k.fov_y * MOVIE_RAD_TO_DEG,
-            hover_kind == 0 ? "Drag to move the eye: the camera keeps looking at the same point." : "Drag to move what it looks at: the eye stays.");
+            hover_kind == 0 ? "Drag to move the eye: the camera keeps looking at the same point." :
+            hover_kind == 1 ? "Drag to move what it looks at: the eye stays. A tracked look-at becomes a fixed point." :
+            "Drag to move what is sharp from this key on. It becomes a fixed point.");
     }
 
     if (insert_at >= 0.0) {
         bool taken = false;
         for (size_t i = 0; i < n; ++i) taken |= fabs(keys[i].time - insert_at) < 1.0e-3;
         if (!taken) {
-            movie_insert_key(state, camera_key_on_path(sorted, insert_at, m.loop, movie_upright(state)), false);
+            ViewTransform vt;
+            float fov_y, blur = 0.0f;
+            movie_pose(state, R, insert_at, &vt, &fov_y);
+            CameraKeyframe key = camera_key_on_path(vt, fov_y, sorted, insert_at, movie_upright(state));
+            if (insert_path == 2) {
+                // On the path of what is sharp: the key sets the focus where the path is, so that it can be dragged from there
+                key.focus_on = true;
+                key.focus_target = FocusTarget::Point;
+                key.focus_point = movie_focus_evaluate(state, R, insert_at, vt, &blur);
+                key.focus_blur = blur;
+                key.focus_transition = 0.0f;
+            }
+            movie_insert_key(state, key, false);
             m.playhead = (float)insert_at;
         }
     }
@@ -9978,7 +9790,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 
     constexpr int N = 200;
     float xs[N], dist[N], fov[N];
-    const auto look_points = m.independent_tracks ? movie_target_points(data, m.look_keys) : std::vector<vec3_t>{};
+    const MovieResolved resolved = n > 0 ? movie_resolve(data, m.keyframes, n) : MovieResolved{};
     char distance_unit[32], distance_axis[64];
     const double distance_scale = display_units::factor_print(distance_unit, sizeof(distance_unit), md_unit_angstrom());
     snprintf(distance_axis, sizeof(distance_axis), "Distance (%s)", distance_unit);
@@ -9988,7 +9800,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             ViewTransform vt;
             float fov_y;
             const double t = xs[i];
-            movie_camera_evaluate(data, t, sorted.data(), n, nullptr, &vt, &fov_y, &look_points);
+            movie_pose(data, resolved, t, &vt, &fov_y);
             dist[i] = (float)(vt.distance * distance_scale);
             fov[i] = fov_y * MOVIE_RAD_TO_DEG;
         } else {
@@ -10131,7 +9943,8 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             ImPlot::PushStyleColor(ImPlotCol_Line, colors[track]);
             ImPlot::PlotLine(titles[track], xs, track == 0 ? frm : track == 1 ? dist : fov, N);
             ImPlot::PopStyleColor();
-            if (m.independent_tracks && track == 1) continue;
+            // The distance is what the eye and the look-at make of it: it has no keys of its own
+            if (track == 1) continue;
 
             KeyShift lane;
             lane.lane = track == 0 ? KeyLane::Frame : track == 1 ? KeyLane::Distance : KeyLane::Fov;
@@ -10166,7 +9979,7 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
                     if (k.time < x0 || k.time > x1) continue;
                     for (int ci = 0; ci < num_curves; ++ci) {
                         const int track = curves[ci];
-                        if (m.independent_tracks && track == 1) continue;
+                        if (track == 1) continue;
                         if (track == 0 && !k.use_frame) continue;
                         const double ky = track == 0 ? k.frame : track == 1 ? k.transform.distance * distance_scale : k.fov_y * MOVIE_RAD_TO_DEG;
                         const float py = ImPlot::PlotToPixels(k.time, ky, ImAxis_X1, ci == 0 ? ImAxis_Y1 : ImAxis_Y2).y;
@@ -10231,7 +10044,11 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
             if (!taken) {
                 CameraKeyframe key;
                 if (md_array_size(m.keyframes) > 0) {
-                    key = camera_key_on_path(sorted, camera_edit.insert, m.loop, movie_upright(data));
+                    const MovieResolved r = movie_resolve(data, m.keyframes, md_array_size(m.keyframes));
+                    ViewTransform pose;
+                    float fov_y;
+                    movie_pose(data, r, camera_edit.insert, &pose, &fov_y);
+                    key = camera_key_on_path(pose, fov_y, r.keys, camera_edit.insert, movie_upright(data));
                 } else {
                     key = movie_current_key(data);
                     key.time = camera_edit.insert;
@@ -10254,14 +10071,36 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 // The camera on one lane: its keys (numbered, with their names), where the look-at point follows the target or an atom, where
 // the camera spins, and the keys that pin a trajectory frame. Drag a key sideways to change when, click it to go there, right
 // click for its name and removal. A double click on an empty place adds a key on the path, without moving the camera.
+// What a key's look-at is ("3 atoms"), and what its focus is ("sharp: look-at, blur 2 %"), for the lane and the key table
+static std::string movie_set_label(const ApplicationState* state, uint32_t id) {
+    const MovieAtomSet* set = movie_atoms_find(state->movie.atom_sets, id);
+    char buf[48];
+    if (!set || set->atoms.empty()) return "atoms";
+    if (set->atoms.size() == 1) snprintf(buf, sizeof(buf), "atom %u", set->atoms[0] + 1);
+    else snprintf(buf, sizeof(buf), "%zu atoms", set->atoms.size());
+    return buf;
+}
+
+static std::string movie_focus_label(const ApplicationState* state, const CameraKeyframe& key) {
+    char buf[96];
+    switch (key.focus_target) {
+    case FocusTarget::Selection: snprintf(buf, sizeof(buf), "%s", movie_set_label(state, key.focus_set).c_str()); break;
+    case FocusTarget::LookAt:    snprintf(buf, sizeof(buf), "look-at"); break;
+    case FocusTarget::Distance:  snprintf(buf, sizeof(buf), "%.1f A", key.focus_distance); break;
+    default:                     snprintf(buf, sizeof(buf), "point"); break;
+    }
+    std::string out = buf;
+    snprintf(buf, sizeof(buf), ", blur %.1f %%", key.focus_blur);
+    return out + buf;
+}
+
 static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool locked, const std::vector<CameraKeyframe>& sorted, MovieCameraLaneEdit* edit) {
     auto& m = data->movie;
     if (movie_len <= 0.0f) return;
     const size_t n = md_array_size(m.keyframes);
     const ImPlotDragToolFlags drag_flags = ImPlotDragToolFlags_NoFit | (locked ? ImPlotDragToolFlags_NoInputs : 0);
     const ImPlotFlags plot_flags = ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoTitle | ImPlotFlags_NoLegend;
-    static const char* row_labels[4] = {"Camera keys", "Look at", "Spin", "Frame"};
-    static const char* independent_labels[5] = {"Camera position", "Spin", "Frame", "Look-at keys", "Focus keys"};
+    static const char* row_labels[5] = {"Camera keys", "Look at", "Focus", "Spin", "Frame"};
     static const double row_pos[5] = {0.0, 1.0, 2.0, 3.0, 4.0};
     static int menu_key = -1;
     int open_menu = -1;
@@ -10271,8 +10110,8 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
         ImPlot::SetupAxes("Movie time (s)", nullptr, 0, ImPlotAxisFlags_Lock | ImPlotAxisFlags_Invert);
         movie_lane_axes_format();
         ImPlot::SetupAxisLinks(ImAxis_X1, &m.timeline_view_begin, &m.timeline_view_end);
-        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.6, m.independent_tracks ? 4.6 : 3.6, ImPlotCond_Always);
-        ImPlot::SetupAxisTicks(ImAxis_Y1, row_pos, m.independent_tracks ? 5 : 4, m.independent_tracks ? independent_labels : row_labels);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, -0.6, 4.6, ImPlotCond_Always);
+        ImPlot::SetupAxisTicks(ImAxis_Y1, row_pos, 5, row_labels);
         ImPlot::SetupFinish();
         movie_lane_title("Camera");
 
@@ -10290,7 +10129,7 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
             const ImU32 hold_fill = IM_COL32(128, 128, 128, 40), hold_line = IM_COL32(160, 160, 160, 70);
             auto hold_span = [&](double t0, double t1, const char* tip) {
                 if (t1 - t0 <= 1.0e-6) return;
-                const ImVec2 a = px(t0, -0.5), c = px(t1, 3.5);
+                const ImVec2 a = px(t0, -0.5), c = px(t1, 4.5);
                 dl->AddRectFilled(a, c, hold_fill);
                 const float step = ImGui::GetFontSize() * 0.8f;
                 dl->PushClipRect(a, c, true);
@@ -10302,21 +10141,16 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
             hold_span(sorted.back().time, (double)movie_len, "After the last key the camera holds still: add keys here for it to move,\nor shorten the movie (Timing > Movie length)");
         }
         for (const CameraBand& b : camera_bands(sorted)) {
-            if (m.independent_tracks && b.kind != CameraBandKind::Spin) continue;
-            const int row = m.independent_tracks ? 1 : b.kind == CameraBandKind::Spin ? 2 : 1;
+            const int row = b.kind == CameraBandKind::Spin ? 3 : 1;
             ImVec2 a = px(b.begin, (double)row - 0.3), c = px(b.end, (double)row + 0.3);
             if (c.x - a.x < 8.0f) { a.x -= 4.0f; c.x += 4.0f; }
             ImVec4 col(0.2f, 0.75f, 0.7f, 1.0f);
             std::string text, tip;
-            char buf[96];
-            if (b.kind == CameraBandKind::LookAtAtom) {
+            char buf[160];
+            if (b.kind == CameraBandKind::LookAtSet) {
                 col = ImVec4(0.45f, 0.6f, 1.0f, 1.0f);
-                snprintf(buf, sizeof(buf), "atom %d", b.atom + 1);
-                text = buf;
-                snprintf(buf, sizeof(buf), "Looks at atom %d, tracked through the trajectory\nKeys %d to %d, %.2f s to %.2f s", b.atom + 1, b.first + 1, b.last + 1, b.begin, b.end);
-            } else if (b.kind == CameraBandKind::FollowTarget) {
-                text = "follow target";
-                snprintf(buf, sizeof(buf), "Looks at the follow target, which moves with the trajectory\nKeys %d to %d, %.2f s to %.2f s", b.first + 1, b.last + 1, b.begin, b.end);
+                text = movie_set_label(data, b.set);
+                snprintf(buf, sizeof(buf), "Looks at %s, tracked through the trajectory\nKeys %d to %d, %.2f s to %.2f s", text.c_str(), b.first + 1, b.last + 1, b.begin, b.end);
             } else {
                 col = ImVec4(0.75f, 0.45f, 0.95f, 1.0f);
                 snprintf(buf, sizeof(buf), "%+d x", b.turns);
@@ -10332,10 +10166,37 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
             if (plot_hovered && mouse.x >= a.x && mouse.x <= c.x && mouse.y >= a.y && mouse.y <= c.y) band_tip = tip;
         }
 
+        // What is sharp: from each key that sets it to the next one that does, a band (its transition darker)
+        {
+            const ImVec4 col(1.0f, 0.4f, 0.85f, 1.0f);
+            for (size_t i = 0; i < sorted.size(); ++i) {
+                if (!sorted[i].focus_on) continue;
+                double end = (double)movie_len;
+                for (size_t j = i + 1; j < sorted.size(); ++j) {
+                    if (sorted[j].focus_on) { end = sorted[j].time; break; }
+                }
+                ImVec2 a = px(sorted[i].time, 2.0 - 0.3), c = px(MAX(end, sorted[i].time), 2.0 + 0.3);
+                if (c.x - a.x < 8.0f) c.x = a.x + 8.0f;
+                const ImVec2 t = px(MIN(sorted[i].time + (double)sorted[i].focus_transition, end), 2.3);
+                dl->AddRectFilled(a, c, ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.25f)), 3.0f);
+                dl->AddRectFilled(a, ImVec2(MAX(t.x, a.x), c.y), ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.5f)), 3.0f);
+                dl->AddRect(a, c, ImGui::ColorConvertFloat4ToU32(ImVec4(col.x, col.y, col.z, 0.9f)), 3.0f);
+                const std::string text = movie_focus_label(data, sorted[i]);
+                dl->PushClipRect(a, c, true);
+                dl->AddText(ImVec2(a.x + 4.0f, 0.5f * (a.y + c.y) - 0.5f * ImGui::GetFontSize()), IM_COL32(255, 255, 255, 235), text.c_str());
+                dl->PopClipRect();
+                if (plot_hovered && mouse.x >= a.x && mouse.x <= c.x && mouse.y >= a.y && mouse.y <= c.y) {
+                    char tip[200];
+                    snprintf(tip, sizeof(tip), "Key %d sets what is sharp: %s\nChange over %.1f s, then it holds until the next key that sets it", (int)i + 1, text.c_str(), sorted[i].focus_transition);
+                    band_tip = tip;
+                }
+            }
+        }
+
         // The keys that pin a trajectory frame
         for (size_t i = 0; i < sorted.size(); ++i) {
             if (!sorted[i].use_frame) continue;
-            const ImVec2 p = px(sorted[i].time, m.independent_tracks ? 2.0 : 3.0);
+            const ImVec2 p = px(sorted[i].time, 4.0);
             const float r = ImGui::GetFontSize() * 0.4f;
             dl->AddQuadFilled(ImVec2(p.x, p.y - r), ImVec2(p.x + r, p.y), ImVec2(p.x, p.y + r), ImVec2(p.x - r, p.y), IM_COL32(110, 230, 110, 255));
             char buf[32];
@@ -10348,26 +10209,6 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
             }
         }
         ImPlot::PopPlotClipRect();
-
-        if (m.independent_tracks) {
-            for (int track = 0; track < 2; ++track) {
-                auto& keys = track == 0 ? m.look_keys : m.focus_keys;
-                for (int i = 0; i < (int)keys.size(); ++i) {
-                    const ImVec4 color = track == 0 ? ImVec4(1, 0.86f, 0.25f, 1) : ImVec4(1, 0.35f, 0.86f, 1);
-                    bool any_held = false;
-                    const auto point = movie_key_point(data, locked, track == 0 ? KeyKind::Look : KeyKind::Focus, 0,
-                        keys[i].time, 3.0 + track, 18000 + track * 1000 + i, color, 7, KeyShift{}, &any_held);
-                    if (any_held && !locked) movie_apply_time(data, m.playhead, true);
-                    any_hovered |= point.hovered || point.held;
-                    if (point.clicked && !locked && !ImGui::GetIO().KeyCtrl) {
-                        m.playhead = (float)keys[i].time;
-                        movie_apply_time(data, m.playhead, true);
-                    }
-                    if (point.hovered && !point.held) ImGui::SetTooltip("%s key %.2f s\nDrag to change time; Ctrl-click to select with other tracks.\nEdit target/mode in Camera > Independent tracks.",
-                        track == 0 ? "Look-at" : "Focus", keys[i].time);
-                }
-            }
-        }
 
         // The keys, which are dragged sideways only
         for (size_t i = 0; i < n; ++i) {
@@ -10392,12 +10233,9 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
             const double vline = (double)m.playhead;
             movie_lane_box(data, locked, 20, any_hovered, &vline, 1, [&](double x0, double x1, double y0, double y1) {
                 for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
-                    if ((!m.independent_tracks || (y0 <= 0 && y1 >= 0)) && m.keyframes[i].time >= x0 && m.keyframes[i].time <= x1)
+                    if (y0 <= 0 && y1 >= 0 && m.keyframes[i].time >= x0 && m.keyframes[i].time <= x1)
                         m.sel.add(KeyKind::Camera, 0, m.keyframes[i].time);
                 }
-                if (m.independent_tracks) for (int track = 0; track < 2; ++track)
-                    if (y0 <= 3 + track && y1 >= 3 + track) for (const auto& key : track == 0 ? m.look_keys : m.focus_keys)
-                        if (key.time >= x0 && key.time <= x1) m.sel.add(track == 0 ? KeyKind::Look : KeyKind::Focus, 0, key.time);
             });
         }
 
@@ -10405,21 +10243,7 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
         if (!locked && !any_hovered && plot_hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             const auto mouse_point = ImPlot::GetPlotMousePos();
             const double time = movie_snap_time(data, mouse_point.x);
-            if (m.independent_tracks && mouse_point.y >= 2.5 && mouse_point.y <= 4.5) {
-                const bool focus = mouse_point.y >= 3.5;
-                ViewTransform camera = data->view.target;
-                float fov = data->view.camera.fov_y;
-                if (n) movie_camera_evaluate(data, time, m.keyframes, n, nullptr, &camera, &fov);
-                MovieTargetKey key;
-                key.time = time;
-                key.transition = 0;
-                key.point = focus && !m.focus_keys.empty() ?
-                    movie_focus_point(m.focus_keys, movie_target_points(data, m.focus_keys), time, camera, &key.blur) :
-                    camera_get_look_at(camera);
-                movie_target_insert(focus ? m.focus_keys : m.look_keys, key);
-                m.playhead = (float)time;
-                movie_apply_time(data, time, true);
-            } else edit->insert = time;
+            edit->insert = time;
         }
 
         double playhead = (double)m.playhead;
@@ -11514,12 +11338,6 @@ static void draw_movie_timeline_panel(ApplicationState* data) {
         KeyEase common = KeyEase::Smooth;
         bool mixed = false;
         int with_ease = key_selection_ease(m.keyframes, md_array_size(m.keyframes), m.param_keys, m.rep_keys, m.sel, &common, &mixed);
-        if (m.independent_tracks) for (int track = 0; track < 2; ++track) for (const auto& key : track == 0 ? m.look_keys : m.focus_keys) {
-            if (!m.sel.contains(track == 0 ? KeyKind::Look : KeyKind::Focus, 0, key.time)) continue;
-            if (with_ease == 0) common = key.ease;
-            else mixed |= common != key.ease;
-            ++with_ease;
-        }
         if (with_ease > 0) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(fs * 8.0f);
@@ -11978,6 +11796,85 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     }
 }
 
+// What a key looks at: atoms that it tracks through the trajectory, or a fixed point
+static void draw_movie_key_look_popup(ApplicationState* data, int i) {
+    auto& m = data->movie;
+    if (i < 0 || i >= (int)md_array_size(m.keyframes)) return;
+    CameraKeyframe& key = m.keyframes[i];
+    ImGui::TextDisabled("Keyframe %d looks at", i + 1);
+    ImGui::Text("%s", key.look_set != 0 ? movie_set_label(data, key.look_set).c_str() : "a fixed point");
+    ImGui::Separator();
+    const std::vector<uint32_t> selected = movie_selection_atoms(data);
+    char label[64];
+    snprintf(label, sizeof(label), "The selection (%zu atoms)", selected.size());
+    if (ImGui::MenuItem(label, nullptr, false, !selected.empty())) movie_key_look_at_atoms(data, i, selected);
+    ImGui::SetItemTooltip("The centre of the selected atoms, tracked through the trajectory. The eye stays where it is.");
+    if (ImGui::MenuItem("Pick an atom in the viewport")) {
+        m.look_pick_key = i;
+        m.focus_pick_key = -1;
+    }
+    ImGui::SetItemTooltip("Click an atom: it is tracked through the trajectory. Esc cancels.");
+    if (ImGui::MenuItem("The point the view is aimed at")) movie_key_look_at_point(data, i, camera_get_look_at(data->view.target));
+    ImGui::SetItemTooltip("A fixed point: where the current view is looking.");
+    if (ImGui::MenuItem("Stop tracking", nullptr, false, key.look_set != 0)) key.look_set = 0;
+    ImGui::SetItemTooltip("It looks at where it looks now and stays there.");
+}
+
+// What is sharp from a key on. A key that does not set it leaves it as the key before it set it; by default it is what the camera
+// looks at.
+static void draw_movie_key_focus_popup(ApplicationState* data, int i) {
+    auto& m = data->movie;
+    if (i < 0 || i >= (int)md_array_size(m.keyframes)) return;
+    CameraKeyframe& key = m.keyframes[i];
+    ImGui::TextDisabled("Keyframe %d: what is sharp", i + 1);
+    bool on = key.focus_on;
+    if (ImGui::Checkbox("Set the focus on this key", &on)) {
+        if (on) movie_key_focus_begin(data, i);
+        else key.focus_on = false;
+    }
+    ImGui::SetItemTooltip("Off: the focus stays as the key before it set it. Before the first key that sets it, what the camera looks at is sharp.");
+    ImGui::BeginDisabled(!key.focus_on);
+    ImGui::Separator();
+    if (ImGui::Selectable("What the camera looks at", key.focus_target == FocusTarget::LookAt, ImGuiSelectableFlags_NoAutoClosePopups)) key.focus_target = FocusTarget::LookAt;
+    const std::vector<uint32_t> selected = movie_selection_atoms(data);
+    char label[64];
+    snprintf(label, sizeof(label), "The selection (%zu atoms)", selected.size());
+    if (ImGui::Selectable(label, key.focus_target == FocusTarget::Selection, ImGuiSelectableFlags_NoAutoClosePopups | (selected.empty() ? ImGuiSelectableFlags_Disabled : 0))) movie_key_focus_on_atoms(data, i, selected);
+    ImGui::SetItemTooltip("The centre of the selected atoms, tracked through the trajectory.");
+    if (ImGui::Selectable("Pick an atom in the viewport")) {
+        m.focus_pick_key = i;
+        m.look_pick_key = -1;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemTooltip("Click an atom: it is tracked through the trajectory. Esc cancels.");
+    if (ImGui::Selectable("The point the view is aimed at", key.focus_target == FocusTarget::Point, ImGuiSelectableFlags_NoAutoClosePopups)) {
+        key.focus_target = FocusTarget::Point;
+        key.focus_point = camera_get_look_at(data->view.target);
+    }
+    char unit[32];
+    const float scale = (float)display_units::factor_print(unit, sizeof(unit), md_unit_angstrom());
+    float distance = key.focus_distance * scale;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+    char format[48];
+    snprintf(format, sizeof(format), "%%.1f %s", unit);
+    if (ImGui::DragFloat("Distance##focus_distance", &distance, 0.1f * scale, 0.0f, 1.0e4f, format)) {
+        key.focus_distance = MAX(distance / scale, 0.0f);
+        key.focus_target = FocusTarget::Distance;
+    }
+    ImGui::SetItemTooltip("Sharp at a distance from the camera.");
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+    ImGui::DragFloat("Blur##focus_blur", &key.focus_blur, 0.05f, 0.0f, 20.0f, "%.1f %%");
+    ImGui::SetItemTooltip("How blurred what is out of focus is, in percent of the height of the view. 0: everything is sharp.");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+    ImGui::DragFloat("Transition##focus_transition", &key.focus_transition, 0.05f, 0.0f, 60.0f, "%.1f s");
+    ImGui::SetItemTooltip("How long the focus takes to change to this, from the key's time.");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+    int ease = (int)key.focus_ease;
+    if (ImGui::Combo("Ease##focus_ease", &ease, key_ease_str, (int)KeyEase::Count)) key.focus_ease = (KeyEase)ease;
+    ImGui::EndDisabled();
+}
+
 static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, bool locked) {
     auto& m = data->movie;
     if (md_array_size(m.keyframes) == 0) {
@@ -11996,13 +11893,15 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
 
     // Columns can be resized, and the table scrolls sideways when they do not fit
     const float fs = ImGui::GetFontSize();
-    if (ImGui::BeginTable("##keyframes", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX)) {
+    if (ImGui::BeginTable("##keyframes", 11, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollX)) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, fs * 1.8f);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
         ImGui::TableSetupColumn("Time (s)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
         ImGui::TableSetupColumn("Frame", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
         ImGui::TableSetupColumn("FOV (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 5.0f);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 7.5f);
+        ImGui::TableSetupColumn("Look at", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+        ImGui::TableSetupColumn("Focus on", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableSetupColumn("Ease", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
         ImGui::TableSetupColumn("Spin", ImGuiTableColumnFlags_WidthFixed, fs * 7.0f);
         ImGui::TableSetupColumn("Roll (deg)", ImGuiTableColumnFlags_WidthFixed, fs * 6.0f);
@@ -12072,18 +11971,38 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             }
 
             ImGui::TableNextColumn();
+            {
+                const bool picking = m.look_pick_key == i;
+                if (picking) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                const std::string text = std::string(ICON_FA_CROSSHAIRS " ") + (key.look_set != 0 ? movie_set_label(data, key.look_set) : "fixed");
+                if (ImGui::Button((text + "##look").c_str(), ImVec2(-FLT_MIN, 0.0f))) ImGui::OpenPopup("##look_popup");
+                if (picking) ImGui::PopStyleColor();
+                ImGui::SetItemTooltip(picking ? "Click an atom in the viewport. Esc cancels." :
+                    "Look at: what this keyframe looks at, a set of atoms tracked through the trajectory or a fixed point.\nThe eye keeps its place.");
+                if (ImGui::BeginPopup("##look_popup")) {
+                    draw_movie_key_look_popup(data, i);
+                    ImGui::EndPopup();
+                }
+            }
+
+            ImGui::TableNextColumn();
+            {
+                const bool picking = m.focus_pick_key == i;
+                if (picking) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                const std::string text = std::string(ICON_FA_BULLSEYE " ") + (key.focus_on ? movie_focus_label(data, key).substr(0, movie_focus_label(data, key).find(',')) : "auto");
+                if (ImGui::Button((text + "##focus").c_str(), ImVec2(-FLT_MIN, 0.0f))) ImGui::OpenPopup("##focus_popup");
+                if (picking) ImGui::PopStyleColor();
+                ImGui::SetItemTooltip(picking ? "Click an atom in the viewport. Esc cancels." :
+                    "Focus on: what is sharp from this keyframe on. 'auto' leaves it as the keyframe before it set it, and before the\nfirst keyframe that sets it, what the camera looks at is sharp.");
+                if (ImGui::BeginPopup("##focus_popup")) {
+                    draw_movie_key_focus_popup(data, i);
+                    ImGui::EndPopup();
+                }
+            }
+
+            ImGui::TableNextColumn();
             if (ImGui::SmallButton(ICON_FA_ARROW_RIGHT_TO_BRACKET "##goto")) movie_goto_keyframe(data, (size_t)i);
             ImGui::SetItemTooltip("Go to: move the view to this keyframe");
-            ImGui::SameLine();
-            ImGui::BeginDisabled(m.independent_tracks);
-            const bool picking_this = m.look_pick_key == i;
-            if (picking_this) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            if (ImGui::SmallButton(ICON_FA_CROSSHAIRS "##look")) m.look_pick_key = picking_this ? -1 : i;
-            if (picking_this) ImGui::PopStyleColor();
-            if (picking_this) ImGui::SetItemTooltip("Click an atom in the viewport. Esc cancels.");
-            else if (key.follow && key.follow_atom >= 0) ImGui::SetItemTooltip("Look at: looks at atom %d, tracked through the trajectory.\nClick to pick another atom in the viewport. Esc cancels.", key.follow_atom + 1);
-            else ImGui::SetItemTooltip("Look at: click an atom in the viewport for this keyframe to look at. It is tracked through the trajectory. Esc cancels.");
-            ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_FA_CAMERA "##update")) {
                 // The camera moves to the current view's eye, still looking at the point the keyframe looks at
@@ -12099,26 +12018,8 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             ImGui::SetItemTooltip("Update position: move this keyframe's camera to the current view's position. What it looks at stays.");
             ImGui::SameLine();
             if (ImGui::SmallButton(ICON_FA_ELLIPSIS "##more")) ImGui::OpenPopup("##key_more");
-            ImGui::SetItemTooltip("Follow, Duplicate, Copy, Remove");
+            ImGui::SetItemTooltip("Duplicate, Copy, Remove");
             if (ImGui::BeginPopup("##key_more")) {
-            if (ImGui::MenuItem(key.follow ? "Unfollow" : "Follow target", nullptr, false, !m.independent_tracks)) {
-                if (key.follow) {
-                    key.follow = false;
-                    key.follow_atom = -1;
-                } else {
-                    vec3_t center;
-                    if (md_bitfield_empty(&m.follow_mask)) {
-                        VIAMD_LOG_ERROR("Set a follow target first (Set Follow Target, in the Camera Keyframes section)");
-                    } else if (fabs(data->animation.frame - movie_trajectory_frame(data, key.time)) > 0.5) {
-                        VIAMD_LOG_ERROR("Go to keyframe %d first: the target is taken where it is at the frame of the keyframe", i + 1);
-                    } else if (movie_follow_center(data, &center)) {
-                        key.follow = true;
-                        key.follow_center = center;
-                        key.follow_atom = -1;
-                    }
-                }
-            }
-            ImGui::SetItemTooltip("Makes this keyframe look at a point that moves with the follow target, kept where it is relative to the target\nnow. Go to the key first, so that the trajectory is at the frame of the keyframe. Unfollow makes it fixed again.");
             if (ImGui::MenuItem(ICON_FA_CLONE " Duplicate")) dup_idx = i;
             ImGui::SetItemTooltip("Copy it to one second later");
             if (ImGui::MenuItem(ICON_FA_COPY " Copy")) {
@@ -12192,11 +12093,11 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
         // The camera in 3D at the preview time, which is what the distance alone does not say
         ViewTransform vt;
         float fov_y;
-        movie_camera_evaluate(data, (double)m.playhead, m.keyframes, md_array_size(m.keyframes), nullptr, &vt, &fov_y);
+        movie_camera_evaluate(data, (double)m.playhead, m.keyframes, md_array_size(m.keyframes), &vt, &fov_y);
         const vec3_t look = camera_get_look_at(vt);
         ImGui::TextDisabled("At %.2f s: eye (%.2f, %.2f, %.2f)  looks at (%.2f, %.2f, %.2f)  distance %.2f",
             m.playhead, vt.position.x, vt.position.y, vt.position.z, look.x, look.y, look.z, vt.distance);
-        if (data->visuals.dof.enabled || (m.independent_tracks && !m.focus_keys.empty())) {
+        if (data->visuals.dof.enabled || movie_focus_keys_exist(m.keyframes, md_array_size(m.keyframes))) {
             ImGui::TextDisabled("Focus at %.2f from the eye", dof_focus_depth(data, vt));
         }
     }
@@ -12487,184 +12388,6 @@ static void draw_movie_rep_section(ApplicationState* data, float movie_len) {
     if (resort) movie_rep_sort(data);
 }
 
-static void movie_enable_independent(ApplicationState* data) {
-    auto& m = data->movie;
-    m.independent_tracks = true;
-    m.look_pick_key = -1;
-    m.target_drag.active = false;
-    m.invalid_target_reported = false;
-    if (md_array_size(m.keyframes) == 0) movie_add_keyframe(data);
-    if (m.look_keys.empty()) {
-        for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
-            MovieTargetKey key;
-            key.time = m.keyframes[i].time;
-            key.point = camera_get_look_at(m.keyframes[i].transform);
-            key.ease = m.keyframes[i].ease;
-            m.look_keys.push_back(key);
-        }
-    }
-    if (m.focus_keys.empty()) {
-        MovieTargetKey key;
-        key.mode = MovieTargetMode::LookAt;
-        key.blur = data->visuals.dof.enabled ? data->visuals.dof.aperture : 0.0f;
-        if (data->visuals.dof.focus_mode == DofFocusMode::Distance) {
-            key.mode = MovieTargetMode::Distance;
-            key.distance = data->visuals.dof.focus_distance;
-        } else if (data->visuals.dof.focus_mode == DofFocusMode::FocusTarget || data->visuals.dof.focus_mode == DofFocusMode::Target) {
-            const auto& mask = data->visuals.dof.focus_mode == DofFocusMode::FocusTarget ? data->visuals.dof.target_mask : m.follow_mask;
-            if (movie_target_center(data, &mask, data->mold.state, &key.point)) {
-                key.mode = MovieTargetMode::Selection;
-                auto it = md_bitfield_iter_create(&mask);
-                while (md_bitfield_iter_next(&it)) key.atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
-            } else VIAMD_LOG_ERROR("Cannot convert the global focus target: using look-at focus. Set a valid movie focus selection.");
-        }
-        m.focus_keys.push_back(key);
-    }
-}
-
-static void movie_target_insert(std::vector<MovieTargetKey>& keys, MovieTargetKey key) {
-    auto it = std::find_if(keys.begin(), keys.end(), [&](const auto& old) { return fabs(old.time - key.time) < 1.0e-6; });
-    if (it == keys.end()) keys.push_back(key);
-    else *it = key;
-    std::stable_sort(keys.begin(), keys.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
-}
-
-static bool movie_target_selection(ApplicationState* data, MovieTargetKey* key) {
-    if (!movie_target_center(data, &data->selection.selection_mask, data->mold.state, &key->point)) {
-        VIAMD_LOG_ERROR("Select an atom or group in this system first");
-        return false;
-    }
-    key->atoms.clear();
-    md_bitfield_iter_t it = md_bitfield_iter_create(&data->selection.selection_mask);
-    while (md_bitfield_iter_next(&it)) key->atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
-    key->mode = MovieTargetMode::Selection;
-    data->movie.invalid_target_reported = false;
-    return true;
-}
-
-static void draw_movie_independent_tracks(ApplicationState* data, bool recording) {
-    auto& m = data->movie;
-    const MovieKeys before = movie_keys_snapshot(data);
-    ImGui::SeparatorText("Independent tracks");
-    ImGui::BeginDisabled(recording);
-    bool independent = m.independent_tracks;
-    if (ImGui::Checkbox("Independent camera / look-at / focus", &independent)) {
-        if (independent) movie_enable_independent(data);
-        else m.independent_tracks = false;
-        m.sel.clear();
-        m.key_drag.active = false;
-        m.path_drag.active = false;
-        m.target_drag.active = false;
-    }
-    ImGui::SetItemTooltip("Off: legacy paired camera keys and global focus.\nOn: camera keys control position/FOV/spin/roll; look-at and focus have their own times.\nEnabling seeds fixed look-at points from camera keys. Review tracked legacy movies before converting.");
-    if (m.independent_tracks) {
-        ImGui::TextWrapped("Movie focus keys control blur here; global DOF and Looks focus/blur keys are not used. Paths for tracked targets show the current trajectory frame.");
-        ImGui::TextWrapped("Blue: camera position. Yellow: aim. Magenta: focus. Select the path to edit:");
-        ImGui::RadioButton("Camera##path_track", &m.path_track, 0);
-        ImGui::SameLine();
-        ImGui::RadioButton("Look-at##path_track", &m.path_track, 1);
-        ImGui::SameLine();
-        ImGui::RadioButton("Focus##path_track", &m.path_track, 2);
-        for (int track = 0; track < 2; ++track) {
-            ImGui::PushID(track);
-            auto& keys = track == 0 ? m.look_keys : m.focus_keys;
-            ImGui::SeparatorText(track == 0 ? "Look-at keys" : "Focus keys");
-            if (keys.empty()) ImGui::TextDisabled(track == 0 ? "No keys: aim holds at the first camera key's look-at." : "No keys: movie blur is off.");
-            if (ImGui::Button("Key on selection")) {
-                MovieTargetKey key;
-                key.time = movie_snap_time(data, m.playhead);
-                key.blur = 2.0f;
-                if (movie_target_selection(data, &key)) movie_target_insert(keys, key);
-            }
-            ImGui::SetItemTooltip("Store the selected atom/group on this key. Changing selection later does not change previous keys.\nFocus transitions start at the key time; look-at eases into each key.");
-            ImGui::SameLine();
-            if (ImGui::Button(track == 0 ? "Key view aim" : "Key focus at view aim")) {
-                MovieTargetKey key;
-                key.time = movie_snap_time(data, m.playhead);
-                key.point = camera_get_look_at(data->view.target);
-                key.blur = 2.0f;
-                movie_target_insert(keys, key);
-            }
-            if (track == 1) {
-                if (ImGui::Button("Key no blur")) {
-                    MovieTargetKey key;
-                    key.time = movie_snap_time(data, m.playhead);
-                    key.mode = MovieTargetMode::LookAt;
-                    key.blur = 0.0f;
-                    movie_target_insert(keys, key);
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Key look-at focus")) {
-                    MovieTargetKey key;
-                    key.time = movie_snap_time(data, m.playhead);
-                    key.mode = MovieTargetMode::LookAt;
-                    key.blur = 2.0f;
-                    movie_target_insert(keys, key);
-                }
-            }
-            int remove = -1;
-            bool sort = false;
-            for (int i = 0; i < (int)keys.size(); ++i) {
-                ImGui::PushID(i);
-                auto& key = keys[i];
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
-                double time = key.time;
-                if (ImGui::InputDouble("s", &time, 0, 0, "%.2f")) {
-                    time = CLAMP(time, 0.0, movie_duration(data));
-                    bool taken = false;
-                    for (int j = 0; j < (int)keys.size(); ++j) if (j != i && fabs(keys[j].time - time) < 1.0e-6) taken = true;
-                    if (!taken) key.time = time;
-                    else VIAMD_LOG_ERROR("This target track already has a key at %.2f s", time);
-                }
-                sort |= ImGui::IsItemDeactivatedAfterEdit();
-                ImGui::SameLine();
-                if (ImGui::SmallButton(ICON_FA_ARROW_RIGHT_TO_BRACKET)) {
-                    m.playhead = (float)key.time;
-                    movie_apply_time(data, key.time, true);
-                }
-                ImGui::SetItemTooltip("Go to this key's time");
-                ImGui::SameLine();
-                ImGui::BeginDisabled(keys.size() == 1);
-                if (ImGui::SmallButton(ICON_FA_TRASH_CAN)) remove = i;
-                ImGui::EndDisabled();
-                int mode = (int)key.mode;
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
-                if (ImGui::Combo("Mode", &mode, track == 0 ? "Fixed point\0Track selection\0" : "Fixed point\0Track selection\0Look-at\0Distance\0")) {
-                    if (mode == 1) movie_target_selection(data, &key);
-                    else { key.mode = (MovieTargetMode)mode; key.atoms.clear(); }
-                }
-                if (key.mode == MovieTargetMode::Point) {
-                    ImGui::SetNextItemWidth(-FLT_MIN);
-                    ImGui::DragFloat3("Point", key.point.elem, 0.1f, 0, 0, "%.2f");
-                } else if (key.mode == MovieTargetMode::Selection) {
-                    ImGui::TextDisabled("%zu tracked atoms", key.atoms.size());
-                    if (key.atoms.empty() || std::any_of(key.atoms.begin(), key.atoms.end(), [&](uint32_t atom) { return atom >= data->mold.sys.atom.count; }))
-                        ImGui::TextColored(ImVec4(1, 0.4f, 0.3f, 1), "Invalid target: using saved point. Replace selection.");
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Replace selection")) movie_target_selection(data, &key);
-                } else if (key.mode == MovieTargetMode::Distance) {
-                    ImGui::DragFloat("Depth", &key.distance, 0.1f, 0.001f, 10000.0f, "%.2f");
-                }
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
-                int ease = (int)key.ease;
-                if (ImGui::Combo("Ease", &ease, key_ease_str, (int)KeyEase::Count)) key.ease = (KeyEase)ease;
-                if (track == 1) {
-                    ImGui::SliderFloat("Blur (%)", &key.blur, 0.0f, 4.0f, "%.2f");
-                    ImGui::DragFloat("Transition (s)", &key.transition, 0.05f, 0.0f, (float)movie_duration(data), "%.2f");
-                    ImGui::SetItemTooltip("Blend the previous focus target/depth and blur into this setting after its key time.\n0: immediate switch. Transitions finish by the next focus key.");
-                }
-                ImGui::Separator();
-                ImGui::PopID();
-            }
-            if (remove >= 0) keys.erase(keys.begin() + remove);
-            if (sort) std::stable_sort(keys.begin(), keys.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
-            ImGui::PopID();
-        }
-    }
-    ImGui::EndDisabled();
-    if (m.independent_tracks && !movie_keys_equal(before, movie_keys_snapshot(data))) movie_apply_time(data, m.playhead, true);
-}
-
 static void draw_movie_settings_panel(ApplicationState* data) {
     ASSERT(data);
     auto& m = data->movie;
@@ -12732,27 +12455,6 @@ static void draw_movie_settings_panel(ApplicationState* data) {
         movie_add_selection_keyframe(data);
     }
     ImGui::SetItemTooltip("Adds a keyframe at the preview time that frames the selected atoms, seen from the direction the camera\nhas now, and moves the view there.");
-    if (!m.independent_tracks) {
-        const size_t follow_count = md_bitfield_popcount(&m.follow_mask);
-        if (ImGui::Button("Set Follow Target")) {
-            md_bitfield_copy(&m.follow_mask, &data->selection.selection_mask);
-            m.key_follow = md_bitfield_popcount(&m.follow_mask) > 0;
-        }
-        ImGui::SetItemTooltip("Uses the atoms selected now as what the camera can follow: it then looks at their middle.");
-        ImGui::SameLine();
-        ImGui::BeginDisabled(follow_count == 0);
-        if (ImGui::Button("Clear##follow")) {
-            md_bitfield_clear(&m.follow_mask);
-            m.key_follow = false;
-        }
-        ImGui::SameLine();
-        ImGui::Checkbox("keys follow target", &m.key_follow);
-        ImGui::SetItemTooltip("New keyframes look at a point that moves with the target, kept where it is relative to the target.\nBetween a following key and a fixed one the camera blends from one to the other.");
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (follow_count > 0) ImGui::TextDisabled("%zu atoms", follow_count);
-        else                  ImGui::TextDisabled("no target");
-    }
     ImGui::EndDisabled();
     ImGui::Spacing();
 
@@ -12935,7 +12637,6 @@ static void draw_movie_settings_panel(ApplicationState* data) {
     ImGui::EndDisabled();
 
     if (ImGui::BeginTabItem("Camera")) {
-        draw_movie_independent_tracks(data, recording);
         ImGui::BeginDisabled(recording);
         {
             bool ticks = (m.path_options & 1) != 0, sight = (m.path_options & 2) != 0, cams = (m.path_options & 4) != 0, rings = (m.path_options & 8) != 0;
@@ -12954,23 +12655,18 @@ static void draw_movie_settings_panel(ApplicationState* data) {
             if (ImGui::Checkbox("Cameras", &cams)) m.path_options = (m.path_options & ~4) | (cams ? 4 : 0);
             ImGui::SetItemTooltip("A camera drawn at each keyframe.");
             ImGui::SameLine();
-                ImGui::BeginDisabled(m.independent_tracks);
-                if (ImGui::Checkbox("Spin rings", &rings)) m.path_options = (m.path_options & ~8) | (rings ? 8 : 0);
-                ImGui::SetItemTooltip("The circle the camera goes round in a spin, with arrows the way it turns.");
-                ImGui::EndDisabled();
+            if (ImGui::Checkbox("Spin rings", &rings)) m.path_options = (m.path_options & ~8) | (rings ? 8 : 0);
+            ImGui::SetItemTooltip("The circle the camera goes round in a spin, with arrows the way it turns.");
             ImGui::Unindent();
             ImGui::EndDisabled();
         }
 
-        ImGui::Checkbox(m.independent_tracks ? "Loop playback" : "Seamless loop", &m.loop);
-        ImGui::SetItemTooltip(m.independent_tracks ? "Repeat the whole movie. Tracks hold outside their keys; match each track's start and end yourself for a continuous loop." :
-            "The camera path is cyclic: it moves through the end into the start without a corner.\nFor that the movie has to end in the pose it starts in, 'Close Loop' sets that up.");
+        ImGui::Checkbox("Seamless loop", &m.loop);
+        ImGui::SetItemTooltip("The camera path is cyclic: it moves through the end into the start without a corner.\nFor that the movie has to end in the pose it starts in, 'Close Loop' sets that up.");
         ImGui::SameLine();
-        ImGui::BeginDisabled(m.independent_tracks);
         if (ImGui::Button("Close Loop")) {
             movie_close_loop(data);
         }
-        ImGui::EndDisabled();
         ImGui::SetItemTooltip("Ends the movie in the pose of the first keyframe and turns the loop on.");
 
         ImGui::Checkbox("Keep upright", &m.keep_upright);
@@ -13331,12 +13027,8 @@ static void movie_render_pip(ApplicationState* state) {
         (double)state->app.framebuffer.width, (double)state->app.framebuffer.height, (double)n};
     uint64_t hash = md_hash64(scalars, sizeof(scalars), 11);
     if (n > 0) hash = md_hash64_combine(hash, md_hash64(m.keyframes, n * sizeof(CameraKeyframe), 12));
-    hash = md_hash64_combine(hash, m.independent_tracks ? 1 : 0);
-    for (const auto* track : {&m.look_keys, &m.focus_keys}) for (const auto& key : *track) {
-        const double values[] = {key.time, (double)(int)key.mode, key.point.x, key.point.y, key.point.z,
-            key.distance, key.blur, key.transition, (double)(int)key.ease};
-        hash = md_hash64_combine(hash, md_hash64(values, sizeof(values), 13));
-        if (!key.atoms.empty()) hash = md_hash64_combine(hash, md_hash64(key.atoms.data(), key.atoms.size() * sizeof(uint32_t), 14));
+    for (const MovieAtomSet& set : m.atom_sets) {
+        hash = md_hash64_combine(hash, md_hash64(set.atoms.data(), set.atoms.size() * sizeof(uint32_t), 13 + set.id));
     }
     const double now = ImGui::GetTime();
     const bool changed = hash != m.pip_hash || !m.pip_valid;
@@ -13348,9 +13040,7 @@ static void movie_render_pip(ApplicationState* state) {
     if (n > 0) {
         std::vector<CameraKeyframe> sorted(m.keyframes, m.keyframes + n);
         std::stable_sort(sorted.begin(), sorted.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
-        vec3_t center;
-        const bool have = movie_follow_center(state, &center);
-        movie_camera_evaluate(state, (double)m.playhead, sorted.data(), n, have ? &center : nullptr, &vt, &fov_y);
+        movie_camera_evaluate(state, (double)m.playhead, sorted.data(), n, &vt, &fov_y);
     } else if (m.pose_movie.valid) {
         vt = m.pose_movie.target;
         fov_y = m.pose_movie.fov_y;
@@ -13723,12 +13413,12 @@ static void render_scene(ApplicationState* state, bool pip) {
     state->visuals.dof.focus_depth = dof_focus_depth(state, state->view.camera);
     settings.dof.focus_depth = state->visuals.dof.focus_depth;
     settings.dof.aperture = state->visuals.dof.aperture * 0.01f;
-    if (state->movie.independent_tracks &&
-        (state->movie.show_window || movie_capture)) {
-        float blur = 0;
-        if (!state->movie.focus_keys.empty()) settings.dof.focus_depth = movie_focus_evaluate(state->movie.focus_keys,
-                movie_target_points(state, state->movie.focus_keys), movie_capture ? state->movie.cur_time : state->movie.playhead,
-                state->view.camera, &blur);
+    if (movie_focus_active(state)) {
+        // The keys that set the focus decide what is sharp, and how much the rest is blurred
+        float blur = 0.0f;
+        const auto& m = state->movie;
+        const MovieResolved r = movie_resolve(state, m.keyframes, md_array_size(m.keyframes));
+        settings.dof.focus_depth = MAX(camera_depth_of_point(state->view.camera, movie_focus_evaluate(state, r, movie_focus_time(state), state->view.camera, &blur)), 1.0e-3f);
         settings.dof.enabled = blur > 0.0f;
         settings.dof.aperture = CLAMP(blur, 0.0f, 4.0f) * 0.01f;
     }

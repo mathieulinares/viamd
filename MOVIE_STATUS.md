@@ -4,17 +4,18 @@ Branch `video`; no pull request yet.
 
 Merged `scanberg/viamd` master through `381f3fad`, including renderer, ASE loader and camera/recentering fixes. Movie focus modes, recording, editor and live preview are retained. Depth-of-field blur now uses aperture units; legacy blur and occlusion-radius keys are retained but inactive (see the manual).
 
-Independent camera-position, look-at and focus tracks are now opt-in under Movie >
-Camera. They have separate timings, per-key moving selections, movie-local focus
-modes/blur/transitions, timeline group editing, viewport paths and undo/workspace
-persistence. Spin orbits the independently animated aim. Legacy movies stay unchanged
-until enabled. Tracked viewport paths show the current trajectory frame; independent
-loops require matching track endpoints rather than legacy Close Loop.
+Each camera key now has its own **Look at** (a fixed point, or atoms tracked through the
+trajectory) and **Focus on** (what is sharp, with blur, transition and ease), set with two
+buttons in the key table. The focus is the look-at point by default and a key that does not set
+it keeps the focus of the key before. The viewport shows three paths (camera, look-at, focus)
+and the camera lane has Look at and Focus rows. The opt-in "Independent camera / look-at / focus"
+switch and the separate tracks are gone: workspaces that used them (and keys that followed a
+follow target) are converted when loaded, which can change the eye path of such a movie slightly.
 
 | File | What it is |
 |---|---|
 | `docs/movie_maker.md` | The user manual (also the text for the GitHub wiki, a separate repository) |
-| `gui-checklist.md` | Manual GUI checks, including independent focus and movie tracks |
+| `gui-checklist.md` | Manual GUI checks, including look at and focus on per key |
 | `PR_DESCRIPTION.md` | The pull request text |
 | `docs/examples/aspirin_phospholipase_movie.via` | The first example workspace (its trajectory files are not in the repository) |
 | `docs/examples/aspirin_binding_movie.via` | A 60 s example with a dolly zoom, a bullet-time orbit, representation hand-overs and energy plots; see the manual |
@@ -23,7 +24,7 @@ loops require matching track endpoints rather than legacy Close Loop.
 ## Build and test
 
 - Build: `cmake --build build --target viamd viamd_test -j8`; run `cmake -S . -B build` after adding files.
-- Tests: all 259 tests pass, including independent position/aim, moving focus and target switches, transitions, Spin pivot/axis, history/time scaling, group copy/paste/delete, workspace target encoding and the optics tutorial. They cover pure logic only; the frame sink tests use a fake script, so ffmpeg is not needed.
+- Tests: all 264 tests pass, including atom sets, eye and aim evaluated separately, the default focus and focus transitions, Spin pivot/axis, camera bands, conversion of older tracks and follow keys (with the optics tutorial), focus encoding, history/time scaling and group edits that keep a key's look-at and focus. They cover pure logic only; the frame sink tests use a fake script, so ffmpeg is not needed.
 - VS Code CMake Tools currently reports no active configure preset. The existing `build` tree successfully builds `viamd` and `viamd_test` through a temporary VS Code Make task. VS Code's test runner does not discover the C++ tests; the executable passes.
 - The GUI could not be run while the code was written, so everything in `gui-checklist.md` beyond blocks 1 to 5 is untested. Windows and macOS are untested (the ffmpeg pipe uses `popen` / `_popen`).
 
@@ -47,7 +48,7 @@ Numbers that are saved and must never be renumbered, only added to: parameter id
 
 - **Editor:** one window, timeline left and tabbed controls right, resizable and collapsible; shared playback; Scene view / Movie preview switch (Tab); frame placed beside the Movie window with a shifted projection; Show path / Fit path / Live picture on the top row; green Preview button plays the movie with the windows hidden and a bottom control bar (Space, Esc) with separate poses, **Fit path** and a live picture of the movie camera.
 - **Timing:** movie length as the master value, trajectory start/end anchors, frame pins, backward trajectory, **Match Animation speed**, **Snap to frames**.
-- **Camera:** legacy paired keys or opt-in independent position, look-at and focus tracks; ease, spin, orbit, loops, keep upright with roll, follow target, look-at-atom, names; per-focus-key targets, blur and transitions; colored viewport paths with draggable handles.
+- **Camera:** keys with a per-key look-at (fixed or atoms) and focus (target, blur, transition, ease); ease, spin, orbit, loops, keep upright with roll, names; three colored viewport paths (camera, look-at, focus) with draggable handles; camera lane rows for keys, look at, focus, spin and frame.
 - **Looks and representations:** keyed look parameters; keyed representation properties (visibility with transition, scales, tint, saturation, colors) with stable representation ids; the overview lane by system with block editing and swap.
 - **Overlays:** text, time stamp, scale bar, time bar, logo, image, timeline, distribution, property visualization; markers (labels on up to three rows); subplot ids and names; overlays shown together are moved apart (`movie_overlay_avoid`).
 - **Timeline panel:** lane toggles with presets and a Layout popup; ruler, trajectory, camera, lens (FOV and distance on two axes), look parameter, representation lane, overview and overlay lanes; multi-select across all of them with group move, stretch, inspector, keyboard and copy/paste; lane layout saved in the workspace.
@@ -57,12 +58,12 @@ Numbers that are saved and must never be renumbered, only added to: parameter id
 ## Known limits
 
 - Only some representation properties can be keyed (not type, filter, color mapping, the other colors or electronic structure settings). Tint and saturation recolor atoms every frame: slow for very large systems.
-- The follow target itself is not part of undo.
+- The global follow target of older workspaces is not part of undo and can no longer be set (a key's **Look at** / **Focus on** replace it).
 - Where a frame curve turns around the trajectory slows to a stop; for a hard reversal add a key at the turn-around frame with Linear ease.
 - Overlay text has one style (shadow and optional plate).
 - Timeline / distribution overlays draw at most six series per subplot and the first member of a population; a timeline overlay has one axis kind for all subplots.
-- **Follow target** depth of field uses the global follow target, not a key's own **Look at** atom.
-- Independent tracked path drawings use the current trajectory frame, not future-frame sampling. Spin-ring decorations and automatic Close Loop are legacy-only; independent loops require matching each track's endpoints.
+- Tracked path drawings use the current trajectory frame, not future-frame sampling.
+- A key that looks at atoms aims at their centre; the offset that a legacy follow key kept is not preserved on conversion.
 - Picked overlay bars and representation blocks move with picked keys but are not copied, pasted or (overlays) deleted by the picking shortcuts; unkeyed blocks cannot be picked.
 - With **Keep upright**, a spin around a horizontal axis flips at the poles; roll eases as a number, so 170 to -170 degrees turns the long way.
 - Master code, not ours: a perfectly symmetric flat molecule (exact ideal benzene) can settle about 10 degrees off face-on in the default view.
