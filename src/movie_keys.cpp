@@ -1,11 +1,162 @@
 #include "movie_keys.h"
 
 #include <gfx/camera_utils.h>
+#include <md_system.h>
+#include <md_util.h>
+#include <core/md_bitfield.h>
+#include <core/md_allocator.h>
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+
+bool movie_target_center(vec3_t* out, const md_system_t& system, const md_system_state_t& state,
+                         const md_bitfield_t& mask, const mat4_t& world_transform, md_allocator_i* alloc) {
+    const size_t count = md_bitfield_popcount(&mask);
+    uint64_t first = 0, last = 0;
+    if (!out || count == 0 || !state.xyz || state.num_atoms != system.atom.count ||
+        !md_bitfield_get_range(&first, &last, &mask) || last >= system.atom.count) return false;
+
+    md_temp_scope_t temp = md_temp_begin_in(alloc);
+    defer { md_temp_end(temp); };
+    vec4_t* xyzw = md_temp_alloc_array(temp, vec4_t, count);
+    md_util_system_extract_xyzw_from_mask(xyzw, &mask, &system, &state);
+    vec3_t center = vec3_zero();
+    md_util_deperiodize_self_vec4(xyzw, count, &state.unitcell, &center);
+    *out = mat4_mul_vec3(world_transform, center, 1.0f);
+    return true;
+}
+
+static std::vector<size_t> target_order(const std::vector<MovieTargetKey>& keys) {
+    std::vector<size_t> order(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return keys[a].time < keys[b].time; });
+    return order;
+}
+
+std::array<float, 10> movie_target_encode(const MovieTargetKey& key) {
+    return {(float)key.time, (float)(int)key.mode, key.point.x, key.point.y, key.point.z,
+        key.distance, key.blur, key.transition, (float)(int)key.ease, 1.0f};
+}
+
+bool movie_target_decode(MovieTargetKey* key, const float (&v)[10], bool focus) {
+    for (float value : v) {
+        // Floating-point predicates can be optimized away by the application's fast-math flags.
+        uint32_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+        if ((bits & 0x7f800000u) == 0x7f800000u) return false;
+    }
+    if (v[9] != 1 || v[0] < 0 || v[1] < 0 || v[1] >= (float)MovieTargetMode::Count ||
+        v[1] != floorf(v[1]) || (!focus && v[1] > (float)MovieTargetMode::Selection) ||
+        v[8] < 0 || v[8] >= (float)KeyEase::Count || v[8] != floorf(v[8])) return false;
+    MovieTargetKey result;
+    result.time = v[0];
+    result.mode = (MovieTargetMode)(int)v[1];
+    result.point = vec3_set(v[2], v[3], v[4]);
+    result.distance = MAX(v[5], 0.001f);
+    result.blur = CLAMP(v[6], 0.0f, 4.0f);
+    result.transition = MAX(v[7], 0.0f);
+    result.ease = (KeyEase)(int)v[8];
+    *key = std::move(result);
+    return true;
+}
+
+vec3_t movie_target_evaluate(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points, double time) {
+    ASSERT(!keys.empty() && points.size() == keys.size());
+    const auto order = target_order(keys);
+    std::vector<double> times, values;
+    std::vector<KeyEase> eases;
+    for (size_t i : order) {
+        if (!times.empty() && keys[i].time <= times.back()) continue;
+        times.push_back(keys[i].time);
+        eases.push_back(keys[i].ease);
+    }
+    vec3_t result = {};
+    for (int c = 0; c < 3; ++c) {
+        values.clear();
+        double last = -DBL_MAX;
+        for (size_t i : order) if (keys[i].time > last) {
+            values.push_back(points[i].elem[c]);
+            last = keys[i].time;
+        }
+        result.elem[c] = (float)keyed_curve_evaluate(times.data(), values.data(), eases.data(), times.size(), time);
+    }
+    return result;
+}
+
+vec3_t movie_focus_point(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points,
+                           double time, const ViewTransform& camera, float* blur) {
+    ASSERT(!keys.empty() && points.size() == keys.size());
+    const auto order = target_order(keys);
+    size_t current = order.front(), previous = current;
+    for (size_t i : order) {
+        if (keys[i].time > time) break;
+        previous = current;
+        current = i;
+    }
+    auto point = [&](size_t i) {
+        switch (keys[i].mode) {
+        case MovieTargetMode::LookAt: return camera_get_look_at(camera);
+        case MovieTargetMode::Distance: return camera.position + camera.orientation * vec3_t{0, 0, -keys[i].distance};
+        default: return points[i];
+        }
+    };
+    float u = 1.0f;
+    if (previous != current && keys[current].transition > 0.0f) {
+        double duration = keys[current].transition;
+        for (size_t i : order) if (keys[i].time > keys[current].time) {
+            duration = std::min(duration, keys[i].time - keys[current].time);
+            break;
+        }
+        u = CLAMP((float)((time - keys[current].time) / duration), 0.0f, 1.0f);
+        if (keys[current].ease == KeyEase::Hold) u = u >= 1.0f ? 1.0f : 0.0f;
+        else if (keys[current].ease != KeyEase::Linear) u = u * u * (3.0f - 2.0f * u);
+    }
+    *blur = keys[previous].blur * (1.0f - u) + keys[current].blur * u;
+    return point(previous) * (1.0f - u) + point(current) * u;
+}
+
+float movie_focus_evaluate(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points,
+                           double time, const ViewTransform& camera, float* blur) {
+    return MAX(camera_depth_of_point(camera, movie_focus_point(keys, points, time, camera, blur)), 1.0e-3f);
+}
+
+void movie_camera_independent(ViewTransform* camera, const ViewTransform& unspun, vec3_t look, const vec3_t* up, float roll, const quat_t* spin) {
+    const quat_t orbit = spin ? *spin : quat_normalize(camera->orientation * quat_conj(unspun.orientation));
+    camera->position = look + orbit * (unspun.position - look);
+    if (camera_aim_at(camera, look) && up) camera_level(camera, *up, roll);
+}
+
+vec3_t movie_position_evaluate(const CameraKeyframe* keys, size_t count, double time, bool loop) {
+    if (!count) return {};
+    std::vector<CameraKeyframe> ordered(keys, keys + count);
+    std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
+    ordered.erase(std::unique(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.time == b.time; }), ordered.end());
+    const double start = ordered.front().time, span = ordered.back().time - start;
+    if (loop && span > 0.0 && time > ordered.back().time) time = start + fmod(time - start, span);
+    std::vector<double> times, values;
+    std::vector<KeyEase> eases;
+    for (const auto& key : ordered) { times.push_back(key.time); eases.push_back(key.ease); }
+    vec3_t point = {};
+    for (int axis = 0; axis < 3; ++axis) {
+        values.clear();
+        for (const auto& key : ordered) values.push_back(key.transform.position.elem[axis]);
+        point.elem[axis] = (float)keyed_curve_evaluate(times.data(), values.data(), eases.data(), times.size(), time);
+    }
+    return point;
+}
+
+static bool target_keys_equal(const std::vector<MovieTargetKey>& a, const std::vector<MovieTargetKey>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].time != b[i].time || a[i].mode != b[i].mode || a[i].atoms != b[i].atoms ||
+            a[i].distance != b[i].distance || a[i].blur != b[i].blur || a[i].transition != b[i].transition ||
+            a[i].ease != b[i].ease) return false;
+        for (int c = 0; c < 3; ++c) if (a[i].point.elem[c] != b[i].point.elem[c]) return false;
+    }
+    return true;
+}
 
 bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t count, int param, double time) {
     std::vector<const ParamKey*> mine;
@@ -365,6 +516,7 @@ static bool equal(const RepKey& a, const RepKey& b) {
 }
 
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
+    if (a.independent_tracks != b.independent_tracks || !target_keys_equal(a.look, b.look) || !target_keys_equal(a.focus, b.focus)) return false;
     if (a.loop != b.loop || a.keep_upright != b.keep_upright || a.up_axis != b.up_axis || a.duration != b.duration || a.traj_begin != b.traj_begin || a.traj_end != b.traj_end ||
         a.start_frame != b.start_frame || a.end_frame != b.end_frame || a.camera.size() != b.camera.size() ||
         a.params.size() != b.params.size() || a.reps.size() != b.reps.size() || a.overlays.size() != b.overlays.size()) return false;
@@ -401,6 +553,10 @@ bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
 }
 
 void movie_keys_scale_time(MovieKeys* keys, double scale) {
+    for (auto* track : {&keys->look, &keys->focus}) for (MovieTargetKey& k : *track) {
+        k.time *= scale;
+        k.transition *= (float)scale;
+    }
     for (CameraKeyframe& k : keys->camera) k.time *= scale;
     for (ParamKey& k : keys->params) k.time *= scale;
     for (RepKey& k : keys->reps) k.time *= scale;
@@ -703,6 +859,10 @@ void KeySelection::set(KeyKind kind, int64_t subject, double time, double end) {
 
 static bool has_key(const MovieKeys& keys, const KeyId& id) {
     switch (id.kind) {
+    case KeyKind::Look:
+    case KeyKind::Focus:
+        for (const auto& k : id.kind == KeyKind::Look ? keys.look : keys.focus) if (fabs(k.time - id.time) < 1.0e-9) return true;
+        return false;
     case KeyKind::Camera:
         for (const CameraKeyframe& k : keys.camera) if (fabs(k.time - id.time) < 1.0e-9) return true;
         return false;
@@ -729,6 +889,10 @@ void key_selection_prune(KeySelection* sel, const MovieKeys& keys) {
 
 void key_selection_all(KeySelection* sel, const MovieKeys& keys, int64_t param, int64_t rep_subject) {
     for (const CameraKeyframe& k : keys.camera) sel->add(KeyKind::Camera, 0, k.time);
+    if (keys.independent_tracks) {
+        for (const auto& k : keys.look) sel->add(KeyKind::Look, 0, k.time);
+        for (const auto& k : keys.focus) sel->add(KeyKind::Focus, 0, k.time);
+    }
     if (param >= 0) {
         for (const ParamKey& k : keys.params) if ((int64_t)k.param == param) sel->add(KeyKind::Param, param, k.time);
     }
@@ -749,6 +913,8 @@ static void selection_extent(const MovieKeys& keys, const KeySelection& sel, dou
     *t_max = -DBL_MAX;
     auto take = [&](double a, double b) { *t_min = std::min(*t_min, a); *t_max = std::max(*t_max, b); };
     for (const CameraKeyframe& k : keys.camera) if (sel.contains(KeyKind::Camera, 0, k.time)) take(k.time, k.time);
+    for (const auto& k : keys.look) if (sel.contains(KeyKind::Look, 0, k.time)) take(k.time, k.time);
+    for (const auto& k : keys.focus) if (sel.contains(KeyKind::Focus, 0, k.time)) take(k.time, k.time);
     for (const ParamKey& k : keys.params) if (sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) take(k.time, k.time);
     for (const RepKey& k : keys.reps) if (sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) take(k.time, k.time);
     for (size_t i = 0; i < sel.ids.size(); ++i) {
@@ -848,6 +1014,10 @@ double movie_keys_shift(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
     }
     keys->overlays = std::move(overlays);
     keys->camera = std::move(camera);
+    keys->look = start.look;
+    keys->focus = start.focus;
+    for (auto& k : keys->look) if (start_sel.contains(KeyKind::Look, 0, k.time)) k.time += d;
+    for (auto& k : keys->focus) if (start_sel.contains(KeyKind::Focus, 0, k.time)) k.time += d;
     keys->params = std::move(params);
     keys->reps = std::move(reps);
     sel->ids = std::move(ids);
@@ -873,6 +1043,13 @@ static void keep_one_per_time(std::vector<T>& v, Same same, IsSel is_sel) {
 }
 
 void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel) {
+    for (int track = 0; track < 2; ++track) {
+        auto& targets = track == 0 ? keys->look : keys->focus;
+        const KeyKind kind = track == 0 ? KeyKind::Look : KeyKind::Focus;
+        std::stable_sort(targets.begin(), targets.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
+        keep_one_per_time(targets, [](const auto&, const auto&) { return true; },
+            [&](const auto& k) { return sel.contains(kind, 0, k.time); });
+    }
     std::stable_sort(keys->camera.begin(), keys->camera.end(), [](const CameraKeyframe& a, const CameraKeyframe& b) { return a.time < b.time; });
     keep_one_per_time(keys->camera, [](const CameraKeyframe&, const CameraKeyframe&) { return true; },
         [&](const CameraKeyframe& k) { return sel.contains(KeyKind::Camera, 0, k.time); });
@@ -892,6 +1069,13 @@ void movie_keys_resolve(MovieKeys* keys, const KeySelection& sel) {
 }
 
 void movie_keys_delete(MovieKeys* keys, KeySelection* sel) {
+    for (int track = 0; track < 2; ++track) {
+        auto& targets = track == 0 ? keys->look : keys->focus;
+        const KeyKind kind = track == 0 ? KeyKind::Look : KeyKind::Focus;
+        targets.erase(std::remove_if(targets.begin(), targets.end(), [&](const auto& k) {
+            return sel->contains(kind, 0, k.time);
+        }), targets.end());
+    }
     for (const KeyId& id : sel->ids) {
         if (id.kind != KeyKind::Block) continue;
         for (const RepInterval& iv : rep_shown_intervals(keys->reps, (uint32_t)id.subject, (double)keys->duration)) {
@@ -913,6 +1097,8 @@ void movie_keys_delete(MovieKeys* keys, KeySelection* sel) {
 KeyClip movie_keys_copy(const MovieKeys& keys, const KeySelection& sel) {
     KeyClip clip;
     double begin = DBL_MAX;
+    for (const auto& k : keys.look) if (sel.contains(KeyKind::Look, 0, k.time)) { clip.look.push_back(k); begin = std::min(begin, k.time); }
+    for (const auto& k : keys.focus) if (sel.contains(KeyKind::Focus, 0, k.time)) { clip.focus.push_back(k); begin = std::min(begin, k.time); }
     for (const CameraKeyframe& k : keys.camera) if (sel.contains(KeyKind::Camera, 0, k.time)) { clip.camera.push_back(k); begin = std::min(begin, k.time); }
     for (const ParamKey& k : keys.params) if (sel.contains(KeyKind::Param, (int64_t)k.param, k.time)) { clip.params.push_back(k); begin = std::min(begin, k.time); }
     for (const RepKey& k : keys.reps) if (sel.contains(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time)) { clip.reps.push_back(k); begin = std::min(begin, k.time); }
@@ -923,12 +1109,16 @@ KeyClip movie_keys_copy(const MovieKeys& keys, const KeySelection& sel) {
 void movie_keys_paste(MovieKeys* keys, KeySelection* sel, const KeyClip& clip, double time, double duration) {
     if (clip.empty()) return;
     double last = clip.begin;
+    for (const auto& k : clip.look) last = std::max(last, k.time);
+    for (const auto& k : clip.focus) last = std::max(last, k.time);
     for (const CameraKeyframe& k : clip.camera) last = std::max(last, k.time);
     for (const ParamKey& k : clip.params) last = std::max(last, k.time);
     for (const RepKey& k : clip.reps) last = std::max(last, k.time);
     const double offset = std::max(std::min(time, duration - (last - clip.begin)), 0.0) - clip.begin;
 
     sel->clear();
+    for (auto k : clip.look) { k.time += offset; keys->look.push_back(k); sel->add(KeyKind::Look, 0, k.time); }
+    for (auto k : clip.focus) { k.time += offset; keys->focus.push_back(k); sel->add(KeyKind::Focus, 0, k.time); }
     for (CameraKeyframe k : clip.camera) { k.time += offset; keys->camera.push_back(k); sel->add(KeyKind::Camera, 0, k.time); }
     for (ParamKey k : clip.params) { k.time += offset; keys->params.push_back(k); sel->add(KeyKind::Param, (int64_t)k.param, k.time); }
     for (RepKey k : clip.reps) { k.time += offset; keys->reps.push_back(k); sel->add(KeyKind::Rep, rep_key_subject(k.rep, k.prop), k.time); }
@@ -984,6 +1174,10 @@ double movie_keys_scale(MovieKeys* keys, KeySelection* sel, const MovieKeys& sta
     }
     keys->overlays = std::move(overlays);
     keys->camera = std::move(camera);
+    keys->look = start.look;
+    keys->focus = start.focus;
+    for (auto& k : keys->look) if (start_sel.contains(KeyKind::Look, 0, k.time)) k.time = at(k.time);
+    for (auto& k : keys->focus) if (start_sel.contains(KeyKind::Focus, 0, k.time)) { k.time = at(k.time); k.transition *= (float)f; }
     keys->params = std::move(params);
     keys->reps = std::move(reps);
     sel->ids = std::move(ids);
@@ -1008,6 +1202,8 @@ int key_selection_ease(const CameraKeyframe* camera, size_t num_camera, const st
 }
 
 void movie_keys_set_ease(MovieKeys* keys, const KeySelection& sel, KeyEase ease) {
+    for (auto& k : keys->look) if (sel.contains(KeyKind::Look, 0, k.time)) k.ease = ease;
+    for (auto& k : keys->focus) if (sel.contains(KeyKind::Focus, 0, k.time)) k.ease = ease;
     double first = DBL_MAX;
     for (const CameraKeyframe& k : keys->camera) first = std::min(first, k.time);
     for (CameraKeyframe& k : keys->camera) if (k.time > first && sel.contains(KeyKind::Camera, 0, k.time)) k.ease = ease;

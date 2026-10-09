@@ -1001,6 +1001,10 @@ void free_system_data(ApplicationState* data) {
 
     md_bitfield_clear(&data->selection.selection_mask);
     md_bitfield_clear(&data->selection.highlight_mask);
+    if (!md_bitfield_empty(&data->visuals.dof.target_mask)) {
+        VIAMD_LOG_INFO("Focus target cleared because the system is being replaced");
+        md_bitfield_clear(&data->visuals.dof.target_mask);
+    }
     md_script_ir_t* ir = data->script.ir;
     md_script_ir_t* eval_ir = data->script.eval_ir;
     data->script.ir = nullptr;
@@ -1234,6 +1238,8 @@ struct WorkspacePending {
 
     bool has_follow_target;
     md_bitfield_t follow_target;
+    bool has_focus_target;
+    md_bitfield_t focus_target;
 
     // Timeline filter and zoom, in frames: a time would depend on the unit it is shown in
     bool   has_filter_range;
@@ -1262,6 +1268,9 @@ MovieKeys movie_keys_snapshot(const ApplicationState* app) {
     const CameraKeyframe* keys = app->movie.keyframes;
     k.camera.assign(keys, keys + md_array_size(app->movie.keyframes));
     k.params = app->movie.param_keys;
+    k.independent_tracks = app->movie.independent_tracks;
+    k.look = app->movie.look_keys;
+    k.focus = app->movie.focus_keys;
     k.reps = app->movie.rep_keys;
     k.overlays = app->movie.overlays;
     k.markers = app->movie.markers;
@@ -1283,6 +1292,11 @@ void movie_keys_restore(ApplicationState* app, const MovieKeys& keys) {
         md_array_push(m.keyframes, k, app->allocator.persistent);
     }
     m.param_keys = keys.params;
+    m.independent_tracks = keys.independent_tracks;
+    m.look_keys = keys.look;
+    m.focus_keys = keys.focus;
+    m.target_drag.active = false;
+    m.invalid_target_reported = false;
     m.rep_keys = keys.reps;
     m.overlays = keys.overlays;
     m.markers = keys.markers;
@@ -1328,7 +1342,10 @@ static void workspace_reset(ApplicationState* data) {
     data->timeline.filter.temporal_window.enabled = false;
     data->timeline.filter.temporal_window.extent_in_frames = 10;
 
+    md_bitfield_t focus_target = data->visuals.dof.target_mask;
+    md_bitfield_clear(&focus_target);
     data->visuals = {};
+    data->visuals.dof.target_mask = focus_target;
     data->simulation_box = {};
     data->view.mode = CameraMode::Perspective;
     data->view.camera.fov_y = Camera{}.fov_y;
@@ -1367,6 +1384,11 @@ static void workspace_reset(ApplicationState* data) {
         m.up_axis = 1;
         m.animate_params = true;
         m.param_keys.clear();
+        m.independent_tracks = false;
+        m.invalid_target_reported = false;
+        m.look_keys.clear();
+        m.focus_keys.clear();
+        m.target_drag = {};
         m.rep_keys.clear();
         m.rep_saved.clear();
         m.overlays = { movie_overlay_default_logo() };
@@ -1733,6 +1755,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
     md_bitfield_init(&pending.selection_mask, temp_alloc);
     md_bitfield_init(&pending.recenter_target, temp_alloc);
     md_bitfield_init(&pending.follow_target, temp_alloc);
+    md_bitfield_init(&pending.focus_target, temp_alloc);
 
     str_t folder = {};
     extract_folder_path(&folder, filename);
@@ -1794,6 +1817,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("DofEnabled")))           viamd::extract_bool(v.dof.enabled, arg);
                 else if (str_eq(ident, STR_LIT("DofFocusMode")))         viamd::extract_enum(v.dof.focus_mode, arg, (int)DofFocusMode::Count);
                 else if (str_eq(ident, STR_LIT("DofFocusDistance")))     viamd::extract_flt(v.dof.focus_distance, arg);
+                else if (str_eq(ident, STR_LIT("DofFocusTarget")))       pending.has_focus_target = deserialize_mask(&pending.focus_target, arg);
                 else if (str_eq(ident, STR_LIT("DofAperture")))          viamd::extract_flt(v.dof.aperture, arg);
                 else if (str_eq(ident, STR_LIT("FxaaEnabled")))          viamd::extract_bool(v.fxaa.enabled, arg);
                 else if (str_eq(ident, STR_LIT("TaaEnabled")))           viamd::extract_bool(v.temporal_aa.enabled, arg);
@@ -1831,6 +1855,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
             // (DurationAuto), and their keys with a frame alone decided how the trajectory played
             bool legacy_auto = false;
             int  timeline_version = 1;
+            bool target_atoms_allowed[2] = {};
             // Movies from before the camera could be kept upright went through their keys' tilts
             m.keep_upright = false;
             while (viamd::next_entry(ident, arg, state)) {
@@ -1958,6 +1983,28 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("Loop")))          viamd::extract_bool(m.loop, arg);
                 else if (str_eq(ident, STR_LIT("FollowTarget")))  pending.has_follow_target = deserialize_mask(&pending.follow_target, arg);
                 else if (str_eq(ident, STR_LIT("AnimateParams"))) viamd::extract_bool(m.animate_params, arg);
+                else if (str_eq(ident, STR_LIT("IndependentTracks"))) viamd::extract_bool(m.independent_tracks, arg);
+                else if (str_eq(ident, STR_LIT("LookKey")) || str_eq(ident, STR_LIT("FocusKey"))) {
+                    float v[10] = {};
+                    MovieTargetKey key;
+                    const int track = str_eq(ident, STR_LIT("FocusKey")) ? 1 : 0;
+                    target_atoms_allowed[track] = false;
+                    if (viamd::extract_flt_vec(v, 10, arg) && movie_target_decode(&key, v, str_eq(ident, STR_LIT("FocusKey")))) {
+                        (str_eq(ident, STR_LIT("LookKey")) ? m.look_keys : m.focus_keys).push_back(key);
+                        target_atoms_allowed[track] = key.mode == MovieTargetMode::Selection;
+                    } else VIAMD_LOG_ERROR("Invalid movie target key in workspace");
+                }
+                else if (str_eq(ident, STR_LIT("LookAtoms")) || str_eq(ident, STR_LIT("FocusAtoms"))) {
+                    md_bitfield_t mask = {};
+                    md_bitfield_init(&mask, temp_alloc);
+                    auto& track = str_eq(ident, STR_LIT("LookAtoms")) ? m.look_keys : m.focus_keys;
+                    const int track_id = str_eq(ident, STR_LIT("FocusAtoms")) ? 1 : 0;
+                    if (target_atoms_allowed[track_id] && !track.empty() && deserialize_mask(&mask, arg)) {
+                        md_bitfield_iter_t it = md_bitfield_iter_create(&mask);
+                        while (md_bitfield_iter_next(&it)) track.back().atoms.push_back((uint32_t)md_bitfield_iter_idx(&it));
+                    } else VIAMD_LOG_ERROR("Invalid movie target selection in workspace");
+                    target_atoms_allowed[track_id] = false;
+                }
                 else if (str_eq(ident, STR_LIT("RepKey"))) {
                     // representation id, property, time, value, ease, then the other two numbers of a colour
                     float v[7] = {};
@@ -1994,6 +2041,15 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 }
             }
             m.res_x = CLAMP(m.res_x, 640, 16384);
+            MovieKeys target_keys;
+            target_keys.look = std::move(m.look_keys);
+            target_keys.focus = std::move(m.focus_keys);
+            const size_t target_count = target_keys.look.size() + target_keys.focus.size();
+            movie_keys_resolve(&target_keys, KeySelection{});
+            if (target_count != target_keys.look.size() + target_keys.focus.size())
+                VIAMD_LOG_ERROR("Overlapping movie target keys in workspace: keeping one key per track/time");
+            m.look_keys = std::move(target_keys.look);
+            m.focus_keys = std::move(target_keys.focus);
             m.res_y = CLAMP(m.res_y, 480, 16384);
             m.fps = CLAMP(m.fps, 1.0f, 240.0f);
             std::stable_sort(m.keyframes, m.keyframes + md_array_size(m.keyframes),
@@ -2305,6 +2361,13 @@ void load_workspace(ApplicationState* data, str_t filename) {
     if (pending.has_follow_target && mask_fits(&pending.follow_target)) {
         md_bitfield_copy(&data->movie.follow_mask, &pending.follow_target);
     }
+    if (pending.has_focus_target) {
+        if (mask_fits(&pending.focus_target)) {
+            md_bitfield_copy(&data->visuals.dof.target_mask, &pending.focus_target);
+        } else {
+            VIAMD_LOG_ERROR("Workspace focus target does not match the loaded system; select a new focus target");
+        }
+    }
     if (pending.has_recenter_target && mask_fits(&pending.recenter_target)) {
         md_bitfield_copy(&data->operations.selection_mask, &pending.recenter_target);
         recenter_update_target_data(data);
@@ -2443,6 +2506,9 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("DofEnabled"), v.dof.enabled);
         viamd::write_int(state,  STR_LIT("DofFocusMode"), (int)v.dof.focus_mode);
         viamd::write_flt(state,  STR_LIT("DofFocusDistance"), v.dof.focus_distance);
+        if (!md_bitfield_empty(&v.dof.target_mask)) {
+            viamd::write_bitfield(state, STR_LIT("DofFocusTarget"), &v.dof.target_mask);
+        }
         viamd::write_flt(state,  STR_LIT("DofAperture"), v.dof.aperture);
         viamd::write_bool(state, STR_LIT("FxaaEnabled"), v.fxaa.enabled);
         viamd::write_bool(state, STR_LIT("TaaEnabled"), v.temporal_aa.enabled);
@@ -2505,6 +2571,19 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_bool(state, STR_LIT("KeepUpright"), m.keep_upright);
         viamd::write_int (state, STR_LIT("UpAxis"), m.up_axis);
         viamd::write_bool(state, STR_LIT("AnimateParams"), m.animate_params);
+        viamd::write_bool(state, STR_LIT("IndependentTracks"), m.independent_tracks);
+        for (int track = 0; track < 2; ++track) {
+            for (const auto& k : track == 0 ? m.look_keys : m.focus_keys) {
+                const auto v = movie_target_encode(k);
+                viamd::write_flt_vec(state, track == 0 ? STR_LIT("LookKey") : STR_LIT("FocusKey"), v.data(), v.size());
+                if (k.mode == MovieTargetMode::Selection && !k.atoms.empty()) {
+                    md_bitfield_t mask = {};
+                    md_bitfield_init(&mask, temp_alloc);
+                    for (uint32_t atom : k.atoms) md_bitfield_set_bit(&mask, atom);
+                    viamd::write_bitfield(state, track == 0 ? STR_LIT("LookAtoms") : STR_LIT("FocusAtoms"), &mask);
+                }
+            }
+        }
         for (size_t i = 0; i < md_array_size(m.keyframes); ++i) {
             const CameraKeyframe& k = m.keyframes[i];
             const float v[21] = {

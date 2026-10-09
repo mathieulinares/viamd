@@ -279,8 +279,9 @@ static dvec3 quat_path_tangent(const quat_t* prev, quat_t cur, const quat_t* nex
     return {catmull_slope(d0.x, d1.x, h0, h1), catmull_slope(d0.y, d1.y, h0, h1), catmull_slope(d0.z, d1.z, h0, h1)};
 }
 
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop, const vec3_t* follow_now, const vec3_t* key_follow_now, const vec3_t* upright) {
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop, const vec3_t* follow_now, const vec3_t* key_follow_now, const vec3_t* upright, quat_t* out_spin) {
     ASSERT(count > 0);
+    if (out_spin) *out_spin = quat_t{0, 0, 0, 1};
     // A key that tracks an atom of its own is moved by that atom, the others by follow_now
     auto now_of = [&](size_t k) -> const vec3_t* {
         if (keys[k].follow_atom >= 0) return key_follow_now ? &key_follow_now[k] : nullptr;
@@ -408,7 +409,9 @@ void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, c
         }
         const double s = keys[j].spin_constant_speed ? us : us * us * (3.0 - 2.0 * us);
         const double angle = 6.283185307179586 * (double)keys[j].spin_turns * s;
-        ori = quat_normalize(quat_axis_angle(vec3_normalize(axis), (float)angle) * ori);
+        const quat_t spin = quat_axis_angle(vec3_normalize(axis), (float)angle);
+        if (out_spin) *out_spin = spin;
+        ori = quat_normalize(spin * ori);
     }
 
     out_transform->orientation = ori;

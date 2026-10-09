@@ -112,7 +112,7 @@ void camera_interpolate_look_at(vec3_t* out_pos, quat_t* out_ori, float* out_dis
 // follow is ignored.
 // With upright, the camera is kept level: its up is turned as close to *upright as it can be about the direction it
 // looks in, then by the keys' roll (interpolated). A spin around the camera's up is then a spin around *upright.
-void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false, const vec3_t* follow_now = nullptr, const vec3_t* key_follow_now = nullptr, const vec3_t* upright = nullptr);
+void camera_keyframes_evaluate(ViewTransform* out_transform, float* out_fov_y, const CameraKeyframe* keys, size_t count, double time, bool loop = false, const vec3_t* follow_now = nullptr, const vec3_t* key_follow_now = nullptr, const vec3_t* upright = nullptr, quat_t* out_spin = nullptr);
 
 // Turns the camera about the direction it looks in, so that its up is as close to 'up' as it can be, then by 'roll'
 // radians (positive leans the camera's up to the left). Where it looks from and at stay. Looking along 'up', the

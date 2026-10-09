@@ -7,6 +7,41 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <array>
+
+struct md_system_t;
+struct md_system_state_t;
+struct md_bitfield_t;
+struct md_allocator_i;
+
+// Centre of a selected atom/group, made whole across periodic boundaries and transformed to camera space.
+// Returns false for an empty selection or indices outside the current system. alloc must be a VM arena.
+bool movie_target_center(vec3_t* out, const md_system_t& system, const md_system_state_t& state,
+                         const md_bitfield_t& mask, const mat4_t& world_transform, md_allocator_i* alloc);
+
+enum class MovieTargetMode : int { Point, Selection, LookAt, Distance, Count };
+
+struct MovieTargetKey {
+    double time = 0.0;
+    vec3_t point = {};
+    MovieTargetMode mode = MovieTargetMode::Point;
+    std::vector<uint32_t> atoms;
+    float distance = 10.0f;
+    float blur = 0.0f;
+    float transition = 1.0f;
+    KeyEase ease = KeyEase::EaseInOut;
+};
+std::array<float, 10> movie_target_encode(const MovieTargetKey& key);
+bool movie_target_decode(MovieTargetKey* key, const float (&values)[10], bool focus);
+
+// Resolved points are in camera space, in the same order as keys. Selection points can change at each frame.
+vec3_t movie_target_evaluate(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points, double time);
+float movie_focus_evaluate(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points,
+                           double time, const ViewTransform& camera, float* blur);
+vec3_t movie_focus_point(const std::vector<MovieTargetKey>& keys, const std::vector<vec3_t>& points,
+                        double time, const ViewTransform& camera, float* blur);
+void movie_camera_independent(ViewTransform* camera, const ViewTransform& unspun, vec3_t look, const vec3_t* up, float roll, const quat_t* spin = nullptr);
+vec3_t movie_position_evaluate(const CameraKeyframe* keys, size_t count, double time, bool loop);
 
 // What is keyed on a movie's timeline besides the camera: look parameters (background, depth of field,
 // clipping ...), each with its own keys. The application has a table of the parameters, a key refers to
@@ -188,6 +223,8 @@ void camera_key_translate(CameraKeyframe* key, vec3_t delta);
 // Everything on the timeline that the user edits, so that it can be undone as one
 struct MovieKeys {
     std::vector<CameraKeyframe> camera;
+    bool independent_tracks = false;
+    std::vector<MovieTargetKey> look, focus;
     std::vector<ParamKey> params;
     std::vector<RepKey> reps;
     std::vector<MovieOverlay> overlays;
@@ -213,7 +250,7 @@ void movie_keys_scale_time(MovieKeys* keys, double scale);
 
 // Overlay: a bar of the overlay lane (subject: its place in the list, time: when it starts, end: when it stops).
 // Block: a stretch of the representation overview where a representation is shown (subject: its id, time and end as the stretch).
-enum class KeyKind : int { Camera, Param, Rep, Overlay, Block };
+enum class KeyKind : int { Camera, Param, Rep, Overlay, Block, Look, Focus };
 
 // What a key of a parameter or of a property of a representation belongs to
 inline int64_t rep_key_subject(uint32_t rep, int prop) { return ((int64_t)rep << 8) | (int64_t)prop; }
@@ -291,10 +328,11 @@ void movie_keys_delete(MovieKeys* keys, KeySelection* sel);
 // Selected keys remembered to be put in somewhere else
 struct KeyClip {
     std::vector<CameraKeyframe> camera;
+    std::vector<MovieTargetKey> look, focus;
     std::vector<ParamKey> params;
     std::vector<RepKey> reps;
     double begin = 0.0;         // The time of the first
-    bool empty() const { return camera.empty() && params.empty() && reps.empty(); }
+    bool empty() const { return camera.empty() && look.empty() && focus.empty() && params.empty() && reps.empty(); }
 };
 
 KeyClip movie_keys_copy(const MovieKeys& keys, const KeySelection& sel);

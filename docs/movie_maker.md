@@ -147,11 +147,85 @@ To edit a key: go to it, move around, **Update position**, and **Look at** to ch
 - The **green camera** is the camera at the preview time: a green dot on the eye, a green ring (**looks at**), and a thick arrow between them. Orbit the scene to see the path from other sides.
 - With keys that follow a target or atom, the path follows the target through the trajectory. It is computed a few points at a time (frames must be read), so it grows for a moment; the old path stays until the new one is ready.
 
-### Depth of field
+### Independent camera, look-at and focus tracks
 
-Under **Visuals > Depth of Field**, **Focus** chooses what is sharp: **Look-at point** (default, follows the keys), **Distance** (**Focus distance**; **From view** takes the current one; key it as a look parameter to pull focus), or **Follow target** (the follow-target centre even when the camera looks elsewhere).
+In **Movie > Camera**, enable **Independent camera / look-at / focus**. It is opt-in:
+existing workspaces keep their paired camera keys and global focus until enabled.
+
+- **Camera keys** now control the eye's position, FOV, Spin, Roll and optional
+  trajectory-frame pins. Position interpolates directly, independently of aim.
+  Use **Add Keyframe**, **K**, or **Update position** to record positions.
+- **Look-at keys** have their own times. **Key view aim** records a fixed world
+  point; **Key on selection** records the selected atom/group as a moving target.
+  Each key retains its own selection, so another key can aim at a different molecule.
+- **Focus keys** also have their own times and selections. Choose **Fixed point**,
+  **Track selection**, **Look-at**, or **Distance**. **Blur (%)** controls blur
+  directly; **Key no blur** makes everything sharp. No global DOF switch is needed.
+  For camera travel in a general direction while sharpening a moving molecule,
+  record camera positions, keep the look-at point fixed, then add a focus selection key.
+  For a still image, keep the camera and trajectory fixed and key two focus targets.
+
+**Transition (s)** belongs to an incoming focus key: starting at that key's time,
+blend from the preceding focus target and blur strength into the new setting. Set it
+to zero for a cut. A transition is shortened to finish at the next focus key;
+**Ease** shapes the transition. Look-at easing instead describes the segment
+*leading into* its key. Tracking uses the current displayed coordinates, including
+periodic-group correction, recentering and orientation correction, without
+playback-history-dependent smoothing.
+
+The Camera timeline has separate **Look-at keys** and **Focus keys** rows. Drag
+times independently, or Ctrl-click/box-select keys across tracks to move, stretch,
+copy/paste or delete them together. Undo/redo and duration scaling include all tracks.
+In the viewport, choose **Camera**, **Look-at**, or **Focus** above the target editors:
+blue, yellow and magenta paths are shown together, and the chosen track has editable
+handles. Drag a handle, release to apply, or Esc to cancel; Ctrl-click its path to
+insert a key only on that track. Moving a tracked handle converts that key to a
+fixed world point. Inserting keys may reshape interpolation or Spin segments.
+Tracked paths are references evaluated with the **current trajectory frame**, not
+a prediction of every future frame; playback and recording resolve targets per frame.
+
+Spin/Orbit rotates the position path around the independently evaluated look-at
+target, using the existing axis, easing and whole-turn settings. Roll and Keep
+upright remain available. The Distance curve is derived from position and aim,
+and is read-only in this mode. Separate spin-ring decorations and legacy
+**Close Loop** are unavailable; **Loop playback** repeats the whole movie.
+Tracks hold outside their keys, so match each track's endpoints for a continuous loop.
+
+Movie-local focus overrides **Visuals > Depth of Field** and the old Looks
+focus-distance/blur keys while the movie is displayed or recorded; it does not
+replace those saved global settings. With no focus keys movie blur is off. With no
+look-at keys aim holds at the first camera key's look-at point. Invalid tracked
+selections are reported and use their saved point until replaced.
+Enabling seeds fixed look-at keys from the existing camera keys and copies the
+current global focus setting; review legacy tracked movies after conversion.
+Disabling preserves the independent keys but restores legacy evaluation.
+All target modes, atom selections, timings and transitions save with the workspace.
+
+### Global depth of field (legacy movies and ordinary viewport)
+
+Under **Visuals > Depth of Field**, **Focus** chooses what is sharp: **Look-at point** (default, follows the keys), **Distance** (**Focus distance**; **From view** takes the current one; key it as a look parameter to pull focus), **Follow target** (the camera follow-target centre even when the camera looks elsewhere), or **Focus target** (an independent atom/group).
+
+To decouple focus from aim, select an atom or a group, choose **Focus target**, and press **Set focus from selection**. Only sharpness tracks that target: the camera position, look-at point, keys and camera follow target stay unchanged. A group uses its mass-weighted centre and is made whole across periodic boundaries. Focus depth is measured along the camera's viewing direction, not as the straight-line distance to the target.
+
+The target and mode are saved in the workspace. Tracking uses the displayed coordinates, including recentering and orientation correction, in the viewport, live picture, Preview and recording; it has no playback-history-dependent smoothing. A group centre can reduce single-atom jitter. **Clear** removes the focus target; with no valid target, the UI reports that focus falls back to the look-at point. A target behind the camera is clamped to a small positive depth. Replacing the system clears the target so atom indices cannot silently refer to another molecule.
 
 **Blur Strength** uses the upstream renderer's aperture: blur of distant objects as a percentage of the view height, independent of zoom level. The movie's **Depth of field blur** keys use the same units.
+
+### A small FOV and focus tutorial
+
+Open [fov_and_focus.via](examples/fov_and_focus.via) and press the green **Preview** button. Its companion [fov_and_focus.xyz](examples/fov_and_focus.xyz) is a tiny synthetic trajectory, included in the repository: no aspirin files are needed. Keep the two files together.
+
+- **0-18 s, field of view:** all atoms and the camera stay fixed; blur is off. FOV changes from **45 to 20 degrees** (objects grow), then to **70 degrees** (objects shrink), then back to 45. This is lens zoom, not camera travel. The Camera table shows the changing FOV while distance stays at 32 A.
+- **18-32 s, depth of field:** FOV, camera position and aim stay fixed. A movie-local focus key turns blur on over two seconds and tracks the centre carbon. The red foreground oxygens become sharp when it reaches their depth (22.5 s), then the blue background nitrogens become sharp at their depth (31.5 s).
+- **32-34 s:** focus racks from the moving carbon to a fixed point on the red oxygen over one second.
+- **34-36 s:** a no-blur key fades blur to zero over one second. All atoms become sharp again.
+
+Inspect **Movie > Camera > Independent tracks > Focus keys**: the key at 18 s
+stores the carbon selection, the key at 32 s stores the red oxygen's fixed position,
+and the key at 34 s has zero blur. Changing a target or its blur here does not require
+changing a camera key or opening global settings.
+
+**In short:** FOV changes how much you see and the apparent size; depth of field changes what is sharp. Narrow FOV does not by itself enable blur. Increasing **Blur Strength** strengthens depth separation, not zoom.
 
 ## Looks
 

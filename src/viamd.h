@@ -403,6 +403,7 @@ enum class DofFocusMode : int {
     LookAt,    // What the camera looks at (the orbit pivot)
     Distance,  // A distance from the camera, which can be keyed
     Target,    // The movie's follow target, wherever the camera is
+    FocusTarget, // Independent of the movie camera's follow target.
     Count,
 };
 
@@ -1274,6 +1275,15 @@ struct ApplicationState {
         // Kept sorted by time. While recording or previewing the movie, the camera follows
         // these (smoothly, through every one of them) instead of staying where the user left it.
         md_array(CameraKeyframe) keyframes = 0;
+        bool independent_tracks = false;
+        mutable bool invalid_target_reported = false;
+        std::vector<MovieTargetKey> look_keys, focus_keys;
+        int path_track = 0; // Camera, look-at, focus.
+        struct {
+            bool active = false, moved = false;
+            int track = 0, key = -1;
+            vec3_t start = {}, plane = {}, normal = {}, grab = {};
+        } target_drag;
         bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
         bool keep_upright = true;             // The camera stays level about up_axis, tilted only by the keys' roll
         int  up_axis = 1;                     // The world axis that is up for keep_upright: +X, +Y, +Z, -X, -Y, -Z
@@ -1584,6 +1594,7 @@ struct ApplicationState {
             float focus_distance = 10.0f;   // DofFocusMode::Distance: from the camera, along the view direction
             float focus_depth = 10.0f;      // What was used last: the result of the mode
             float aperture = 1.0f;      // percent of the view height (CoC of an object at infinity)
+            md_bitfield_t target_mask = {};
         } dof;
 
         struct {
