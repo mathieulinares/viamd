@@ -93,7 +93,7 @@ struct CameraKeyframe {
     uint32_t    focus_set = 0;                 // Selection: the atoms
     vec3_t      focus_point = {0, 0, 0};       // Point, and where the set was when Selection was made
     float       focus_distance = 10.0f;        // Distance
-    float       focus_blur = 2.0f;             // The blur, in percent of the height of the view; 0: everything is sharp
+    float       focus_blur = -1.0f;            // Only keys of earlier versions have one (0 or more); the blur is a look parameter now
     float       focus_transition = 1.0f;
     KeyEase     focus_ease = KeyEase::EaseInOut;
 };

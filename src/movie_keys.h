@@ -27,10 +27,13 @@ bool movie_target_center(vec3_t* out, const md_system_t& system, const md_system
 struct MovieAtomSet {
     uint32_t id = 0;
     std::vector<uint32_t> atoms;   // Sorted, without duplicates
+    std::string expr;              // A selection in the language of the filters (protein, resname("AIN")): then 'atoms' is not used
 };
 
 // The id of a set with these atoms: one the table has already, or a new one. 0 for no atoms.
 uint32_t movie_atoms_add(std::vector<MovieAtomSet>* sets, std::vector<uint32_t> atoms);
+// The id of a set that is this selection expression (one the table has already, or a new one). 0 for an empty expression.
+uint32_t movie_atoms_add_expr(std::vector<MovieAtomSet>* sets, std::string expr);
 const MovieAtomSet* movie_atoms_find(const std::vector<MovieAtomSet>& sets, uint32_t id);
 // Takes out the sets that no key uses
 void movie_atoms_prune(std::vector<MovieAtomSet>* sets, const CameraKeyframe* keys, size_t count);
@@ -84,16 +87,14 @@ void movie_keys_from_follow(std::vector<CameraKeyframe>* keys, std::vector<Movie
 // Whether any key sets the focus
 bool movie_focus_keys_exist(const CameraKeyframe* keys, size_t count);
 
-// What is sharp at 'time', from the keys that set the focus: the point (in the space of the camera) and the blur in percent.
-// 'points' are aligned with 'keys': where the atoms of a Selection focus are now. Before the first key that sets it, what the
-// camera looks at is sharp with 'default_blur'. A key's change starts at its time and takes its transition, shortened to end
-// at the next key that sets the focus.
-vec3_t movie_focus_point(const CameraKeyframe* keys, size_t count, const vec3_t* points, float default_blur,
-                         double time, const ViewTransform& camera, float* blur);
+// What is sharp at 'time', from the keys that set the focus: the point (in the space of the camera). 'points' are aligned with
+// 'keys': where the atoms of a Selection focus are now. Before the first key that sets it, what the camera looks at is sharp.
+// A key's change starts at its time and takes its transition, shortened to end at the next key that sets the focus.
+// How blurred the rest is belongs to the look parameter of the blur.
+vec3_t movie_focus_point(const CameraKeyframe* keys, size_t count, const vec3_t* points, double time, const ViewTransform& camera);
 
 // The depth in front of the camera of that point
-float movie_focus_depth(const CameraKeyframe* keys, size_t count, const vec3_t* points, float default_blur,
-                        double time, const ViewTransform& camera, float* blur);
+float movie_focus_depth(const CameraKeyframe* keys, size_t count, const vec3_t* points, double time, const ViewTransform& camera);
 
 // What is keyed on a movie's timeline besides the camera: look parameters (background, depth of field,
 // clipping ...), each with its own keys. The application has a table of the parameters, a key refers to
@@ -104,6 +105,13 @@ struct ParamKey {
     float   value[3] = {0, 0, 0};   // A colour uses all three, a scalar the first
     KeyEase ease = KeyEase::Smooth; // Shapes the stretch leading to this key
 };
+
+// The id of the look parameter for the blur of the depth of field (it is saved, and also the id of the application's table)
+constexpr int MOVIE_PARAM_DOF_APERTURE = 9;
+
+// Keys of earlier versions carried the blur of the focus (focus_blur of 0 or more; -1 is no blur of its own). This moves it to
+// keys of the blur's look parameter, with the same transitions, and sets focus_blur to -1.
+std::vector<ParamKey> movie_blur_keys_from_focus(CameraKeyframe* keys, size_t count);
 
 // The value of a parameter at 'time' from the keys that are for it, which need not be sorted. Returns
 // false if there are none. Passes through every key and holds outside the first and last.

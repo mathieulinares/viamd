@@ -5,8 +5,8 @@ Branch `video`; no pull request yet.
 Merged `scanberg/viamd` master through `381f3fad`, including renderer, ASE loader and camera/recentering fixes. Movie focus modes, recording, editor and live preview are retained. Depth-of-field blur now uses aperture units; legacy blur and occlusion-radius keys are retained but inactive (see the manual).
 
 Each camera key now has its own **Look at** (a fixed point, or atoms tracked through the
-trajectory) and **Focus on** (what is sharp, with blur, transition and ease), set with two
-buttons in the key table. The focus is the look-at point by default and a key that does not set
+trajectory) and **Focus on** (what is sharp, with transition and ease), set with two
+buttons in the key table. Both can be a selection typed in the filter language (`resname("AIN")`). The blur is the **Depth of field blur** look parameter. The focus is the look-at point by default and a key that does not set
 it keeps the focus of the key before. The viewport shows three paths (camera, look-at, focus)
 and the camera lane has Look at and Focus rows. The opt-in "Independent camera / look-at / focus"
 switch and the separate tracks are gone: workspaces that used them (and keys that followed a
@@ -24,7 +24,7 @@ follow target) are converted when loaded, which can change the eye path of such 
 ## Build and test
 
 - Build: `cmake --build build --target viamd viamd_test -j8`; run `cmake -S . -B build` after adding files.
-- Tests: all 264 tests pass, including atom sets, eye and aim evaluated separately, the default focus and focus transitions, Spin pivot/axis, camera bands, conversion of older tracks and follow keys (with the optics tutorial), focus encoding, history/time scaling and group edits that keep a key's look-at and focus. They cover pure logic only; the frame sink tests use a fake script, so ffmpeg is not needed.
+- Tests: all 266 tests pass, including atom sets, eye and aim evaluated separately, the default focus and focus transitions, Spin pivot/axis, camera bands, conversion of older tracks and follow keys (with the optics tutorial), focus encoding, history/time scaling and group edits that keep a key's look-at and focus. They cover pure logic only; the frame sink tests use a fake script, so ffmpeg is not needed.
 - VS Code CMake Tools currently reports no active configure preset. The existing `build` tree successfully builds `viamd` and `viamd_test` through a temporary VS Code Make task. VS Code's test runner does not discover the C++ tests; the executable passes.
 - The GUI could not be run while the code was written, so everything in `gui-checklist.md` beyond blocks 1 to 5 is untested. Windows and macOS are untested (the ffmpeg pipe uses `popen` / `_popen`).
 
@@ -48,7 +48,7 @@ Numbers that are saved and must never be renumbered, only added to: parameter id
 
 - **Editor:** one window, timeline left and tabbed controls right, resizable and collapsible; shared playback; Scene view / Movie preview switch (Tab); frame placed beside the Movie window with a shifted projection; Show path / Fit path / Live picture on the top row; green Preview button plays the movie with the windows hidden and a bottom control bar (Space, Esc) with separate poses, **Fit path** and a live picture of the movie camera.
 - **Timing:** movie length as the master value, trajectory start/end anchors, frame pins, backward trajectory, **Match Animation speed**, **Snap to frames**.
-- **Camera:** keys with a per-key look-at (fixed or atoms) and focus (target, blur, transition, ease); ease, spin, orbit, loops, keep upright with roll, names; three colored viewport paths (camera, look-at, focus) with draggable handles; camera lane rows for keys, look at, focus, spin and frame.
+- **Camera:** keys with a per-key look-at (fixed or atoms) and focus (target, transition, ease; blur is a look parameter); ease, spin, orbit, loops, keep upright with roll, names; three colored viewport paths (camera, look-at, focus) with draggable handles; camera lane rows for keys, look at, focus, spin and frame.
 - **Looks and representations:** keyed look parameters; keyed representation properties (visibility with transition, scales, tint, saturation, colors) with stable representation ids; the overview lane by system with block editing and swap.
 - **Overlays:** text, time stamp, scale bar, time bar, logo, image, timeline, distribution, property visualization; markers (labels on up to three rows); subplot ids and names; overlays shown together are moved apart (`movie_overlay_avoid`).
 - **Timeline panel:** lane toggles with presets and a Layout popup; ruler, trajectory, camera, lens (FOV and distance on two axes), look parameter, representation lane, overview and overlay lanes; multi-select across all of them with group move, stretch, inspector, keyboard and copy/paste; lane layout saved in the workspace.

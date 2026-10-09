@@ -25,7 +25,7 @@ The manual is [`docs/movie_maker.md`](docs/movie_maker.md). [`docs/examples/aspi
 - Movable trajectory start/end anchors (fly-over before the dynamics, hold at the end); frame pins on keys vary the speed and allow backward play; **Match Animation speed**; **Snap to frames**.
 
 **Camera**
-- Keys with per-key ease (Smooth, Ease in/out, Linear, Hold), field of view, names, spin turns, **Add Orbit**, seamless loop, a per-key **Look at** (a fixed point or atoms, tracked through the trajectory) and **Focus on** (what is sharp, with blur, transition and ease; the look-at point by default), three viewport paths (camera, look-at, focus), **Key on Selection**, copy/paste.
+- Keys with per-key ease (Smooth, Ease in/out, Linear, Hold), field of view, names, spin turns, **Add Orbit**, seamless loop, a per-key **Look at** (a fixed point or atoms, tracked through the trajectory) and **Focus on** (what is sharp, with transition and ease; the look-at point by default), both able to be a selection typed in the filter language (the blur is the **Depth of field blur** look parameter), three viewport paths (camera, look-at, focus), **Key on Selection**, copy/paste.
 - **Keep upright** with a roll per key, so loops and spins never tilt the camera.
 - Depth of field focus on the look-at point, a keyable distance or a focus target; a movie's keys can set the focus themselves.
 - The camera path is drawn in the viewport (ticks at round times, chevrons, sight lines, cameras, spin rings, the green camera at the preview time) with handles on the eye and the look-at point of each key: click to go there, drag to edit (Ctrl moves both), Ctrl + click on the path adds a key.

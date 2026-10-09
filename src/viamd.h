@@ -1031,6 +1031,20 @@ struct PickingReadbackRequest {
     mat4_t clip_to_world = MD_MAT4_IDENT_INIT;
 };
 
+// What a selection expression of a movie's atom set selects: evaluated again when the script, the system or (for an expression
+// that depends on it) the frame changes
+struct MovieSetEval {
+    uint32_t id = 0;
+    std::string expr;
+    uint64_t ir_fingerprint = 0;
+    size_t num_atoms = 0;
+    double frame = 0.0;
+    bool dynamic = false;
+    bool valid = false;
+    std::vector<uint32_t> atoms;
+    std::string error;
+};
+
 struct ApplicationState {
     // --- APPLICATION ---
     application::Context app {};
@@ -1277,6 +1291,7 @@ struct ApplicationState {
         md_array(CameraKeyframe) keyframes = 0;
         std::vector<MovieAtomSet> atom_sets;     // The atoms that keys look at or focus on, by id
         mutable bool invalid_target_reported = false;
+        mutable std::vector<MovieSetEval> set_eval;   // What the selection expressions of the atom sets select now
         bool loop = false;                    // The camera path is cyclic: the last key is in the pose of the first
         bool keep_upright = true;             // The camera stays level about up_axis, tilted only by the keys' roll
         int  up_axis = 1;                     // The world axis that is up for keep_upright: +X, +Y, +Z, -X, -Y, -Z

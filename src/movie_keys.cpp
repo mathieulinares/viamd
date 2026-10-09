@@ -34,10 +34,26 @@ uint32_t movie_atoms_add(std::vector<MovieAtomSet>* sets, std::vector<uint32_t> 
     if (atoms.empty()) return 0;
     uint32_t next = 1;
     for (const MovieAtomSet& s : *sets) {
-        if (s.atoms == atoms) return s.id;
+        if (s.expr.empty() && s.atoms == atoms) return s.id;
         next = std::max(next, s.id + 1);
     }
     sets->push_back({next, std::move(atoms)});
+    return next;
+}
+
+uint32_t movie_atoms_add_expr(std::vector<MovieAtomSet>* sets, std::string expr) {
+    const size_t first = expr.find_first_not_of(" \t\r\n"), last = expr.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos) return 0;
+    expr = expr.substr(first, last - first + 1);
+    uint32_t next = 1;
+    for (const MovieAtomSet& s : *sets) {
+        if (s.expr == expr) return s.id;
+        next = std::max(next, s.id + 1);
+    }
+    MovieAtomSet set;
+    set.id = next;
+    set.expr = std::move(expr);
+    sets->push_back(std::move(set));
     return next;
 }
 
@@ -76,7 +92,7 @@ bool movie_focus_decode(CameraKeyframe* key, const float (&v)[9]) {
     key->focus_target = (FocusTarget)(int)v[0];
     key->focus_point = vec3_set(v[1], v[2], v[3]);
     key->focus_distance = MAX(v[4], 0.001f);
-    key->focus_blur = CLAMP(v[5], 0.0f, 4.0f);
+    key->focus_blur = v[5] >= 0.0f ? CLAMP(v[5], 0.0f, 4.0f) : -1.0f;
     key->focus_transition = MAX(v[6], 0.0f);
     key->focus_ease = (KeyEase)(int)v[7];
     key->focus_set = (uint32_t)v[8];
@@ -257,22 +273,21 @@ bool movie_focus_keys_exist(const CameraKeyframe* keys, size_t count) {
     return false;
 }
 
-vec3_t movie_focus_point(const CameraKeyframe* keys, size_t count, const vec3_t* points, float default_blur,
-                         double time, const ViewTransform& camera, float* blur) {
+vec3_t movie_focus_point(const CameraKeyframe* keys, size_t count, const vec3_t* points, double time, const ViewTransform& camera) {
     struct Focus {
         double time;
         FocusTarget target;
         vec3_t point;
-        float distance, blur, transition;
+        float distance, transition;
         KeyEase ease;
     };
-    // What is sharp before any key says: what the camera looks at, with the blur the viewport has
+    // What is sharp before any key says: what the camera looks at
     std::vector<Focus> f;
-    f.push_back({-DBL_MAX, FocusTarget::LookAt, {}, 10.0f, default_blur, 0.0f, KeyEase::EaseInOut});
+    f.push_back({-DBL_MAX, FocusTarget::LookAt, {}, 10.0f, 0.0f, KeyEase::EaseInOut});
     for (size_t i = 0; i < count; ++i) {
         if (!keys[i].focus_on) continue;
         f.push_back({keys[i].time, keys[i].focus_target, points ? points[i] : keys[i].focus_point, keys[i].focus_distance,
-            keys[i].focus_blur, keys[i].focus_transition, keys[i].focus_ease});
+            keys[i].focus_transition, keys[i].focus_ease});
     }
     std::stable_sort(f.begin(), f.end(), [](const Focus& a, const Focus& b) { return a.time < b.time; });
     size_t current = 0, previous = 0;
@@ -296,13 +311,47 @@ vec3_t movie_focus_point(const CameraKeyframe* keys, size_t count, const vec3_t*
         if (f[current].ease == KeyEase::Hold) u = u >= 1.0f ? 1.0f : 0.0f;
         else if (f[current].ease != KeyEase::Linear) u = u * u * (3.0f - 2.0f * u);
     }
-    *blur = f[previous].blur * (1.0f - u) + f[current].blur * u;
     return point(f[previous]) * (1.0f - u) + point(f[current]) * u;
 }
 
-float movie_focus_depth(const CameraKeyframe* keys, size_t count, const vec3_t* points, float default_blur,
-                        double time, const ViewTransform& camera, float* blur) {
-    return MAX(camera_depth_of_point(camera, movie_focus_point(keys, count, points, default_blur, time, camera, blur)), 1.0e-3f);
+float movie_focus_depth(const CameraKeyframe* keys, size_t count, const vec3_t* points, double time, const ViewTransform& camera) {
+    return MAX(camera_depth_of_point(camera, movie_focus_point(keys, count, points, time, camera)), 1.0e-3f);
+}
+
+std::vector<ParamKey> movie_blur_keys_from_focus(CameraKeyframe* keys, size_t count) {
+    std::vector<size_t> order;
+    for (size_t i = 0; i < count; ++i) if (keys[i].focus_on) order.push_back(i);
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return keys[a].time < keys[b].time; });
+    std::vector<ParamKey> result;
+    float previous = -1.0f;
+    double last_time = -DBL_MAX;
+    for (size_t n = 0; n < order.size(); ++n) {
+        CameraKeyframe& k = keys[order[n]];
+        if (k.focus_blur < 0.0f) continue;
+        auto add = [&](double time, float value, KeyEase ease) {
+            ParamKey p;
+            p.param = MOVIE_PARAM_DOF_APERTURE;
+            p.time = time;
+            p.value[0] = value;
+            p.ease = ease;
+            result.push_back(p);
+            last_time = time;
+        };
+        const bool ramp = previous >= 0.0f && k.focus_transition > 0.0f && previous != k.focus_blur;
+        if (ramp) {
+            double end = k.time + k.focus_transition;
+            for (size_t m = n + 1; m < order.size(); ++m) {
+                if (keys[order[m]].time > k.time) { end = std::min(end, keys[order[m]].time); break; }
+            }
+            if (last_time < k.time - 1.0e-9) add(k.time, previous, KeyEase::Linear);
+            add(std::max(end, k.time + 1.0e-6), k.focus_blur, k.focus_ease);
+        } else {
+            add(k.time, k.focus_blur, KeyEase::Hold);
+        }
+        previous = k.focus_blur;
+        k.focus_blur = -1.0f;
+    }
+    return result;
 }
 
 bool param_keys_evaluate(float* out, int comps, const ParamKey* keys, size_t count, int param, double time) {
@@ -668,7 +717,7 @@ static bool equal(const RepKey& a, const RepKey& b) {
 
 bool movie_keys_equal(const MovieKeys& a, const MovieKeys& b) {
     if (a.sets.size() != b.sets.size()) return false;
-    for (size_t i = 0; i < a.sets.size(); ++i) if (a.sets[i].id != b.sets[i].id || a.sets[i].atoms != b.sets[i].atoms) return false;
+    for (size_t i = 0; i < a.sets.size(); ++i) if (a.sets[i].id != b.sets[i].id || a.sets[i].atoms != b.sets[i].atoms || a.sets[i].expr != b.sets[i].expr) return false;
     if (a.loop != b.loop || a.keep_upright != b.keep_upright || a.up_axis != b.up_axis || a.duration != b.duration || a.traj_begin != b.traj_begin || a.traj_end != b.traj_end ||
         a.start_frame != b.start_frame || a.end_frame != b.end_frame || a.camera.size() != b.camera.size() ||
         a.params.size() != b.params.size() || a.reps.size() != b.reps.size() || a.overlays.size() != b.overlays.size()) return false;

@@ -6492,6 +6492,7 @@ enum MovieParamId : int {
     MovieParam_FocusDistance,
     MovieParam_DofAperture,
 };
+static_assert(MovieParam_DofAperture == MOVIE_PARAM_DOF_APERTURE, "the id of the blur is saved in workspaces");
 
 struct MovieParamDesc {
     int         id;
@@ -6716,15 +6717,73 @@ static bool movie_follow_center(const ApplicationState* state, vec3_t* out) {
     return movie_target_center(state, &state->movie.follow_mask, state->mold.state, out);
 }
 
-// Where a set of atoms of the movie is now
-static bool movie_set_center(const ApplicationState* state, uint32_t id, vec3_t* out) {
-    const MovieAtomSet* set = movie_atoms_find(state->movie.atom_sets, id);
-    if (!set) return false;
+// What an expression selects in the system now, for a set or for the field that is typed. False with a message when it is not
+// valid, or selects nothing.
+static bool movie_expr_atoms(const ApplicationState* state, const std::string& expr, std::vector<uint32_t>* atoms, bool* dynamic, std::string* error) {
+    atoms->clear();
+    if (dynamic) *dynamic = false;
+    const size_t num_atoms = state->mold.sys.atom.count;
+    if (num_atoms == 0 || state->mold.state.num_atoms != num_atoms) {
+        if (error) *error = "No system";
+        return false;
+    }
     md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
     defer { md_temp_end(temp); };
     md_bitfield_t mask = {};
     md_bitfield_init(&mask, md_temp_allocator(temp));
-    for (uint32_t atom : set->atoms) md_bitfield_set_bit(&mask, atom);
+    char message[256] = "";
+    bool is_dynamic = false;
+    const bool ok = md_filter(&mask, str_from_cstr(expr.c_str()), &state->mold.sys, &state->mold.state, state->script.ir, &is_dynamic, message, sizeof(message));
+    if (dynamic) *dynamic = is_dynamic;
+    if (!ok) {
+        if (error) *error = message[0] ? message : "Not a valid selection";
+        return false;
+    }
+    md_bitfield_iter_t it = md_bitfield_iter_create(&mask);
+    while (md_bitfield_iter_next(&it)) atoms->push_back((uint32_t)md_bitfield_iter_idx(&it));
+    if (atoms->empty()) {
+        if (error) *error = "Selects no atoms";
+        return false;
+    }
+    return true;
+}
+
+// The atoms of a set now: its list, or what its expression selects (again when the script or the system changed, or the frame if
+// the expression depends on it). Null when the set is not there or its expression does not select anything.
+static const std::vector<uint32_t>* movie_set_atoms(const ApplicationState* state, uint32_t id) {
+    const MovieAtomSet* set = movie_atoms_find(state->movie.atom_sets, id);
+    if (!set) return nullptr;
+    if (set->expr.empty()) return &set->atoms;
+    auto& cache = state->movie.set_eval;
+    MovieSetEval* e = nullptr;
+    for (auto& c : cache) if (c.id == id) e = &c;
+    if (!e) {
+        cache.emplace_back();
+        e = &cache.back();
+        e->id = id;
+    }
+    const uint64_t fingerprint = state->script.ir ? state->script.ir_fingerprint : 0;
+    const size_t num_atoms = state->mold.sys.atom.count;
+    const double frame = state->animation.frame;
+    if (e->expr != set->expr || e->ir_fingerprint != fingerprint || e->num_atoms != num_atoms || (e->dynamic && e->frame != frame)) {
+        e->expr = set->expr;
+        e->ir_fingerprint = fingerprint;
+        e->num_atoms = num_atoms;
+        e->frame = frame;
+        e->valid = movie_expr_atoms(state, set->expr, &e->atoms, &e->dynamic, &e->error);
+    }
+    return e->valid ? &e->atoms : nullptr;
+}
+
+// Where a set of atoms of the movie is now
+static bool movie_set_center(const ApplicationState* state, uint32_t id, vec3_t* out) {
+    const std::vector<uint32_t>* atoms = movie_set_atoms(state, id);
+    if (!atoms || atoms->empty()) return false;
+    md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
+    defer { md_temp_end(temp); };
+    md_bitfield_t mask = {};
+    md_bitfield_init(&mask, md_temp_allocator(temp));
+    for (uint32_t atom : *atoms) md_bitfield_set_bit(&mask, atom);
     return movie_target_center(state, &mask, state->mold.state, out);
 }
 
@@ -6804,15 +6863,18 @@ static void movie_camera_evaluate(const ApplicationState* state, double time, co
     movie_pose(state, movie_resolve(state, keys, num_keys), time, vt, fov_y);
 }
 
-// What is sharp, and how much it is blurred, for a camera at a time, from the keys that set the focus: the point, the depth in
-// front of the camera and the blur in percent. Before the first of them what the camera looks at is sharp, with the blur of the
-// Depth of Field settings.
-static float movie_default_blur(const ApplicationState* state) {
-    return state->visuals.dof.enabled ? state->visuals.dof.aperture : 0.0f;
+// What is sharp for a camera at a time, from the keys that set the focus: before the first of them what the camera looks at is
+// sharp.
+static vec3_t movie_focus_evaluate(const MovieResolved& r, double time, const ViewTransform& camera) {
+    return movie_focus_point(r.keys.data(), r.keys.size(), r.focus.data(), time, camera);
 }
 
-static vec3_t movie_focus_evaluate(const ApplicationState* state, const MovieResolved& r, double time, const ViewTransform& camera, float* blur) {
-    return movie_focus_point(r.keys.data(), r.keys.size(), r.focus.data(), movie_default_blur(state), time, camera, blur);
+// Whether the blur of the depth of field is keyed, so that the movie blurs without the global switch
+static bool movie_blur_keyed(const ApplicationState* state) {
+    const auto& m = state->movie;
+    if (!m.animate_params) return false;
+    for (const ParamKey& k : m.param_keys) if (k.param == MOVIE_PARAM_DOF_APERTURE) return true;
+    return false;
 }
 
 // Whether the movie decides what is sharp: while it is edited or recorded and a key sets the focus
@@ -6827,13 +6889,12 @@ static double movie_focus_time(const ApplicationState* state) {
 }
 
 // Aims a key, from where its eye is, at the centre of a set of atoms that it then tracks through the trajectory
-static bool movie_key_look_at_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms) {
+static bool movie_key_look_at_set(ApplicationState* state, int key_idx, uint32_t id) {
     auto& m = state->movie;
-    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || atoms.empty()) return false;
-    const uint32_t id = movie_atoms_add(&m.atom_sets, atoms);
+    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || id == 0) return false;
     vec3_t center;
     if (!movie_set_center(state, id, &center)) {
-        VIAMD_LOG_ERROR("These atoms are not in the current system");
+        VIAMD_LOG_ERROR("Nothing to look at: the atoms are not in the current system");
         return false;
     }
     CameraKeyframe& key = m.keyframes[key_idx];
@@ -6841,6 +6902,16 @@ static bool movie_key_look_at_atoms(ApplicationState* state, int key_idx, const 
     key.look_set = id;
     m.invalid_target_reported = false;
     return true;
+}
+
+static bool movie_key_look_at_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms) {
+    if (atoms.empty()) return false;
+    return movie_key_look_at_set(state, key_idx, movie_atoms_add(&state->movie.atom_sets, atoms));
+}
+
+// A selection in the language of the filters (protein, resname("AIN")), evaluated again wherever the movie is shown
+static bool movie_key_look_at_expr(ApplicationState* state, int key_idx, const std::string& expr) {
+    return movie_key_look_at_set(state, key_idx, movie_atoms_add_expr(&state->movie.atom_sets, expr));
 }
 
 // Makes a keyframe look at an atom and track it through the trajectory. The eye stays where it is.
@@ -6860,31 +6931,21 @@ static bool movie_key_look_at_point(ApplicationState* state, int key_idx, vec3_t
     return true;
 }
 
-// What a key that starts to set the focus begins with: the blur there is where it is, or the one of the Depth of Field settings
+// A key that sets the focus starts with what the camera looks at
 static void movie_key_focus_begin(ApplicationState* state, int key_idx) {
-    auto& m = state->movie;
-    CameraKeyframe& key = m.keyframes[key_idx];
+    CameraKeyframe& key = state->movie.keyframes[key_idx];
     if (key.focus_on) return;
-    float blur = movie_default_blur(state);
-    if (movie_focus_keys_exist(m.keyframes, md_array_size(m.keyframes))) {
-        const MovieResolved r = movie_resolve(state, m.keyframes, md_array_size(m.keyframes));
-        ViewTransform vt;
-        float fov;
-        movie_pose(state, r, key.time, &vt, &fov);
-        movie_focus_evaluate(state, r, key.time, vt, &blur);
-    }
     key.focus_on = true;
     key.focus_target = FocusTarget::LookAt;
-    key.focus_blur = blur > 0.0f ? blur : 2.0f;
+    key.focus_blur = -1.0f;
 }
 
-static bool movie_key_focus_on_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms) {
+static bool movie_key_focus_on_set(ApplicationState* state, int key_idx, uint32_t id) {
     auto& m = state->movie;
-    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || atoms.empty()) return false;
-    const uint32_t id = movie_atoms_add(&m.atom_sets, atoms);
+    if (key_idx < 0 || key_idx >= (int)md_array_size(m.keyframes) || id == 0) return false;
     vec3_t center;
     if (!movie_set_center(state, id, &center)) {
-        VIAMD_LOG_ERROR("These atoms are not in the current system");
+        VIAMD_LOG_ERROR("Nothing to focus on: the atoms are not in the current system");
         return false;
     }
     movie_key_focus_begin(state, key_idx);
@@ -6896,14 +6957,22 @@ static bool movie_key_focus_on_atoms(ApplicationState* state, int key_idx, const
     return true;
 }
 
+static bool movie_key_focus_on_atoms(ApplicationState* state, int key_idx, const std::vector<uint32_t>& atoms) {
+    if (atoms.empty()) return false;
+    return movie_key_focus_on_set(state, key_idx, movie_atoms_add(&state->movie.atom_sets, atoms));
+}
+
+static bool movie_key_focus_on_expr(ApplicationState* state, int key_idx, const std::string& expr) {
+    return movie_key_focus_on_set(state, key_idx, movie_atoms_add_expr(&state->movie.atom_sets, expr));
+}
+
 // How far from the camera depth of field is sharp, for a camera: from the movie's focus keys when it has some, otherwise from the
 // focus mode of the Depth of Field settings
 static float dof_focus_depth(const ApplicationState* state, const ViewTransform& view) {
     if (movie_focus_active(state)) {
-        float blur;
         const auto& m = state->movie;
         const MovieResolved r = movie_resolve(state, m.keyframes, md_array_size(m.keyframes));
-        return MAX(camera_depth_of_point(view, movie_focus_evaluate(state, r, movie_focus_time(state), view, &blur)), 1.0e-3f);
+        return MAX(camera_depth_of_point(view, movie_focus_evaluate(r, movie_focus_time(state), view)), 1.0e-3f);
     }
     const auto& dof = state->visuals.dof;
     float depth = view.distance;
@@ -8973,7 +9042,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         uint64_t h = md_hash64(sorted.data(), n * sizeof(CameraKeyframe), 21);
         h = md_hash64_combine(h, md_hash64(R.look.data(), n * sizeof(vec3_t), 22));
         h = md_hash64_combine(h, md_hash64(R.focus.data(), n * sizeof(vec3_t), 23));
-        const double scalars[] = {(double)m.up_axis, (double)m.keep_upright, (double)movie_default_blur(state)};
+        const double scalars[] = {(double)m.up_axis, (double)m.keep_upright};
         h = md_hash64_combine(h, md_hash64(scalars, sizeof(scalars), 24));
         if (h != path_signature || path.time.empty()) {
             path_signature = h;
@@ -8989,8 +9058,7 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
                 path.time.push_back(t);
                 path.eye.push_back(vt.position);
                 path.look.push_back(camera_get_look_at(vt));
-                float blur;
-                path_focus.push_back(have_focus ? movie_focus_evaluate(state, R, t, vt, &blur) : path.look.back());
+                path_focus.push_back(have_focus ? movie_focus_evaluate(R, t, vt) : path.look.back());
             }
         }
     }
@@ -9302,15 +9370,14 @@ static void movie_draw_camera_path(ApplicationState* state, ImDrawList* dl) {
         for (size_t i = 0; i < n; ++i) taken |= fabs(keys[i].time - insert_at) < 1.0e-3;
         if (!taken) {
             ViewTransform vt;
-            float fov_y, blur = 0.0f;
+            float fov_y;
             movie_pose(state, R, insert_at, &vt, &fov_y);
             CameraKeyframe key = camera_key_on_path(vt, fov_y, sorted, insert_at, movie_upright(state));
             if (insert_path == 2) {
                 // On the path of what is sharp: the key sets the focus where the path is, so that it can be dragged from there
                 key.focus_on = true;
                 key.focus_target = FocusTarget::Point;
-                key.focus_point = movie_focus_evaluate(state, R, insert_at, vt, &blur);
-                key.focus_blur = blur;
+                key.focus_point = movie_focus_evaluate(R, insert_at, vt);
                 key.focus_transition = 0.0f;
             }
             movie_insert_key(state, key, false);
@@ -10071,10 +10138,11 @@ static void draw_movie_strip(ApplicationState* data, float movie_len, bool locke
 // The camera on one lane: its keys (numbered, with their names), where the look-at point follows the target or an atom, where
 // the camera spins, and the keys that pin a trajectory frame. Drag a key sideways to change when, click it to go there, right
 // click for its name and removal. A double click on an empty place adds a key on the path, without moving the camera.
-// What a key's look-at is ("3 atoms"), and what its focus is ("sharp: look-at, blur 2 %"), for the lane and the key table
+// What a key's look-at is ("3 atoms", "resname(\"AIN\")"), and what its focus is, for the lane and the key table
 static std::string movie_set_label(const ApplicationState* state, uint32_t id) {
     const MovieAtomSet* set = movie_atoms_find(state->movie.atom_sets, id);
     char buf[48];
+    if (set && !set->expr.empty()) return set->expr.size() > 24 ? set->expr.substr(0, 23) + "..." : set->expr;
     if (!set || set->atoms.empty()) return "atoms";
     if (set->atoms.size() == 1) snprintf(buf, sizeof(buf), "atom %u", set->atoms[0] + 1);
     else snprintf(buf, sizeof(buf), "%zu atoms", set->atoms.size());
@@ -10089,9 +10157,7 @@ static std::string movie_focus_label(const ApplicationState* state, const Camera
     case FocusTarget::Distance:  snprintf(buf, sizeof(buf), "%.1f A", key.focus_distance); break;
     default:                     snprintf(buf, sizeof(buf), "point"); break;
     }
-    std::string out = buf;
-    snprintf(buf, sizeof(buf), ", blur %.1f %%", key.focus_blur);
-    return out + buf;
+    return buf;
 }
 
 static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool locked, const std::vector<CameraKeyframe>& sorted, MovieCameraLaneEdit* edit) {
@@ -10187,7 +10253,7 @@ static void draw_movie_camera_lane(ApplicationState* data, float movie_len, bool
                 dl->PopClipRect();
                 if (plot_hovered && mouse.x >= a.x && mouse.x <= c.x && mouse.y >= a.y && mouse.y <= c.y) {
                     char tip[200];
-                    snprintf(tip, sizeof(tip), "Key %d sets what is sharp: %s\nChange over %.1f s, then it holds until the next key that sets it", (int)i + 1, text.c_str(), sorted[i].focus_transition);
+                    snprintf(tip, sizeof(tip), "Key %d sets what is sharp: %s\nChange over %.1f s, then it holds until the next key that sets it.\nHow blurred the rest is: Looks > Depth of field blur", (int)i + 1, text.c_str(), sorted[i].focus_transition);
                     band_tip = tip;
                 }
             }
@@ -11796,6 +11862,49 @@ static void draw_movie_overlay_section(ApplicationState* data, float movie_len) 
     }
 }
 
+// A field for a selection in the language of the filters; Enter applies a valid one. 'current' is shown when the popup opens.
+static bool movie_expr_field(const ApplicationState* data, const char* label, const std::string& current, std::string* applied) {
+    static char buf[256];
+    static std::string checked, error;
+    static bool valid = true;
+    if (ImGui::IsWindowAppearing()) {
+        snprintf(buf, sizeof(buf), "%s", current.c_str());
+        checked = "\x01";
+    }
+    if (checked != buf) {
+        checked = buf;
+        std::vector<uint32_t> atoms;
+        error.clear();
+        valid = checked.empty() || movie_expr_atoms(data, checked, &atoms, nullptr, &error);
+    }
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+    const bool entered = ImGui::InputQuery(label, buf, sizeof(buf), valid, error.c_str(), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetItemTooltip("A selection: protein, resname(\"AIN\"), resid(12) ... Tracked through the trajectory. Enter applies it.");
+    if (entered && valid && buf[0] != '\0') {
+        *applied = buf;
+        return true;
+    }
+    return false;
+}
+
+// Keys the blur of the depth of field at a time, as it is now
+static void movie_key_blur_at(ApplicationState* state, double time) {
+    auto& m = state->movie;
+    const int num_params = (int)(sizeof(movie_param_table) / sizeof(movie_param_table[0]));
+    for (int p = 0; p < num_params; ++p) {
+        if (movie_param_table[p].id == MOVIE_PARAM_DOF_APERTURE) m.param_selected = p;
+    }
+    ParamKey key;
+    key.param = MOVIE_PARAM_DOF_APERTURE;
+    key.time = time;
+    key.value[0] = state->visuals.dof.aperture;
+    for (ParamKey& k : m.param_keys) {
+        if (k.param == key.param && fabs(k.time - time) < 1.0e-3) return;
+    }
+    m.param_keys.push_back(key);
+    movie_param_sort(state);
+}
+
 // What a key looks at: atoms that it tracks through the trajectory, or a fixed point
 static void draw_movie_key_look_popup(ApplicationState* data, int i) {
     auto& m = data->movie;
@@ -11804,6 +11913,11 @@ static void draw_movie_key_look_popup(ApplicationState* data, int i) {
     ImGui::TextDisabled("Keyframe %d looks at", i + 1);
     ImGui::Text("%s", key.look_set != 0 ? movie_set_label(data, key.look_set).c_str() : "a fixed point");
     ImGui::Separator();
+    {
+        std::string expr;
+        const MovieAtomSet* set = movie_atoms_find(m.atom_sets, key.look_set);
+        if (movie_expr_field(data, "##look_expr", set ? set->expr : std::string(), &expr) && movie_key_look_at_expr(data, i, expr)) ImGui::CloseCurrentPopup();
+    }
     const std::vector<uint32_t> selected = movie_selection_atoms(data);
     char label[64];
     snprintf(label, sizeof(label), "The selection (%zu atoms)", selected.size());
@@ -11835,6 +11949,11 @@ static void draw_movie_key_focus_popup(ApplicationState* data, int i) {
     ImGui::SetItemTooltip("Off: the focus stays as the key before it set it. Before the first key that sets it, what the camera looks at is sharp.");
     ImGui::BeginDisabled(!key.focus_on);
     ImGui::Separator();
+    {
+        std::string expr;
+        const MovieAtomSet* set = key.focus_target == FocusTarget::Selection ? movie_atoms_find(m.atom_sets, key.focus_set) : nullptr;
+        if (movie_expr_field(data, "##focus_expr", set ? set->expr : std::string(), &expr)) movie_key_focus_on_expr(data, i, expr);
+    }
     if (ImGui::Selectable("What the camera looks at", key.focus_target == FocusTarget::LookAt, ImGuiSelectableFlags_NoAutoClosePopups)) key.focus_target = FocusTarget::LookAt;
     const std::vector<uint32_t> selected = movie_selection_atoms(data);
     char label[64];
@@ -11864,15 +11983,15 @@ static void draw_movie_key_focus_popup(ApplicationState* data, int i) {
     ImGui::SetItemTooltip("Sharp at a distance from the camera.");
     ImGui::Separator();
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
-    ImGui::DragFloat("Blur##focus_blur", &key.focus_blur, 0.05f, 0.0f, 20.0f, "%.1f %%");
-    ImGui::SetItemTooltip("How blurred what is out of focus is, in percent of the height of the view. 0: everything is sharp.");
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
     ImGui::DragFloat("Transition##focus_transition", &key.focus_transition, 0.05f, 0.0f, 60.0f, "%.1f s");
     ImGui::SetItemTooltip("How long the focus takes to change to this, from the key's time.");
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
     int ease = (int)key.focus_ease;
     if (ImGui::Combo("Ease##focus_ease", &ease, key_ease_str, (int)KeyEase::Count)) key.focus_ease = (KeyEase)ease;
     ImGui::EndDisabled();
+    ImGui::TextDisabled("How blurred the rest is: Looks > Depth of field blur");
+    if (ImGui::SmallButton("Key the blur here")) movie_key_blur_at(data, key.time);
+    ImGui::SetItemTooltip("Adds a key of Depth of field blur at this key's time, with the blur as it is now. Edit and smooth it in the Looks tab\nor the look parameter lane. The blur is on when it is above 0 and a key sets the focus.");
 }
 
 static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, bool locked) {
@@ -11989,7 +12108,7 @@ static void draw_movie_keyframe_table(ApplicationState* data, float movie_len, b
             {
                 const bool picking = m.focus_pick_key == i;
                 if (picking) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                const std::string text = std::string(ICON_FA_BULLSEYE " ") + (key.focus_on ? movie_focus_label(data, key).substr(0, movie_focus_label(data, key).find(',')) : "auto");
+                const std::string text = std::string(ICON_FA_BULLSEYE " ") + (key.focus_on ? movie_focus_label(data, key) : "auto");
                 if (ImGui::Button((text + "##focus").c_str(), ImVec2(-FLT_MIN, 0.0f))) ImGui::OpenPopup("##focus_popup");
                 if (picking) ImGui::PopStyleColor();
                 ImGui::SetItemTooltip(picking ? "Click an atom in the viewport. Esc cancels." :
@@ -13029,6 +13148,7 @@ static void movie_render_pip(ApplicationState* state) {
     if (n > 0) hash = md_hash64_combine(hash, md_hash64(m.keyframes, n * sizeof(CameraKeyframe), 12));
     for (const MovieAtomSet& set : m.atom_sets) {
         hash = md_hash64_combine(hash, md_hash64(set.atoms.data(), set.atoms.size() * sizeof(uint32_t), 13 + set.id));
+        hash = md_hash64_combine(hash, md_hash64(set.expr.data(), set.expr.size(), 14 + set.id));
     }
     const double now = ImGui::GetTime();
     const bool changed = hash != m.pip_hash || !m.pip_valid;
@@ -13414,13 +13534,11 @@ static void render_scene(ApplicationState* state, bool pip) {
     settings.dof.focus_depth = state->visuals.dof.focus_depth;
     settings.dof.aperture = state->visuals.dof.aperture * 0.01f;
     if (movie_focus_active(state)) {
-        // The keys that set the focus decide what is sharp, and how much the rest is blurred
-        float blur = 0.0f;
+        // The keys that set the focus decide what is sharp; the blur is the look parameter
         const auto& m = state->movie;
         const MovieResolved r = movie_resolve(state, m.keyframes, md_array_size(m.keyframes));
-        settings.dof.focus_depth = MAX(camera_depth_of_point(state->view.camera, movie_focus_evaluate(state, r, movie_focus_time(state), state->view.camera, &blur)), 1.0e-3f);
-        settings.dof.enabled = blur > 0.0f;
-        settings.dof.aperture = CLAMP(blur, 0.0f, 4.0f) * 0.01f;
+        settings.dof.focus_depth = MAX(camera_depth_of_point(state->view.camera, movie_focus_evaluate(r, movie_focus_time(state), state->view.camera)), 1.0e-3f);
+        settings.dof.enabled = (state->visuals.dof.enabled || movie_blur_keyed(state)) && state->visuals.dof.aperture > 0.0f;
     }
 
     settings.fxaa.enabled = state->visuals.fxaa.enabled;

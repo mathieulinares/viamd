@@ -116,8 +116,8 @@ Columns resize by dragging their borders; the table scrolls sideways when wider 
 | **Time (s)** | When. The list re-sorts when you finish editing. |
 | **Frame** | Tick to pin a trajectory frame to the key, then drag the number. A frame lower than the previous pin plays backwards. |
 | **FOV (deg)** | Field of view. Narrow it to zoom without moving. |
-| **Look at** | A button that opens what the key looks at: **the selection**, **Pick an atom in the viewport**, **the point the view is aimed at** (fixed), or **Stop tracking**. Atoms are tracked through the trajectory. The eye keeps its place. See [Look at and focus on](#look-at-and-focus-on). |
-| **Focus on** | A button that opens what is sharp from this key on, with its blur, transition and ease. **auto** means the key does not set it. |
+| **Look at** | A button that opens what the key looks at: a **selection typed in the language of the filters**, **the selection**, **Pick an atom in the viewport**, **the point the view is aimed at** (fixed), or **Stop tracking**. Atoms are tracked through the trajectory. The eye keeps its place. See [Look at and focus on](#look-at-and-focus-on). |
+| **Focus on** | A button that opens what is sharp from this key on, with its transition and ease. **auto** means the key does not set it. |
 | **Actions** | Two icon buttons and a **⋯** menu, each with a tooltip: |
 | ↦ **Go to** | Moves the viewport to the key. Clicking a key's orange marker in the **Timelines** window does the same. |
 | 📷 **Update position** | Moves the key's eye to the viewport camera, still looking at the same point; also takes the FOV and, if pinned, the frame. |
@@ -134,14 +134,16 @@ To edit a key: go to it, move around, **Update position**, and **Look at** / **F
 
 Every key can say two things besides where the eye is, each on its own and independently of the other keys' times:
 
-- **Look at:** what the camera is aimed at. A **fixed point** (the default: where the pose aims) or **atoms**, tracked through the trajectory (the selection, or one atom picked in the viewport). The aim moves from one key's look-at to the next with the key's easing, so a camera can look at one molecule and then turn to another while the eye travels its own way. The look-at path is the *yellow* one in the viewport.
-- **Focus on:** what is sharp. A key that sets it (**Set the focus on this key**) chooses **What the camera looks at**, **the selection** or **an atom**, **the point the view is aimed at**, or **a distance** from the camera, plus **Blur** (percent of the height of the view; 0 makes everything sharp), **Transition** (seconds, from the key's time) and **Ease**. A key that does not set it leaves the focus as the key before it set it. **By default the focus is what the camera looks at**: before the first key that sets it, that is what is sharp, with the blur of **Visuals > Depth of Field** (off when it is off). The transition is shortened to end at the next key that sets the focus; the focus path is the *magenta* one.
+- **Look at:** what the camera is aimed at. A **fixed point** (the default: where the pose aims) or **atoms**, tracked through the trajectory: a selection typed in the language of the filters (`protein`, `resname("AIN")`, `resid(12)`, a named selection ...; Enter applies it, red when it is not valid or selects nothing), the current selection, or one atom picked in the viewport. An expression is evaluated again for the system and frame that are shown, so it keeps working when the system is replaced; the centre is mass-weighted and made whole across periodic boundaries. The aim moves from one key's look-at to the next with the key's easing, so a camera can look at one molecule and then turn to another while the eye travels its own way. The look-at path is the *yellow* one in the viewport.
+- **Focus on:** what is sharp. A key that sets it (**Set the focus on this key**) chooses **What the camera looks at**, a typed selection, **the selection** or **an atom**, **the point the view is aimed at**, or **a distance** from the camera, plus **Transition** (seconds, from the key's time) and **Ease** for the change of target. A key that does not set it leaves the focus as the key before it set it. **By default the focus is what the camera looks at**: before the first key that sets it, that is what is sharp, with the blur of **Visuals > Depth of Field** (off when it is off). The transition is shortened to end at the next key that sets the focus; the focus path is the *magenta* one.
+
+**How blurred the rest is** is the look parameter **Depth of field blur** (Looks tab and look-parameter lane), not part of the key: key it, ease it and smooth it like any other look parameter, with **Key the blur here** in the Focus on popup as a shortcut. While a key sets the focus, the blur is on when that parameter is above 0, without the global depth-of-field switch.
 
 Where a key is selected, **Look at** and **Focus on** act on that key only. Their targets are saved with the key and are copied, pasted, moved, stretched and deleted with it; undo covers them, and a movie's length scales their transitions.
 
-While the movie is shown or recorded, a key that sets the focus decides what is sharp and how much the rest is blurred; it overrides the global depth-of-field focus settings (the global switch is not needed) and the older **Depth of field blur** keys of Looks. Atoms that are not in the current system are reported once and the key's saved point is used.
+While the movie is shown or recorded, a key that sets the focus decides what is sharp and how much the rest is blurred; it overrides the global depth-of-field **Focus** setting and the **Focus distance** look parameter. Atoms that are not in the current system are reported once and the key's saved point is used.
 
-Workspaces made with the separate **Look-at** and **Focus** tracks, or with keys that followed a follow target or an atom, are converted when loaded: a camera key is added (on the path, so the movie goes the same way) where a track had a key, tracked keys look at the centre of their atoms, and the focus keys become **Focus on** of the key at their time. The eye path of such a movie can differ slightly from before.
+Workspaces made with the separate **Look-at** and **Focus** tracks, or with keys that followed a follow target or an atom, are converted when loaded: a camera key is added (on the path, so the movie goes the same way) where a track had a key, tracked keys look at the centre of their atoms, the focus keys become **Focus on** of the key at their time and their blur becomes keys of **Depth of field blur** with the same transitions. The eye path of such a movie can differ slightly from before.
 
 ### The camera path in the viewport
 
@@ -178,7 +180,7 @@ Open [fov_and_focus.via](examples/fov_and_focus.via) and press the green **Previ
 - **32-34 s:** focus racks from the moving carbon to a fixed point on the red oxygen over one second.
 - **34-36 s:** a no-blur key fades blur to zero over one second. All atoms become sharp again.
 
-Open **Focus on** of the keys at 18, 32 and 34 s: the key at 18 s stores the carbon (atoms), the key at 32 s the red oxygen's fixed position, and the key at 34 s has zero blur. The example is in the format of the earlier separate tracks: it is converted to keys when it is loaded.
+Open **Focus on** of the keys at 18, 32 and 34 s: the key at 18 s stores the carbon (atoms), the key at 32 s the red oxygen's fixed position, and the key at 34 s goes back to what the camera looks at. The blur, 0 to 3.5 % and back, is keys of **Depth of field blur** in the Looks tab. The example is in the format of the earlier separate tracks: it is converted to keys when it is loaded.
 
 **In short:** FOV changes how much you see and the apparent size; depth of field changes what is sharp. Narrow FOV does not by itself enable blur. Increasing **Blur Strength** strengthens depth separation, not zoom.
 

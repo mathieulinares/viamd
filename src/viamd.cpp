@@ -2004,8 +2004,14 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     atom_set_id = 0;
                     if (viamd::extract_int(id, arg) && id > 0 && !movie_atoms_find(m.atom_sets, (uint32_t)id)) {
                         atom_set_id = (uint32_t)id;
-                        m.atom_sets.push_back({atom_set_id, {}});
+                        m.atom_sets.push_back({atom_set_id, {}, {}});
                     }
+                }
+                else if (str_eq(ident, STR_LIT("AtomSetExpr"))) {
+                    char expr[256] = "";
+                    if (atom_set_id != 0 && viamd::extract_to_char_buf(expr, sizeof(expr), arg) && expr[0] != '\0') m.atom_sets.back().expr = expr;
+                    else VIAMD_LOG_ERROR("Invalid selection expression of a movie key in workspace");
+                    atom_set_id = 0;
                 }
                 else if (str_eq(ident, STR_LIT("AtomSetAtoms"))) {
                     md_bitfield_t mask = {};
@@ -2077,6 +2083,16 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 md_array_shrink(m.keyframes, 0);
                 for (const CameraKeyframe& k : keys) md_array_push(m.keyframes, k, data->allocator.persistent);
                 VIAMD_LOG_INFO("Workspace: the look-at and focus tracks were put on camera keys, so that every key has its own look-at and focus");
+            }
+            {
+                // The blur of the focus keys of earlier versions is a look parameter now
+                std::vector<ParamKey> blur = movie_blur_keys_from_focus(m.keyframes, md_array_size(m.keyframes));
+                if (!blur.empty()) {
+                    m.param_keys.erase(std::remove_if(m.param_keys.begin(), m.param_keys.end(), [](const ParamKey& k) { return k.param == MOVIE_PARAM_DOF_APERTURE; }), m.param_keys.end());
+                    m.param_keys.insert(m.param_keys.end(), blur.begin(), blur.end());
+                    m.animate_params = true;
+                    VIAMD_LOG_INFO("Workspace: the blur of the focus keys is now the keys of Depth of field blur in the Looks tab");
+                }
             }
             if (timeline_version < 2) {
                 if (legacy_auto) {
@@ -2615,6 +2631,11 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
             std::vector<MovieAtomSet> sets = m.atom_sets;
             movie_atoms_prune(&sets, m.keyframes, md_array_size(m.keyframes));
             for (const MovieAtomSet& set : sets) {
+                if (!set.expr.empty()) {
+                    viamd::write_int(state, STR_LIT("AtomSet"), (int)set.id);
+                    viamd::write_str(state, STR_LIT("AtomSetExpr"), str_from_cstr(set.expr.c_str()));
+                    continue;
+                }
                 if (set.atoms.empty()) continue;
                 viamd::write_int(state, STR_LIT("AtomSet"), (int)set.id);
                 md_bitfield_t mask = {};
