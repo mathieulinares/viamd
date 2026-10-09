@@ -2,6 +2,8 @@
 
 Branch `video`; no pull request yet.
 
+Merged `scanberg/viamd` master through `381f3fad`, including renderer, ASE loader and camera/recentering fixes. Movie focus modes, recording, editor and live preview are retained. Depth-of-field blur now uses aperture units; legacy blur and occlusion-radius keys are retained but inactive (see the manual).
+
 | File | What it is |
 |---|---|
 | `docs/movie_maker.md` | The user manual (also the text for the GitHub wiki, a separate repository) |
@@ -13,7 +15,7 @@ Branch `video`; no pull request yet.
 ## Build and test
 
 - Build: `cmake --build build --target viamd viamd_test -j8`; run `cmake -S . -B build` after adding files.
-- Tests: `./build/bin/viamd_test` (230 tests, all passing). They cover pure logic only; the frame sink tests use a fake script, so ffmpeg is not needed.
+- Tests: `./build/bin/viamd_test` (246 tests, all passing after the upstream merge). They cover pure logic only; the frame sink tests use a fake script, so ffmpeg is not needed.
 - VS Code CMake Tools: a local, gitignored `CMakeUserPresets.json` (preset `release`, binary dir `build`, unit tests on) and `.vscode/settings.json` make it configure. VS Code's test runner does not discover the C++ tests; run the executable.
 - The GUI could not be run while the code was written, so everything in `gui-checklist.md` beyond blocks 1 to 5 is untested. Windows and macOS are untested (the ffmpeg pipe uses `popen` / `_popen`).
 

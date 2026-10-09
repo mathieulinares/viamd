@@ -119,6 +119,7 @@ void init_volume(Volume* vol, const md_grid_t& grid, GLenum format) {
     vol->texture_to_world = compute_texture_to_world_mat(grid.orientation, grid.origin * scl, extent * scl);
     vol->voxel_size       = grid.spacing * scl;
     gl::init_texture_3D(&vol->tex_id, vol->dim[0], vol->dim[1], vol->dim[2], format);
+    volume::notify_data_changed(vol->tex_id);
 }
 
 static void init_all_representations(ApplicationState* state);
@@ -189,45 +190,57 @@ static void fill_picking_tooltip_text(md_strb_t* sb, const ApplicationState& sta
             md_strb_push_char(sb, '\n');
         }
 
-        uint32_t flags = 0;
+        // What the level the selection works at says about it: the atom's particle, role and chemistry, the kind
+        // of the component and its place in the chain, or the kind of the instance's entity
+        const md_component_kind_t comp_kind = comp_idx != -1 ? md_component_kind(&sys.component, comp_idx) : MD_COMPONENT_KIND_OTHER;
+        const bool nucleotide = comp_kind == MD_COMPONENT_KIND_NUCLEOTIDE;
 
         if (state.selection.granularity == SelectionGranularity::Atom) {
-			flags = md_system_atom_flags(&sys, atom_idx);
-		} else if (state.selection.granularity == SelectionGranularity::Component && comp_idx != -1) {
-			flags = md_system_component_flags(&sys, comp_idx);
+            const md_particle_kind_t particle = md_atom_particle_kind(&sys.atom, atom_idx);
+            if (particle != MD_PARTICLE_ATOM) {
+                md_strb_fmt(sb, "particle: %s\n", md_particle_kind_name(particle));
+            }
+            const md_atom_flags_t flags = md_system_atom_flags(&sys, atom_idx);
+            if (flags) {
+                *sb += "flags: ";
+                if (flags & MD_ATOM_FLAG_BACKBONE)       { *sb += "BACKBONE "; }
+                if (flags & MD_ATOM_FLAG_SIDE_CHAIN)     { *sb += "SIDE-CHAIN "; }
+                if (flags & MD_ATOM_FLAG_NUCLEOSIDE)     { *sb += "NUCLEOSIDE "; }
+                if (flags & MD_ATOM_FLAG_NUCLEOBASE)     { *sb += "NUCLEOBASE "; }
+                if (flags & MD_ATOM_FLAG_TERMINAL_BEG)   { *sb += nucleotide ? "5'-TERMINUS " : "N-TERMINUS "; }
+                if (flags & MD_ATOM_FLAG_TERMINAL_END)   { *sb += nucleotide ? "3'-TERMINUS " : "C-TERMINUS "; }
+                switch (md_atom_flags_hybridization(flags)) {
+                case MD_HYBRIDIZATION_SP:  *sb += "SP ";  break;
+                case MD_HYBRIDIZATION_SP2: *sb += "SP2 "; break;
+                case MD_HYBRIDIZATION_SP3: *sb += "SP3 "; break;
+                default: break;
+                }
+                if (flags & MD_ATOM_FLAG_AROMATIC)       { *sb += "AROMATIC "; }
+                if (flags & MD_ATOM_FLAG_QM)             { *sb += "QM "; }
+                *sb += "\n";
+            }
+        } else if (state.selection.granularity == SelectionGranularity::Component && comp_idx != -1) {
+            const md_component_flags_t flags = md_system_component_flags(&sys, comp_idx);
+            if (comp_kind != MD_COMPONENT_KIND_OTHER || flags) {
+                md_strb_fmt(sb, "kind: %s", md_component_kind_name(comp_kind));
+                if ((comp_kind == MD_COMPONENT_KIND_AMINO_ACID || nucleotide) && !(flags & MD_COMPONENT_FLAG_RESOLVED)) { *sb += ", unresolved"; }
+                if (flags & MD_COMPONENT_FLAG_TERMINAL_BEG) { *sb += nucleotide ? ", 5'-terminus" : ", N-terminus"; }
+                if (flags & MD_COMPONENT_FLAG_TERMINAL_END) { *sb += nucleotide ? ", 3'-terminus" : ", C-terminus"; }
+                *sb += "\n";
+            }
         } else if (state.selection.granularity == SelectionGranularity::Instance && inst_idx != -1) {
-			flags = md_system_instance_flags(&sys, inst_idx);
+            const md_entity_idx_t ent_idx = md_instance_entity_idx(&sys.instance, inst_idx);
+            if (ent_idx != -1) {
+                const str_t desc = md_entity_description(&sys.entity, ent_idx);
+                md_strb_fmt(sb, "entity[%i]: " STR_FMT " (%s%s)\n", ent_idx + 1, STR_ARG(desc), md_entity_kind_name(md_entity_kind(&sys.entity, ent_idx)),
+                    (md_entity_flags(&sys.entity, ent_idx) & MD_ENTITY_FLAG_INFERRED) ? ", inferred" : "");
+            }
         }
-
-		const uint32_t TERM_N = MD_FLAG_AMINO_ACID   | MD_FLAG_TERMINAL_BEG;
-		const uint32_t TERM_C = MD_FLAG_AMINO_ACID   | MD_FLAG_TERMINAL_END;
-		const uint32_t TERM_5 = MD_FLAG_NUCLEIC_ACID | MD_FLAG_TERMINAL_BEG;
-		const uint32_t TERM_3 = MD_FLAG_NUCLEIC_ACID | MD_FLAG_TERMINAL_END;
-
-        if (flags) {
-            *sb += "flags: ";
-            if (flags & MD_FLAG_HETERO)         { *sb += "HETERO "; }
-			if (flags & MD_FLAG_POLYPEPTIDE)    { *sb += "POLYPEPTIDE "; }
-            if (flags & MD_FLAG_AMINO_ACID)     { *sb += "AMINO-ACID "; }
-            if (flags & MD_FLAG_SIDE_CHAIN)     { *sb += "SIDE-CHAIN "; }
-			if (flags & MD_FLAG_NUCLEIC_ACID)   { *sb += "NUCLEIC-ACID "; }
-            if (flags & MD_FLAG_NUCLEOTIDE)     { *sb += "NUCLEOTIDE "; }
-            if (flags & MD_FLAG_NUCLEOSIDE)     { *sb += "NUCLEOSIDE "; }
-            if (flags & MD_FLAG_NUCLEOBASE)     { *sb += "NUCLEOBASE "; }
-            if (flags & MD_FLAG_WATER)          { *sb += "WATER "; }
-            if (flags & MD_FLAG_ION)            { *sb += "ION "; }
-            if (flags & MD_FLAG_BACKBONE)       { *sb += "BACKBONE "; }
-            if ((flags & TERM_N) == TERM_N)     { *sb += "N-TERMINUS "; }
-            if ((flags & TERM_C) == TERM_C)     { *sb += "C-TERMINUS "; }
-			if ((flags & TERM_5) == TERM_5)     { *sb += "5'-TERMINUS "; }
-			if ((flags & TERM_3) == TERM_3)     { *sb += "3'-TERMINUS "; }
-            if (flags & MD_FLAG_SP)             { *sb += "SP "; }
-            if (flags & MD_FLAG_SP2)            { *sb += "SP2 "; }
-            if (flags & MD_FLAG_SP3)            { *sb += "SP3 "; }
-            if (flags & MD_FLAG_AROMATIC)       { *sb += "AROMATIC "; }
-            if (flags & MD_FLAG_COARSE_GRAINED) { *sb += "COARSE-GRAINED "; }
-            if (flags & MD_FLAG_DERIVED)        { *sb += "DERIVED "; }
-            *sb += "\n";
+        if (state.selection.granularity == SelectionGranularity::Atom) {
+            const int charge = md_atom_formal_charge(&sys.atom, atom_idx);
+            const int num_h  = md_atom_hydrogen_count(&sys.atom, atom_idx);
+            if (charge) md_strb_fmt(sb, "formal charge: %+d\n", charge);
+            if (num_h > 0) md_strb_fmt(sb, "hydrogens: %d\n", num_h);
         }
         /*
         // @TODO: REIMPLEMENT THIS
@@ -251,17 +264,15 @@ static void fill_picking_tooltip_text(md_strb_t* sb, const ApplicationState& sta
             } bond_flag_label_t;
 
             bond_flag_label_t bond_flag_map[] = {
-                {MD_BOND_FLAG_COVALENT,     "COVALENT"},
-                {MD_BOND_FLAG_DOUBLE,       "DOUBLE"},
-                {MD_BOND_FLAG_TRIPLE,       "TRIPLE"},
-                {MD_BOND_FLAG_QUADRUPLE,    "QUADRUPLE"},
-                {MD_BOND_FLAG_AROMATIC,     "AROMATIC"},
-                {MD_BOND_FLAG_COORDINATE,   "COORD"},
-				{MD_BOND_FLAG_METAL,        "METAL"},
-				{MD_BOND_FLAG_INFERRED,     "INFERRED"},
-				{MD_BOND_FLAG_USER_DEFINED, "USER"},
-				{MD_BOND_FLAG_TOPOLOGY,     "TOPOLOGY"},
+                {MD_BOND_FLAG_AROMATIC,        "AROMATIC"},
+                {MD_BOND_FLAG_DELOCALIZED,     "DELOCALIZED"},
+                {MD_BOND_FLAG_COORDINATE,      "COORD"},
+                {MD_BOND_FLAG_ORDER_PERCEIVED, "ORDER-PERCEIVED"},
             };
+
+            // Where the bond came from is a value, not a set of bits (md_bond_origin)
+            static const char* origin_label[] = {"FILE", "TOPOLOGY", "USER", "INFERRED"};
+            len += snprintf(bond_flags_buf + len, sizeof(bond_flags_buf) - len, "%s ", origin_label[md_bond_origin(flags) & 3]);
 
             for (size_t i = 0; i < ARRAY_SIZE(bond_flag_map); ++i) {
                 if (flags & bond_flag_map[i].flag) {
@@ -269,11 +280,16 @@ static void fill_picking_tooltip_text(md_strb_t* sb, const ApplicationState& sta
                 }
             }
             
+            // The order is a value, not a set of bits (md_bond_order)
+            const int order = md_bond_order(flags);
             char bond_type = '-';
-            if (flags & MD_BOND_FLAG_DOUBLE) bond_type = '=';
-            if (flags & MD_BOND_FLAG_TRIPLE) bond_type = '#';
-            if (flags & MD_BOND_FLAG_QUADRUPLE) bond_type = '$';
-            if (flags & MD_BOND_FLAG_AROMATIC) bond_type = ':';
+            if (order == MD_BOND_ORDER_DOUBLE)    bond_type = '=';
+            if (order == MD_BOND_ORDER_TRIPLE)    bond_type = '#';
+            if (order == MD_BOND_ORDER_QUADRUPLE) bond_type = '$';
+            if (flags & (MD_BOND_FLAG_AROMATIC | MD_BOND_FLAG_DELOCALIZED)) bond_type = ':';
+            if (order) {
+                len += snprintf(bond_flags_buf + len, sizeof(bond_flags_buf) - len, "ORDER-%d ", order);
+            }
 
             vec3_t p0 = md_state_coord(&sys_state, pair.idx[0]);
             vec3_t p1 = md_state_coord(&sys_state, pair.idx[1]);
@@ -293,7 +309,7 @@ static void fill_picking_tooltip_text(md_strb_t* sb, const ApplicationState& sta
         if (dipole_group_from_key(&group, sys, hit.key) && hit.local_idx < group.count) {
             char label[64];
             int label_len = dipole_entry_label(label, sizeof(label), group, hit.local_idx);
-            md_strb_fmt(sb, "%.*s\n", label_len, label);
+            md_strb_fmt(sb, "dipole: %.*s\n", label_len, label);
 
             vec3_t vec = {0, 0, 0};
             if (dipole_moment_read(&vec, nullptr, sys, group.key, hit.local_idx)) {
@@ -445,6 +461,43 @@ static md_secondary_structure_t secondary_structure_from_render_class(SecondaryS
     }
 }
 
+// Fills an isolated coil between two segments of the same structure in with that structure, within each chain, to
+// keep the cartoon from flickering at the noise of the assignment. Presentation only.
+static void secondary_structure_weights_fill_isolated_coils(md_gl_secondary_structure_t* weights, const md_protein_backbone_data_t* backbone) {
+    auto is_eq = [](md_gl_secondary_structure_t a, md_gl_secondary_structure_t b) {
+        return a.helix == b.helix && a.sheet == b.sheet;
+    };
+    const md_gl_secondary_structure_t ss_coil  = { 0, 0 };
+    const md_gl_secondary_structure_t ss_helix = { .helix = 1.0f };
+    const md_gl_secondary_structure_t ss_sheet = { .sheet = 1.0f };
+    for (size_t r = 0; r < backbone->range.count; ++r) {
+        for (size_t j = backbone->range.offset[r] + 1; j + 1 < backbone->range.offset[r + 1]; ++j) {
+            if (!is_eq(weights[j], ss_coil)) continue;
+            if (is_eq(weights[j - 1], ss_helix) && is_eq(weights[j + 1], ss_helix)) weights[j] = ss_helix;
+            if (is_eq(weights[j - 1], ss_sheet) && is_eq(weights[j + 1], ss_sheet)) weights[j] = ss_sheet;
+        }
+    }
+}
+
+// The cartoon's secondary structure for the displayed state's own labels, uploaded directly: the weights are renderer
+// input and are kept nowhere but on the GPU. Without a run there is nothing to blend between; interpolate_system_state
+// uploads its own blend of the frames around the displayed one.
+static void upload_secondary_structure_weights(ApplicationState* data) {
+    const md_system_t& sys = data->mold.sys;
+    const size_t num_segments = sys.protein_backbone.segment.count;
+    const md_secondary_structure_t* ss = md_util_state_secondary_structure(&data->mold.state, &sys);
+    if (!ss || num_segments == 0) return;
+
+    md_temp_scope_t temp = md_temp_begin();
+    defer { md_temp_end(temp); };
+    md_gl_secondary_structure_t* weights = md_temp_alloc_array(temp, md_gl_secondary_structure_t, num_segments);
+    for (size_t i = 0; i < num_segments; ++i) {
+        weights[i] = md_gl_secondary_structure_convert(ss[i]);
+    }
+    secondary_structure_weights_fill_isolated_coils(weights, &sys.protein_backbone);
+    md_gl_mol_set_backbone_secondary_structure(data->mold.gl_mol, 0, (uint32_t)num_segments, weights, 0);
+}
+
 static void secondary_structure_render_denoise(md_secondary_structure_t* dst, const md_secondary_structure_t* src, size_t num_frames, size_t stride) {
     ASSERT(dst);
     ASSERT(src);
@@ -555,6 +608,19 @@ md_unit_t run_time_unit(const ApplicationState* app) {
     return axis ? axis->unit : md_unit_none();
 }
 
+const md_secondary_structure_t* displayed_secondary_structure(const ApplicationState* app) {
+    ASSERT(app);
+    const md_system_state_t* state = &app->mold.state;
+    const auto& render = app->trajectory_data.secondary_structure_render;
+    if (render.data && render.stride == app->mold.sys.protein_backbone.segment.count && md_state_has_frame(state)) {
+        const size_t frame = (size_t)md_state_frame_nearest(state);
+        if ((frame + 1) * render.stride <= render.count) {
+            return render.data + frame * render.stride;
+        }
+    }
+    return md_util_state_secondary_structure(state, &app->mold.sys);
+}
+
 static const str_t frame_extract_paths[] = { STR_INIT("atom/position"), STR_INIT("unitcell") };
 
 bool extract_frame(const ApplicationState* app, int64_t frame, md_system_state_t* out) {
@@ -601,6 +667,10 @@ static void run_path_from_file(char* buf, size_t cap, str_t path) {
 void free_trajectory_data(ApplicationState* state) {
     ASSERT(state);
 
+    // The orientation reference was read from this run's first frame. A run loaded in its place, on the
+    // same topology, has a first frame of its own.
+    state->operations.initial_frame.valid = false;
+
     // Before anything they read goes: the contexts hold the run's files open.
     end_frame_extracts(state);
 
@@ -628,6 +698,7 @@ void free_trajectory_data(ApplicationState* state) {
     // first frame to the renderer whenever it happens to resolve to the same nearest frame index
     // as whatever was last displayed (frame 0 is the common case).
     state->mold.last_interpolated_nearest_frame = -1;
+    state->mold.last_interpolated_frame = -1.0;
 
     // The views above are dropped first; now the storage they pointed at goes with the run - its
     // frame axis, the quantities derived per frame, and whatever was loaded against it.
@@ -835,17 +906,20 @@ void init_system_data(ApplicationState* data) {
     if (data->mold.sys.atom.count) {
         md_bitfield_clear(&data->operations.recenter_query.mask);
         md_bitfield_clear(&data->operations.selection_mask);
-        recenter_mark_selection_dirty(data);
         data->operations.recenter_query.valid = false;
         data->operations.recenter_query.dynamic = false;
         data->operations.recenter_query.evaluated_version = 0;
         data->operations.recenter_query.ir_fingerprint = 0;
-        data->operations.initial_frame.target_version = 0;
+        data->operations.initial_frame.valid = false;
+        data->operations.state_rotation = mat4_ident();
         recenter_mark_query_dirty(data);
 
         data->mold.gl_mol = md_gl_mol_create(&data->mold.sys);
-        if (data->mold.sys.protein_backbone.segment.count > 0) {
-            data->mold.interpolated_properties.secondary_structure = md_array_create(md_gl_secondary_structure_t, data->mold.sys.protein_backbone.segment.count, data->mold.sys.alloc);
+
+        // The backbone of the loaded coordinates, carried by the state, which stands until a run replaces it frame by
+        // frame (interpolate_system_state)
+        if (md_util_state_backbone_compute(&data->mold.state, &data->mold.sys)) {
+            upload_secondary_structure_weights(data);
         }
 
         mat3_t A;
@@ -912,6 +986,7 @@ void free_system_data(ApplicationState* data) {
 
     md_array_free(data->operations.initial_frame.rel_xyzw, data->allocator.persistent);
     data->operations.initial_frame.rel_xyzw = nullptr;
+    data->operations.initial_frame.valid = false;
 
     md_gl_mol_destroy(data->mold.gl_mol);
 
@@ -920,7 +995,6 @@ void free_system_data(ApplicationState* data) {
 
     MEMSET(data->files.molecule, 0, sizeof(data->files.molecule));
 
-    data->mold.interpolated_properties.secondary_structure = nullptr;
 
     MEMSET(data->mold.frame_cache.states, 0, sizeof(data->mold.frame_cache.states));
     clear_frame_cache(&data->mold.frame_cache);
@@ -1145,7 +1219,10 @@ struct WorkspacePending {
     bool   has_frame;
     double frame;
 
-    bool   has_camera;
+    // Kept aside rather than written to the camera: loading the molecule puts the camera at the
+    // default view of what was loaded (init_system_data), which would overwrite it
+    bool          has_camera;
+    ViewTransform camera;
 
     md_array(md_atom_pair_t) user_bonds;
 
@@ -1313,8 +1390,6 @@ static void workspace_reset(ApplicationState* data) {
     data->operations.recenter_query.query[0] = '\0';
     recenter_mark_query_dirty(data);
     md_bitfield_clear(&data->operations.selection_mask);
-    recenter_mark_selection_dirty(data);
-
     movie_history_reset(data);
 }
 
@@ -1390,19 +1465,30 @@ static void deserialize_representation(ApplicationState* data, viamd::deserializ
             viamd::extract_bool(rep->dynamic_evaluation, arg);
         } else if (str_eq(ident, STR_LIT("AtomicPropertyPath"))) {
             // Ids are a function of the path: this resolves before the dataset is loaded
-            rep->atomic_property.key = md_attributes_id_from_path(arg);
+            rep->atom_attribute.key = md_attributes_id_from_path(arg);
         } else if (str_eq(ident, STR_LIT("AtomicPropertyVariant"))) {
-            viamd::extract_int(rep->atomic_property.variant_idx, arg);
+            viamd::extract_int(rep->atom_attribute.variant_idx, arg);
         } else if (str_eq(ident, STR_LIT("AtomicPropertyColormap"))) {
-            viamd::extract_int(rep->atomic_property.colormap, arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyDataRange"))) {
-            float r[2];
-            if (viamd::extract_flt_vec(r, 2, arg)) { rep->atomic_property.value_min = r[0]; rep->atomic_property.value_max = r[1]; }
+            viamd::extract_int(rep->atom_attribute.scale.colormap, arg);
         } else if (str_eq(ident, STR_LIT("AtomicPropertyRange"))) {
+            // A range that was written is one somebody set: a workspace from before the range could
+            // follow the values has no AtomicPropertyAutoRange, and keeps it. One that has, has it
+            // after this line and says for itself.
             float r[2];
-            if (viamd::extract_flt_vec(r, 2, arg)) { rep->atomic_property.range_beg = r[0]; rep->atomic_property.range_end = r[1]; }
-        } else if (str_eq(ident, STR_LIT("AtomicPropertySymmetricZero"))) {
-            viamd::extract_bool(rep->atomic_property.range_symmetric_zero, arg);
+            if (viamd::extract_flt_vec(r, 2, arg)) {
+                rep->atom_attribute.scale.range_beg = r[0];
+                rep->atom_attribute.scale.range_end = r[1];
+                rep->atom_attribute.scale.auto_range = false;
+            }
+        } else if (str_eq(ident, STR_LIT("AtomicPropertyAutoRange"))) {
+            viamd::extract_bool(rep->atom_attribute.scale.auto_range, arg);
+        } else if (str_eq(ident, STR_LIT("AtomicPropertySymmetric"))) {
+            viamd::extract_bool(rep->atom_attribute.scale.symmetric, arg);
+        } else if (str_eq(ident, STR_LIT("AtomicPropertyLegend"))) {
+            viamd::extract_bool(rep->atom_attribute.scale.show_legend, arg);
+        } else if (str_eq(ident, STR_LIT("AtomicPropertyDataRange")) || str_eq(ident, STR_LIT("AtomicPropertySymmetricZero"))) {
+            // Written by earlier versions: the span is measured from the data now, and the old
+            // symmetric flag never reached the colours
         } else if (str_eq(ident, STR_LIT("DipolePath"))) {
             rep->dipole.dipole_key = md_attributes_id_from_path(arg);
         } else if (str_eq(ident, STR_LIT("DipoleIndex"))) {
@@ -1459,6 +1545,29 @@ static void deserialize_representation(ApplicationState* data, viamd::deserializ
             if (viamd::extract_int(component, arg)) rep->electronic_structure.transition_density_component = (ElectronicStructureTransitionDensityComponent)component;
         } else if (str_eq(ident, STR_LIT("ElectronicStructureIso"))) {
             viamd::extract_dbl(rep->electronic_structure.iso_value, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureColoring"))) {
+            int c;
+            if (viamd::extract_int(c, arg) && c >= 0 && c < (int)SurfaceColoring::Count) rep->electronic_structure.coloring = (SurfaceColoring)c;
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldKind"))) {
+            int k;
+            if (viamd::extract_int(k, arg) && k >= 0 && k < (int)SurfaceFieldKind::Count) rep->electronic_structure.field_kind = (SurfaceFieldKind)k;
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldColormap"))) {
+            viamd::extract_int(rep->electronic_structure.field_map.colormap, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldRange"))) {
+            float r[2];
+            if (viamd::extract_flt_vec(r, 2, arg)) { rep->electronic_structure.field_map.range_beg = r[0]; rep->electronic_structure.field_map.range_end = r[1]; }
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldSymmetric"))) {
+            viamd::extract_bool(rep->electronic_structure.field_map.symmetric, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldAutoRange"))) {
+            viamd::extract_bool(rep->electronic_structure.field_map.auto_range, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldLegend"))) {
+            viamd::extract_bool(rep->electronic_structure.field_map.show_legend, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureTintPos"))) {
+            viamd::extract_vec4(rep->electronic_structure.tint_psi_pos, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureTintNeg"))) {
+            viamd::extract_vec4(rep->electronic_structure.tint_psi_neg, arg);
+        } else if (str_eq(ident, STR_LIT("ElectronicStructureTintDen"))) {
+            viamd::extract_vec4(rep->electronic_structure.tint_den, arg);
         } else if (str_eq(ident, STR_LIT("ElectronicStructureColPos"))) {
             viamd::extract_vec4(rep->electronic_structure.col_psi_pos, arg);
         } else if (str_eq(ident, STR_LIT("ElectronicStructureColNeg"))) {
@@ -1518,15 +1627,17 @@ static void serialize_representation(viamd::serialization_state_t& state, const 
     viamd::write_bool(state, STR_LIT("DynamicEval"), rep.dynamic_evaluation);
 
     // Attributes by path: an id is a hash of it, and the path is what a reader can see
-    if (const md_attribute_t* prop = md_attributes_get(attributes, rep.atomic_property.key)) {
+    if (const md_attribute_t* prop = md_attributes_get(attributes, rep.atom_attribute.key)) {
         viamd::write_str(state, STR_LIT("AtomicPropertyPath"), prop->path);
-        viamd::write_int(state, STR_LIT("AtomicPropertyVariant"), rep.atomic_property.variant_idx);
-        viamd::write_int(state, STR_LIT("AtomicPropertyColormap"), rep.atomic_property.colormap);
-        const float data_range[2] = { rep.atomic_property.value_min, rep.atomic_property.value_max };
-        const float range[2]      = { rep.atomic_property.range_beg, rep.atomic_property.range_end };
-        viamd::write_flt_vec(state, STR_LIT("AtomicPropertyDataRange"), data_range, 2);
+        viamd::write_int(state, STR_LIT("AtomicPropertyVariant"), rep.atom_attribute.variant_idx);
+        const ColorScale& scale = rep.atom_attribute.scale;
+        const float range[2] = { scale.range_beg, scale.range_end };
+        viamd::write_int(state, STR_LIT("AtomicPropertyColormap"), scale.colormap);
         viamd::write_flt_vec(state, STR_LIT("AtomicPropertyRange"), range, 2);
-        viamd::write_bool(state, STR_LIT("AtomicPropertySymmetricZero"), rep.atomic_property.range_symmetric_zero);
+        // After the range, which on its own reads as a range somebody set
+        viamd::write_bool(state, STR_LIT("AtomicPropertyAutoRange"), scale.auto_range);
+        viamd::write_bool(state, STR_LIT("AtomicPropertySymmetric"), scale.symmetric);
+        viamd::write_bool(state, STR_LIT("AtomicPropertyLegend"), scale.show_legend);
     }
 
     if (rep.type == RepresentationType::DipoleMoment) {
@@ -1561,6 +1672,19 @@ static void serialize_representation(viamd::serialization_state_t& state, const 
         viamd::write_vec4(state, STR_LIT("ElectronicStructureColDen"),   rep.electronic_structure.col_den);
         viamd::write_vec4(state, STR_LIT("ElectronicStructureColAtt"),   rep.electronic_structure.col_att);
         viamd::write_vec4(state, STR_LIT("ElectronicStructureColDet"),   rep.electronic_structure.col_det);
+        viamd::write_int(state,  STR_LIT("ElectronicStructureColoring"), (int)rep.electronic_structure.coloring);
+        viamd::write_vec4(state, STR_LIT("ElectronicStructureTintPos"),  rep.electronic_structure.tint_psi_pos);
+        viamd::write_vec4(state, STR_LIT("ElectronicStructureTintNeg"),  rep.electronic_structure.tint_psi_neg);
+        viamd::write_vec4(state, STR_LIT("ElectronicStructureTintDen"),  rep.electronic_structure.tint_den);
+        if (rep.electronic_structure.coloring == SurfaceColoring::Field) {
+            const float range[2] = { rep.electronic_structure.field_map.range_beg, rep.electronic_structure.field_map.range_end };
+            viamd::write_int(state,      STR_LIT("ElectronicStructureFieldKind"),      (int)rep.electronic_structure.field_kind);
+            viamd::write_int(state,      STR_LIT("ElectronicStructureFieldColormap"),  rep.electronic_structure.field_map.colormap);
+            viamd::write_flt_vec(state,  STR_LIT("ElectronicStructureFieldRange"),     range, 2);
+            viamd::write_bool(state,     STR_LIT("ElectronicStructureFieldSymmetric"), rep.electronic_structure.field_map.symmetric);
+            viamd::write_bool(state,     STR_LIT("ElectronicStructureFieldAutoRange"), rep.electronic_structure.field_map.auto_range);
+            viamd::write_bool(state,     STR_LIT("ElectronicStructureFieldLegend"),    rep.electronic_structure.field_map.show_legend);
+        }
         viamd::write_int(state,  STR_LIT("ElectronicStructureDensityPropertyIsoCount"), rep.electronic_structure.density_property.num_isos);
         for (int j = 0; j < rep.electronic_structure.density_property.num_isos; ++j) {
             char key[64];
@@ -1660,17 +1784,17 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 if      (str_eq(ident, STR_LIT("BackgroundColor")))      viamd::extract_vec3(v.background.color, arg);
                 else if (str_eq(ident, STR_LIT("BackgroundIntensity")))  viamd::extract_flt(v.background.intensity, arg);
                 else if (str_eq(ident, STR_LIT("SsaoEnabled")))          viamd::extract_bool(v.ssao.enabled, arg);
-                else if (str_eq(ident, STR_LIT("SsaoIntensity")))        viamd::extract_flt(v.ssao.intensity, arg);
-                else if (str_eq(ident, STR_LIT("SsaoRadius")))           viamd::extract_flt(v.ssao.radius, arg);
-                else if (str_eq(ident, STR_LIT("SsaoBias")))             viamd::extract_flt(v.ssao.bias, arg);
+                // SsaoIntensity, SsaoRadius, SsaoBias and DofFocusScale belonged to the previous scale-dependent SSAO / DOF
+                // and are deliberately ignored: their values do not translate to the new parameters.
+                else if (str_eq(ident, STR_LIT("SsaoStrength")))         viamd::extract_flt(v.ssao.intensity, arg);
                 else if (str_eq(ident, STR_LIT("TonemapEnabled")))       viamd::extract_bool(v.tonemapping.enabled, arg);
                 else if (str_eq(ident, STR_LIT("Tonemapper")))           viamd::extract_enum(v.tonemapping.tonemapper, arg, (int)postprocess_pipeline::Tonemapper_ACES + 1);
                 else if (str_eq(ident, STR_LIT("TonemapExposure")))      viamd::extract_flt(v.tonemapping.exposure, arg);
                 else if (str_eq(ident, STR_LIT("TonemapGamma")))         viamd::extract_flt(v.tonemapping.gamma, arg);
                 else if (str_eq(ident, STR_LIT("DofEnabled")))           viamd::extract_bool(v.dof.enabled, arg);
-                else if (str_eq(ident, STR_LIT("DofFocusScale")))        viamd::extract_flt(v.dof.focus_scale, arg);
                 else if (str_eq(ident, STR_LIT("DofFocusMode")))         viamd::extract_enum(v.dof.focus_mode, arg, (int)DofFocusMode::Count);
                 else if (str_eq(ident, STR_LIT("DofFocusDistance")))     viamd::extract_flt(v.dof.focus_distance, arg);
+                else if (str_eq(ident, STR_LIT("DofAperture")))          viamd::extract_flt(v.dof.aperture, arg);
                 else if (str_eq(ident, STR_LIT("FxaaEnabled")))          viamd::extract_bool(v.fxaa.enabled, arg);
                 else if (str_eq(ident, STR_LIT("TaaEnabled")))           viamd::extract_bool(v.temporal_aa.enabled, arg);
                 else if (str_eq(ident, STR_LIT("TaaJitter")))            viamd::extract_bool(v.temporal_aa.jitter, arg);
@@ -1684,21 +1808,23 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 else if (str_eq(ident, STR_LIT("SimulationBoxColor")))   viamd::extract_vec4(data->simulation_box.color, arg);
             }
         } else if (str_eq(section, STR_LIT("Camera"))) {
-            pending.has_camera = true;
+            // A transform is only restored whole: half of one mixed with the default view is neither
+            bool has_position = false, has_orientation = false, has_distance = false;
             while (viamd::next_entry(ident, arg, state)) {
                 if (str_eq(ident, STR_LIT("Position"))) {
-                    viamd::extract_vec3(data->view.camera.position, arg);
+                    has_position = viamd::extract_vec3(pending.camera.position, arg);
                 } else if (str_eq(ident, STR_LIT("Orientation")) || str_eq(ident, STR_LIT("Rotation"))) {
                     // Rotation: DEPRECATED name
-                    viamd::extract_quat(data->view.camera.orientation, arg);
+                    has_orientation = viamd::extract_quat(pending.camera.orientation, arg);
                 } else if (str_eq(ident, STR_LIT("Distance"))) {
-                    viamd::extract_flt(data->view.camera.distance, arg);
+                    has_distance = viamd::extract_flt(pending.camera.distance, arg);
                 } else if (str_eq(ident, STR_LIT("Mode"))) {
                     viamd::extract_enum(data->view.mode, arg, (int)CameraMode::Count);
                 } else if (str_eq(ident, STR_LIT("FovY"))) {
                     viamd::extract_flt(data->view.camera.fov_y, arg);
                 }
             }
+            pending.has_camera = has_position && has_orientation && has_distance;
         } else if (str_eq(section, STR_LIT("Movie"))) {
             auto& m = data->movie;
             // Workspaces from before the timeline had a set length may have had it follow the trajectory
@@ -1858,7 +1984,12 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         key.value[1] = v[3];
                         key.value[2] = v[4];
                         key.ease = (KeyEase)CLAMP((int)lroundf(v[5]), 0, (int)KeyEase::Count - 1);
-                        if (0 <= key.param && key.param < MOVIE_MAX_PARAMS) m.param_keys.push_back(key);
+                        if (0 <= key.param && key.param < MOVIE_MAX_PARAMS) {
+                            if (key.param == 3 || key.param == 5) {
+                                VIAMD_LOG_INFO("Workspace: legacy occlusion radius / depth-of-field blur key retained but inactive with the new renderer; re-key blur strength using aperture");
+                            }
+                            m.param_keys.push_back(key);
+                        }
                     }
                 }
             }
@@ -2176,7 +2307,6 @@ void load_workspace(ApplicationState* data, str_t filename) {
     }
     if (pending.has_recenter_target && mask_fits(&pending.recenter_target)) {
         md_bitfield_copy(&data->operations.selection_mask, &pending.recenter_target);
-        recenter_mark_selection_dirty(data);
         recenter_update_target_data(data);
     }
 
@@ -2185,17 +2315,17 @@ void load_workspace(ApplicationState* data, str_t filename) {
         for (size_t i = 0; i < num_user_bonds; ++i) {
             const md_atom_pair_t& pair = pending.user_bonds[i];
             if ((size_t)pair.idx[0] < num_atoms && (size_t)pair.idx[1] < num_atoms) {
-                md_system_bond_insert(&data->mold.sys, pair.idx[0], pair.idx[1], MD_BOND_FLAG_USER_DEFINED);
+                md_system_bond_insert(&data->mold.sys, pair.idx[0], pair.idx[1], md_bond_flags_set_origin(MD_BOND_FLAG_NONE, MD_BOND_ORIGIN_USER));
             }
         }
+        md_util_system_infer_coordination(&data->mold.sys);
         data->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
     }
 
     // The camera flies in: from the whole system to where the workspace looked from. Without a
     // stored camera, both are the whole system.
-    const ViewTransform stored = data->view.camera;
     reset_view(&data->view.camera, data->mold.state, &data->representation.visibility_mask);
-    data->view.target = pending.has_camera ? stored : (ViewTransform)data->view.camera;
+    data->view.target = pending.has_camera ? pending.camera : (ViewTransform)data->view.camera;
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdDeserializeEnd, viamd::EventPayloadType_DeserializationState, &state);
 }
@@ -2305,17 +2435,15 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_vec3(state, STR_LIT("BackgroundColor"), v.background.color);
         viamd::write_flt(state,  STR_LIT("BackgroundIntensity"), v.background.intensity);
         viamd::write_bool(state, STR_LIT("SsaoEnabled"), v.ssao.enabled);
-        viamd::write_flt(state,  STR_LIT("SsaoIntensity"), v.ssao.intensity);
-        viamd::write_flt(state,  STR_LIT("SsaoRadius"), v.ssao.radius);
-        viamd::write_flt(state,  STR_LIT("SsaoBias"), v.ssao.bias);
+        viamd::write_flt(state,  STR_LIT("SsaoStrength"), v.ssao.intensity);
         viamd::write_bool(state, STR_LIT("TonemapEnabled"), v.tonemapping.enabled);
         viamd::write_int(state,  STR_LIT("Tonemapper"), (int)v.tonemapping.tonemapper);
         viamd::write_flt(state,  STR_LIT("TonemapExposure"), v.tonemapping.exposure);
         viamd::write_flt(state,  STR_LIT("TonemapGamma"), v.tonemapping.gamma);
         viamd::write_bool(state, STR_LIT("DofEnabled"), v.dof.enabled);
-        viamd::write_flt(state,  STR_LIT("DofFocusScale"), v.dof.focus_scale);
         viamd::write_int(state,  STR_LIT("DofFocusMode"), (int)v.dof.focus_mode);
         viamd::write_flt(state,  STR_LIT("DofFocusDistance"), v.dof.focus_distance);
+        viamd::write_flt(state,  STR_LIT("DofAperture"), v.dof.aperture);
         viamd::write_bool(state, STR_LIT("FxaaEnabled"), v.fxaa.enabled);
         viamd::write_bool(state, STR_LIT("TaaEnabled"), v.temporal_aa.enabled);
         viamd::write_bool(state, STR_LIT("TaaJitter"), v.temporal_aa.jitter);
@@ -2329,10 +2457,12 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         viamd::write_vec4(state, STR_LIT("SimulationBoxColor"), app_state->simulation_box.color);
     }
 
+    // The target, not the camera: the camera eases towards it over several frames (camera_animate),
+    // so saving during a fly-in or right after a drag would store a point along the way
     viamd::write_section_header(state, STR_LIT("Camera"));
-    viamd::write_vec3(state, STR_LIT("Position"), app_state->view.camera.position);
-    viamd::write_quat(state, STR_LIT("Orientation"), app_state->view.camera.orientation);
-    viamd::write_flt(state,  STR_LIT("Distance"), app_state->view.camera.distance);
+    viamd::write_vec3(state, STR_LIT("Position"), app_state->view.target.position);
+    viamd::write_quat(state, STR_LIT("Orientation"), app_state->view.target.orientation);
+    viamd::write_flt(state,  STR_LIT("Distance"), app_state->view.target.distance);
     viamd::write_int(state,  STR_LIT("Mode"), (int)app_state->view.mode);
     viamd::write_flt(state,  STR_LIT("FovY"), app_state->view.camera.fov_y);
 
@@ -2488,7 +2618,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
     // Save user defined bonds
     bool has_user_bonds = false;
     for (size_t i = 0; i < app_state->mold.sys.bond.count; ++i) {
-        if (app_state->mold.sys.bond.flags[i] & MD_BOND_FLAG_USER_DEFINED) {
+        if (md_bond_origin(app_state->mold.sys.bond.flags[i]) == MD_BOND_ORIGIN_USER) {
             if (!has_user_bonds) {
                 viamd::write_section_header(state, STR_LIT("UserBonds"));
                 has_user_bonds = true;
@@ -2562,11 +2692,16 @@ static void init_representation(ApplicationState* state, Representation* rep) {
     rep->md_rep = md_gl_rep_create(state->mold.gl_mol);
     md_bitfield_init(&rep->atom_mask, state->allocator.persistent);
 
-    // Default to the first per atom field the system offers, if it offers any. There is no list to
-    // consult: the attribute table is the list.
-    md_attribute_id_t first_property = MD_ATTRIBUTE_INVALID;
-    if (atom_property_query(&first_property, 1, state->mold.sys) > 0) {
-        atom_property_select(&rep->atomic_property, first_property, state->mold.sys);
+    // Default to the first per atom field the system offers, if it offers any - unless the
+    // representation already names one the system has. This runs again for every representation
+    // when a system is loaded, which is AFTER a workspace's representations were read, and for a
+    // clone: neither may lose the attribute it was coloured by, or how. There is no list to consult:
+    // the attribute table is the list.
+    if (!md_attributes_get(&state->mold.sys.attributes, rep->atom_attribute.key)) {
+        md_attribute_id_t first_attribute = MD_ATTRIBUTE_INVALID;
+        if (atom_attribute_query(&first_attribute, 1, state->mold.sys) > 0) {
+            atom_attribute_select(&rep->atom_attribute, first_attribute, state->mold.sys);
+        }
     }
 
     flag_representation_as_dirty(rep);
@@ -2619,7 +2754,7 @@ void remove_representation(ApplicationState* state, size_t idx) {
     gpu_volume_jobs_drain(state);
     if (rep.electronic_structure.density_vol.tex_id) gl::free_texture(&rep.electronic_structure.density_vol.tex_id);
     if (rep.electronic_structure.color_vol.tex_id)   gl::free_texture(&rep.electronic_structure.color_vol.tex_id);
-    if (rep.electronic_structure.dvr.tf_tex)         gl::free_texture(&rep.electronic_structure.dvr.tf_tex);
+    surface_field_free(&rep.electronic_structure.field_vol);
     md_array_swap_back_and_pop(state->representation.reps, idx);
     recompute_atom_visibility_mask(state);
 }
@@ -2757,17 +2892,17 @@ bool dipole_moment_read(vec3_t* out_vec, vec3_t* out_origin, const md_system_t& 
 // A per atom scalar field: values one component wide, the atom axis LAST, and at most one axis of
 // variants ahead of it. mdlib deliberately does not know that an "atom/..." path is over this
 // system's atoms - categories are not predeclared - so this is where that convention is checked.
-static bool atom_property_qualifies(const md_attribute_t* attr, const md_system_t& sys) {
+static bool atom_attribute_qualifies(const md_attribute_t* attr, const md_system_t& sys) {
     const md_attribute_format_t& fmt = attr->format;
     if (fmt.rank < 1 || fmt.rank > 2) return false;
     if (fmt.components != 1) return false;
     return fmt.shape[fmt.rank - 1] == (uint32_t)sys.atom.count;
 }
 
-size_t atom_property_query(md_attribute_id_t out_ids[], size_t cap, const md_system_t& sys) {
+size_t atom_attribute_query(md_attribute_id_t out_ids[], size_t cap, const md_system_t& sys) {
     size_t count = 0;
     for (md_attribute_iter_t it = md_attributes_iter(&sys.attributes, STR_LIT("atom")); md_attributes_next(&it);) {
-        if (!atom_property_qualifies(it.attr, sys)) continue;
+        if (!atom_attribute_qualifies(it.attr, sys)) continue;
 
         if (out_ids && count < cap) {
             out_ids[count] = it.attr->id;
@@ -2778,58 +2913,82 @@ size_t atom_property_query(md_attribute_id_t out_ids[], size_t cap, const md_sys
     return count;
 }
 
-str_t atom_property_label(const md_attribute_t* attr) {
+str_t atom_attribute_label(const md_attribute_t* attr) {
     if (!attr) return str_t{};
     // An empty label is a valid state, and the leaf is what the path spells for itself.
     return str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label;
 }
 
-int atom_property_variant_count(const md_attribute_t* attr) {
+int atom_attribute_variant_count(const md_attribute_t* attr) {
     if (!attr) return 0;
     return attr->format.rank > 1 ? (int)attr->format.shape[0] : 1;
 }
 
-bool atom_property_value_range(float* out_min, float* out_max, const md_attribute_t* attr) {
-    if (!attr) return false;
+ColorScaleSpan atom_attribute_span(const md_attribute_t* attr, const md_bitfield_t* mask) {
+    ColorScaleSpan span;
+    if (!attr) return span;
 
     const size_t num_values = md_attribute_element_count(&attr->format);
-    if (num_values == 0) return false;
+    const size_t num_atoms  = attr->format.rank > 0 ? attr->format.shape[attr->format.rank - 1] : 0;
+    if (num_values == 0 || num_atoms == 0) return span;
 
     md_temp_scope_t temp = md_temp_begin();
     float* values = (float*)md_temp_alloc(temp, sizeof(float) * num_values);
 
-    // Deliberately the whole attribute and not one variant: a span recomputed per variant would
-    // make the colours shift as the index slider moves, which reads as the data changing.
-    bool result = values && md_attribute_extract_f32(values, num_values, attr, md_attribute_slice_all(), md_unit_none()) == num_values;
-    if (result) {
+    // Deliberately the whole attribute and not one variant: a span measured per variant would make
+    // the colours shift as the index slider moves, which reads as the data changing.
+    if (values && md_attribute_extract_f32(values, num_values, attr, md_attribute_slice_all(), md_unit_none()) == num_values) {
         float value_min =  FLT_MAX;
         float value_max = -FLT_MAX;
+        size_t num_present = 0;
         for (size_t i = 0; i < num_values; ++i) {
+            if (mask && !md_bitfield_test_bit(mask, i % num_atoms)) continue;
+            if (atom_attribute_value_absent(values[i])) continue;
             value_min = MIN(value_min, values[i]);
             value_max = MAX(value_max, values[i]);
+            num_present += 1;
         }
-        if (out_min) *out_min = value_min;
-        if (out_max) *out_max = value_max;
+        if (num_present > 0) {
+            span = color_scale_span(value_min, value_max);
+        }
     }
     md_temp_end(temp);
 
-    return result;
+    return span;
 }
 
-void atom_property_select(AtomicPropertyRepresentation* prop, md_attribute_id_t key, const md_system_t& sys) {
-    ASSERT(prop);
+void atom_attribute_legend_label(char* buf, size_t cap, const md_attribute_t* attr, int variant_idx) {
+    ASSERT(buf && cap > 0);
+    const str_t label = atom_attribute_label(attr);
+    const int num_variants = atom_attribute_variant_count(attr);
+    if (num_variants > 1) {
+        snprintf(buf, cap, "%.*s [%d/%d]", (int)label.len, label.ptr, CLAMP(variant_idx, 0, num_variants - 1) + 1, num_variants);
+    } else {
+        snprintf(buf, cap, "%.*s", (int)label.len, label.ptr);
+    }
+}
 
-    prop->key = key;
-    prop->variant_idx = 0;
+void atom_attribute_select(AtomAttributeColoring* coloring, md_attribute_id_t key, const md_system_t& sys) {
+    ASSERT(coloring);
 
-    float value_min = 0.0f;
-    float value_max = 1.0f;
-    atom_property_value_range(&value_min, &value_max, md_attributes_get(&sys.attributes, key));
+    coloring->key = key;
+    coloring->variant_idx = 0;
+    coloring->span_hash = 0;    // measured again, over the representation's atoms, with its colours
 
-    prop->value_min = value_min;
-    prop->value_max = value_max;
-    prop->range_beg = value_min;
-    prop->range_end = value_max;
+    // Started out from the values of every atom: the representation's own are not at hand here
+    const ColorScaleSpan span = atom_attribute_span(md_attributes_get(&sys.attributes, key), nullptr);
+    const bool signed_values = color_scale_span_signed(span);
+
+    ColorScale& scale = coloring->scale;
+    scale.symmetric  = signed_values;
+    scale.auto_range = true;
+    if (signed_values && scale.colormap == DEFAULT_COLORMAP) {
+        scale.colormap = COLOR_SCALE_COLORMAP_RDBU;
+    } else if (!signed_values && scale.colormap == COLOR_SCALE_COLORMAP_RDBU) {
+        scale.colormap = DEFAULT_COLORMAP;
+    }
+    coloring->span = span;
+    color_scale_update_range(&scale, span);
 }
 
 // ---------------------------------------------------------------------------
@@ -2970,8 +3129,10 @@ double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, c
 // then the basis' atom indices are its own and not the system's. That map was the last thing an
 // evaluation still needed a loader for, so it is published beside the basis and read from there.
 //
-// Absent means the identity, which is what a standalone load is, so nothing publishes it in the
-// common case and every consumer needs the same one line to handle both.
+// Absent means the identity AND that the QM atoms are the whole system, which is what a plain
+// standalone load is, so nothing publishes it in the common case and every consumer needs the same
+// one line to handle both. A standalone load that appends an embedding's sites after the QM atoms
+// publishes the identity explicitly: the QM atoms are then only part of the system.
 //
 // It is VIAMD that publishes it and not the reader, because the file alone cannot decide: the same
 // h5 carries a local-to-global map whether it is opened on its own - where the map must NOT be
@@ -3201,6 +3362,8 @@ static size_t basis_atom_positions_gather(vec3_t* dst, size_t cap, const md_syst
 // available.
 static void gpu_volume_upload_to_gl(uint32_t vol_tex, const void* src, size_t size) {
     if (!src) return;
+    // The isosurface renderer's empty space grid follows the texels
+    volume::notify_data_changed(vol_tex);
     if (void* dst = gl::pbo_upload_begin(size)) {
         MEMCPY(dst, src, size);
         if (gl::pbo_upload_end_texture_3D(vol_tex, 0, GL_R32F)) return;
@@ -3467,6 +3630,7 @@ bool orbital_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_syste
     }
 
     md_gto_grid_evaluate_mo_GL(vol_tex, &grid, &basis, (const float*)atom_pos, sizeof(vec3_t), ao_coeffs, cutoff, mode, op);
+    volume::notify_data_changed(vol_tex);
     return true;
 }
 
@@ -3538,6 +3702,7 @@ bool density_matrix_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const m
     }
 
     md_gto_grid_evaluate_density_GL(vol_tex, &grid, &basis, (const float*)atom_pos, sizeof(vec3_t), density_matrix, false, op);
+    volume::notify_data_changed(vol_tex);
     return true;
 }
 
@@ -3573,6 +3738,7 @@ static bool electronic_structure_evaluate(ApplicationState* state, Representatio
         return false;
     }
     init_volume(&rep->electronic_structure.density_vol, grid, GL_R32F);
+    rep->electronic_structure.grid = grid;
     const uint32_t tex_id = rep->electronic_structure.density_vol.tex_id;
 
     switch (es.source) {
@@ -3641,16 +3807,21 @@ static void electronic_structure_color_volume_update(ApplicationState* state, Re
         return;
     }
 
-    const int downsample_factor = 1;
+    // Half the density's resolution: the colours vary on the scale of atoms, and at full resolution the
+    // RGBA8 texture is as large as the density itself (512 MB at the 512^3 limit)
+    const int downsample_factor = 2;
     int dim[3] = {
-        (int)(rep->electronic_structure.density_vol.dim[0] / downsample_factor),
-        (int)(rep->electronic_structure.density_vol.dim[1] / downsample_factor),
-        (int)(rep->electronic_structure.density_vol.dim[2] / downsample_factor),
+        MAX(1, DIV_UP((int)rep->electronic_structure.density_vol.dim[0], downsample_factor)),
+        MAX(1, DIV_UP((int)rep->electronic_structure.density_vol.dim[1], downsample_factor)),
+        MAX(1, DIV_UP((int)rep->electronic_structure.density_vol.dim[2], downsample_factor)),
     };
     MEMCPY(rep->electronic_structure.color_vol.dim, dim, sizeof(dim));
     rep->electronic_structure.color_vol.world_to_model   = rep->electronic_structure.density_vol.world_to_model;
     rep->electronic_structure.color_vol.texture_to_world = rep->electronic_structure.density_vol.texture_to_world;
-    rep->electronic_structure.color_vol.voxel_size       = rep->electronic_structure.density_vol.voxel_size * (float)downsample_factor;
+    rep->electronic_structure.color_vol.voxel_size       = vec3_set(
+        rep->electronic_structure.density_vol.voxel_size.x * rep->electronic_structure.density_vol.dim[0] / dim[0],
+        rep->electronic_structure.density_vol.voxel_size.y * rep->electronic_structure.density_vol.dim[1] / dim[1],
+        rep->electronic_structure.density_vol.voxel_size.z * rep->electronic_structure.density_vol.dim[2] / dim[2]);
     gl::init_texture_3D(&rep->electronic_structure.color_vol.tex_id, dim[0], dim[1], dim[2], GL_RGBA8);
 
     const vec3_t& voxel_size     = rep->electronic_structure.color_vol.voxel_size;
@@ -3690,6 +3861,61 @@ static void electronic_structure_color_volume_update(ApplicationState* state, Re
     volume::compute_point_color_volume(rep->electronic_structure.color_vol.tex_id, dim, voxel_size.elem, world_to_model.elem,
                                        index_to_world.elem, point_xyzw, point_colors, num_points,
                                        rep->electronic_structure.gaussian_splatting_power);
+}
+
+// The values of a volume texture, read back. A volume the md_gpu path is still filling is waited
+// for first, and image stores of the GL compute path are made visible before the read.
+static bool volume_read_values(float* dst, ApplicationState* state, const Volume& vol) {
+    if (!vol.tex_id) return false;
+    gpu_volume_jobs_drain(state);
+    if (glMemoryBarrier) {
+        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
+    }
+    GLint prev = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_3D, &prev);
+    glBindTexture(GL_TEXTURE_3D, vol.tex_id);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_FLOAT, dst);
+    glBindTexture(GL_TEXTURE_3D, (GLuint)prev);
+    return true;
+}
+
+// The field the isosurfaces are coloured by, on the grid of the density volume and around the
+// surfaces drawn from it. The VALUES depend on the field and the geometry (the frame, which the
+// volume hash holds) and are kept while only the isovalues change: a new isovalue evaluates the
+// voxels it adds to the band and nothing else.
+static void electronic_structure_field_update(ApplicationState* state, Representation* rep) {
+    ElectronicStructureRepresentation& es = rep->electronic_structure;
+    if (!surface_field_available(es.field_kind, state->mold.sys)) {
+        surface_field_free(&es.field_vol);
+        return;
+    }
+
+    IsoDesc iso;
+    electronic_structure_iso_desc_init(&iso, es);
+
+    const uint64_t source_hash = md_hash64(&es.field_kind, sizeof(es.field_kind), es.vol_hash);
+    const uint64_t band_hash   = md_hash64(iso.values, sizeof(float) * iso.count, (uint64_t)iso.count + 1);
+    if (es.field_vol.tex_id && source_hash == es.field_vol.source_hash && band_hash == es.field_vol.band_hash) {
+        return;
+    }
+
+    const size_t num_voxels = md_grid_num_points(&es.grid);
+    if (num_voxels == 0) return;
+
+    md_temp_scope_t temp = md_temp_begin();
+    defer { md_temp_end(temp); };
+    float* density = (float*)md_temp_alloc(temp, sizeof(float) * num_voxels);
+    if (!density || !volume_read_values(density, state, es.density_vol)) {
+        return;
+    }
+
+    const md_tick_t t0 = md_tick_now();
+    if (surface_field_update(&es.field_vol, es.field_kind, state->mold.sys, state->mold.state, es.grid, density, iso.values, iso.count, source_hash, band_hash)) {
+        color_scale_update_range(&es.field_map, surface_field_span(es.field_vol));
+        const SurfaceFieldVolume& fv = es.field_vol;
+        MD_LOG_DEBUG("Surface field: %zu of %zu voxels evaluated, %.1f ms; on %zu surface samples min %g, 1%% %g, 99%% %g, max %g", fv.num_evaluated, num_voxels,
+                     md_tick_to_milliseconds(md_tick_now() - t0), fv.num_surface_samples, fv.surface_min, fv.surface_lo, fv.surface_hi, fv.surface_max);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3940,7 +4166,7 @@ void update_all_representations(ApplicationState* state) {
 bool representation_uses_atom_colors(const Representation& rep) {
     switch (rep.type) {
         case RepresentationType::ElectronicStructure:
-            return rep.electronic_structure.use_atom_colors;
+            return rep.electronic_structure.coloring == SurfaceColoring::AtomColors;
         case RepresentationType::DipoleMoment:
             return false;
         default:
@@ -3965,13 +4191,23 @@ void update_representation(ApplicationState* state, Representation* rep) {
     const size_t bytes = num_atoms * sizeof(uint32_t);
 
     //md_script_property_t prop = {0};
-    //if (rep->color_mapping == ColorMapping::Property) {
+    //if (rep->color_mapping == ColorMapping::Attribute) {
     //rep->prop_is_valid = md_script_compile_and_eval_property(&prop, rep->prop, &data->mold.sys, frame_allocator, &data->script.ir, rep->prop_error.beg(), rep->prop_error.capacity());
     //}
 
     uint32_t* colors = 0;
     if (representation_uses_atom_colors(*rep)) {
         colors = (uint32_t*)md_vm_arena_push(frame_alloc, sizeof(uint32_t) * num_atoms);
+
+        // The atoms first: the colours are applied through them, and a colour scale's range can
+        // follow the values of exactly the atoms shown
+        if (rep->dynamic_evaluation) {
+            rep->filt_is_dirty = true;
+        }
+        if (rep->filt_is_dirty) {
+            rep->filt_is_valid = md_filter(&rep->atom_mask, str_from_cstr(rep->filt), &state->mold.sys, &state->mold.state, state->script.ir, &rep->filt_is_dynamic, rep->filt_error, sizeof(rep->filt_error));
+            rep->filt_is_dirty = false;
+        }
 
         switch (rep->color_mapping) {
         case ColorMapping::Uniform:
@@ -4004,43 +4240,52 @@ void update_representation(ApplicationState* state, Representation* rep) {
                 .helix = convert_color(rep->secondary_structure.color_helix),
                 .sheet = convert_color(rep->secondary_structure.color_sheet),
             };
-            color_atoms_secondary_structure(colors, num_atoms, sys, palette);
+            color_atoms_secondary_structure(colors, num_atoms, sys, displayed_secondary_structure(state), palette);
             break;
         }
-        case ColorMapping::Property:
-            // @TODO: Map colors accordingly
-            //color_atoms_uniform(colors, mol.atom.count, rep->uniform_color);
+        case ColorMapping::Attribute: {
+            AtomAttributeColoring& coloring = rep->atom_attribute;
+            const md_attribute_t* attr = md_attributes_get(&sys.attributes, coloring.key);
+            size_t num_extracted = 0;
+            float* values = nullptr;
 
-            {
-                const md_attribute_t* attr = md_attributes_get(&sys.attributes, rep->atomic_property.key);
-                size_t num_extracted = 0;
-                float* values = nullptr;
+            if (attr) {
+                values = (float*)md_vm_arena_push(frame_alloc, sizeof(float) * num_atoms);
 
-                if (attr) {
-                    values = (float*)md_vm_arena_push(frame_alloc, sizeof(float) * num_atoms);
-
-                    // Fixing the variant axis hands back exactly the atom axis, so there is no
-                    // offset arithmetic here to get wrong. A field with no variant axis is rank 1
-                    // and takes no indices at all.
-                    const uint32_t variant = (uint32_t)CLAMP(rep->atomic_property.variant_idx, 0, MAX(atom_property_variant_count(attr) - 1, 0));
-                    const md_attribute_slice_t slice = attr->format.rank > 1 ? md_attribute_slice_1(variant) : md_attribute_slice_all();
-                    num_extracted = md_attribute_extract_f32(values, num_atoms, attr, slice, md_unit_none());
-                }
-
-                if (num_extracted == num_atoms) {
-                    float range_ext = (rep->atomic_property.range_end - rep->atomic_property.range_beg);
-                    range_ext = MAX(range_ext, 0.001f);
-                    for (size_t i = 0; i < num_atoms; ++i) {
-                        float t = (values[i] - rep->atomic_property.range_beg) / range_ext;
-                        colors[i] = ImPlot::SampleColormapU32(ImClamp(t, 0.0f, 1.0f), rep->atomic_property.colormap);
-                    }
-                } else {
-                    if (attr) {
-                        MD_LOG_DEBUG("Failed to extract values for the selected atom property");
-                    }
-                    MEMSET(colors, 0xFFFFFFFFu, bytes);
-                }
+                // Fixing the variant axis hands back exactly the atom axis, so there is no
+                // offset arithmetic here to get wrong. A field with no variant axis is rank 1
+                // and takes no indices at all.
+                const uint32_t variant = (uint32_t)CLAMP(coloring.variant_idx, 0, MAX(atom_attribute_variant_count(attr) - 1, 0));
+                const md_attribute_slice_t slice = attr->format.rank > 1 ? md_attribute_slice_1(variant) : md_attribute_slice_all();
+                num_extracted = md_attribute_extract_f32(values, num_atoms, attr, slice, md_unit_none());
             }
+
+            if (num_extracted == num_atoms) {
+                // The span of the atoms shown, measured again only when the values or the atoms
+                // changed: it scans every variant of the attribute
+                const md_bitfield_t* shown = rep->filt_is_valid ? &rep->atom_mask : nullptr;
+                uint64_t span_hash = md_hash64(&coloring.key, sizeof(coloring.key), 1);
+                const uint64_t version = md_attributes_version(&sys.attributes, coloring.key);
+                span_hash = md_hash64(&version, sizeof(version), span_hash);
+                span_hash = shown ? md_bitfield_hash64(shown, span_hash) : md_hash64(&num_atoms, sizeof(num_atoms), span_hash);
+                if (span_hash != coloring.span_hash) {
+                    coloring.span = atom_attribute_span(attr, shown);
+                    coloring.span_hash = span_hash;
+                }
+                color_scale_update_range(&coloring.scale, coloring.span);
+
+                for (size_t i = 0; i < num_atoms; ++i) {
+                    // An atom without a value is not a point on the ramp: NAN would reach the
+                    // colormap lookup as an index, so it gets a neutral grey of its own instead
+                    colors[i] = atom_attribute_value_absent(values[i]) ? IM_COL32(128, 128, 128, 255) : color_scale_color_u32(coloring.scale, values[i]);
+                }
+            } else {
+                if (attr) {
+                    MD_LOG_DEBUG("Failed to extract values for the selected atom attribute");
+                }
+                MEMSET(colors, 0xFFFFFFFFu, bytes);
+            }
+        }
 #if 0
             if (rep->prop) {
                 MEMSET(colors, 0xFFFFFFFF, bytes);
@@ -4142,13 +4387,15 @@ void update_representation(ApplicationState* state, Representation* rep) {
                 electronic_structure_evaluate(state, rep);
             }
 
-            if (rep->electronic_structure.use_atom_colors) {
+            if (rep->electronic_structure.coloring == SurfaceColoring::AtomColors) {
                 uint64_t col_hash = md_hash64(&rep->electronic_structure.gaussian_splatting_power, sizeof(rep->electronic_structure.gaussian_splatting_power), (int)rep->color_mapping);
                 col_hash = md_hash64_combine(col_hash, rep->electronic_structure.vol_hash);
                 if (col_hash != rep->electronic_structure.col_hash) {
                     rep->electronic_structure.col_hash = col_hash;
                     electronic_structure_color_volume_update(state, rep, colors);
                 }
+            } else if (rep->electronic_structure.coloring == SurfaceColoring::Field) {
+                electronic_structure_field_update(state, rep);
             }
         }
         break;
@@ -4162,15 +4409,6 @@ void update_representation(ApplicationState* state, Representation* rep) {
     }
 
     if (colors) {
-        if (rep->dynamic_evaluation) {
-            rep->filt_is_dirty = true;
-        }
-
-        if (rep->filt_is_dirty) {
-			rep->filt_is_valid = md_filter(&rep->atom_mask, str_from_cstr(rep->filt), &state->mold.sys, &state->mold.state, state->script.ir, &rep->filt_is_dynamic, rep->filt_error, sizeof(rep->filt_error));
-            rep->filt_is_dirty = false;
-        }
-
         if (rep->filt_is_valid) {
             filter_colors(colors, num_atoms, &rep->atom_mask);
             state->representation.atom_visibility_mask_dirty = true;
@@ -4221,7 +4459,7 @@ ElectronicStructureSourceFlags es_source_mask(const md_system_t& sys) {
 
 // Per atom scalar fields are deliberately not gathered anywhere. They live in the system's attribute
 // table under atom/, whoever loaded the data put them there, and the UI reads that table directly
-// through atom_property_query.
+// through atom_attribute_query.
 
 static void init_all_representations(ApplicationState* state) {
     for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
@@ -4275,18 +4513,18 @@ void create_default_representations(ApplicationState* state) {
         goto done;
     }
 
-    // TODO: Redo this check with entities instead of atom flags
-    for (size_t i = 0; i < state->mold.sys.atom.count; ++i) {
-        uint32_t flags = state->mold.sys.atom.flags[i];
-        if (flags & MD_FLAG_AMINO_ACID) amino_acid_present = true;
-        if (flags & MD_FLAG_NUCLEOTIDE) nucleic_present = true;
-        if (flags & MD_FLAG_ION) ion_present = true;
-        if (flags & MD_FLAG_WATER) water_present = true;
-        if (flags & MD_FLAG_COARSE_GRAINED) num_coarse_grained += 1;
-
-        if (!(flags & (MD_FLAG_AMINO_ACID | MD_FLAG_NUCLEOTIDE | MD_FLAG_ION | MD_FLAG_WATER))) {
-            ligand_present = true;
+    // What is present, by what the components are. The selections of the representations below are by the same.
+    for (size_t i = 0; i < state->mold.sys.component.count; ++i) {
+        switch (md_component_kind(&state->mold.sys.component, i)) {
+        case MD_COMPONENT_KIND_AMINO_ACID: amino_acid_present = true; break;
+        case MD_COMPONENT_KIND_NUCLEOTIDE: nucleic_present = true;    break;
+        case MD_COMPONENT_KIND_ION:        ion_present = true;        break;
+        case MD_COMPONENT_KIND_WATER:      water_present = true;      break;
+        default:                           ligand_present = true;     break;
         }
+    }
+    for (size_t i = 0; i < state->mold.sys.atom.count; ++i) {
+        num_coarse_grained += md_atom_particle_kind(&state->mold.sys.atom, i) == MD_PARTICLE_BEAD;
     }
 
     // Coarse grained when most of it is. A handful of beads, or atoms a loader could not assign an
@@ -4301,14 +4539,19 @@ void create_default_representations(ApplicationState* state) {
         RepresentationType type = RepresentationType::Cartoon;
         ColorMapping color = ColorMapping::SecondaryStructure;
 
-        if (state->mold.sys.instance.count > 1) {
-            color = ColorMapping::InstId;
-        } else {
-            size_t res_count = md_instance_comp_count(&state->mold.sys.instance, 0);
-            if (res_count < 20) {
-                type = RepresentationType::BallAndStick;
-                color = ColorMapping::Type;
+        // Several chains are told apart by color; a short single chain (or none: free amino acids) is shown atom by atom
+        size_t num_chains = 0;
+        size_t chain_res_count = 0;
+        for (size_t i = 0; i < state->mold.sys.instance.count; ++i) {
+            if (md_system_instance_entity_kind(&state->mold.sys, i) == MD_ENTITY_KIND_PEPTIDE) {
+                if (num_chains++ == 0) chain_res_count = md_instance_comp_count(&state->mold.sys.instance, i);
             }
+        }
+        if (num_chains > 1) {
+            color = ColorMapping::InstId;
+        } else if (chain_res_count < 20) {
+            type = RepresentationType::BallAndStick;
+            color = ColorMapping::Type;
         }
 
         Representation* prot = create_representation(state, type, color, STR_LIT("protein"));
@@ -4364,7 +4607,7 @@ done:
             // Lower case, like every other auto created representation - "protein", "water",
             // "electronic structure". dipole_label_pretty title cases for menus and tooltips,
             // which is a different job and stays as it is.
-            snprintf(dipole_rep->name, sizeof(dipole_rep->name), "ground state");
+            snprintf(dipole_rep->name, sizeof(dipole_rep->name), "dipole moment");
             dipole_rep->enabled = true;
             break;
         }
@@ -4397,6 +4640,18 @@ void interpolate_system_state(ApplicationState* app) {
     }
     app->mold.last_interpolated_nearest_frame = nearest_frame;
 
+    // The backbone keeps the orientation of its cross sections coherent from one displayed state to the next. That
+    // continuity only means something while the structure moves continuously, so a jump (seeking, skipping frames,
+    // a new run) starts it over. Playback keeps it whatever the speed.
+    {
+        const double last = app->mold.last_interpolated_frame;
+        const bool playing = app->animation.mode == PlaybackMode::Playing;
+        if (last < 0.0 || (!playing && fabs(time - last) > 1.5)) {
+            app->mold.dirty_gpu_buffers |= MolBit_ResetBackboneHistory;
+        }
+        app->mold.last_interpolated_frame = time;
+    }
+
     // This represents the frames that we would like to load into memory for interpolation (worst case).
     const int64_t frames[4] = {
         MAX(0LL, frame - 1),
@@ -4426,6 +4681,11 @@ void interpolate_system_state(ApplicationState* app) {
         md_system_state_t* src_states[4];
 		md_system_state_t* dst_state;
 
+        // The backbone of the destination state, and the cartoon's weights for it (temporary, uploaded at the end)
+        md_backbone_angles_t*        dst_angle;
+        md_secondary_structure_t*    dst_ss;
+        md_gl_secondary_structure_t* ss_weights;
+
         vec3_t* aabb_min;
         vec3_t* aabb_max;
 
@@ -4436,7 +4696,9 @@ void interpolate_system_state(ApplicationState* app) {
 
     Payload payload = {
         .app = app,
-        .s = 1.0f - CLAMP(app->animation.tension, 0.0f, 1.0f),
+        // Tangent scale of the cardinal spline: (p2 - p0) * s. Tension 0 gives s = 0.5, i.e. Catmull-Rom, which plays
+        // uniform motion back uniformly; tension 1 eases in and out of every frame.
+        .s = 0.5f * (1.0f - CLAMP(app->animation.tension, 0.0f, 1.0f)),
         .t = (float)fract(time),
         .mode = mode,
         .nearest_frame = nearest_frame,
@@ -4446,11 +4708,26 @@ void interpolate_system_state(ApplicationState* app) {
         .aabb_max = md_temp_alloc_array(temp, vec3_t, num_threads),
     };
 
+    // The backbone of the displayed state is the run's at the frames around it: the angles and the secondary structure
+    // go into the state's attributes, the cartoon's weights into temporary memory, which is uploaded at the end.
+    const size_t num_segments = app->mold.sys.protein_backbone.segment.count;
+    if (num_segments > 0 && app->trajectory_data.backbone_angles.data) {
+        payload.dst_angle = md_util_state_backbone_angles_write(&app->mold.state, &app->mold.sys);
+    }
+    if (num_segments > 0 && app->trajectory_data.secondary_structure.data) {
+        payload.dst_ss = md_util_state_secondary_structure_write(&app->mold.state, &app->mold.sys);
+        payload.ss_weights = payload.dst_ss ? md_temp_alloc_array(temp, md_gl_secondary_structure_t, num_segments) : nullptr;
+    }
+
     // Stamp the destination with the frame it is about to represent. The interpolated state is not
     // written by a run extraction, so nothing else would fill this in, and a
     // stale value is worse than an absent one. Nearest snaps to a whole frame; the other modes land
     // between two, which is exactly what the fractional part is for.
     app->mold.state.frame = (mode == InterpolationMode::Nearest) ? (double)nearest_frame : time;
+
+    // Fresh coordinates, in the lattice frame of the cell: the turn the previous ones carried goes
+    // with them. The System State Changed handler puts one back if the orientation is kept.
+    app->operations.state_rotation = mat4_ident();
 
     int requested_frames[4] = { 0 };
     int num_requested_frames = 0;
@@ -4610,7 +4887,7 @@ void interpolate_system_state(ApplicationState* app) {
         tasks[num_tasks++] = aabb_task;
     }
 
-    if (sys.protein_backbone.segment.count > 0 && sys.protein_backbone.segment.angle) {
+    if (payload.dst_angle) {
         switch (mode) {
             case InterpolationMode::Nearest: {
                 task_system::ID angle_task = task_system::create_pool_task(STR_LIT("## Compute Backbone Angles"), [data = &payload]() {
@@ -4619,7 +4896,7 @@ void interpolate_system_state(ApplicationState* app) {
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[2],
                     };
                     const md_backbone_angles_t* src_angle = data->t < 0.5f ? src_angles[0] : src_angles[1];
-                    MEMCPY(data->app->mold.sys.protein_backbone.segment.angle, src_angle, data->app->mold.sys.protein_backbone.segment.count * sizeof(md_backbone_angles_t));
+                    MEMCPY(data->dst_angle, src_angle, data->app->mold.sys.protein_backbone.segment.count * sizeof(md_backbone_angles_t));
                 });
 
                 tasks[num_tasks++] = angle_task;
@@ -4632,7 +4909,6 @@ void interpolate_system_state(ApplicationState* app) {
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[1],
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[2],
                     };
-                    md_system_t& sys = data->app->mold.sys;
                     for (size_t i = range_beg; i < range_end; ++i) {
                         float phi[2] = {src_angles[0][i].phi, src_angles[1][i].phi};
                         float psi[2] = {src_angles[0][i].psi, src_angles[1][i].psi};
@@ -4642,7 +4918,7 @@ void interpolate_system_state(ApplicationState* app) {
 
                         float final_phi = lerp(phi[0], phi[1], data->t);
                         float final_psi = lerp(psi[0], psi[1], data->t);
-                        sys.protein_backbone.segment.angle[i] = {deperiodize_orthof(final_phi, 0, (float)TWO_PI), deperiodize_orthof(final_psi, 0, (float)TWO_PI)};
+                        data->dst_angle[i] = {deperiodize_orthof(final_phi, 0, (float)TWO_PI), deperiodize_orthof(final_psi, 0, (float)TWO_PI)};
                     }
                 });
 
@@ -4658,7 +4934,6 @@ void interpolate_system_state(ApplicationState* app) {
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[2],
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[3],
                     };
-                    md_system_t& sys = data->app->mold.sys;
                     for (size_t i = range_beg; i < range_end; ++i) {
                         float phi[4] = {src_angles[0][i].phi, src_angles[1][i].phi, src_angles[2][i].phi, src_angles[3][i].phi};
                         float psi[4] = {src_angles[0][i].psi, src_angles[1][i].psi, src_angles[2][i].psi, src_angles[3][i].psi};
@@ -4673,7 +4948,7 @@ void interpolate_system_state(ApplicationState* app) {
 
                         float final_phi = cubic_spline(phi[0], phi[1], phi[2], phi[3], data->t, data->s);
                         float final_psi = cubic_spline(psi[0], psi[1], psi[2], psi[3], data->t, data->s);
-                        sys.protein_backbone.segment.angle[i] = {deperiodize_orthof(final_phi, 0, (float)TWO_PI), deperiodize_orthof(final_psi, 0, (float)TWO_PI)};
+                        data->dst_angle[i] = {deperiodize_orthof(final_phi, 0, (float)TWO_PI), deperiodize_orthof(final_psi, 0, (float)TWO_PI)};
                     }
                 });
 
@@ -4686,13 +4961,13 @@ void interpolate_system_state(ApplicationState* app) {
         }
     }
 
-    if (sys.protein_backbone.segment.count > 0 && sys.protein_backbone.segment.secondary_structure) {
-        if (md_array_size(app->mold.interpolated_properties.secondary_structure) != sys.protein_backbone.segment.count) {
-			MD_LOG_ERROR("Secondary structure array size does not match the number of segments.");
-        }
-        size_t num_backbone_segments = sys.protein_backbone.segment.count;
-        task_system::ID ss_task = task_system::create_pool_task(STR_LIT("## Interpolate Secondary Structures"), (uint32_t)num_backbone_segments, [data = &payload, mode](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
+    if (payload.dst_ss) {
+        task_system::ID ss_task = task_system::create_pool_task(STR_LIT("## Interpolate Secondary Structures"), (uint32_t)num_segments, [data = &payload, mode](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
             (void)thread_num;
+            // The state carries the secondary structure of the nearest frame as it was assigned. The cartoon blends the
+            // denoised copy (a presentation smoothing, see secondary_structure_render) where it exists.
+            const md_secondary_structure_t* label_nearest = data->app->trajectory_data.secondary_structure.data +
+                data->app->trajectory_data.secondary_structure.stride * (data->t < 0.5f ? data->frames[1] : data->frames[2]);
             const md_secondary_structure_t* ss_data = data->app->trajectory_data.secondary_structure_render.data ?
                 data->app->trajectory_data.secondary_structure_render.data :
                 data->app->trajectory_data.secondary_structure.data;
@@ -4736,10 +5011,8 @@ void interpolate_system_state(ApplicationState* app) {
                 [[fallthrough]];
             case InterpolationMode::Nearest: {
                 for (size_t i = range_beg; i < range_end; ++i) {
-                    md_secondary_structure_t ss = src_ss_nearest[i];
-                    // Set both the analytical (nearest) and interpolated secondary structure (rendering)
-                    data->app->mold.sys.protein_backbone.segment.secondary_structure[i] = ss;
-                    data->app->mold.interpolated_properties.secondary_structure[i] = md_gl_secondary_structure_convert(ss);
+                    data->dst_ss[i] = label_nearest[i];
+                    data->ss_weights[i] = md_gl_secondary_structure_convert(src_ss_nearest[i]);
                 }
                 break;
             }
@@ -4747,10 +5020,8 @@ void interpolate_system_state(ApplicationState* app) {
                 for (size_t i = range_beg; i < range_end; ++i) {
                     md_secondary_structure_t ss[2] = { src_ss[1][i], src_ss[2][i] };
                     md_gl_secondary_structure_t ss_gl[2] = { md_gl_secondary_structure_convert(ss[0]), md_gl_secondary_structure_convert(ss[1]) };
-                    md_gl_secondary_structure_t ss_gl_i = blend_ss(ss_gl[0], ss_gl[1], data->t);
-                    // Set both the analytical (nearest) and interpolated secondary structure (rendering)
-                    data->app->mold.sys.protein_backbone.segment.secondary_structure[i] = src_ss_nearest[i];
-                    data->app->mold.interpolated_properties.secondary_structure[i] = ss_gl_i;
+                    data->dst_ss[i] = label_nearest[i];
+                    data->ss_weights[i] = blend_ss(ss_gl[0], ss_gl[1], data->t);
                 }
                 break;
             }
@@ -4774,10 +5045,8 @@ void interpolate_system_state(ApplicationState* app) {
                         ss_gl[2] = ss_gl[1];
                     }
 
-                    md_gl_secondary_structure_t ss_gl_i = blend_ss(ss_gl[1], ss_gl[2], smoothstep5(data->t));
-                    // Set both the analytical (nearest) and interpolated secondary structure (rendering)
-                    data->app->mold.sys.protein_backbone.segment.secondary_structure[i] = src_ss_nearest[i];
-                    data->app->mold.interpolated_properties.secondary_structure[i] = ss_gl_i;
+                    data->dst_ss[i] = label_nearest[i];
+                    data->ss_weights[i] = blend_ss(ss_gl[1], ss_gl[2], smoothstep5(data->t));
                 }
                 break;
             }
@@ -4785,36 +5054,12 @@ void interpolate_system_state(ApplicationState* app) {
         });
         tasks[num_tasks++] = ss_task;
 
-#if 1
-        // Task for cleaning up isolated coils to its neighbors (if the same), to reduce the noise in the secondary structure during transitions. This is a non temporal filtering step
+        // Isolated coils between matching structured segments are filled in, to reduce the noise during transitions.
+        // A non temporal filtering step, after the blend above.
         task_system::ID ss_cleanup_task = task_system::create_pool_task(STR_LIT("## Cleanup Secondary Structures"), [data = &payload]() {
-            // Cleanup isolated coils to reduce noise during transitions
-            auto is_eq = [](md_gl_secondary_structure_t a, md_gl_secondary_structure_t b) {
-                return a.helix == b.helix && a.sheet == b.sheet;
-            };
-            const md_gl_secondary_structure_t ss_coil = { 0,0 };
-            const md_gl_secondary_structure_t ss_helix = { .helix = 1.0f };
-            const md_gl_secondary_structure_t ss_sheet = { .sheet = 1.0f };
-
-            md_gl_secondary_structure_t* ss_gl = data->app->mold.interpolated_properties.secondary_structure;
-            for (size_t i = 0; i < data->app->mold.sys.protein_backbone.range.count; ++i) {
-                size_t range_beg = data->app->mold.sys.protein_backbone.range.offset[i];
-                size_t range_end = data->app->mold.sys.protein_backbone.range.offset[i + 1];
-                for (size_t j = range_beg + 1; j + 1 < range_end; ++j) {
-                    // Set isolated coils between matching structured segments to reduce noise during transitions.
-                    if (is_eq(ss_gl[j - 1], ss_helix) && is_eq(ss_gl[j + 1], ss_helix) && is_eq(ss_gl[j], ss_coil)) {
-                        ss_gl[j] = ss_helix;
-                    }
-                    if (is_eq(ss_gl[j - 1], ss_sheet) && is_eq(ss_gl[j + 1], ss_sheet) && is_eq(ss_gl[j], ss_coil)) {
-                        ss_gl[j] = ss_sheet;
-                    }
-                }
-            }
+            secondary_structure_weights_fill_isolated_coils(data->ss_weights, &data->app->mold.sys.protein_backbone);
         });
         tasks[num_tasks++] = ss_cleanup_task;
-#endif
-
-        app->mold.dirty_gpu_buffers |= MolBit_DirtySecondaryStructure;
     }
 
     if (num_tasks > 0) {
@@ -4823,6 +5068,11 @@ void interpolate_system_state(ApplicationState* app) {
         }
         task_system::enqueue_task(tasks[0]);
         task_system::task_wait_for(tasks[num_tasks - 1]);
+    }
+
+    // The weights are the renderer's input and nothing else's: straight to the GPU, from the temporary memory above
+    if (payload.ss_weights) {
+        md_gl_mol_set_backbone_secondary_structure(app->mold.gl_mol, 0, (uint32_t)num_segments, payload.ss_weights, 0);
     }
 
     vec3_t aabb_min = payload.aabb_min[0];
@@ -4850,6 +5100,17 @@ void interpolate_system_state(ApplicationState* app) {
     app->mold.dirty_gpu_buffers |= MolBit_DirtyPosition;
 }
 
+// Exact, element by element. The identities compared against here are only ever assigned, never computed.
+static bool is_identity(const mat4_t& M) {
+    const mat4_t I = mat4_ident();
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            if (M.elem[c][r] != I.elem[c][r]) return false;
+        }
+    }
+    return true;
+}
+
 void recenter_mark_query_dirty(ApplicationState* state) {
     ASSERT(state);
     state->operations.recenter_query.version += 1;
@@ -4858,24 +5119,9 @@ void recenter_mark_query_dirty(ApplicationState* state) {
     }
 }
 
-void recenter_mark_selection_dirty(ApplicationState* state) {
-    ASSERT(state);
-    state->operations.selection_version += 1;
-    if (state->operations.selection_version == 0) {
-        state->operations.selection_version = 1;
-    }
-}
-
 const md_bitfield_t& recenter_get_active_target_mask(const ApplicationState* state) {
     ASSERT(state);
     return state->operations.recenter_query.enabled ? state->operations.recenter_query.mask : state->operations.selection_mask;
-}
-
-uint64_t recenter_get_active_target_version(const ApplicationState* state) {
-    ASSERT(state);
-    const uint64_t source_version = state->operations.recenter_query.enabled ? state->operations.recenter_query.evaluated_version : state->operations.selection_version;
-    const uint64_t source_idx = state->operations.recenter_query.enabled ? 1 : 0;
-    return (source_version << 1) | source_idx;
 }
 
 bool recenter_update_query_mask(ApplicationState* state) {
@@ -4913,14 +5159,34 @@ void recenter_update(ApplicationState* state) {
     recenter_update_target_data(state);
 }
 
+// Exactly the same atoms, whatever range of bits each bitfield happens to be stored over. A hash of the
+// stored blocks is neither: it misses their offset, and the same atoms can be stored over different ranges.
+static bool same_atoms(const md_bitfield_t* a, const md_bitfield_t* b) {
+    md_temp_scope_t temp = md_temp_begin();
+    defer { md_temp_end(temp); };
+    md_bitfield_t diff = md_bitfield_create(md_temp_allocator(temp));
+    md_bitfield_xor(&diff, a, b);
+    return md_bitfield_empty(&diff);
+}
+
 void recenter_update_target_data(ApplicationState* state) {
     if (run_num_frames(state) == 0) return;
 
+    // The reference is only for keeping the orientation. Centering alone needs nothing from the first frame,
+    // so without this a target picked by a query which depends on the frame read it from disk in every frame.
+    if (!state->operations.fixate_orientation) return;
+
+    auto& ref = state->operations.initial_frame;
     const md_bitfield_t& target_mask = recenter_get_active_target_mask(state);
-    const uint64_t target_version = recenter_get_active_target_version(state);
-    if (target_version != state->operations.initial_frame.target_version) {
-        // Need to recalculate the initial frame
-        state->operations.initial_frame.target_version = target_version;
+
+    // Keyed on the atoms themselves. The versions this used to compare change every time a query is
+    // evaluated, which for one that depends on the frame is every frame, whether or not its atoms changed.
+    if (!ref.valid || !same_atoms(&ref.target_mask, &target_mask)) {
+        if (!ref.target_mask.alloc) {
+            md_bitfield_init(&ref.target_mask, state->allocator.persistent);
+        }
+        md_bitfield_copy(&ref.target_mask, &target_mask);
+        ref.valid = true;
         size_t count = md_bitfield_popcount(&target_mask);
 
         md_array_resize(state->operations.initial_frame.rel_xyzw, count, state->allocator.persistent);
@@ -4959,13 +5225,17 @@ void recenter_update_target_data(ApplicationState* state) {
     }
 }
 
-void recenter_calculate_transform(float M[4][4], const ApplicationState* app) {
-    ASSERT(M);
+bool recenter_calculate_transform(mat4_t* translation, mat4_t* rotation, const ApplicationState* app) {
+    ASSERT(translation);
+    ASSERT(rotation);
     ASSERT(app);
+
+    *translation = mat4_ident();
+    *rotation    = mat4_ident();
+    bool turn = false;
 
     const md_bitfield_t& target_mask = recenter_get_active_target_mask(app);
     size_t count = md_bitfield_popcount(&target_mask);
-    mat4_t transform = mat4_ident();
 
     if (count > 0) {
         md_temp_scope_t temp = md_temp_begin_in(app->allocator.frame);
@@ -4999,11 +5269,13 @@ void recenter_calculate_transform(float M[4][4], const ApplicationState* app) {
         // The reference has to have been built from the SAME target that is being fitted now.
         // A size match is not sufficient: the selection can change to a different set of equal
         // size between recenter_update() and this call, which would silently pair up unrelated
-        // atoms and yield a garbage rotation. The version is the identity of the target.
+        // atoms and yield a garbage rotation. The atoms themselves are the identity of the target.
         const bool reference_valid =
+            app->operations.fixate_orientation &&
+            app->operations.initial_frame.valid &&
             app->operations.initial_frame.rel_xyzw &&
             md_array_size(app->operations.initial_frame.rel_xyzw) == count &&
-            app->operations.initial_frame.target_version == recenter_get_active_target_version(app);
+            same_atoms(&app->operations.initial_frame.target_mask, &target_mask);
 
         // R maps the CURRENT target onto the reference: R * (q - target_com) ~= p. The relative fit this
         // replaced had its operands the other way around, which yields the rotation carrying the reference
@@ -5019,10 +5291,140 @@ void recenter_calculate_transform(float M[4][4], const ApplicationState* app) {
             md_util_deperiodize_self_vec4(target_xyzw, count, &app->mold.state.unitcell, &target_com);
         }
 
+        // Split at the cell centre. The translation preserves the lattice, so it is valid for coordinates
+        // in whatever image they arrived in. The turn does not: R times a lattice vector is not a lattice
+        // vector, so it may only be applied once every image is settled relative to the target. The
+        // product is the transform this used to return in one piece,
+        //     translate(target) * A * R * translate(-target_com)
         const mat4_t A = app->operations.alignment_mat;
-        transform = mat4_translate_vec3(target) * A * mat4_from_mat3(R) * mat4_translate_vec3(-target_com);
+        turn = (app->operations.fixate_orientation && reference_valid) || !is_identity(A);
+
+        *translation = mat4_translate_vec3(vec3_sub(target, target_com));
+        if (turn) {
+            *rotation = mat4_translate_vec3(target) * A * mat4_from_mat3(R) * mat4_translate_vec3(-target);
+        }
     }
-    mat4_store((float*)M, transform);
+    return turn;
+}
+
+// Every atom of mold.state through M
+static void state_transform(ApplicationState* app, const mat4_t& M) {
+    md_system_state_t& s = app->mold.state;
+    task_system::ID task = task_system::create_pool_task(STR_LIT("## Transform"), (uint32_t)s.num_atoms, [&s, M](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
+        (void)thread_num;
+        mat4_batch_transform_inplace(s.xyz + range_beg, 1.0f, range_end - range_beg, M);
+    }, 1024);
+    task_system::enqueue_task(task);
+    task_system::task_wait_for(task);
+}
+
+bool apply_state_operations(ApplicationState* app, bool recenter, bool pbc, bool unwrap) {
+    ASSERT(app);
+    md_system_t& sys = app->mold.sys;
+    md_system_state_t& s = app->mold.state;
+
+    if (s.num_atoms == 0 || !s.xyz) return false;
+    if (!recenter && !pbc && !unwrap) return false;
+
+    const bool periodic = md_unitcell_flags(&s.unitcell) != 0;
+
+    // Into the lattice frame first. Wrapping or making whole turned coordinates against the unturned
+    // cell moves atoms by vectors that are not lattice vectors, to places where they have no image.
+    const mat4_t prev_rotation = app->operations.state_rotation;
+    if (!is_identity(prev_rotation)) {
+        state_transform(app, mat4_inverse(prev_rotation));
+    }
+
+    // A wrap or a make whole on its own keeps the turn the coordinates had
+    mat4_t rotation = prev_rotation;
+    bool fresh_turn = false;
+    if (recenter && !md_bitfield_empty(&recenter_get_active_target_mask(app))) {
+        // Current for this target before it is fitted against. The main loop does this every frame too, but
+        // ticking 'keep orientation' applies at once, before the loop has had a chance to build it.
+        recenter_update_target_data(app);
+
+        // Measured on the lattice frame coordinates: the fit is against the reference, not against a
+        // previous fit's output
+        mat4_t translation = mat4_ident();
+        fresh_turn = recenter_calculate_transform(&translation, &rotation, app);
+        state_transform(app, translation);
+    }
+    const bool turn = !is_identity(rotation);
+
+    // Settle the periodic images before turning: every atom into the image nearest the cell centre,
+    // which is where the translation just put the target. Without it the turn carries the image each
+    // atom happened to be written in by the trajectory into the result, as a displacement of R times
+    // a lattice vector. That differs from frame to frame for every atom crossing the trajectory's own
+    // box, and for the whole system at once whenever the target's centre lands in another image.
+    if (periodic && (pbc || fresh_turn)) {
+        task_system::ID task = task_system::create_pool_task(STR_LIT("## Apply PBC"), (uint32_t)s.num_atoms, [&s](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
+            (void)thread_num;
+            md_util_pbc(s.xyz + range_beg, NULL, range_end - range_beg, &s.unitcell);
+        });
+        task_system::enqueue_task(task);
+        task_system::task_wait_for(task);
+    }
+
+    if (unwrap) {
+        const size_t num_structures = md_structure_count(&sys.structure);
+        if (num_structures > 0) {
+            task_system::ID task = task_system::create_pool_task(STR_LIT("## Unwrap Structures"), (uint32_t)num_structures, [&s, &sys](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
+                (void)thread_num;
+                for (uint32_t i = range_beg; i < range_end; ++i) {
+                    md_structure_t structure = {};
+                    md_structure_extract(&structure, &sys.structure, i);
+                    md_util_unwrap_structure(&s, &structure);
+                }
+            });
+            task_system::enqueue_task(task);
+            task_system::task_wait_for(task);
+        }
+    }
+
+    if (turn) {
+        state_transform(app, rotation);
+    }
+    app->operations.state_rotation = turn ? rotation : mat4_ident();
+
+    return true;
+}
+
+bool recompute_covalent_bonds(ApplicationState* app, int64_t frame) {
+    ASSERT(app);
+    md_system_t& sys = app->mold.sys;
+    const size_t num_atoms = sys.atom.count;
+    if (num_atoms == 0) return false;
+
+    md_temp_scope_t temp = md_temp_begin();
+    defer { md_temp_end(temp); };
+
+    md_system_state_t state = { .alloc = temp.arena };
+    if (!md_system_state_init(&state, num_atoms)) return false;
+
+    // The bond search takes its minimum images in the cell, so its coordinates have to be in the cell's
+    // lattice frame. A frame of the run always is.
+    const size_t num_frames = run_num_frames(app);
+    if (num_frames > 0) {
+        if (!extract_frame(app, CLAMP(frame, (int64_t)0, (int64_t)num_frames - 1), &state)) {
+            MD_LOG_ERROR("Failed to extract frame data");
+            return false;
+        }
+    } else {
+        // The coordinates shown, taken back out of any turn from keeping the orientation
+        const md_system_state_t& shown = app->mold.state;
+        if (!shown.xyz || shown.num_atoms != num_atoms) return false;
+        MEMCPY(state.xyz, shown.xyz, num_atoms * sizeof(vec3_t));
+        state.unitcell = shown.unitcell;
+        if (!is_identity(app->operations.state_rotation)) {
+            mat4_batch_transform_inplace(state.xyz, 1.0f, num_atoms, mat4_inverse(app->operations.state_rotation));
+        }
+    }
+
+    MD_LOG_DEBUG("RECALCULATING BONDS");
+    md_util_infer_covalent_bonds(&sys.bond, &state, &sys, sys.alloc);
+    md_bond_build_connectivity(&sys.bond, num_atoms, sys.alloc);
+    app->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
+    return true;
 }
 
 bool picking_range_reserve(PickingRange* out_range, PickingSpace* space, PickingDomainID domain, size_t count, uint64_t key) {
@@ -5794,14 +6196,9 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
             int num_tasks = 0;
             task_system::ID tasks[16];
             
-            md_system_t& sys = app->mold.sys;
-			md_system_state_t& sys_state = app->mold.state;
-            // Identity, not the zero matrix: a transform that never gets computed must leave
-            // the system where it is rather than collapse it onto the origin.
-            mat4_t recenter_transform = mat4_ident();
-
-            // Whether any operation below actually rewrote mold.state coordinates.
-            bool coords_modified = false;
+            // The event means mold.state was just written from its source, in the lattice frame of its
+            // cell: whatever turn the previous coordinates carried went with them.
+            app->operations.state_rotation = mat4_ident();
 
             if (app->operations.recalc_bonds) {
                 static int64_t cur_nearest_frame = -1;
@@ -5813,76 +6210,13 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
                     const bool has_frames = run_num_frames(app) > 0;
                     if (!has_frames || (cur_nearest_frame != nearest_frame)) {
                         cur_nearest_frame = nearest_frame;
-                        task_system::ID recalc_bond_task = task_system::create_pool_task(STR_LIT("## Recalc bond task"), [&sys, app, &nearest_frame, has_frames]() {
-                            md_temp_scope_t temp = md_temp_begin();
-                            defer { md_temp_end(temp); };
-
-							md_system_state_t ref_state = sys.reference;
-
-                            if (has_frames) {
-                                // Use state from frame closest to the current animation time
-                                md_system_state_t frame_state = { .alloc = temp.arena };
-								md_system_state_init(&frame_state, sys.atom.count);
-                                if (!extract_frame(app, nearest_frame, &frame_state)) {
-                                    MD_LOG_ERROR("Failed to extract frame data");
-                                }
-                            }
-
-                            MD_LOG_DEBUG("RECALCULATING BONDS");
-                            md_util_infer_covalent_bonds(&sys.bond, &ref_state, &sys, sys.alloc);
-                            md_bond_build_connectivity(&sys.bond, sys.atom.count, sys.alloc);
-
-                            app->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
+                        // From the whole frame nearest the animation time, not the interpolated state shown
+                        task_system::ID recalc_bond_task = task_system::create_pool_task(STR_LIT("## Recalc bond task"), [app, nearest_frame]() {
+                            recompute_covalent_bonds(app, nearest_frame);
                         });
                         tasks[num_tasks++] = recalc_bond_task;
                     }
                 }
-            }
-
-            if (state->operations.recenter) {
-                const md_bitfield_t& target_mask = recenter_get_active_target_mask(state);
-                size_t num_idx = md_bitfield_popcount(&target_mask);
-                if (num_idx > 0) {
-                    // Create async task to calculate transformation matrix (Its only expressed as a task to ensure that it runs after some of the previous tasks in the workflow)
-                    task_system::ID calc_transform_task = task_system::create_pool_task(STR_LIT("## Calculate Recenter Transform"), [&recenter_transform, app]() {
-                        recenter_calculate_transform(recenter_transform.elem, app);
-                    });
-
-                    // Batch transform all atoms
-                    task_system::ID apply_transform_task = task_system::create_pool_task(STR_LIT("## Recenter"), (uint32_t)sys.atom.count, [&sys_state, &recenter_transform](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                        (void)thread_num;
-                        size_t count = range_end - range_beg;
-                        mat4_batch_transform_inplace(sys_state.xyz + range_beg, 1.0f, count, recenter_transform);
-                    }, 1024);
-
-                    tasks[num_tasks++] = calc_transform_task;
-                    tasks[num_tasks++] = apply_transform_task;
-                    coords_modified = true;
-                }
-            }
-
-            if (state->operations.apply_pbc) {
-                task_system::ID pbc_task = task_system::create_pool_task(STR_LIT("## Apply PBC"), (uint32_t)sys.atom.count, [&sys_state](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                    (void)thread_num;
-                    size_t count = range_end - range_beg;
-                    md_util_pbc(sys_state.xyz + range_beg, NULL, count, &sys_state.unitcell);
-                });
-                tasks[num_tasks++] = pbc_task;
-                coords_modified = true;
-            } 
-
-            if (state->operations.unwrap_structures) {
-                size_t num_structures = md_structure_count(&sys.structure);
-                task_system::ID unwrap_task = task_system::create_pool_task(STR_LIT("## Unwrap Structures"), (uint32_t)num_structures, [&sys_state, &sys](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                    (void)thread_num;
-                    for (uint32_t i = range_beg; i < range_end; ++i) {
-                        md_structure_t structure = {};
-                        md_structure_extract(&structure, &sys.structure, i);
-						md_util_unwrap_structure(&sys_state, &structure);
-                    }
-                });
-                tasks[num_tasks++] = unwrap_task;
-                coords_modified = true;
             }
 
             if (num_tasks > 0) {
@@ -5893,10 +6227,11 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
                 task_system::task_wait_for(tasks[num_tasks - 1]);
             }
 
-            // The operations above rewrote the coordinates that update_md_buffers uploads.
-            // Nothing else flags them: the synchronous broadcasts of this event do not pass
-            // through the interpolation step that would otherwise have set the bit.
-            if (coords_modified) {
+            // Recenter, wrap, make whole and turn, in that order (see apply_state_operations). They rewrite
+            // the coordinates that update_md_buffers uploads, and nothing else flags them: the synchronous
+            // broadcasts of this event do not pass through the interpolation step that would otherwise
+            // have set the bit.
+            if (apply_state_operations(app, app->operations.recenter, app->operations.apply_pbc, app->operations.unwrap_structures)) {
                 app->mold.dirty_gpu_buffers |= MolBit_DirtyPosition;
             }
             break;

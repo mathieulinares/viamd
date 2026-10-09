@@ -151,11 +151,15 @@ To edit a key: go to it, move around, **Update position**, and **Look at** to ch
 
 Under **Visuals > Depth of Field**, **Focus** chooses what is sharp: **Look-at point** (default, follows the keys), **Distance** (**Focus distance**; **From view** takes the current one; key it as a look parameter to pull focus), or **Follow target** (the follow-target centre even when the camera looks elsewhere).
 
+**Blur Strength** uses the upstream renderer's aperture: blur of distant objects as a percentage of the view height, independent of zoom level. The movie's **Depth of field blur** keys use the same units.
+
 ## Looks
 
 ![Look parameters and overlays](images/movie/looks_and_overlays.png)
 
-Background color and intensity, ambient occlusion and radius, exposure, depth-of-field blur, near and far clipping planes and focus distance can change during the movie.
+Background color and intensity, ambient occlusion, exposure, depth-of-field blur, near and far clipping planes and focus distance can change during the movie.
+
+After the upstream renderer update, occlusion radius is no longer adjustable. Old occlusion-radius and depth-of-field-blur keys are retained in workspaces but inactive, with a message when loaded: their old units cannot be converted reliably. Re-key **Depth of field blur** using the new aperture units. Other parameter IDs are unchanged.
 
 1. Pick the parameter in the list.
 2. Set it up in **Visuals** at some preview time.

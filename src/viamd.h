@@ -29,6 +29,7 @@
 #include <frame_sink.h>
 #include <movie_keys.h>
 #include <movie_overlay.h>
+#include <surface_field.h>
 #include <loader.h>
 #include <event.h>
 #include <plot_series.h>
@@ -117,7 +118,7 @@ enum class ColorMapping {
     InstId,
     InstIndex,
     SecondaryStructure,
-    Property,
+    Attribute,          // a per atom attribute of the system, through a colour scale
     Count
 };
 
@@ -134,6 +135,21 @@ enum class ElectronicStructureField {
     Amplitude,
     Density,
     Count
+};
+
+// What colours an isosurface: its own colour, the colours of the atoms blended over it, or a field
+// evaluated on it and shown through a colour map (surface_field.h)
+enum class SurfaceColoring {
+    Uniform,
+    AtomColors,
+    Field,
+    Count
+};
+
+inline const char* surface_coloring_str[(int)SurfaceColoring::Count] = {
+    "Uniform",
+    "Atom Colors",
+    "Field",
 };
 
 enum class ElectronicStructureSpin {
@@ -157,10 +173,10 @@ enum MolBit_ {
     MolBit_None                     = 0,
     MolBit_DirtyPosition            = 1u << 0,
     MolBit_DirtyRadius              = 1u << 1,
-    MolBit_DirtySecondaryStructure  = 1u << 2,
     MolBit_DirtyFlags               = 1u << 3,
     MolBit_DirtyBonds               = 1u << 4,
     MolBit_ClearVelocity            = 1u << 5,
+    MolBit_ResetBackboneHistory     = 1u << 6,  // The positions jumped: the backbone orientation starts over (md_gl_mol_reset_backbone_history)
 };
 
 enum class RepresentationType {
@@ -206,7 +222,7 @@ inline const char* color_mapping_str[(int)ColorMapping::Count] = {
     "Chain Id",
     "Chain Idx",
     "Secondary Structure",
-    "Property",
+    "Attribute",
 };
 
 
@@ -545,13 +561,16 @@ struct ElectronicStructureRepresentation {
     // Optical scaling factor which controls attenuation of light within iso surfaces.
     double iso_optical_density = 0.005;
 
-    bool use_atom_colors = false;
+    SurfaceColoring coloring = SurfaceColoring::Uniform;
 
-    struct {
-        bool enabled = false;
-        uint32_t tf_tex = 0;
-        int colormap = DEFAULT_COLORMAP;
-    } dvr;
+    // SurfaceColoring::Field: the field, how it maps to colour, and its values on the grid of
+    // density_vol - evaluated only around the isosurfaces this representation draws
+    SurfaceFieldKind    field_kind = SurfaceFieldKind::EmbeddingPotential;
+    ColorScale          field_map  = surface_field_default_scale();
+    SurfaceFieldVolume  field_vol  = {};
+
+    // The grid density_vol was evaluated on (bohr), kept for what is evaluated on the same grid
+    md_grid_t grid = {};
 
     ElectronicStructureSource source = ElectronicStructureSource::MolecularOrbital;
     bool use_magnitude = false;
@@ -570,7 +589,6 @@ struct ElectronicStructureRepresentation {
 
 	uint64_t col_hash = 0;
 	uint64_t vol_hash = 0;
-    uint64_t tf_hash = 0;
 };
 
 static inline ElectronicStructureSourceFlags electronic_structure_source_flag(ElectronicStructureSource source) {
@@ -689,7 +707,7 @@ static inline void electronic_structure_iso_desc_init(IsoDesc* iso, const Electr
         iso->count = 2;
         iso->values[0] =  iso_threshold;
         iso->values[1] = -iso_threshold;
-        if (rep.use_atom_colors) {
+        if (rep.coloring != SurfaceColoring::Uniform) {
             iso->colors[0] = rep.tint_psi_pos;
             iso->colors[1] = rep.tint_psi_neg;
         } else {
@@ -701,7 +719,7 @@ static inline void electronic_structure_iso_desc_init(IsoDesc* iso, const Electr
     } else {
         iso->count = 1;
         iso->values[0] = iso_threshold;
-        if (rep.use_atom_colors) {
+        if (rep.coloring != SurfaceColoring::Uniform) {
             if (rep.source == ElectronicStructureSource::TransitionDensity && rep.transition_density_component == ElectronicStructureTransitionDensityComponent::Attachment) {
                 iso->colors[0] = rep.tint_att;
             } else if (rep.source == ElectronicStructureSource::TransitionDensity && rep.transition_density_component == ElectronicStructureTransitionDensityComponent::Detachment) {
@@ -757,7 +775,11 @@ static inline void electronic_structure_set_source_defaults(ElectronicStructureR
     case ElectronicStructureSource::DensityProperty:
         rep->spin = ElectronicStructureSpin::None;
         rep->use_magnitude = false;
-        rep->use_atom_colors = false;
+        // The atoms' colours are not offered for a density property; a field is, as it is
+        // evaluated on the same grid
+        if (rep->coloring == SurfaceColoring::AtomColors) {
+            rep->coloring = SurfaceColoring::Uniform;
+        }
         if (rep->density_property.num_isos <= 0) {
             electronic_structure_density_property_init_defaults(rep);
         }
@@ -850,19 +872,21 @@ static inline int electronic_structure_legacy_type(const ElectronicStructureRepr
     }
 }
 
-// Colouring by a per atom scalar field. The field itself is an attribute on the system, so what
-// is stored here is its id and nothing else about it - no copied label, no cached list position.
-// The id is a hash of the path and stable across a reload, so a representation keeps pointing at
-// the same quantity when the data is reloaded; an index into a gathered list would not.
-struct AtomicPropertyRepresentation {
-    int colormap = DEFAULT_COLORMAP;
+// Colouring atoms by one of their attributes: a per atom scalar field of the system's attribute
+// table (atom/...). The attribute itself is stored as its id and nothing else about it - no copied
+// label, no cached list position. The id is a hash of the path and stable across a reload, so a
+// representation keeps pointing at the same quantity when the data is reloaded; an index into a
+// gathered list would not.
+//
+// The values map to colours by a colour scale, the same one an isosurface coloured by a field uses
+// (color_scale.h). Its automatic range follows the span of the atoms the representation SHOWS - the
+// atoms of its filter, over every variant so the colours do not jump as the variant changes.
+struct AtomAttributeColoring {
     md_attribute_id_t key = MD_ATTRIBUTE_INVALID;
     int variant_idx = 0;                // position along the leading axis, when the field has one
-    float value_min = 0.0f;             // span of the DATA, refreshed when key changes
-    float value_max = 1.0f;
-    float range_beg = 0.0f;             // span the colour ramp is mapped over, user adjustable
-    float range_end = 1.0f;
-    bool  range_symmetric_zero = true;  // Use a symmetric min and max value around zero
+    ColorScale scale = {};
+    ColorScaleSpan span = {};           // of the shown atoms, refreshed with the colours
+    uint64_t span_hash = 0;             // what span was measured over: the attribute, its version, the atoms
 };
 
 struct DipoleRepresentation {
@@ -920,7 +944,7 @@ struct Representation {
 	vec4_t bond_base_color = { 1.0f, 1.0f, 1.0f, 1.0f };
 
     ElectronicStructureRepresentation electronic_structure = {};
-    AtomicPropertyRepresentation atomic_property = {};
+    AtomAttributeColoring atom_attribute = {};
 	DipoleRepresentation dipole = {};
 };
 
@@ -1330,25 +1354,18 @@ struct ApplicationState {
         // The arena backing this dataset is sys.alloc - there is no second handle to it. It is
         // created once at startup and survives every load: free_system_data rewinds it and puts the
         // handle back, because zeroing a system also zeroes the allocator it was using.
+        // The cartoon's secondary structure (blend weights between coil, helix and sheet) lives on the GPU only: it is
+        // computed where it is produced and uploaded straight away (upload_secondary_structure_weights,
+        // interpolate_system_state), never read back and kept nowhere else.
         md_gl_mol_t         gl_mol = {};
-
-        // Derived FOR DRAWING, in the renderer's own format, never read back - the same rule the
-        // GPU block below states, which is why this belongs beside gl_mol rather than in one of the
-        // attribute tables. md_gl_secondary_structure_t is a pair of blend weights, not a physical
-        // quantity: nothing would ask "what is the helix weight of segment 12" as a question about
-        // the molecule, and its only consumer is md_gl_mol_set_backbone_secondary_structure.
-        //
-        // Per DATASET, so it replicates with the rest of this block when several can be loaded.
-        struct {
-            md_array(md_gl_secondary_structure_t) secondary_structure = nullptr;
-        } interpolated_properties;
 #if EXPERIMENTAL_GFX_API
         md_gfx_handle_t     gfx_structure = {};
 #endif
         md_system_t         sys = {};
 
         // The actual interpolated state of the system.
-        // Is only used for rendering and visualization of properties.
+        // Is only used for rendering and visualization of properties. Its attributes carry the backbone angles and
+        // secondary structure of the displayed frame (md_util_state_backbone_angles, md_util_state_secondary_structure).
         md_system_state_t   state = {};
 
 		mat4_t 			    unitcell_transform = MD_MAT4_IDENT_INIT;
@@ -1375,7 +1392,11 @@ struct ApplicationState {
         // trusted to match what was last pushed (new trajectory, secondary structure recomputed),
         // so the next call is never skipped by a stale match.
         int64_t             last_interpolated_nearest_frame = -1;
+        // The (fractional) frame last interpolated, negative when there is none. A jump away from it
+        // resets the temporal coherence of the backbone orientation (MolBit_ResetBackboneHistory).
+        double              last_interpolated_frame = -1.0;
         uint32_t            dirty_gpu_buffers = 0;
+        uint64_t            gpu_buffers_version = 0;    // bumped whenever gl_mol is updated, for views that cache what they render from it
 
 #if MD_ENABLE_GPU
         // GPU side data derived from sys, sitting beside gl_mol and for the same reason: it is
@@ -1538,9 +1559,7 @@ struct ApplicationState {
 
         struct { 
             bool enabled = true;
-            float intensity = 6.0f;
-            float radius = 6.0f;
-            float bias = 0.1f;
+            float intensity = 5.0f;
         } ssao;
 
 #if EXPERIMENTAL_CONE_TRACED_AO == 1
@@ -1564,7 +1583,7 @@ struct ApplicationState {
             DofFocusMode focus_mode = DofFocusMode::LookAt;
             float focus_distance = 10.0f;   // DofFocusMode::Distance: from the camera, along the view direction
             float focus_depth = 10.0f;      // What was used last: the result of the mode
-            float focus_scale = 10.0f;
+            float aperture = 1.0f;      // percent of the view height (CoC of an object at infinity)
         } dof;
 
         struct {
@@ -1624,6 +1643,14 @@ struct ApplicationState {
         // it survives a change of recenter target.
         mat4_t alignment_mat = MD_MAT4_IDENT_INIT;
 
+        // The turn (about the cell centre) that the coordinates in mold.state carry relative to the
+        // lattice of mold.state.unitcell. Identity unless keeping the orientation (or alignment_mat)
+        // turned the system. md_unitcell_t is lower triangular and cannot describe a turned lattice, so
+        // this is the only record of it: wrapping and making whole only work in the lattice frame (see
+        // apply_state_operations), and the box is drawn through it to stay in register with the atoms.
+        // Back to identity whenever mold.state is rewritten from its source.
+        mat4_t state_rotation = MD_MAT4_IDENT_INIT;
+
         struct {
             char query[256] = "";
             char error[256] = "";
@@ -1643,11 +1670,14 @@ struct ApplicationState {
 
         // Manual selection mask for recentering / orientating, which atoms to consider for calculating the center of mass and principal axes
         // This is populated by assigning a user defined selection.
-        uint64_t selection_version = 1;
         md_bitfield_t selection_mask = {0};
 
         struct {
-            uint64_t target_version = 0;
+            // The atoms the reference was built from, compared exactly against the active target. A query
+            // which depends on the frame is evaluated again in every frame but mostly picks the same atoms,
+            // and the reference only has to be rebuilt (from the first frame, read from disk) when they change.
+            md_bitfield_t target_mask = {0};
+            bool valid = false;
 
 			// Need to store the initial relative coordinate vectors and center of mass of reference frame for recentering and orientating the structure.
             vec4_t* rel_xyzw = nullptr;
@@ -1659,6 +1689,7 @@ struct ApplicationState {
     // Persisted in the ImGui .ini; see app_settings.h. Bound in main().
     struct {
         bool keep_representations = false;
+        bool exact_isosurfaces = false;     // volume::IsoRenderDesc::iso.exact for every isosurface view
         float font_size = 18.0f;    // Matches the size the default font is baked at.
     } settings;
 
@@ -2017,11 +2048,20 @@ md_unit_t             run_time_unit(const ApplicationState* app);
 // its own (md_system_extract_begin) so the files stay open across them.
 bool extract_frame(const ApplicationState* app, int64_t frame, md_system_state_t* out);
 
+// Guesses the covalent bonds again from the distances between atoms: in the given whole frame of the run,
+// or in the coordinates shown when there is no run. Inferred bonds are replaced, others are kept.
+bool recompute_covalent_bonds(ApplicationState* app, int64_t frame);
+
 // "<run>/<leaf>" in the loaded trajectory's run, e.g. "run/md/backbone/angle" for "backbone/angle".
 // Empty when no trajectory is loaded, or when it does not fit in buf.
 str_t run_attribute_path(char* buf, size_t cap, const ApplicationState* app, str_t leaf);
 // The attribute at "<run>/<leaf>" of the current run; NULL without a run or without such an attribute.
 const md_attribute_t* run_attribute(const ApplicationState* app, str_t leaf);
+
+// The secondary structure to show for the displayed state, one per segment of sys.protein_backbone: the denoised copy
+// of the run at the displayed frame (secondary_structure_render), else the state's own assignment
+// (md_util_state_secondary_structure). For presentation; NULL when there is neither.
+const md_secondary_structure_t* displayed_secondary_structure(const ApplicationState* app);
 
 // Frame cache operations
 void clear_system_frame_cache(ApplicationState* app);
@@ -2112,19 +2152,33 @@ int dipole_entry_label(char* buf, size_t cap, const DipoleGroup& group, uint32_t
 // system's atom count; an optional leading axis is the variant axis. Everything else under atom/ -
 // a position, a velocity, anything several components wide - is data this colouring cannot express
 // and is skipped rather than mangled. Cheap enough to call per frame.
-size_t atom_property_query(md_attribute_id_t out_ids[], size_t cap, const md_system_t& sys);
+size_t atom_attribute_query(md_attribute_id_t out_ids[], size_t cap, const md_system_t& sys);
 
 // What to show for it: the attribute's label, or its leaf path segment when it has none. A view
 // into the table's storage, null terminated, so it can go straight to ImGui.
-str_t atom_property_label(const md_attribute_t* attr);
+str_t atom_attribute_label(const md_attribute_t* attr);
 
 // Number of variants: the leading index axis, 1 when the field has none.
-int atom_property_variant_count(const md_attribute_t* attr);
+int atom_attribute_variant_count(const md_attribute_t* attr);
 
-// Span of the values, over EVERY variant so a colour ramp does not jump as the variant changes.
-// Derived rather than stored: it belongs to whoever is drawing the ramp, not to the table.
-// Scans the whole attribute, so call it when the selection changes, not per frame.
-bool atom_property_value_range(float* out_min, float* out_max, const md_attribute_t* attr);
+// Span of the values, over EVERY variant so a colour ramp does not jump as the variant changes, and
+// over the atoms of 'mask' (all of them when NULL). Derived rather than stored: it belongs to whoever
+// is drawing the ramp, not to the table. Scans the whole attribute, so not something to call per
+// frame without a reason. Atoms without a value play no part; invalid when there are none with one.
+ColorScaleSpan atom_attribute_span(const md_attribute_t* attr, const md_bitfield_t* mask);
+
+// What a legend calls it: the label, and which variant when there are several ("Charge [2/5]")
+void atom_attribute_legend_label(char* buf, size_t cap, const md_attribute_t* attr, int variant_idx);
+
+// Whether an atom has NO value in a per atom field. A producer marks that with NAN
+// (md_attributes_publish_atom_column): the QM atoms in an embedding's charges, the embedding's sites
+// in a column of the QM calculation, a blank in an mmCIF column. Tested on the bits, because under
+// fast math every float spelling of the test (v != v, isnan) may be folded away.
+static inline bool atom_attribute_value_absent(float v) {
+    uint32_t u;
+    MEMCPY(&u, &v, sizeof(u));
+    return (u & 0x7fffffffu) > 0x7f800000u;
+}
 
 // Builds the per dataset GPU data - the uploaded GTO basis and the atom buffer - from the system's
 // own basis/ attributes, and grows the device coefficient scratch to fit. Returns false when the
@@ -2383,23 +2437,38 @@ bool density_matrix_evaluate_to_gpu_volume(ApplicationState* state, const md_gri
                                            const double* density_matrix, size_t dim, md_gto_op_t op);
 #endif
 
-// Points a representation at an attribute and seeds its drawing range from that attribute's own
-// span. Selecting a field and choosing the range to draw it over are one action the first time and
-// separate afterwards, which is why the range is seeded here and never recomputed behind the user.
-void atom_property_select(AtomicPropertyRepresentation* prop, md_attribute_id_t key, const md_system_t& sys);
+// Points a representation at an attribute, and starts its colour scale out as fits the values: a
+// symmetric range on a diverging map for values on both sides of zero (a charge), the range of the
+// values on a sequential map otherwise. A colour map the user chose is kept; only the two defaults
+// trade places. The range follows the values from there unless the user takes it over.
+void atom_attribute_select(AtomAttributeColoring* coloring, md_attribute_id_t key, const md_system_t& sys);
 
 // Recentering operations (low level)
 
 void recenter_mark_query_dirty(ApplicationState* app);
-void recenter_mark_selection_dirty(ApplicationState* app);
 const md_bitfield_t& recenter_get_active_target_mask(const ApplicationState* app);
-uint64_t recenter_get_active_target_version(const ApplicationState* app);
 bool recenter_update_query_mask(ApplicationState* app);
 void recenter_update(ApplicationState* app);
 
-// Update the required initial frame data for the recentering target (if needed)
+// Builds the reference that keeping the orientation fits against, from the first frame of the run, when
+// the target's atoms differ from the ones it was built for. Does nothing while the orientation is not kept.
 void recenter_update_target_data(ApplicationState* app);
-void recenter_calculate_transform(float M[4][4], const ApplicationState* app);
+
+// The recentering transform T = rotation * translation, split where the periodic images have to be
+// settled (see apply_state_operations):
+//     translation = translate(cell_centre - com)                                  lattice preserving
+//     rotation    = translate(cell_centre) * alignment_mat * R * translate(-cell_centre)
+// rotation is exactly the identity unless the orientation is kept or alignment_mat is set, and the
+// return value says whether it is not.
+bool recenter_calculate_transform(mat4_t* translation, mat4_t* rotation, const ApplicationState* app);
+
+// Applies the coordinate operations to mold.state in the one order that keeps them valid together:
+//     take off operations.state_rotation -> translate -> wrap -> make whole -> turn
+// Wrapping and making whole are only defined in the lattice frame of the cell, and turning before the
+// periodic images are settled turns the arbitrary image each atom arrived in into a real displacement
+// of R times a lattice vector. So the turn comes last, and a fresh turn is always preceded by a wrap.
+// Returns true if the coordinates were touched.
+bool apply_state_operations(ApplicationState* app, bool recenter, bool pbc, bool unwrap);
 
 // Picking
 

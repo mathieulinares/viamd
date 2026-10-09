@@ -186,7 +186,8 @@ static void render(ApplicationState* state);
 static void render_scene(ApplicationState* state, bool pip);
 static void draw_representations_opaque(ApplicationState* state);
 static void draw_representations_opaque_lean_and_mean(ApplicationState* state, uint32_t mask = 0xFFFFFFFFU);
-static void draw_representations_transparent(ApplicationState* state);
+// Returns true if anything was drawn into gbuffer.tex.transparency_hdr this frame
+static bool draw_representations_transparent(ApplicationState* state);
 
 static void draw_load_dataset_window(ApplicationState* state);
 static void draw_main_menu(ApplicationState* state);
@@ -202,6 +203,7 @@ static void draw_script_editor_window(ApplicationState* state);
 static void draw_script_reference_window(ApplicationState* state);
 static void open_script_reference(ApplicationState* state, str_t topic, bool take_focus = true);
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current);
+static void draw_color_legend_windows(const ApplicationState& state);
 
 static void draw_debug_window(ApplicationState* state);
 static void draw_property_export_window(ApplicationState* state);
@@ -409,6 +411,7 @@ int main(int argc, char** argv) {
     // Application settings live in the ImGui .ini. Bind first, then initialize: that call
     // reads the file, so the bound values are current by the time the loop starts.
     app_settings::bind(STR_LIT("keep_representations"), &state.settings.keep_representations);
+    app_settings::bind(STR_LIT("exact_isosurfaces"), &state.settings.exact_isosurfaces);
     app_settings::bind(STR_LIT("font_size"), &state.settings.font_size);
     app_settings::on_apply(apply_font_size, &state);
     display_units::register_settings();
@@ -604,6 +607,7 @@ int main(int argc, char** argv) {
         //ImGui::ShowDemoWindow();
 
         if (!play_mode) draw_coordinate_system_widget_window(&state.view.target, state.view.camera);
+        if (!play_mode) draw_color_legend_windows(state);
             
         ImGui::BeginCanvas("Main interaction window", true);
         ImVec2 view_size = ImGui::GetContentRegionAvail();
@@ -1496,6 +1500,18 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Separator();
             ImGui::Checkbox("Anti-Aliasing (FXAA)", &data->visuals.fxaa.enabled);
             ImGui::SetItemTooltip("Smooth jagged edges in the rendered image");
+            {
+                int iso_mode = data->settings.exact_isosurfaces ? 1 : 0;
+                if (ImGui::Combo("Isosurfaces", &iso_mode, "Fast\0Exact\0")) {
+                    data->settings.exact_isosurfaces = iso_mode == 1;
+                    app_settings::mark_dirty();
+                }
+                ImGui::SetItemTooltip("Fast: samples the volume once per voxel along each ray. Parts of a surface thinner than\n"
+                                      "about a voxel can be missed, and up close or at grazing angles the sampling can show;\n"
+                                      "a finer volume resolution makes both smaller.\n"
+                                      "Exact: intersects every cell a ray passes through, so nothing is missed and the surfaces\n"
+                                      "do not depend on any sampling. Roughly twice the GPU time of Fast.");
+            }
             // Temporal
             ImGui::BeginGroup();
             {
@@ -1526,9 +1542,7 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Checkbox("Ambient Occlusion", &data->visuals.ssao.enabled);
             ImGui::SetItemTooltip("Darken creases and cavities, where less light reaches (SSAO)");
             if (data->visuals.ssao.enabled) {
-                ImGui::SliderFloat("Intensity", &data->visuals.ssao.intensity, 0.5f, 12.f);
-                ImGui::SliderFloat("Radius", &data->visuals.ssao.radius, 1.f, 30.f);
-                ImGui::SliderFloat("Bias", &data->visuals.ssao.bias, 0.0f, 1.0f);
+                ImGui::SliderFloat("Intensity", &data->visuals.ssao.intensity, 0.0f, 8.f);
             }
             ImGui::PopID();
             ImGui::EndGroup();
@@ -1571,8 +1585,8 @@ static void draw_main_menu(ApplicationState* data) {
                     ImGui::TextDisabled("No follow target set: using the look-at point");
                 }
                 ImGui::TextDisabled("Focus at %.2f from the camera", dof_focus_depth(data, data->view.camera));
-                ImGui::SliderFloat("Blur Strength", &data->visuals.dof.focus_scale, 0.001f, 100.f);
-                ImGui::SetItemTooltip("How strongly what is out of focus is blurred");
+                ImGui::SliderFloat("Blur Strength", &data->visuals.dof.aperture, 0.0f, 4.0f, "%.2f %%");
+                ImGui::SetItemTooltip("Blur of distant objects, in percent of the view height. Independent of zoom level");
             }
             ImGui::EndGroup();
             ImGui::Separator();
@@ -1772,6 +1786,7 @@ static void draw_main_menu(ApplicationState* data) {
             bool do_pbc = false;
             bool do_unwrap = false;
             bool do_bonds = false;
+            bool redo_every_frame = false;
 
             // Each operation can be applied to the frame shown now, or to every frame as it is shown.
             // The labels say what happens to the atoms, not what the operation is called internally.
@@ -1830,8 +1845,11 @@ static void draw_main_menu(ApplicationState* data) {
                 }
 
                 ImGui::TableSetColumnIndex(2);
-                ImGui::Checkbox(ICON_FA_ANCHOR_LOCK "##keep-orientation", &data->operations.fixate_orientation);
-                ImGui::SetItemTooltip("Keep orientation: when centering, also turn everything so the target\nkeeps the orientation it has in the first frame");
+                if (ImGui::Checkbox(ICON_FA_ANCHOR_LOCK "##keep-orientation", &data->operations.fixate_orientation) && data->operations.recenter) {
+                    // Turning it on or off while centering every frame takes effect on the frame shown, not the next one
+                    redo_every_frame = true;
+                }
+                ImGui::SetItemTooltip("Keep orientation: when centering, also turn everything so the target\nkeeps the orientation it has in the first frame.\nEverything is wrapped into the box around the target before it is turned,\nand the box turns with it.");
 
                 ImGui::SameLine();
                 ImGui::Checkbox(ICON_FA_COMMENT_DOTS "##target-query", &data->operations.recenter_query.enabled);
@@ -1889,62 +1907,22 @@ static void draw_main_menu(ApplicationState* data) {
                 ImGui::EndTable();
             }
 
-            if (do_recenter) {
-                mat4_t T = mat4_ident();
-                recenter_calculate_transform(T.elem, data);
-
-                // Batch transform all atoms
-                const uint32_t grain_size = 1024;
-                task_system::ID apply_transform_task = task_system::create_pool_task(STR_LIT("## Recenter"), (uint32_t)data->mold.state.num_atoms, [T, data](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                    (void)thread_num;
-                    size_t count = range_end - range_beg;
-                    mat4_batch_transform_inplace(data->mold.state.xyz + range_beg, 1.0f, count, T);
-                }, grain_size);
-                task_system::enqueue_task(apply_transform_task);
-                task_system::task_wait_for(apply_transform_task);
-                data->mold.dirty_gpu_buffers |= MolBit_DirtyPosition | MolBit_ClearVelocity;
+            if (redo_every_frame) {
+                do_recenter = true;
+                do_pbc     |= data->operations.apply_pbc;
+                do_unwrap  |= data->operations.unwrap_structures;
             }
 
-            if (do_pbc) {
-                md_util_system_pbc(&data->mold.state);
-                data->mold.dirty_gpu_buffers |= MolBit_DirtyPosition | MolBit_ClearVelocity;
-            }
-
-            if (do_unwrap) {
-                md_util_unwrap_system(&data->mold.state, &data->mold.sys);
+            // One pass, in the order that keeps them valid together, and in the lattice frame of the cell
+            // even when the coordinates are turned (see apply_state_operations)
+            if (apply_state_operations(data, do_recenter, do_pbc, do_unwrap)) {
                 data->mold.dirty_gpu_buffers |= MolBit_DirtyPosition | MolBit_ClearVelocity;
             }
 
             if (do_bonds) {
                 if (!task_system::task_is_running(data->tasks.evaluate_full) && !task_system::task_is_running(data->tasks.evaluate_filt)) {
-                    const auto& mol = data->mold.sys;
-
-                    vec3_t* xyz = NULL;
-
-                    if (run_num_frames(data) > 0) {
-                        // Closest frame to the current animation time
-                        uint32_t frame_idx = (uint32_t)(data->animation.frame + 0.5);
-                        md_temp_scope_t temp_pos = md_temp_begin_in(frame_alloc);
-                        defer { md_temp_end(temp_pos); };
-
-                        xyz = (vec3_t*)md_vm_arena_push(frame_alloc, ALIGN_TO(mol.atom.count, 16) * sizeof(vec3_t));
-                        md_system_state_t frame_state = {};
-                        frame_state.num_atoms = mol.atom.count;
-                        frame_state.xyz = xyz;
-                        if (!extract_frame(data, frame_idx, &frame_state)) {
-                            MD_LOG_ERROR("Failed to extract frame data");
-                        } 
-                    } else {
-						// No trajectory, use current positions
-						xyz = data->mold.state.xyz;
-                    }
-
-                    if (xyz) {
-                        MD_LOG_DEBUG("RECALCULATING BONDS");
-                        md_util_infer_covalent_bonds(&data->mold.sys.bond, &data->mold.state, &data->mold.sys, data->mold.sys.alloc);
-                        md_bond_build_connectivity(&data->mold.sys.bond, data->mold.sys.atom.count, data->mold.sys.alloc);
-                        data->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
-                    }
+                    // The whole frame nearest the animation time, or the coordinates shown when there is no run
+                    recompute_covalent_bonds(data, (int64_t)(data->animation.frame + 0.5));
                 } else {
                     MD_LOG_INFO("Cannot recalculate bonds while evaluation is occuring.");
                 }
@@ -1994,6 +1972,16 @@ static void draw_main_menu(ApplicationState* data) {
             const float w = ImGui::CalcTextSize(fps_buf).x;
             ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - w);
             ImGui::Text("%s", fps_buf);
+            if (ImGui::IsItemHovered()) {
+                // GPU time of the volume passes, all views together (main viewport and component windows)
+                const volume::GpuTimings t = volume::timings_get();
+                ImGui::BeginTooltip();
+                ImGui::Text("Volume rendering, GPU per frame: %.3f ms", t.total_ms);
+                for (int i = 0; i < volume::TimingStage_Count; ++i) {
+                    ImGui::Text("  %-14s %.3f ms", volume::timing_stage_name((volume::TimingStage)i), t.ms[i]);
+                }
+                ImGui::EndTooltip();
+            }
         }
         ImGui::EndMainMenuBar();
     }
@@ -2547,14 +2535,15 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
                 char buf[256];
                 snprintf(buf, sizeof(buf), "Create Bond (%i, %i)", idx[0] + 1, idx[1] + 1);
                 if (ImGui::MenuItem(buf)) {
-                    md_system_bond_insert(&state->mold.sys, idx[0], idx[1], MD_BOND_FLAG_USER_DEFINED);
+                    md_system_bond_insert(&state->mold.sys, idx[0], idx[1], md_bond_flags_set_origin(MD_BOND_FLAG_NONE, MD_BOND_ORIGIN_USER));
+                    md_util_system_infer_coordination(&state->mold.sys);
                     md_system_bond_build_connectivity(&state->mold.sys);
                     state->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
                     ImGui::CloseCurrentPopup();
                 }
             } else {
 				md_bond_flags_t flags = md_system_bond_flags(&state->mold.sys, bond_idx);
-                if (flags & MD_BOND_FLAG_USER_DEFINED) {
+                if (md_bond_origin(flags) == MD_BOND_ORIGIN_USER) {
                     char buf[256];
                     snprintf(buf, sizeof(buf), "Remove Bond (%i, %i)", idx[0] + 1, idx[1] + 1);
                     if (ImGui::MenuItem(buf)) {
@@ -2839,7 +2828,6 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
             if (ImGui::MenuItem("Set as Centering Target")) {
                 md_bitfield_clear(&state->operations.selection_mask);
                 md_bitfield_copy(&state->operations.selection_mask, &state->selection.selection_mask);
-                recenter_mark_selection_dirty(state);
                 state->operations.recenter_query.enabled = false;
                 recenter_update_target_data(state);
                 ImGui::CloseCurrentPopup();
@@ -3012,7 +3000,7 @@ static void draw_animation_window(ApplicationState* data) {
         if (data->animation.interpolation == InterpolationMode::CubicSpline) {
             ImGui::SliderFloat("Tension", &data->animation.tension, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Tension of the Cubic Spline");
+                ImGui::SetTooltip("Tension of the Cubic Spline (0 = Catmull-Rom, 1 = ease in and out of every frame)");
             }
         }
         switch (data->animation.mode) {
@@ -3038,6 +3026,78 @@ static void draw_animation_window(ApplicationState* data) {
         ImGui::EndDisabled();
     }
     ImGui::End();
+}
+
+// How the isosurfaces of an electronic structure representation are coloured. The atoms' colours
+// are not offered for a density property; a field is offered whenever the dataset has what one is
+// made from.
+static bool draw_surface_coloring(ElectronicStructureRepresentation& es, const md_system_t& sys, bool advanced, bool allow_atom_colors) {
+    bool update_rep = false;
+
+    bool any_field = false;
+    for (int k = 0; k < (int)SurfaceFieldKind::Count; ++k) {
+        any_field |= surface_field_available((SurfaceFieldKind)k, sys);
+    }
+
+    if (ImGui::BeginCombo("coloring", surface_coloring_str[(int)es.coloring])) {
+        for (int i = 0; i < (int)SurfaceColoring::Count; ++i) {
+            const SurfaceColoring c = (SurfaceColoring)i;
+            const bool enabled = (c == SurfaceColoring::AtomColors) ? allow_atom_colors :
+                                 (c == SurfaceColoring::Field)      ? any_field : true;
+            ImGui::BeginDisabled(!enabled);
+            if (ImGui::Selectable(surface_coloring_str[i], es.coloring == c)) {
+                es.coloring = c;
+                update_rep = true;
+            }
+            ImGui::EndDisabled();
+            if (!enabled && c == SurfaceColoring::Field) {
+                ImGui::SetItemTooltip("Nothing in this dataset to make a field from: the embedding potential needs classical charges (atom/charge)\n"
+                                       "on atoms outside the QM region");
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    if (es.coloring == SurfaceColoring::AtomColors && advanced) {
+        const double min_power = 2.0;
+        const double max_power = 20.0;
+        update_rep |= ImGui::SliderScalar("gaussian power", ImGuiDataType_Double, &es.gaussian_splatting_power, &min_power, &max_power, "%.2f");
+    }
+
+    if (es.coloring != SurfaceColoring::Field) {
+        return update_rep;
+    }
+
+    if (ImGui::BeginCombo("field", surface_field_kind_str[(int)es.field_kind])) {
+        for (int k = 0; k < (int)SurfaceFieldKind::Count; ++k) {
+            const SurfaceFieldKind kind = (SurfaceFieldKind)k;
+            ImGui::BeginDisabled(!surface_field_available(kind, sys));
+            if (ImGui::Selectable(surface_field_kind_str[k], es.field_kind == kind)) {
+                es.field_kind = kind;
+                update_rep = true;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    if (es.field_kind == SurfaceFieldKind::EmbeddingPotential) {
+        ImGui::SetItemTooltip("The electrostatic potential of the environment's classical multipoles on the surface: the charges,\n"
+                              "and the dipoles and quadrupoles where the potential has them.\n"
+                              "The QM region is left out, whatever charges a topology gives its atoms.\n"
+                              "For a polarizable embedding this is the potential of its PERMANENT multipoles:\n"
+                              "the induced dipoles are solved for during the calculation and not stored.");
+    }
+
+    // The colours are applied per pixel as the surface is shaded, so a change to the scale needs
+    // nothing re-evaluated: it is not an update of the representation
+    const SurfaceFieldVolume& vol = es.field_vol;
+    color_scale_draw_controls(&es.field_map, surface_field_span(vol), surface_field_unit(es.field_kind),
+                              "on surface", "its 1st to 99th percentile on the surface");
+    if (advanced && vol.num_surface_samples > 0) {
+        ImGui::TextDisabled("%zu of %zu voxels evaluated", vol.num_evaluated, vol.num_voxels);
+    }
+
+    return update_rep;
 }
 
 static bool draw_representations_window_electronic_structure(ApplicationState* state, Representation& rep) {
@@ -3338,26 +3398,6 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
             }
         }
     }
-#if 0
-    // Currently we do not expose DVR, since we do not have a good way of exposing the alpha ramp for the transfer function...
-    ImGui::Checkbox("Enable DVR", &rep.electronic_structure.dvr.enabled);
-    if (rep.electronic_structure.dvr.enabled) {
-        const ImVec2 button_size = {160, 0};
-        if (ImPlot::ColormapButton(ImPlot::GetColormapName(rep.electronic_structure.dvr.colormap), button_size, rep.electronic_structure.dvr.colormap)) {
-            ImGui::OpenPopup("Colormap Selector");
-        }
-        if (ImGui::BeginPopup("Colormap Selector")) {
-            for (int map = 4; map < ImPlot::GetColormapCount(); ++map) {
-                if (ImPlot::ColormapButton(ImPlot::GetColormapName(map), button_size, map)) {
-                    rep.electronic_structure.dvr.colormap = map;
-                    update_rep = true;
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::EndPopup();
-        }
-    }
-#endif
     if (electronic_structure_uses_magnitude_toggle(es)) {
         const char* magnitude_label = es.source == ElectronicStructureSource::ElectronDensity ? (const char*)u8"magnitude |ρ|" : (const char*)u8"magnitude |Ψ|";
         if (ImGui::Checkbox(magnitude_label, &es.use_magnitude)) {
@@ -3368,10 +3408,7 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
     const double min_tau = 0.0;
     const double max_tau = 1.0;
     
-    const double min_power = 2.0;
-    const double max_power = 20.0;
-
-    const double iso_min = 1.0e-8;
+    const double iso_min = 1.0e-2;
     const double iso_max = 5.0;
 
     if (electronic_structure_is_density_property(es)) {
@@ -3400,41 +3437,40 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
             ImGui::SetItemTooltip("Optical density shared by all custom isosurfaces");
         }
 
+        update_rep |= draw_surface_coloring(es, state->mold.sys, advanced, false);
+
         return update_rep;
     }
     
     const char* iso_label = electronic_structure_iso_value_label();
     
     if (electronic_structure_is_signed(es)) {
-        ImGui::SliderScalar(iso_label, ImGuiDataType_Double, &rep.electronic_structure.iso_value, &iso_min, &iso_max, "%.8f", ImGuiSliderFlags_Logarithmic);
+        // The band a field is evaluated in follows the isovalue
+        update_rep |= ImGui::SliderScalar(iso_label, ImGuiDataType_Double, &rep.electronic_structure.iso_value, &iso_min, &iso_max, "%.8f", ImGuiSliderFlags_Logarithmic) && rep.electronic_structure.coloring == SurfaceColoring::Field;
         ImGui::SetItemTooltip("%s", electronic_structure_iso_value_tooltip(rep.electronic_structure));
         if (advanced) {
             ImGui::SliderScalar((const char*)u8"iso τ", ImGuiDataType_Double, &rep.electronic_structure.iso_optical_density, &min_tau, &max_tau, "%.4f", ImGuiSliderFlags_Logarithmic);
             ImGui::SetItemTooltip("Optical density of the isosurfaces");
         }
-        if (rep.electronic_structure.use_atom_colors) {
+        update_rep |= draw_surface_coloring(rep.electronic_structure, state->mold.sys, advanced, true);
+        if (rep.electronic_structure.coloring != SurfaceColoring::Uniform) {
             ImGui::ColorEdit4("tint positive", rep.electronic_structure.tint_psi_pos.elem);
             ImGui::ColorEdit4("tint negative", rep.electronic_structure.tint_psi_neg.elem);
         } else {
             ImGui::ColorEdit4("color positive", rep.electronic_structure.col_psi_pos.elem);
             ImGui::ColorEdit4("color negative", rep.electronic_structure.col_psi_neg.elem);
         }
-        if (advanced || rep.electronic_structure.use_atom_colors) {
-            update_rep |= ImGui::Checkbox("use atom colors", &rep.electronic_structure.use_atom_colors);
-        }
-
-        if (advanced && rep.electronic_structure.use_atom_colors) {
-            update_rep |= ImGui::SliderScalar("gaussian power", ImGuiDataType_Double, &rep.electronic_structure.gaussian_splatting_power, &min_power, &max_power, "%.2f");
-        }
     }
     else {
-        ImGui::SliderScalar(iso_label, ImGuiDataType_Double, &rep.electronic_structure.iso_value, &iso_min, &iso_max, "%.8f", ImGuiSliderFlags_Logarithmic);
+        // The band a field is evaluated in follows the isovalue
+        update_rep |= ImGui::SliderScalar(iso_label, ImGuiDataType_Double, &rep.electronic_structure.iso_value, &iso_min, &iso_max, "%.8f", ImGuiSliderFlags_Logarithmic) && rep.electronic_structure.coloring == SurfaceColoring::Field;
         ImGui::SetItemTooltip("%s", electronic_structure_iso_value_tooltip(rep.electronic_structure));
         if (advanced) {
             ImGui::SliderScalar((const char*)u8"iso τ", ImGuiDataType_Double, &rep.electronic_structure.iso_optical_density, &min_tau, &max_tau, "%.4f", ImGuiSliderFlags_Logarithmic);
             ImGui::SetItemTooltip("Optical density of the isosurfaces");
         }
-        if (rep.electronic_structure.use_atom_colors) {
+        update_rep |= draw_surface_coloring(rep.electronic_structure, state->mold.sys, advanced, true);
+        if (rep.electronic_structure.coloring != SurfaceColoring::Uniform) {
             if (es.source == ElectronicStructureSource::TransitionDensity && es.transition_density_component == ElectronicStructureTransitionDensityComponent::Attachment) {
                 ImGui::ColorEdit4("tint attachment", rep.electronic_structure.tint_att.elem);
             }
@@ -3452,12 +3488,6 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
             } else {
                 ImGui::ColorEdit4("color density",  rep.electronic_structure.col_den.elem);
             }
-        }
-        if (advanced || rep.electronic_structure.use_atom_colors) {
-            update_rep |= ImGui::Checkbox("use atom colors", &rep.electronic_structure.use_atom_colors);
-        }
-        if (advanced && rep.electronic_structure.use_atom_colors) {
-            update_rep |= ImGui::SliderScalar("gaussian power", ImGuiDataType_Double, &rep.electronic_structure.gaussian_splatting_power, &min_power, &max_power, "%.2f");
         }
     }
 
@@ -3645,78 +3675,59 @@ static void draw_representations_window(ApplicationState* state) {
                     update_rep = true;
                 }
 
-                if (rep.color_mapping == ColorMapping::Property) {
+                if (rep.color_mapping == ColorMapping::Attribute) {
                     // The list of per atom fields IS the system's attribute table under atom/.
                     // Queried here rather than cached anywhere, so it cannot disagree with the data.
                     md_attribute_id_t prop_ids[64];
-                    size_t num_props = MIN(atom_property_query(prop_ids, ARRAY_SIZE(prop_ids), state->mold.sys), ARRAY_SIZE(prop_ids));
+                    size_t num_props = MIN(atom_attribute_query(prop_ids, ARRAY_SIZE(prop_ids), state->mold.sys), ARRAY_SIZE(prop_ids));
 
                     const md_attributes_t& attributes = state->mold.sys.attributes;
-                    const md_attribute_t* selected_prop = md_attributes_get(&attributes, rep.atomic_property.key);
+                    const md_attribute_t* selected_prop = md_attributes_get(&attributes, rep.atom_attribute.key);
 
                     // A key the table no longer holds - a reload which dropped that field - falls
                     // back to the first available rather than leaving the representation blank.
                     if (!selected_prop && num_props > 0) {
-                        atom_property_select(&rep.atomic_property, prop_ids[0], state->mold.sys);
-                        selected_prop = md_attributes_get(&attributes, rep.atomic_property.key);
+                        atom_attribute_select(&rep.atom_attribute, prop_ids[0], state->mold.sys);
+                        selected_prop = md_attributes_get(&attributes, rep.atom_attribute.key);
                         update_rep = true;
                     }
 
                     if (num_props > 0 && selected_prop) {
-                        if (ImGui::BeginCombo("property", atom_property_label(selected_prop).ptr)) {
+                        if (ImGui::BeginCombo("attribute", atom_attribute_label(selected_prop).ptr)) {
                             for (size_t i = 0; i < num_props; ++i) {
                                 const md_attribute_t* attr = md_attributes_get(&attributes, prop_ids[i]);
                                 if (!attr) continue;
-                                bool selected = prop_ids[i] == rep.atomic_property.key;
-                                if (ImGui::Selectable(atom_property_label(attr).ptr, selected)) {
-                                    atom_property_select(&rep.atomic_property, prop_ids[i], state->mold.sys);
+                                bool selected = prop_ids[i] == rep.atom_attribute.key;
+                                if (ImGui::Selectable(atom_attribute_label(attr).ptr, selected)) {
+                                    atom_attribute_select(&rep.atom_attribute, prop_ids[i], state->mold.sys);
                                     update_rep = true;
                                 }
                             }
                             ImGui::EndCombo();
                         }
 
-                        const int num_variants = atom_property_variant_count(selected_prop);
+                        const int num_variants = atom_attribute_variant_count(selected_prop);
                         if (num_variants > 1) {
-                            int idx = rep.atomic_property.variant_idx + 1;
+                            int idx = rep.atom_attribute.variant_idx + 1;
                             const int min = 1;
                             const int max = num_variants;
                             if (ImGui::SliderInt("index", &idx, min, max)) {
                                 update_rep = true;
                             }
-                            rep.atomic_property.variant_idx = CLAMP(idx - 1, 0, num_variants - 1);
+                            rep.atom_attribute.variant_idx = CLAMP(idx - 1, 0, num_variants - 1);
                         }
                         
-                        if (ImPlot::ColormapButton(ImPlot::GetColormapName(rep.atomic_property.colormap), ImVec2(inner_item_width,0), rep.atomic_property.colormap)) {
-                            ImGui::OpenPopup("Color Map Selector");
-                        }
-
-                        // The data's own span, taken when the field was selected. Not recomputed
-                        // here: it is what the user's range is measured against, and a value which
-                        // moved underneath the slider would move the slider.
-						const float value_pad = MAX(fabsf(rep.atomic_property.value_min), fabsf(rep.atomic_property.value_max));
-                        const float value_min = rep.atomic_property.value_min - value_pad;
-                        const float value_max = rep.atomic_property.value_max + value_pad;
-
-						// Otherwise, we allow independent scaling of the min and max values
-                        // Scale a bit outside of the default range
-                        update_rep |= ImGui::RangeSliderFloat("min / max", &rep.atomic_property.range_beg, &rep.atomic_property.range_end, value_min, value_max);
-
-                        if (ImGui::BeginPopup("Color Map Selector")) {
-                            for (int map = 0; map < ImPlot::GetColormapCount(); ++map) {
-                                if (ImPlot::ColormapButton(ImPlot::GetColormapName(map), ImVec2(inner_item_width,0), map)) {
-                                    rep.atomic_property.colormap = map;
-                                    update_rep = true;
-                                    ImGui::CloseCurrentPopup();
-                                }
-                            }
-                            ImGui::EndPopup();
-                        }
+                        // The same scale an isosurface coloured by a field has. Its span is what
+                        // the colours were last made from, the atoms of this representation.
+                        const bool multiple = num_variants > 1;
+                        update_rep |= color_scale_draw_controls(&rep.atom_attribute.scale, rep.atom_attribute.span, selected_prop->unit, "shown atoms",
+                                                                multiple ? "the smallest to the largest value of the atoms shown, at every index"
+                                                                         : "the smallest to the largest value of the atoms shown");
                     } else {
-                        ImGui::Text("no properties available");
+                        ImGui::TextDisabled("no per atom attributes in this dataset");
                     }
                 }
-                if (rep.filt_is_dynamic || rep.color_mapping == ColorMapping::Property) {
+                if (rep.filt_is_dynamic || rep.color_mapping == ColorMapping::Attribute) {
                     if (advanced) {
                         update_rep |= ImGui::Checkbox("auto-update", &rep.dynamic_evaluation);
                         if (!rep.dynamic_evaluation) {
@@ -6220,6 +6231,10 @@ static void update_md_buffers(ApplicationState* data) {
 
     if (sys.atom.count == 0) return;
 
+    if (data->mold.dirty_gpu_buffers) {
+        data->mold.gpu_buffers_version += 1;
+    }
+
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyPosition) {
         vec3_t pbc_ext = { 0 };
         md_unitcell_diag_extract_float(pbc_ext.elem, &state.unitcell);
@@ -6235,6 +6250,10 @@ static void update_md_buffers(ApplicationState* data) {
 
     if (data->mold.dirty_gpu_buffers & MolBit_ClearVelocity) {
         md_gl_mol_zero_velocity(data->mold.gl_mol);
+    }
+
+    if (data->mold.dirty_gpu_buffers & MolBit_ResetBackboneHistory) {
+        md_gl_mol_reset_backbone_history(data->mold.gl_mol);
     }
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyRadius) {
@@ -6283,14 +6302,6 @@ static void update_md_buffers(ApplicationState* data) {
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyBonds) {
         md_gl_mol_set_bonds(data->mold.gl_mol, 0, (uint32_t)sys.bond.count, sys.bond.pairs, sizeof(md_atom_pair_t));
-    }
-
-    if (data->mold.dirty_gpu_buffers & MolBit_DirtySecondaryStructure) {
-        const md_gl_secondary_structure_t* ss_arr = data->mold.interpolated_properties.secondary_structure;
-        size_t ss_len = md_array_size(ss_arr);
-        if (ss_len > 0) {
-            md_gl_mol_set_backbone_secondary_structure(data->mold.gl_mol, 0, (uint32_t)ss_len, ss_arr, 0);
-        }
     }
 
     data->mold.dirty_gpu_buffers = 0;
@@ -6441,12 +6452,13 @@ enum MovieParamId : int {
     MovieParam_BackgroundColor = 0,
     MovieParam_BackgroundIntensity,
     MovieParam_SsaoIntensity,
-    MovieParam_SsaoRadius,
+    MovieParam_SsaoRadius, // Reserved for legacy scale-dependent SSAO.
     MovieParam_Exposure,
-    MovieParam_DofStrength,
+    MovieParam_DofStrength, // Reserved for legacy scale-dependent DOF.
     MovieParam_NearClip,
     MovieParam_FarClip,
     MovieParam_FocusDistance,
+    MovieParam_DofAperture,
 };
 
 struct MovieParamDesc {
@@ -6464,9 +6476,8 @@ static const MovieParamDesc movie_param_table[] = {
     { MovieParam_BackgroundColor,     "Background color",     3, true,  0.0f, 1.0f,     false, [](ApplicationState* s) { return s->visuals.background.color.elem; }, nullptr },
     { MovieParam_BackgroundIntensity, "Background intensity", 1, false, 0.0f, 100.0f,   false, [](ApplicationState* s) { return &s->visuals.background.intensity; }, nullptr },
     { MovieParam_SsaoIntensity,       "Ambient occlusion",    1, false, 0.0f, 10.0f,    false, [](ApplicationState* s) { return &s->visuals.ssao.intensity; }, "The intensity of the ambient occlusion. It has to be enabled." },
-    { MovieParam_SsaoRadius,          "Occlusion radius",     1, false, 0.1f, 50.0f,    true,  [](ApplicationState* s) { return &s->visuals.ssao.radius; }, nullptr },
     { MovieParam_Exposure,            "Exposure",             1, false, 0.05f, 10.0f,   true,  [](ApplicationState* s) { return &s->visuals.tonemapping.exposure; }, "The exposure of the tonemapping. It has to be enabled." },
-    { MovieParam_DofStrength,         "Depth of field blur",  1, false, 0.001f, 100.0f, true,  [](ApplicationState* s) { return &s->visuals.dof.focus_scale; }, "The blur strength. Depth of field has to be enabled; it focuses on what the camera looks at." },
+    { MovieParam_DofAperture,         "Depth of field blur",   1, false, 0.0f, 4.0f, false, [](ApplicationState* s) { return &s->visuals.dof.aperture; }, "Blur of distant objects, in percent of the view height. Depth of field has to be enabled." },
     { MovieParam_NearClip,            "Near clipping plane",  1, false, 0.01f, 5000.0f, true,  [](ApplicationState* s) { return &s->view.camera.near_plane; }, "Distance from the camera to where things start to show. Raise it to cut into the structure." },
     { MovieParam_FarClip,             "Far clipping plane",   1, false, 1.0f, 100000.0f,true,  [](ApplicationState* s) { return &s->view.camera.far_plane; }, "Distance from the camera to where things stop showing." },
     { MovieParam_FocusDistance,       "Focus distance",       1, false, 0.01f, 1000.0f, true,  [](ApplicationState* s) { return &s->visuals.dof.focus_distance; }, "How far from the camera depth of field is sharp, so focus can be pulled during the movie. Depth of field has to be enabled and its Focus set to Distance." },
@@ -12867,6 +12878,34 @@ static void movie_render_pip(ApplicationState* state) {
     m.pip_time = now;
 }
 
+// The legends of the representations that colour by a value: the field of an isosurface, or the
+// attribute of its atoms. One per representation at most, since one representation colours by one
+// thing, and only while what it shows exists - a legend of nothing would mislead.
+static void draw_color_legend_windows(const ApplicationState& state) {
+    const size_t num_reps = md_array_size(state.representation.reps);
+    int slot = 0;
+    for (size_t i = 0; i < num_reps; ++i) {
+        const Representation& rep = state.representation.reps[i];
+        if (!rep.enabled) continue;
+
+        if (rep.type == RepresentationType::ElectronicStructure) {
+            const ElectronicStructureRepresentation& es = rep.electronic_structure;
+            if (es.coloring == SurfaceColoring::Field && es.field_map.show_legend && es.field_vol.tex_id) {
+                color_scale_draw_legend(es.field_map, surface_field_unit(es.field_kind), surface_field_kind_str[(int)es.field_kind], rep.name, (int)i, slot++);
+                continue;
+            }
+        }
+
+        if (representation_uses_atom_colors(rep) && rep.color_mapping == ColorMapping::Attribute && rep.atom_attribute.scale.show_legend) {
+            const md_attribute_t* attr = md_attributes_get(&state.mold.sys.attributes, rep.atom_attribute.key);
+            if (!attr) continue;
+            char label[128];
+            atom_attribute_legend_label(label, sizeof(label), attr, rep.atom_attribute.variant_idx);
+            color_scale_draw_legend(rep.atom_attribute.scale, attr->unit, label, rep.name, (int)i, slot++);
+        }
+    }
+}
+
 static void render(ApplicationState* state) {
     movie_render_pip(state);
     render_scene(state, false);
@@ -12898,6 +12937,8 @@ static void render_scene(ApplicationState* state, bool pip) {
 
     update_view_param(state);
 
+    volume::timings_new_frame();
+
     gbuffer_clear(&state->gbuffer);
 
     const GLenum draw_buffers_opaque[] = {GL_COLOR_ATTACHMENT_COLOR, GL_COLOR_ATTACHMENT_NORMAL, GL_COLOR_ATTACHMENT_VELOCITY,
@@ -12919,7 +12960,8 @@ static void render_scene(ApplicationState* state, bool pip) {
         mat3_t A = { 0 };
 		md_unitcell_A_extract_float(A.elem, &state->mold.state.unitcell);
         immediate::Scope scope(state->gfx.world, "simulation box");
-        immediate::box_wireframe(scope, {0,0,0}, {1,1,1}, mat4_from_mat3(A), convert_color(state->simulation_box.color));
+        // Through the turn the coordinates carry, if the orientation is kept: the cell itself cannot hold one
+        immediate::box_wireframe(scope, {0,0,0}, {1,1,1}, state->operations.state_rotation * mat4_from_mat3(A), convert_color(state->simulation_box.color));
     }
 
     if (!pip) {
@@ -13100,7 +13142,20 @@ static void render_scene(ApplicationState* state, bool pip) {
 
     glDrawBuffer(GL_COLOR_ATTACHMENT_TRANSPARENCY);
 
-    draw_representations_transparent(state);
+    const bool transparency_hdr_written = draw_representations_transparent(state);
+    if (transparency_hdr_written) {
+        // What the transparency buffer holds so far (the selection and highlight tints) lies under the
+        // isosurfaces, which are composited before it, in HDR: cover it by their coverage here. The
+        // overlays drawn after this stay on top of everything.
+        PUSH_GPU_SECTION("Isosurface coverage")
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+        postprocessing::blit_texture(state->gbuffer.tex.transparency_hdr);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        POP_GPU_SECTION()
+    }
     viamd::event_system_broadcast_event(viamd::EventType_ViamdRenderTransparent, viamd::EventPayloadType_ApplicationState, state);
 
     const GLenum draw_buffers_transparent[] = { GL_COLOR_ATTACHMENT_TRANSPARENCY, 0, GL_COLOR_ATTACHMENT_VELOCITY, GL_COLOR_ATTACHMENT_PICKING };
@@ -13114,7 +13169,8 @@ static void render_scene(ApplicationState* state, bool pip) {
     // (1 - alpha) and mixes the picking index with whatever was already there,
     // neither of which is a meaningful operation on that data.
     glEnablei(GL_BLEND, 0);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // The transparency buffer holds premultiplied colour: straight alpha sources, accumulated premultiplied
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glDisablei(GL_BLEND, 1);
     glDisablei(GL_BLEND, 2);
     glDisablei(GL_BLEND, 3);
@@ -13150,8 +13206,6 @@ static void render_scene(ApplicationState* state, bool pip) {
 
     settings.ssao.enabled = state->visuals.ssao.enabled;
     settings.ssao.intensity = state->visuals.ssao.intensity;
-    settings.ssao.radius = state->visuals.ssao.radius;
-    settings.ssao.bias = state->visuals.ssao.bias;
 
     settings.tonemap.enabled = state->visuals.tonemapping.enabled;
     settings.tonemap.mode = state->visuals.tonemapping.tonemapper;
@@ -13161,7 +13215,7 @@ static void render_scene(ApplicationState* state, bool pip) {
     settings.dof.enabled = state->visuals.dof.enabled;
     state->visuals.dof.focus_depth = dof_focus_depth(state, state->view.camera);
     settings.dof.focus_depth = state->visuals.dof.focus_depth;
-    settings.dof.focus_scale = state->visuals.dof.focus_scale;
+    settings.dof.aperture = state->visuals.dof.aperture * 0.01f;
 
     settings.fxaa.enabled = state->visuals.fxaa.enabled;
 
@@ -13188,10 +13242,19 @@ static void render_scene(ApplicationState* state, bool pip) {
     inputs.normal = state->gbuffer.tex.normal;
     inputs.velocity = state->gbuffer.tex.velocity;
     inputs.transparency = state->gbuffer.tex.transparency;
+    inputs.transparency_hdr = transparency_hdr_written ? state->gbuffer.tex.transparency_hdr : 0;
     inputs.history = settings.taa.enabled ? state->gbuffer.tex.history : 0;
+    inputs.history_prev = settings.taa.enabled ? state->gbuffer.tex.history_prev : 0;
 
     postprocess_pipeline::execute(inputs, settings, state->view.param);
     POP_GPU_SECTION()
+
+    if (settings.taa.enabled) {
+        // Ping-pong: what was written this frame is read as the previous history next frame.
+        uint32_t tmp = state->gbuffer.tex.history;
+        state->gbuffer.tex.history = state->gbuffer.tex.history_prev;
+        state->gbuffer.tex.history_prev = tmp;
+    }
 
     if (pip) return;
 
@@ -13356,40 +13419,42 @@ static void draw_representations_opaque(ApplicationState* state) {
                     md_array_push(draw_ops, op, frame_alloc);
                 }
             } else if (rep.type == RepresentationType::DipoleMoment) {
-                // immediate draw of dipole moment as arrow
-                vec3_t dipole_vec = {0, 0, 0};
-                vec3_t dipole_org = {0, 0, 0};
-                if (dipole_moment_read(&dipole_vec, &dipole_org, state->mold.sys, rep.dipole.dipole_key, rep.dipole.dipole_index)) {
-                    // The representation's own (key, index) IS the picking address: the group's
-                    // range was reserved under that key this frame, and the shader adds the base to
-                    // the per primitive index, so the element index is what goes on the primitive.
-                    // A group that did not fit in the picking space draws with INVALID_PICKING_IDX,
-                    // which the shader passes through untouched - visible, just not pickable.
-                    const PickingSpace* space = picking_handler_current_space(&state->picking_handler);
-                    const PickingRange* range = space ? picking_space_find_range(*space, PickingDomain_Dipole, rep.dipole.dipole_key) : nullptr;
+                if (rep.enabled) {
+                    // immediate draw of dipole moment as arrow
+                    vec3_t dipole_vec = { 0, 0, 0 };
+                    vec3_t dipole_org = { 0, 0, 0 };
+                    if (dipole_moment_read(&dipole_vec, &dipole_org, state->mold.sys, rep.dipole.dipole_key, rep.dipole.dipole_index)) {
+                        // The representation's own (key, index) IS the picking address: the group's
+                        // range was reserved under that key this frame, and the shader adds the base to
+                        // the per primitive index, so the element index is what goes on the primitive.
+                        // A group that did not fit in the picking space draws with INVALID_PICKING_IDX,
+                        // which the shader passes through untouched - visible, just not pickable.
+                        const PickingSpace* space = picking_handler_current_space(&state->picking_handler);
+                        const PickingRange* range = space ? picking_space_find_range(*space, PickingDomain_Dipole, rep.dipole.dipole_key) : nullptr;
 
-                    immediate::Scope scope(state->gfx.world, "debug_dipole_moment");
-                    immediate::set_picking_base_idx(scope, range ? range->beg : 0);
+                        immediate::Scope scope(state->gfx.world, "debug_dipole_moment");
+                        immediate::set_picking_base_idx(scope, range ? range->beg : 0);
 
-                    const vec3_t org = dipole_org;
-                    const vec3_t vec = dipole_vec * (float)rep.dipole.scale;
+                        const vec3_t org = dipole_org;
+                        const vec3_t vec = dipole_vec * (float)rep.dipole.scale;
 
-                    // cylinder body
-                    const float body_scale = 0.8f;
+                        // cylinder body
+                        const float body_scale = 0.8f;
 
-                    const float body_radius = rep.dipole.radius;
-                    const float head_radius = body_radius * 1.5f;
+                        const float body_radius = rep.dipole.radius;
+                        const float head_radius = body_radius * 1.5f;
 
-                    vec3_t cyl_beg = rep.dipole.offset + org;
-                    vec3_t cyl_end = rep.dipole.offset + org + vec * body_scale;
-                    vec3_t arrow_end = rep.dipole.offset + org + vec;
+                        vec3_t cyl_beg = rep.dipole.offset + org;
+                        vec3_t cyl_end = rep.dipole.offset + org + vec * body_scale;
+                        vec3_t arrow_end = rep.dipole.offset + org + vec;
 
-                    uint32_t color_u32 = convert_color(rep.dipole.color);
+                        uint32_t color_u32 = convert_color(rep.dipole.color);
 
-                    uint32_t picking_idx = range ? rep.dipole.dipole_index : INVALID_PICKING_IDX;
+                        uint32_t picking_idx = range ? rep.dipole.dipole_index : INVALID_PICKING_IDX;
 
-                    immediate::cylinder(scope, cyl_beg, cyl_end, body_radius, color_u32, picking_idx);
-                    immediate::cone(scope, cyl_end, arrow_end, head_radius, color_u32, picking_idx);
+                        immediate::cylinder(scope, cyl_beg, cyl_end, body_radius, color_u32, picking_idx);
+                        immediate::cone(scope, cyl_end, arrow_end, head_radius, color_u32, picking_idx);
+                    }
                 }
             }
         }
@@ -13433,17 +13498,20 @@ static void draw_representations_opaque(ApplicationState* state) {
 #endif
 }
 
-static void draw_representations_transparent(ApplicationState* state) {
+static bool draw_representations_transparent(ApplicationState* state) {
     ASSERT(state);
-    if (state->mold.sys.atom.count == 0) return;
+    if (state->mold.sys.atom.count == 0) return false;
 
     const size_t num_representations = md_array_size(state->representation.reps);
-    if (num_representations == 0) return;
+    if (num_representations == 0) return false;
+
+    bool written = false;
 
     for (size_t i = 0; i < num_representations; ++i) {
-        const Representation& rep = state->representation.reps[i];
+        Representation& rep = state->representation.reps[i];
         if (!rep.enabled) continue;
         if (rep.type == RepresentationType::ElectronicStructure) {
+            const bool use_field = rep.electronic_structure.coloring == SurfaceColoring::Field && rep.electronic_structure.field_vol.tex_id;
             IsoDesc iso;
             electronic_structure_iso_desc_init(&iso, rep.electronic_structure);
 
@@ -13451,17 +13519,19 @@ static void draw_representations_transparent(ApplicationState* state) {
             flag_representation_as_dirty(&state->representation.reps[i]);
 #endif
 
-            volume::RenderDesc desc = {
+            volume::IsoRenderDesc desc = {
                 .render_target = {
                     .depth = state->gbuffer.tex.depth,
-                    .color = state->gbuffer.tex.transparency,
+                    .color = state->gbuffer.tex.transparency_hdr,
                     .width = state->gbuffer.width,
                     .height = state->gbuffer.height,
+                    .clear_color = !written,
                 },
                 .texture = {
                     .density_volume = rep.electronic_structure.density_vol.tex_id,
                     .color_volume = rep.electronic_structure.color_vol.tex_id,
-                    .transfer_function = rep.electronic_structure.dvr.tf_tex,
+                    .field_volume = use_field ? rep.electronic_structure.field_vol.tex_id : 0,
+                    .field_colormap = use_field ? surface_field_colormap_texture(&rep.electronic_structure.field_vol, rep.electronic_structure.field_map.colormap) : 0,
                 },
                 .matrix = {
                     .model = rep.electronic_structure.density_vol.texture_to_world,
@@ -13473,34 +13543,30 @@ static void draw_representations_transparent(ApplicationState* state) {
                     .min = {0,0,0},
                     .max = {1,1,1},
                 },
-                .temporal = {
-                    .enabled = state->visuals.temporal_aa.enabled,
-                },
                 .iso = {
-                    .enabled = true,
                     .count = iso.count,
                     .values = iso.values,
                     .colors = iso.colors,
                     .optical_densities = iso.optical_densities,
-                    .use_color_volume = rep.electronic_structure.use_atom_colors,
+                    .use_color_volume = rep.electronic_structure.coloring == SurfaceColoring::AtomColors,
+                    .use_field = use_field,
+                    .exact = state->settings.exact_isosurfaces,
                 },
-                .dvr = {
-                    .enabled = rep.electronic_structure.dvr.enabled,
-                    .min_tf_value = -1.0f,
-                    .max_tf_value = 1.0f,
+                .field = {
+                    .range_beg = rep.electronic_structure.field_map.range_beg,
+                    .range_end = rep.electronic_structure.field_map.range_end,
                 },
                 .shading = {
                     .env_radiance = state->visuals.background.color * state->visuals.background.intensity * 0.25,
                     .roughness = 0.3f,
                     .dir_radiance = {10,10,10},
                     .ior = 1.5f,
-                    .exposure = state->visuals.tonemapping.exposure,
-                    .gamma = state->visuals.tonemapping.gamma,
-            },
-                .voxel_spacing = rep.electronic_structure.density_vol.voxel_size,
+                },
             };
 
-            volume::render_volume(desc);
+            if (volume::render_isosurfaces(desc)) {
+                written = true;
+            }
 
 #if DEBUG
             {
@@ -13510,6 +13576,7 @@ static void draw_representations_transparent(ApplicationState* state) {
 #endif
         }
     }
+    return written;
 }
 
 static void draw_representations_opaque_lean_and_mean(ApplicationState* data, uint32_t mask) {
