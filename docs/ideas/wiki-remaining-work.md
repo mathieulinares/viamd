@@ -53,7 +53,7 @@ Done on day 2: **Script Reference** (page Script-reference), **Structure Export*
 ### 4. Tutorials
 
 - **Tutorial 1:** the section *Coloring by an attribute* is a placeholder. It needs an example with a `.tpr` file (per-atom charges). Colouring by a script property no longer exists: the *Attribute* list holds the `atom/` attributes only.
-- **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Screenshots in progress.
+- **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. Left: SDF (needs isovalues that suit the probe density, the aspirin ones show nothing), the top overview and the representation image.
 - **Tutorial 2:** the embedded `.via` block is in the 2023 format. Regenerate them from the app, save them as `examples/tutorial-2.via` and so on, and link them instead of embedding.
 - **Tutorial 3:** the embedded workspace has no `shapespace(...)` line.
 - **Tutorial 4:** the Workspace section is a sentence, there is no file.
@@ -78,6 +78,13 @@ Not before the wiki is finished. The tentative list and the replay idea are in `
 
 - **mdlib and scanberg:** `master` of viamd and of mdlib are fast-forwarded to scanberg's. Your commits are in `uinification` (viamd, pushed) and in the mdlib branch `uinification` (fork, pushed).
 - **`uinification-rebased` (mdlib, local only):** the three mdlib commits rebased on `upstream/master`, plus one WIP commit that ports the new procedures to the `md_bitset` API and the `EVAL_LOG_ERROR` macro. Not built, not tested, not pushed. To finish: build `md_unittest`, fix what breaks (the test `script.reference_documents_every_procedure` needs the new procedures documented), push to the fork, open a pull request on `scanberg/mdlib`, then point `ext/mdlib` of the viamd branch at it.
+
+## Lessons from the capture runs
+
+- Do not run two VIAMD captures at once, and do not use the machine during a run (dictation tools type into the focused window).
+- A Distributions plot opens at x 0 to 1 until it is fitted; on a long evaluation wait about a minute after it finishes, then double click the plot.
+- A filtered distribution is not automatic: add the `(filtered)` entry from the Properties menu.
+- Finish every long run with the guarded `cap` step (it checks that VIAMD is on top).
 
 ## The screenshot helper
 
