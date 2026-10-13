@@ -1,6 +1,6 @@
 # Wiki update: state and remaining work
 
-Written on 2026-10-12, at the end of the first working session on the wiki.
+Updated 2026-10-13. The wiki is on hold until after the series-model merge. Changes in this pause are local working-copy edits only; do not push them to either wiki remote.
 
 ## Where everything is
 
@@ -19,7 +19,7 @@ Update the preview: commit on `docu` in `~/viamd.wiki`, then `git push --force f
 
 - **Structure:** clean page names, `_Sidebar`, new Home, stubs under the old numbered names (`0.-Building` to `7.-VIAMD-for-VeloxChem`) so old links keep working.
 - **New pages:** Quick-tour, Working-with-series, Attributes, System-window, File-formats, Example-workspaces, Keyboard-and-mouse, Troubleshooting, Contributing-to-the-docs, Movie-maker with six subpages.
-- **Rewritten from the current source:** Representations, Spatial-view, Rendering, Animation (Operations), Timeline, Distributions, Ramachandran, Shape-space, Density-volume, Script-editor details, Install, Datasets, VeloxChem, Tutorial 1 to 4 (menu and window names).
+- **Rewritten from the current source:** Representations, Spatial-view, Rendering, Animation (Operations), Timeline, Distributions, Ramachandran, Shape-space, Density-volume, Script-editor details, Install, Datasets, VeloxChem, Tutorials 1 to 3. Tutorial 4 prose has been polished locally; its update is on hold until after the series-model merge.
 - **Language reference:** copy of mdlib `docs/script_reference.md` (the command to refresh it is in Contributing-to-the-docs).
 - **Examples:** `examples/` holds `showcase_gui.via`, two aspirin movie workspaces and `fov_and_focus.via` and `.xyz`.
 - **Screenshots, taken from a `uinification` build with the aspirin showcase:** Quick-tour, System-window (both tabs), Attributes, Timeline (with the legend editor and the Properties menu), Distributions, Ramachandran (with the chip editor), Shape-space, Density-volume (with the layer editor), Representations, Animation (with the Operations menu), Script-editor, Rendering (Visuals menu), Spatial-view (tooltip and context menu).
@@ -29,16 +29,16 @@ Update the preview: commit on `docu` in `~/viamd.wiki`, then `git push --force f
 
 ### 1. Screenshots
 
-- **Movie maker pages** (7 `TODO screenshot` comments): needs a build of the `video` branch. The helper can do it, the Movie window has to be added to the layout.
-- **Tutorials:** Tutorials 1, 2 and 3 are finished with new images. Tutorial 4 still has the 2023 images and needs data from the user. Scripts: `docs/ideas/tools/`.
-- **Install, VeloxChem:** old images (Home is done).
+- **Movie maker pages:** five capture TODOs remain; they need a build with the Movie maker. Descriptions are in the page source comments.
+- **Tutorials:** Tutorials 1, 2 and 3 are finished with updated images. Tutorial 4 data is available locally; its text and three current image links are updated in the working copy, with four capture TODOs remaining. Do not publish yet.
+- **VeloxChem and Videos:** legacy images are marked in the page source with capture TODOs. Install currently has no screenshot placeholders to resolve.
 - **Other states not yet captured:** a drag in progress. The Series right-click menu, Screenshot and Settings menus are done.
 - **Seen while capturing:** in the Script Reference, the unit `Å` after the signature of `com` shows as a replacement character in the code block font of the Script Reference.
 - **Check the images online** once pushed: relative paths `img/<page>/<name>.png` should render in the fork's wiki. If they do not, use `https://raw.githubusercontent.com/wiki/<owner>/viamd/img/...`.
 
 ### 2. Windows with no documentation yet
 
-Done on day 2: **Script Reference** (page Script-reference), **Structure Export** and **Contacts**, with screenshots (taken from the GUI). Also new: the Settings page (units, were not documented), and the Screenshot menu image. Still only mentioned: Property Export (the Script Editor File menu offers Load, Save, Export). The debug window (<kbd>F11</kbd>) is only listed.
+Done: **Script Reference**, **Structure Export**, **Contacts**, **Settings** and **Property Export**, with GUI screenshots. The debug window (<kbd>F11</kbd>) is only listed.
 
 ### 3. Things written from the source and not verified in the GUI
 
@@ -55,7 +55,7 @@ Done on day 2: **Script Reference** (page Script-reference), **Structure Export*
 - **Tutorial 1:** *Coloring by an attribute* is written with a `.tpr` (hMff peptide with SDS), the two `.tpr` examples are in `examples/` with their credits. The value filter on a Distributions plot (shading the Timeline) is dead code in all branches (`value_filter.enabled` is never set), so it is not documented.
 - **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. SDF, overview done. Optional: the super_ads dihedral comparison image (needs another amyloid run).
 - **Tutorial 2:** done on day 2: `examples/tutorial-2.via` (helper-built, loads and evaluates), `pocket_1` image taken from a Selection Query. The stored selection `pocket_2` is not in the file.
-- **Tutorial 4:** the Workspace section is a sentence, there is no file.
+- **Tutorial 4:** text is polished in the local working copy. Four current captures remain: sodium in the pore, radial grow, the `bn` representation and the nearby-sodium count. No `examples/tutorial-4.via` yet. Finish after the series-model merge.
 
 ### 5. Waiting for merges
 
@@ -100,24 +100,20 @@ Not before the wiki is finished. The tentative list and the replay idea are in `
 - Window layouts are written to an `imgui.ini` in the working folder, positions in window coordinates.
 - Paths at the top of the file (`SRC`, `BIN`) must be adapted to the machine.
 
-### Day 2, last run
+### Current Pause Status
 
-The 2023 images are all replaced (Property Export, File menu, Home overview, coordinate widget, Script suggestions menu); only the logos and the Videos and Tutorial 4 images remain. Link, anchor and image check passes (the `flatten` anchor is an explicit `<a id>`). Scripts: `t15a` (Property Export), `t15b` (widget, File menu), `t15d` (shift+click and context menu, with a patched click), `t15e` (pocket selection), `t15f` (tutorial-2.via).
+The Tutorial 4 text is polished locally. Its old reveal blocks contained screenshots only, so they have been replaced with four non-rendering `TODO screenshot` comments that describe the captures to make. The three available captures (`loaded.png`, `sodium-positions.png`, `densities.png`) are linked from the page. The five Movie-page capture comments have also been made specific, and legacy screenshots on VeloxChem and Videos are marked for refresh. No wiki changes have been pushed during this pause.
 
 ### Bond orders
 
 Documented on the Representations page from the source: orders come only from the VeloxChem reader (`md_vlx.c`); `compute_covalent_bond_order` in mdlib is not called, so inferred bonds are all single. No image: the local build has `MD_ENABLE_HDF5=OFF` (and no HDF5 headers), so it cannot open the `.h5` files in `~/Downloads`. To take it: build with HDF5, load `biphenyl-scf-*.h5`, Ball And Stick with bond orders on and off (`docs/ideas/tools/t16a.py` has the workspace).
 
-### Tutorial 4 (in progress, day 2 evening)
+### Tutorial 4: Resume Checklist
 
-Data: `~/Desktop/bioexcel/tutorial-4/` (gro 222k atoms, `ef.xtc` 1.65 GB, about 1990 frames at 100 ps). Done: images `loaded`, `sodium-positions`, `densities` in `img/Tutorial-4-Sodium-through-a-membrane/` (scripts `t17a`, `t17b`, `t17d`, `t17e`); the page text is not rewritten yet.
-Facts: ion 103 (`resname("SOD")[103]`) sits in the membrane from about 65 to 105 ns, use frame 1000. A radial grow of 5 A around it reaches only CYS508 and PHE785 (the grow is limited to the visible atoms, hence "hide all but the protein"). Operations in the workspace: `ApplyPbc=1`, `UnwrapStructures=1`; no `[Camera]`. F2 on a selection centers and gives a side view. The keyboard is Swedish: brackets need AltGr (helper patched).
-Left: images of the ion in the pore, the grow (`t17f.py` gets the Grow window at 5.00, check the last capture), the `bn` representation and the count `c` in a second Timeline subplot; define `bn = residue({508,785})`; rewrite the page text (8 old images, `water()` and `protein()` in the script); build `examples/tutorial-4.via` and link it; then push.
+The dataset is at `~/Desktop/bioexcel/tutorial-4/` (`step7_production_rest.gro` and `ef.xtc`). Three updated captures are linked locally. After the series-model merge:
 
-### Tutorial 4: findings at the end of day 2 (read before continuing)
-
-- The selection granularity default is Atom (`viamd.h`): set **Select by** to **Component** before the radial grow, otherwise Apply selects atoms, not residues. `t17f.py` does not set it yet (add the Selection menu entry first).
-- The radial grow (`md_util_mask_grow_by_radius`) takes the visible atoms within the radius of the selected atoms, with periodic distances, then expands to the granularity. Hide everything but the protein (and the ion).
-- Residues of the protein within a radius of ion 103 (mdtraj, any atom, hydrogens included): frame 0 (z 126 A): 0; frame 1000 (z 65 A): 2; 5 A at best 9 (frames 670 to 730); 6 A up to 13 (about frame 780); 8 A 23 to 24. The user expects about 15 at 5 A: ask which frame and cutoff, or check which ion `[103]` is in the app (hover it).
-- Images already in `img/Tutorial-4-Sodium-through-a-membrane/`: `loaded`, `sodium-positions`, `densities`. The page text is not rewritten and `examples/tutorial-4.via` is not built.
-- Helper: brackets need AltGr on the Swedish layout (done in `shot.key(altgr=True)`); `t17*.py` are in `docs/ideas/tools/`.
+1. Capture the four states described by TODO comments in the tutorial: sodium in the pore, radial grow, the `bn` representation and the nearby-sodium count.
+2. Set **Select by** to **Component** before applying radial grow; growth is limited to visible atoms, so keep the protein visible.
+3. Recheck the selected ion and representative frame. A local scan found at most 9 protein residues within 5 Å of ion 103 (frames 670–730), up to 13 within 6 Å (around frame 780), and 23–24 within 8 Å. Frame 1000 yielded two within 5 Å. These counts are guidance, not a required result.
+4. Build and verify `examples/tutorial-4.via`, then run link, anchor and image checks across the wiki.
+5. When the wiki work resumes, review the accumulated local edits and push the preview fork only after verification. Robin's wiki remains untouched.
