@@ -89,9 +89,10 @@ def capture(workspace, steps, settle):
             elif k == 'move': shot.move(ax + st[1], ay + st[2])
             elif k == 'key': shot.key(st[1])
             elif k == 'type':
-                SH = {'(': 'parenleft', ')': 'parenright', '"': 'quotedbl', ',': 'comma', ' ': 'space', '.': 'period', '_': 'underscore'}
+                SH = {'(': 'parenleft', ')': 'parenright', '"': 'quotedbl', ',': 'comma', ' ': 'space', '.': 'period', '_': 'underscore', '[': 'bracketleft', ']': 'bracketright', '{': 'braceleft', '}': 'braceright', ':': 'colon'}
                 for ch in st[1]:
-                    if ch in SH: shot.key(SH[ch], shift=ch in '()"_')
+                    if ch in '[]{}': shot.key(SH[ch], altgr=True)
+                    elif ch in SH: shot.key(SH[ch], shift=ch in '()"_:')
                     else: shot.key(ch.lower(), shift=ch.isupper())
             elif k == 'scroll':
                 for _ in range(st[3]): shot.click(ax + st[1], ay + st[2], 4)
