@@ -30,14 +30,14 @@ Update the preview: commit on `docu` in `~/viamd.wiki`, then `git push --force f
 ### 1. Screenshots
 
 - **Movie maker pages** (7 `TODO screenshot` comments): needs a build of the `video` branch. The helper can do it, the Movie window has to be added to the layout.
-- **Tutorials 1 to 4:** about 50 images from 2023. They need the tutorial data (alanine chain is built in; the others are on the Drive links of the Datasets page) and each step's state.
+- **Tutorials:** day 2 replaced the images of Tutorial 1 (all but the filter dragged in the Distributions window) and of Tutorial 2 (representations, dihedral, distance). Left as `TODO screenshot` in Tutorial 2: the polished look, the pocket selected by hand (`pocket_1`), the radial grow (`pocket_2`). Tutorials 3 and 4 still have the 2023 images (about 30). Scripts: `docs/ideas/tools/tutorial_shots.py`, `tutorial2_*.py`. Old text: about 50 images from 2023. They need the tutorial data (alanine chain is built in; the others are on the Drive links of the Datasets page) and each step's state.
 - **Install, VeloxChem, Home:** old images.
 - **Other states not yet captured:** the Selection Query and Selection Grow windows, the Property Export window, the System window with the Series node expanded and the right-click menu, the Representations window with the Attribute color mapping, the Screenshot and Settings menus, a drag in progress.
 - **Check the images online** once pushed: relative paths `img/<page>/<name>.png` should render in the fork's wiki. If they do not, use `https://raw.githubusercontent.com/wiki/<owner>/viamd/img/...`.
 
 ### 2. Windows with no documentation yet
 
-Found in the **Windows** menu of the `uinification` build: **Script Reference** (opened with <kbd>F1</kbd>), **Structure Export**, **Contacts**. The Selection Query, Selection Grow and Property Export windows are only mentioned. The debug window (<kbd>F11</kbd>) is only listed.
+Done on day 2: **Script Reference** (page Script-reference), **Structure Export** and **Contacts**, written from the source, without screenshots. Still only mentioned: Selection Query, Selection Grow and Property Export. The debug window (<kbd>F11</kbd>) is only listed.
 
 ### 3. Things written from the source and not verified in the GUI
 
