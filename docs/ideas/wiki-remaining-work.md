@@ -33,11 +33,12 @@ Update the preview: commit on `docu` in `~/viamd.wiki`, then `git push --force f
 - **Tutorials:** day 2 replaced the images of Tutorial 1 (all but the filter dragged in the Distributions window) and of Tutorial 2 (representations, dihedral, distance). Left as `TODO screenshot` in Tutorial 2: the polished look, the pocket selected by hand (`pocket_1`), the radial grow (`pocket_2`). Tutorials 3 and 4 still have the 2023 images (about 30). Scripts: `docs/ideas/tools/tutorial_shots.py`, `tutorial2_*.py`. Old text: about 50 images from 2023. They need the tutorial data (alanine chain is built in; the others are on the Drive links of the Datasets page) and each step's state.
 - **Install, VeloxChem, Home:** old images.
 - **Other states not yet captured:** the Selection Query and Selection Grow windows, the Property Export window, the System window with the Series node expanded and the right-click menu, the Representations window with the Attribute color mapping, the Screenshot and Settings menus, a drag in progress.
+- **Seen while capturing:** in the Script Reference, a glyph after the signature of `com` shows as a replacement character (a symbol the font lacks, probably the ‹periodic› marker in the mdlib text).
 - **Check the images online** once pushed: relative paths `img/<page>/<name>.png` should render in the fork's wiki. If they do not, use `https://raw.githubusercontent.com/wiki/<owner>/viamd/img/...`.
 
 ### 2. Windows with no documentation yet
 
-Done on day 2: **Script Reference** (page Script-reference), **Structure Export** and **Contacts**, written from the source, without screenshots. Still only mentioned: Selection Query, Selection Grow and Property Export. The debug window (<kbd>F11</kbd>) is only listed.
+Done on day 2: **Script Reference** (page Script-reference), **Structure Export** and **Contacts**, with screenshots (taken from the GUI). Also new: the Settings page (units, were not documented), and the Screenshot menu image. Still only mentioned: Selection Query, Selection Grow and Property Export (the Script Editor File menu offers Load, Save, Export). The debug window (<kbd>F11</kbd>) is only listed.
 
 ### 3. Things written from the source and not verified in the GUI
 
