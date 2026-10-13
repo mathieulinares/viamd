@@ -1,0 +1,26 @@
+{
+  "title": "Open the Windows menu",
+  "source_dir": "~/viamd/tools/youtube-capture/scenarios",
+  "workspace": "windows-menu-smoke.via",
+  "binary": "~/viamd/build/bin/viamd",
+  "settle_seconds": 6,
+  "show": ["ScriptEditor", "Animation", "Representations"],
+  "window": {
+    "size": [1600, 900],
+    "position": [100, 60]
+  },
+  "layout": {
+    "Representations": [10, 30, 430, 360],
+    "Animation": [10, 410, 430, 150],
+    "Script Editor": [10, 580, 430, 230]
+  },
+  "steps": [
+    {"action": "wait", "seconds": 1, "caption": "Start from the loaded workspace."},
+    {"action": "click", "x": 174, "y": 12, "caption": "Open the Windows menu."},
+    {"action": "wait", "seconds": 2},
+    {"action": "capture", "name": "01-windows-menu", "crop": [0, 0, 660, 450], "caption": "Choose a workspace window."},
+    {"action": "key", "name": "Escape"},
+    {"action": "wait", "seconds": 1},
+    {"action": "capture", "name": "02-workspace", "caption": "Return to the workspace."}
+  ]
+}

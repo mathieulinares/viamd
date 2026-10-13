@@ -1,0 +1,46 @@
+{
+  "title": "Tutorial 1: A chain of alanine",
+  "source_dir": "~/viamd/tools/youtube-capture/scenarios",
+  "workspace": "tutorial-1.via",
+  "binary": "~/viamd/build/bin/viamd",
+  "output_dir": "~/Videos/VIAMD",
+  "settle_seconds": 12,
+  "show": ["Timelines", "Representations", "ScriptEditor", "Animation"],
+  "window": {
+    "size": [1600, 900],
+    "position": [100, 60]
+  },
+  "script_editor_rect": [10, 430, 430, 450],
+  "layout": {
+    "Representations": [10, 30, 430, 220],
+    "Animation": [10, 260, 430, 130],
+    "Script Editor": [10, 400, 430, 470],
+    "Timelines": [460, 30, 1120, 380]
+  },
+  "steps": [
+    {
+      "action": "record_video",
+      "name": "tutorial-1-alanine",
+      "seconds": 80,
+      "fps": 10,
+      "output_size": [1280, 720],
+      "subtitle": "VIAMD | Tutorial 1: A chain of alanine",
+      "events": [
+        {"at": 0, "action": "caption", "text": "Tutorial 1: A chain of alanine"},
+        {"at": 2, "action": "caption", "text": "A 15-residue alanine chain and its 500-frame trajectory."},
+        {"at": 3, "action": "evaluate", "wait_seconds": 0.05},
+        {"at": 7, "action": "caption", "text": "The script calculates end_to_end = distance(1, 151)."},
+        {"at": 10, "action": "drag", "x0": 820, "y0": 620, "x1": 960, "y1": 590, "seconds": 1.0, "samples": 20},
+        {"at": 14, "action": "caption", "text": "Drag to rotate; double-click an atom to center the view."},
+        {"at": 18, "action": "click", "x": 900, "y": 600},
+        {"at": 19, "action": "key", "name": "space"},
+        {"at": 22, "action": "caption", "text": "Space starts VIAMD's trajectory animation."},
+        {"at": 70, "action": "key", "name": "space"},
+        {"at": 72, "action": "caption", "text": "The Timeline shows the end-to-end distance across all 500 frames."},
+        {"at": 75, "action": "move", "x": 900, "y": 180},
+        {"at": 76, "action": "caption", "text": "Hover over a Timeline point for visual feedback at that frame."},
+        {"at": 78, "action": "caption", "text": "The spatial view and plot follow the selected frame."}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "title": "Tutorial 2: Aspirin leaving phospholipase A2",
+  "source_dir": "~/Desktop/bioexcel/aspirin",
+  "workspace": "tutorial-2.via",
+  "workspace_file": "~/viamd.wiki/examples/tutorial-2.via",
+  "binary": "~/viamd/build/bin/viamd",
+  "output_dir": "~/Videos/VIAMD",
+  "settle_seconds": 35,
+  "show": ["Timelines", "Distributions", "Representations", "ScriptEditor", "Animation"],
+  "window": {
+    "size": [1600, 900],
+    "position": [100, 60]
+  },
+  "layout": {
+    "Representations": [10, 30, 400, 255],
+    "Animation": [10, 295, 400, 125],
+    "Script Editor": [10, 435, 480, 425],
+    "Timelines": [1060, 30, 520, 400],
+    "Distributions": [1060, 445, 520, 415]
+  },
+  "steps": [
+    {
+      "action": "evaluate",
+      "wait_seconds": 120
+    },
+    {
+      "action": "scroll",
+      "x": 730,
+      "y": 360,
+      "direction": "up",
+      "count": 7
+    },
+    {
+      "action": "record_video",
+      "name": "tutorial-2-aspirin-phospholipase",
+      "seconds": 600,
+      "fps": 10,
+      "output_size": [1280, 720],
+      "overlay": false,
+      "bitrate_kbps": 2200,
+      "temp_dir": "/dev/shm",
+      "events": [
+        {"at": 0, "action": "drag", "x0": 790, "y0": 610, "x1": 900, "y1": 575, "seconds": 1.2},
+        {"at": 8, "action": "key", "name": "space"},
+        {"at": 38, "action": "key", "name": "space"},
+        {"at": 75, "action": "drag", "x0": 820, "y0": 600, "x1": 740, "y1": 630, "seconds": 1.0},
+        {"at": 122, "action": "key", "name": "space"},
+        {"at": 170, "action": "key", "name": "space"},
+        {"at": 190, "action": "key", "name": "space"},
+        {"at": 238, "action": "key", "name": "space"},
+        {"at": 275, "action": "drag", "x0": 780, "y0": 610, "x1": 920, "y1": 600, "seconds": 1.2},
+        {"at": 300, "action": "key", "name": "space"},
+        {"at": 345, "action": "key", "name": "space"},
+        {"at": 370, "action": "key", "name": "space"},
+        {"at": 410, "action": "key", "name": "space"},
+        {"at": 455, "action": "drag", "x0": 860, "y0": 600, "x1": 780, "y1": 625, "seconds": 1.0},
+        {"at": 480, "action": "key", "name": "space"},
+        {"at": 525, "action": "key", "name": "space"},
+        {"at": 560, "action": "move", "x": 1100, "y": 190},
+        {"at": 585, "action": "key", "name": "space"}
+      ]
+    }
+  ]
+}
