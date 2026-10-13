@@ -107,3 +107,9 @@ The 2023 images are all replaced (Property Export, File menu, Home overview, coo
 ### Bond orders
 
 Documented on the Representations page from the source: orders come only from the VeloxChem reader (`md_vlx.c`); `compute_covalent_bond_order` in mdlib is not called, so inferred bonds are all single. No image: the local build has `MD_ENABLE_HDF5=OFF` (and no HDF5 headers), so it cannot open the `.h5` files in `~/Downloads`. To take it: build with HDF5, load `biphenyl-scf-*.h5`, Ball And Stick with bond orders on and off (`docs/ideas/tools/t16a.py` has the workspace).
+
+### Tutorial 4 (in progress, day 2 evening)
+
+Data: `~/Desktop/bioexcel/tutorial-4/` (gro 222k atoms, `ef.xtc` 1.65 GB, about 1990 frames at 100 ps). Done: images `loaded`, `sodium-positions`, `densities` in `img/Tutorial-4-Sodium-through-a-membrane/` (scripts `t17a`, `t17b`, `t17d`, `t17e`); the page text is not rewritten yet.
+Facts: ion 103 (`resname("SOD")[103]`) sits in the membrane from about 65 to 105 ns, use frame 1000. A radial grow of 5 A around it reaches only CYS508 and PHE785 (the grow is limited to the visible atoms, hence "hide all but the protein"). Operations in the workspace: `ApplyPbc=1`, `UnwrapStructures=1`; no `[Camera]`. F2 on a selection centers and gives a side view. The keyboard is Swedish: brackets need AltGr (helper patched).
+Left: images of the ion in the pore, the grow (`t17f.py` gets the Grow window at 5.00, check the last capture), the `bn` representation and the count `c` in a second Timeline subplot; define `bn = residue({508,785})`; rewrite the page text (8 old images, `water()` and `protein()` in the script); build `examples/tutorial-4.via` and link it; then push.
