@@ -113,3 +113,11 @@ Documented on the Representations page from the source: orders come only from th
 Data: `~/Desktop/bioexcel/tutorial-4/` (gro 222k atoms, `ef.xtc` 1.65 GB, about 1990 frames at 100 ps). Done: images `loaded`, `sodium-positions`, `densities` in `img/Tutorial-4-Sodium-through-a-membrane/` (scripts `t17a`, `t17b`, `t17d`, `t17e`); the page text is not rewritten yet.
 Facts: ion 103 (`resname("SOD")[103]`) sits in the membrane from about 65 to 105 ns, use frame 1000. A radial grow of 5 A around it reaches only CYS508 and PHE785 (the grow is limited to the visible atoms, hence "hide all but the protein"). Operations in the workspace: `ApplyPbc=1`, `UnwrapStructures=1`; no `[Camera]`. F2 on a selection centers and gives a side view. The keyboard is Swedish: brackets need AltGr (helper patched).
 Left: images of the ion in the pore, the grow (`t17f.py` gets the Grow window at 5.00, check the last capture), the `bn` representation and the count `c` in a second Timeline subplot; define `bn = residue({508,785})`; rewrite the page text (8 old images, `water()` and `protein()` in the script); build `examples/tutorial-4.via` and link it; then push.
+
+### Tutorial 4: findings at the end of day 2 (read before continuing)
+
+- The selection granularity default is Atom (`viamd.h`): set **Select by** to **Component** before the radial grow, otherwise Apply selects atoms, not residues. `t17f.py` does not set it yet (add the Selection menu entry first).
+- The radial grow (`md_util_mask_grow_by_radius`) takes the visible atoms within the radius of the selected atoms, with periodic distances, then expands to the granularity. Hide everything but the protein (and the ion).
+- Residues of the protein within a radius of ion 103 (mdtraj, any atom, hydrogens included): frame 0 (z 126 A): 0; frame 1000 (z 65 A): 2; 5 A at best 9 (frames 670 to 730); 6 A up to 13 (about frame 780); 8 A 23 to 24. The user expects about 15 at 5 A: ask which frame and cutoff, or check which ion `[103]` is in the app (hover it).
+- Images already in `img/Tutorial-4-Sodium-through-a-membrane/`: `loaded`, `sodium-positions`, `densities`. The page text is not rewritten and `examples/tutorial-4.via` is not built.
+- Helper: brackets need AltGr on the Swedish layout (done in `shot.key(altgr=True)`); `t17*.py` are in `docs/ideas/tools/`.
