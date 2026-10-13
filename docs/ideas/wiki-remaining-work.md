@@ -79,6 +79,10 @@ Not before the wiki is finished. The tentative list and the replay idea are in `
 - **mdlib and scanberg:** `master` of viamd and of mdlib are fast-forwarded to scanberg's. Your commits are in `uinification` (viamd, pushed) and in the mdlib branch `uinification` (fork, pushed).
 - **`uinification-rebased` (mdlib, local only):** the three mdlib commits rebased on `upstream/master`, plus one WIP commit that ports the new procedures to the `md_bitset` API and the `EVAL_LOG_ERROR` macro. Not built, not tested, not pushed. To finish: build `md_unittest`, fix what breaks (the test `script.reference_documents_every_procedure` needs the new procedures documented), push to the fork, open a pull request on `scanberg/mdlib`, then point `ext/mdlib` of the viamd branch at it.
 
+## Example data (day 2)
+
+`examples/` of the wiki holds two `.tpr` files, shared under CC-BY 4.0 with their credit on Example-workspaces: the atomistic `hMff_60SDS_monomer_CHARMM36m_OPC_37C_replica0.tpr` (Morgan Regnier, Zenodo 10.5281/zenodo.7733867) and the Martini `M-4-900-300.tpr` (Matti Javanainen, Zenodo 10.5281/zenodo.3604289; the paper is "to be added" in the record, check it before publishing). Before publishing to Robin's wiki: owner in the raw links, and ask whether a 4.5 MB of binary files is welcome there.
+
 ## Lessons from the capture runs
 
 - Do not run two VIAMD captures at once, and do not use the machine during a run (dictation tools type into the focused window).
