@@ -53,7 +53,7 @@ Done on day 2: **Script Reference** (page Script-reference), **Structure Export*
 ### 4. Tutorials
 
 - **Tutorial 1:** the section *Coloring by an attribute* is a placeholder. It needs an example with a `.tpr` file (per-atom charges). Colouring by a script property no longer exists: the *Attribute* list holds the `atom/` attributes only.
-- **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. Left: SDF (needs isovalues that suit the probe density, the aspirin ones show nothing), the top overview and the representation image.
+- **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. SDF, overview done. Optional: the super_ads dihedral comparison image (needs another amyloid run).
 - **Tutorial 2:** the embedded `.via` block is in the 2023 format. Regenerate them from the app, save them as `examples/tutorial-2.via` and so on, and link them instead of embedding.
 - **Tutorial 3:** the embedded workspace has no `shapespace(...)` line.
 - **Tutorial 4:** the Workspace section is a sentence, there is no file.
