@@ -45,14 +45,14 @@ Done on day 2: **Script Reference** (page Script-reference), **Structure Export*
 - Window and menu names in the rewritten window pages (the Windows menu says **Shapespace**, one word).
 - Ramachandran: the contents of the **Layers** and **View** menus, the **Create Property** row and the **Reference** checkbox.
 - Shape space: what the legend entries do (hide, highlight), whether points selected with the right mouse button can be saved as a group.
-- `.tpr` files: that `atom/charge` appears in the *Attribute* color list.
+- `.tpr` files: verified on day 2 (`atom/charge` is in the Attribute list; the Contacts window reports LJ and Coulomb energies; the System window shows the force field line).
 - Tutorial 2: `lj_sr_protein_ain` and `coul_sr_protein_ain` are confirmed (plotted from the edr file).
 - Keyboard-and-mouse: the table was checked against the source, not by trying the keys.
 - Troubleshooting: the rendering advice (turn off ambient occlusion, temporal effects).
 
 ### 4. Tutorials
 
-- **Tutorial 1:** the section *Coloring by an attribute* is a placeholder. It needs an example with a `.tpr` file (per-atom charges). Colouring by a script property no longer exists: the *Attribute* list holds the `atom/` attributes only.
+- **Tutorial 1:** *Coloring by an attribute* is written with a `.tpr` (hMff peptide with SDS), no example file is shipped. Decide whether to publish a small `.tpr`. The value filter on a Distributions plot (shading the Timeline) is dead code in all branches (`value_filter.enabled` is never set), so it is not documented.
 - **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. SDF, overview done. Optional: the super_ads dihedral comparison image (needs another amyloid run).
 - **Tutorial 2:** the embedded `.via` block is in the 2023 format. Regenerate them from the app, save them as `examples/tutorial-2.via` and so on, and link them instead of embedding.
 - **Tutorial 3:** the embedded workspace has no `shapespace(...)` line.
