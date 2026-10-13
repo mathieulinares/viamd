@@ -54,8 +54,8 @@ Done on day 2: **Script Reference** (page Script-reference), **Structure Export*
 
 - **Tutorial 1:** *Coloring by an attribute* is written with a `.tpr` (hMff peptide with SDS), no example file is shipped. Decide whether to publish a small `.tpr`. The value filter on a Distributions plot (shading the Timeline) is dead code in all branches (`value_filter.enabled` is never set), so it is not documented.
 - **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. SDF, overview done. Optional: the super_ads dihedral comparison image (needs another amyloid run).
-- **Tutorial 2:** the embedded `.via` block is in the 2023 format. Regenerate them from the app, save them as `examples/tutorial-2.via` and so on, and link them instead of embedding.
-- **Tutorial 3:** the embedded workspace has no `shapespace(...)` line.
+- **Tutorial 2:** done on day 2: `examples/tutorial-2.via` (helper-built, loads and evaluates), `pocket_1` image taken from a Selection Query. The stored selection `pocket_2` is not in the file.
+- **Tutorial 3:** the workspace has no `shapespace(...)` line.
 - **Tutorial 4:** the Workspace section is a sentence, there is no file.
 
 ### 5. Waiting for merges
@@ -100,3 +100,7 @@ Not before the wiki is finished. The tentative list and the replay idea are in `
 - It only touches the window of the process it started, found by its PID. Do not use it while using the machine: it moves the pointer and raises the window.
 - Window layouts are written to an `imgui.ini` in the working folder, positions in window coordinates.
 - Paths at the top of the file (`SRC`, `BIN`) must be adapted to the machine.
+
+### Day 2, last run
+
+The 2023 images are all replaced (Property Export, File menu, Home overview, coordinate widget, Script suggestions menu); only the logos and the Videos and Tutorial 4 images remain. Link, anchor and image check passes (the `flatten` anchor is an explicit `<a id>`). Scripts: `t15a` (Property Export), `t15b` (widget, File menu), `t15d` (shift+click and context menu, with a patched click), `t15e` (pocket selection), `t15f` (tutorial-2.via).
