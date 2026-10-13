@@ -30,9 +30,9 @@ Update the preview: commit on `docu` in `~/viamd.wiki`, then `git push --force f
 ### 1. Screenshots
 
 - **Movie maker pages** (7 `TODO screenshot` comments): needs a build of the `video` branch. The helper can do it, the Movie window has to be added to the layout.
-- **Tutorials:** day 2 replaced the images of Tutorial 1 (all but the filter dragged in the Distributions window) and of Tutorial 2 (representations, dihedral, distance). Left as `TODO screenshot` in Tutorial 2: the pocket selected by hand (`pocket_1`). The polished look and the radial grow are done, and the Selection Query and Grow windows are now on the Spatial-view page. Tutorials 3 and 4 still have the 2023 images (about 30). Scripts: `docs/ideas/tools/tutorial_shots.py`, `tutorial2_*.py`. Old text: about 50 images from 2023. They need the tutorial data (alanine chain is built in; the others are on the Drive links of the Datasets page) and each step's state.
-- **Install, VeloxChem, Home:** old images.
-- **Other states not yet captured:** the Selection Query and Selection Grow windows, the Property Export window, the System window with the Series node expanded and the right-click menu, the Representations window with the Attribute color mapping, the Screenshot and Settings menus, a drag in progress.
+- **Tutorials:** Tutorials 1, 2 and 3 are finished with new images. Tutorial 4 still has the 2023 images and needs data from the user. Scripts: `docs/ideas/tools/`.
+- **Install, VeloxChem:** old images (Home is done).
+- **Other states not yet captured:** the System window with the Series node expanded and the right-click menu, the Screenshot and Settings menus, a drag in progress.
 - **Seen while capturing:** in the Script Reference, the unit `Å` after the signature of `com` shows as a replacement character in the code block font of the Script Reference.
 - **Check the images online** once pushed: relative paths `img/<page>/<name>.png` should render in the fork's wiki. If they do not, use `https://raw.githubusercontent.com/wiki/<owner>/viamd/img/...`.
 
@@ -52,7 +52,7 @@ Done on day 2: **Script Reference** (page Script-reference), **Structure Export*
 
 ### 4. Tutorials
 
-- **Tutorial 1:** *Coloring by an attribute* is written with a `.tpr` (hMff peptide with SDS), no example file is shipped. Decide whether to publish a small `.tpr`. The value filter on a Distributions plot (shading the Timeline) is dead code in all branches (`value_filter.enabled` is never set), so it is not documented.
+- **Tutorial 1:** *Coloring by an attribute* is written with a `.tpr` (hMff peptide with SDS), the two `.tpr` examples are in `examples/` with their credits. The value filter on a Distributions plot (shading the Timeline) is dead code in all branches (`value_filter.enabled` is never set), so it is not documented.
 - **Tutorial 3:** rewritten on day 2 around `distance_min(resname("PFT"), protein)` with two groups, `ads` and `free`; its workspace is `examples/tutorial-3.via` (built with the helper, not saved from the app). The amyloid evaluation takes 1.5 to 3 minutes per run. Images done: probe and group distances, dihedrals and planarity, shape space. SDF, overview done. Optional: the super_ads dihedral comparison image (needs another amyloid run).
 - **Tutorial 2:** done on day 2: `examples/tutorial-2.via` (helper-built, loads and evaluates), `pocket_1` image taken from a Selection Query. The stored selection `pocket_2` is not in the file.
 - **Tutorial 3:** the workspace has no `shapespace(...)` line.
