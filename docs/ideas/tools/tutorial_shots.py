@@ -88,6 +88,8 @@ def capture(workspace, steps, settle):
             elif k == 'dbl': shot.dclick(ax + st[1], ay + st[2])
             elif k == 'move': shot.move(ax + st[1], ay + st[2])
             elif k == 'key': shot.key(st[1])
+            elif k == 'scroll':
+                for _ in range(st[3]): shot.click(ax + st[1], ay + st[2], 4)
             elif k == 'away': shot.move(ax + w - 30, ay + h - 30)
             elif k == 'eval':
                 x, y, ww, hh = shot.SE
