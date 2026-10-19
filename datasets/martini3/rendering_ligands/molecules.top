@@ -1,5 +1,0 @@
-; Append these rows inside [ molecules ], in GRO order.
-LIG_CAFF 1
-LIG_CLPR 1
-LIG_INDO 1
-LIG_BZTA 1

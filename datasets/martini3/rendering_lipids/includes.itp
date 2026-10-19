@@ -1,3 +1,0 @@
-; Include after the Martini 3.0.0 base force field, before any molecule definitions.
-#include "upstream/martini_v3.0.0_ffbonded_v2.itp"
-#include "selected_lipids.itp"
