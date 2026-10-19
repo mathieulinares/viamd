@@ -1,0 +1,53 @@
+; Published Martini molecular topologies; spatial rendering panel, not an equilibrated mixture.
+#include "martini_v3.0.0.itp"
+#include "rendering_nucleic/martini_alpha_dna.itp"
+#include "rendering_nucleic/martini_v3.0.0_rna.itp"
+#include "rendering_lipids/includes.itp"
+#include "rendering_proteins/ubiquitin_0.itp"
+#include "rendering_proteins/ompa_1_0.itp"
+#include "rendering_proteins/ompa_2_0.itp"
+#include "rendering_proteins/ompa_3_0.itp"
+#include "rendering_proteins/ompa_4_0.itp"
+#include "rendering_proteins/gpa_1_0.itp"
+#include "rendering_proteins/gpa_2_0.itp"
+#include "rendering_nucleic/dna.itp"
+#include "rendering_nucleic/rna.itp"
+#include "rendering_deposited/selected.itp"
+#include "rendering_ligands/includes.itp"
+
+[ system ]
+VIAMD bonded Martini 3 rendering panel
+
+[ molecules ]
+ubiquitin_0 1
+ompa_1_0 1
+ompa_2_0 1
+ompa_3_0 1
+ompa_4_0 1
+gpa_1_0 1
+gpa_2_0 1
+rendering_dna 1
+rendering_rna 1
+CHOL 1
+POPC 1
+DPPC 1
+DOPC 1
+POPE 1
+DOPE 1
+POPS 1
+POPG 1
+POPA 1
+PSM 1
+TO 1
+PCER 1
+DEP_SND3 1
+DEP_POPC 715
+DEP_POPE 514
+DEP_POPI 186
+DEP_POPC 727
+DEP_POPE 523
+DEP_POPI 189
+LIG_CAFF 1
+LIG_CLPR 1
+LIG_INDO 1
+LIG_BZTA 1

@@ -1,0 +1,20 @@
+; Martini 3.0 DNA Adenine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : N9, C8, H8          (TN1) 
+; SC2 : N3, C4              (TN2a)
+; SC3 : N1, C2, H2          (TN5a)
+; SC4 : N6, C6, H61, H62    (TN5d)
+; SC5 : N7, C5              (TN3a)
+
+[ mapping ]
+SC1  N9 C8 H8
+SC2  N3 C4
+SC3  N1 C2 H2
+SC4  N6 C6 H61 H62
+SC5  N7 C5
+
+[ atomtypes ]
+SC1  TDA0  0  45
+SC2  TDA1  0  0
+SC3  TDA2  0  45
+SC4  TDA3  0  45
+SC5  TDA4  0  0

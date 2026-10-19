@@ -1,0 +1,611 @@
+; Selected published Martini 3 molecules. See PROVENANCE.md.
+; Only [atoms] residue labels are changed; molecule names and all parameters are preserved.
+
+; Source: martini_v3.0.0_sterols_v1.itp; original molecule: CHOL; AA label: CHL
+[ moleculetype ]
+; molname  nrexcl
+  CHOL     1
+
+[ atoms ]
+; i type resnr residue atom cgnr charge  mass    
+  1  P1  1     CHL    ROH  1    0.0     0.0
+  2 SC4  1     CHL    R1   2    0.0   159.8
+  3 SC3  1     CHL    R2   3    0.0   157.0
+  4 SC3  1     CHL    R3   4    0.0     0.0
+  5 SC3  1     CHL    R4   5    0.0     0.0 
+  6 TC2  1     CHL    R5   6    0.0     0.0
+  7 TC2  1     CHL    R6   7    0.0     0.0
+  8  C2  1     CHL    C1   8    0.0   115.2
+  9  C2  1     CHL    C2   9    0.0    72.0
+
+[ bonds ]
+; i  j  funct  length  force
+  8  9  1     0.440   15000
+#ifdef FLEXIBLE
+ 8  3   1  0.75012  100000
+ 8  2   1  0.78504  100000
+ 3  2   1  0.34797  100000
+#else
+[ constraints ]
+ 8  3   1  0.75012
+ 8  2   1  0.78504
+ 3  2   1  0.34797
+#endif
+
+[ angles ]
+; i  j  k  funct  angle  force
+; Cholesterol acyl chain angle
+  5  4  9     1    99.0   250    ;R4-R3-C2
+
+[ dihedrals ]
+; i  j  k  l funct  angle  force
+; Cholesterol acyl chain tortion
+  7  5  4  9   2    -70.0   50  ;R6-R4-R3-C2
+
+[ virtual_sites3 ]
+ 1   8  3  2  4   1.08999   0.35891   0.22947
+ 4   8  3  2  4  -0.41067   0.83597  -0.05311
+ 5   8  3  2  4   0.69138  -0.10352   0.17476
+ 6   8  3  2  4   0.77524   0.22413   0.92700
+ 7   8  3  2  4   0.06219   0.32398   0.76967
+ 
+[ exclusions ]
+; i  j  k  ...
+  1  2  3  4  5  6  7  8
+  2  3  4  5  6  7  8
+  3  4  5  6  7  8
+  4  5  6  7  8 
+  5  6  7  8 
+  6  7  8 
+  7  8 
+
+; Source: martini_v3.0.0_phospholipids_PC_v2.itp; original molecule: POPC; AA label: POPC
+[moleculetype]
+; molname      nrexcl
+  POPC          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1     Q1   1  POPC  NC3   1 	1.0
+   2     Q5   1  POPC  PO4   2 	-1.0
+   3   SN4a   1  POPC  GL1   3 	0
+   4   SN4a   1  POPC  GL2   4 	0
+   5     C1   1  POPC  C1A   5 	0
+   6    C4h   1  POPC  D2A   6 	0
+   7     C1   1  POPC  C3A   7 	0
+   8     C1   1  POPC  C4A   8 	0
+   9    SC1   1  POPC  C1B   9 	0
+  10     C1   1  POPC  C2B  10 	0
+  11     C1   1  POPC  C3B  11 	0
+  12     C1   1  POPC  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_NC3_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_C1_glyc_5long
+   5  6 	b_C1_C4_mid_5long
+   6  7 	b_C4_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_SC1_glyc
+   9 10 	b_SC1_C1_mid
+  10 11 	b_C1_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_NC3_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C4_glyc
+   5  6  7 	a_C1_C4_C1_def
+   6  7  8 	a_C4_C1_C1_def
+   4  9 10 	a_GL_C1_C1_glyc
+   9 10 11 	a_C1_C1_C1_def
+  10 11 12 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PC_v2.itp; original molecule: DPPC; AA label: DPPC
+[moleculetype]
+; molname      nrexcl
+  DPPC          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1     Q1   1  DPPC  NC3   1 	1.0
+   2     Q5   1  DPPC  PO4   2 	-1.0
+   3   SN4a   1  DPPC  GL1   3 	0
+   4   SN4a   1  DPPC  GL2   4 	0
+   5    SC1   1  DPPC  C1A   5 	0
+   6     C1   1  DPPC  C2A   6 	0
+   7     C1   1  DPPC  C3A   7 	0
+   8     C1   1  DPPC  C4A   8 	0
+   9    SC1   1  DPPC  C1B   9 	0
+  10     C1   1  DPPC  C2B  10 	0
+  11     C1   1  DPPC  C3B  11 	0
+  12     C1   1  DPPC  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_NC3_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_SC1_glyc
+   5  6 	b_SC1_C1_mid
+   6  7 	b_C1_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_SC1_glyc
+   9 10 	b_SC1_C1_mid
+  10 11 	b_C1_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_NC3_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C1_glyc
+   5  6  7 	a_C1_C1_C1_def
+   6  7  8 	a_C1_C1_C1_def
+   4  9 10 	a_GL_C1_C1_glyc
+   9 10 11 	a_C1_C1_C1_def
+  10 11 12 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PC_v2.itp; original molecule: DOPC; AA label: DOPC
+[moleculetype]
+; molname      nrexcl
+  DOPC          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1     Q1   1  DOPC  NC3   1 	1.0
+   2     Q5   1  DOPC  PO4   2 	-1.0
+   3   SN4a   1  DOPC  GL1   3 	0
+   4   SN4a   1  DOPC  GL2   4 	0
+   5     C1   1  DOPC  C1A   5 	0
+   6    C4h   1  DOPC  D2A   6 	0
+   7     C1   1  DOPC  C3A   7 	0
+   8     C1   1  DOPC  C4A   8 	0
+   9     C1   1  DOPC  C1B   9 	0
+  10    C4h   1  DOPC  D2B  10 	0
+  11     C1   1  DOPC  C3B  11 	0
+  12     C1   1  DOPC  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_NC3_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_C1_glyc_5long
+   5  6 	b_C1_C4_mid_5long
+   6  7 	b_C4_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_C1_glyc_5long
+   9 10 	b_C1_C4_mid_5long
+  10 11 	b_C4_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_NC3_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C4_glyc
+   5  6  7 	a_C1_C4_C1_def
+   6  7  8 	a_C4_C1_C1_def
+   4  9 10 	a_GL_C1_C4_glyc
+   9 10 11 	a_C1_C4_C1_def
+  10 11 12 	a_C4_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PE_v2.itp; original molecule: POPE; AA label: POPE
+[moleculetype]
+; molname      nrexcl
+  POPE          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1    Q4p   1  POPE  NH3   1 	1.0
+   2     Q5   1  POPE  PO4   2 	-1.0
+   3   SN4a   1  POPE  GL1   3 	0
+   4   SN4a   1  POPE  GL2   4 	0
+   5     C1   1  POPE  C1A   5 	0
+   6    C4h   1  POPE  D2A   6 	0
+   7     C1   1  POPE  C3A   7 	0
+   8     C1   1  POPE  C4A   8 	0
+   9    SC1   1  POPE  C1B   9 	0
+  10     C1   1  POPE  C2B  10 	0
+  11     C1   1  POPE  C3B  11 	0
+  12     C1   1  POPE  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_NH3_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_C1_glyc_5long
+   5  6 	b_C1_C4_mid_5long
+   6  7 	b_C4_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_SC1_glyc
+   9 10 	b_SC1_C1_mid
+  10 11 	b_C1_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_NH3_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C4_glyc
+   5  6  7 	a_C1_C4_C1_def
+   6  7  8 	a_C4_C1_C1_def
+   4  9 10 	a_GL_C1_C1_glyc
+   9 10 11 	a_C1_C1_C1_def
+  10 11 12 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PE_v2.itp; original molecule: DOPE; AA label: DOPE
+[moleculetype]
+; molname      nrexcl
+  DOPE          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1    Q4p   1  DOPE  NH3   1 	1.0
+   2     Q5   1  DOPE  PO4   2 	-1.0
+   3   SN4a   1  DOPE  GL1   3 	0
+   4   SN4a   1  DOPE  GL2   4 	0
+   5     C1   1  DOPE  C1A   5 	0
+   6    C4h   1  DOPE  D2A   6 	0
+   7     C1   1  DOPE  C3A   7 	0
+   8     C1   1  DOPE  C4A   8 	0
+   9     C1   1  DOPE  C1B   9 	0
+  10    C4h   1  DOPE  D2B  10 	0
+  11     C1   1  DOPE  C3B  11 	0
+  12     C1   1  DOPE  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_NH3_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_C1_glyc_5long
+   5  6 	b_C1_C4_mid_5long
+   6  7 	b_C4_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_C1_glyc_5long
+   9 10 	b_C1_C4_mid_5long
+  10 11 	b_C4_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_NH3_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C4_glyc
+   5  6  7 	a_C1_C4_C1_def
+   6  7  8 	a_C4_C1_C1_def
+   4  9 10 	a_GL_C1_C4_glyc
+   9 10 11 	a_C1_C4_C1_def
+  10 11 12 	a_C4_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PS_v2.itp; original molecule: POPS; AA label: POPS
+[moleculetype]
+; molname      nrexcl
+  POPS          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1     P6   1  POPS  CNO   1 	0.0
+   2     Q5   1  POPS  PO4   2 	-1.0
+   3   SN4a   1  POPS  GL1   3 	0
+   4   SN4a   1  POPS  GL2   4 	0
+   5     C1   1  POPS  C1A   5 	0
+   6    C4h   1  POPS  D2A   6 	0
+   7     C1   1  POPS  C3A   7 	0
+   8     C1   1  POPS  C4A   8 	0
+   9    SC1   1  POPS  C1B   9 	0
+  10     C1   1  POPS  C2B  10 	0
+  11     C1   1  POPS  C3B  11 	0
+  12     C1   1  POPS  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_CNO_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_C1_glyc_5long
+   5  6 	b_C1_C4_mid_5long
+   6  7 	b_C4_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_SC1_glyc
+   9 10 	b_SC1_C1_mid
+  10 11 	b_C1_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_CNO_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C4_glyc
+   5  6  7 	a_C1_C4_C1_def
+   6  7  8 	a_C4_C1_C1_def
+   4  9 10 	a_GL_C1_C1_glyc
+   9 10 11 	a_C1_C1_C1_def
+  10 11 12 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PG_v2.itp; original molecule: POPG; AA label: POPG
+[moleculetype]
+; molname      nrexcl
+  POPG          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1    P4r   1  POPG  GL0   1 	0.0
+   2     Q5   1  POPG  PO4   2 	-1.0
+   3   SN4a   1  POPG  GL1   3 	0
+   4   SN4a   1  POPG  GL2   4 	0
+   5     C1   1  POPG  C1A   5 	0
+   6    C4h   1  POPG  D2A   6 	0
+   7     C1   1  POPG  C3A   7 	0
+   8     C1   1  POPG  C4A   8 	0
+   9    SC1   1  POPG  C1B   9 	0
+  10     C1   1  POPG  C2B  10 	0
+  11     C1   1  POPG  C3B  11 	0
+  12     C1   1  POPG  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_GL0_PO4_def
+   2  3 	b_PO4_GL_def
+   2  4 	b_PO4_GL_def_long
+   3  4 	b_GL_GL_glyc
+   3  5 	b_GL_C1_glyc_5long
+   5  6 	b_C1_C4_mid_5long
+   6  7 	b_C4_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_GL_SC1_glyc
+   9 10 	b_SC1_C1_mid
+  10 11 	b_C1_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_GL0_PO4_GL_def
+   2  3  5 	a_PO4_GL_C_def
+   4  3  5 	a_GL_GL_C_glyc
+   3  4  9 	a_GL_GL_C_glyc
+   3  5  6 	a_GL_C1_C4_glyc
+   5  6  7 	a_C1_C4_C1_def
+   6  7  8 	a_C4_C1_C1_def
+   4  9 10 	a_GL_C1_C1_glyc
+   9 10 11 	a_C1_C1_C1_def
+  10 11 12 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_PA_v2.itp; original molecule: POPA; AA label: POPA
+[moleculetype]
+; molname      nrexcl
+  POPA          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1     Q5   1  POPA  PO4   1 	-1.0
+   2   SN4a   1  POPA  GL1   2 	0
+   3   SN4a   1  POPA  GL2   3 	0
+   4     C1   1  POPA  C1A   4 	0
+   5    C4h   1  POPA  D2A   5 	0
+   6     C1   1  POPA  C3A   6 	0
+   7     C1   1  POPA  C4A   7 	0
+   8    SC1   1  POPA  C1B   8 	0
+   9     C1   1  POPA  C2B   9 	0
+  10     C1   1  POPA  C3B  10 	0
+  11     C1   1  POPA  C4B  11 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_PO4_GL_def
+   1  3 	b_PO4_GL_def_long
+   2  3 	b_GL_GL_glyc
+   2  4 	b_GL_C1_glyc_5long
+   4  5 	b_C1_C4_mid_5long
+   5  6 	b_C4_C1_mid
+   6  7 	b_C1_C1_end
+   3  8 	b_GL_SC1_glyc
+   8  9 	b_SC1_C1_mid
+   9 10 	b_C1_C1_mid
+  10 11 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  4 	a_PO4_GL_C_def
+   3  2  4 	a_GL_GL_C_glyc
+   2  3  8 	a_GL_GL_C_glyc
+   2  4  5 	a_GL_C1_C4_glyc
+   4  5  6 	a_C1_C4_C1_def
+   5  6  7 	a_C4_C1_C1_def
+   3  8  9 	a_GL_C1_C1_glyc
+   8  9 10 	a_C1_C1_C1_def
+   9 10 11 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_phospholipids_SM_v2.itp; original molecule: PSM; AA label: SPM
+[moleculetype]
+; molname      nrexcl
+  PSM          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1     Q1   1   SPM  NC3   1 	1.0
+   2     Q5   1   SPM  PO4   2 	-1.0
+   3    SP1   1   SPM  OH1   3 	0
+   4    SP2   1   SPM  AM2   4 	0
+   5   SC4h   1   SPM  T1A   5 	0
+   6     C1   1   SPM  C2A   6 	0
+   7     C1   1   SPM  C3A   7 	0
+   8     C1   1   SPM  C4A   8 	0
+   9    SC1   1   SPM  C1B   9 	0
+  10     C1   1   SPM  C2B  10 	0
+  11     C1   1   SPM  C3B  11 	0
+  12     C1   1   SPM  C4B  12 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_NC3_PO4_def
+   2  3 	b_PO4_OH1_sm
+   2  4 	b_PO4_AM2_sm
+   3  4 	b_OH1_AM2_sm
+   3  5 	b_OH1_SC4_sm
+   5  6 	b_SC4_C1_mid
+   6  7 	b_C1_C1_mid
+   7  8 	b_C1_C1_end
+   4  9 	b_AM2_SC1_sm
+   9 10 	b_SC1_C1_mid
+  10 11 	b_C1_C1_mid
+  11 12 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  3 	a_NC3_PO4_OH1_sm
+   2  3  5 	a_PO4_OH1_C_sm
+   4  3  5 	a_AM2_OH1_C_sm
+   3  4  9 	a_OH1_AM2_C_sm
+   3  5  6 	a_OH1_C1_C1_sm
+   5  6  7 	a_C1_C1_C1_def
+   6  7  8 	a_C1_C1_C1_def
+   4  9 10 	a_AM2_C1_C1_sm
+   9 10 11 	a_C1_C1_C1_def
+  10 11 12 	a_C1_C1_C1_def
+
+; Source: martini_v3.0.0_triglycerides_v2.itp; original molecule: TO; AA label: TOG
+[moleculetype]
+TO 	1
+
+[atoms]
+; id type   resnr     residu   atom    cgnr charge
+1   SN4a 	1 	TOG 	GL1 	1  	0
+2   C1  	1 	TOG 	C1A 	2  	0 ; 5-1 mapping
+3   C4h 	1 	TOG 	D2A 	3  	0
+4   C1  	1 	TOG 	C3A 	4  	0
+5   C1  	1 	TOG 	C4A 	5  	0
+6   SN4a 	1 	TOG 	GL2 	6  	0
+7   C1  	1 	TOG 	C1B 	7  	0 ; 5-1 mapping
+8   C4h 	1 	TOG 	D2B 	8  	0
+9   C1  	1 	TOG 	C3B 	9  	0
+10  C1  	1 	TOG 	C4B 	10 	0
+11  SN4a 	1 	TOG 	GL3 	11 	0
+12  C1  	1 	TOG 	C1C 	12 	0 ; 5-1 mapping
+13  C4h 	1 	TOG 	D2C 	13 	0
+14  C1  	1 	TOG 	C3C 	14 	0
+15  C1  	1 	TOG 	C4C 	15 	0
+		
+[bonds]
+; i j funct length force.c.
+1 6 	b_GL_GL_glyc	; backbone 
+6 11 	b_GL_GL_glyc	; backbone 
+1 11 	b_GL_GL_glyc_long	; backbone 
+1 2 	b_GL_C1_glyc_5long     ; glycerol+ester bead to hydrocarbon tail
+2 3 	b_C1_C4_mid_5long ; represents 5 atoms => longer bond
+3 4 	b_C4_C1_mid
+4 5 	b_C1_C1_end
+6 7 	b_GL_C1_glyc_5long
+7 8 	b_C1_C4_mid_5long
+8 9 	b_C4_C1_mid
+9 10	b_C1_C1_end
+11 12 	b_GL_C1_glyc_5long
+12 13 	b_C1_C4_mid_5long
+13 14	b_C4_C1_mid
+14 15	b_C1_C1_end
+
+[angles]
+; i j k  
+ 2  1  6	a_GL_GL_C_glyc   ; backbone to tail 1
+12 11  6	a_GL_GL_C_glyc   ; backbone to tail 3
+ 7  6  1	a_GL_GL_C_glyc   ; backbone to tail 2
+ 7  6 11	a_GL_GL_C_glyc   ; backbone to tail 2
+; tails attached to glycerol
+ 1  2  3 	a_GL_C1_C1_glyc ; tail 1
+ 2  3  4 	a_C1_C4_C1_def ; cis double bond
+ 3  4  5 	a_C1_C1_C4_def
+ 6  7  8 	a_GL_C1_C1_glyc ; tail 2
+ 7  8  9 	a_C1_C4_C1_def ; cis double bond
+ 8  9 10 	a_C1_C1_C4_def
+11 12 13 	a_GL_C1_C1_glyc ; tail 3
+12 13 14 	a_C1_C4_C1_def ; cis double bond
+13 14 15  	a_C1_C1_C4_def
+
+; Source: martini_v3.0.0_ceramides_v2.itp; original molecule: PCER; AA label: CER
+[moleculetype]
+; molname      nrexcl
+  PCER          1
+
+[atoms]
+; id 	type 	resnr 	residu 	atom 	cgnr 	charge    (mass)
+   1    TN6   1  CER  COH   1 	0.0
+   2    SP1   1  CER  OH1   2 	0
+   3    SP2   1  CER  AM2   3 	0
+   4   SC4h   1  CER  T1A   4 	0
+   5     C1   1  CER  C2A   5 	0
+   6     C1   1  CER  C3A   6 	0
+   7     C1   1  CER  C4A   7 	0
+   8    SC1   1  CER  C1B   8 	0
+   9     C1   1  CER  C2B   9 	0
+  10     C1   1  CER  C3B  10 	0
+  11     C1   1  CER  C4B  11 	0
+
+[bonds]
+;  i  j 	name 	(using named bondtypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j 	funct 	force.c.
+   1  2 	b_COH_OH1_sm
+   1  3 	b_COH_AM2_sm
+   2  3 	b_OH1_AM2_sm
+   2  4 	b_OH1_SC4_sm
+   4  5 	b_SC4_C1_mid
+   5  6 	b_C1_C1_mid
+   6  7 	b_C1_C1_end
+   3  8 	b_AM2_SC1_sm
+   8  9 	b_SC1_C1_mid
+   9 10 	b_C1_C1_mid
+  10 11 	b_C1_C1_end
+
+[angles]
+;  i  j  k 	name 	(using named angletypes from martini_v3.0.0_ffbonded_v2.itp)
+;  i  j  k 	funct 	angle 	force.c.
+   1  2  4 	a_COH_OH1_C_cera
+   3  2  4 	a_AM2_OH1_C_sm
+   2  3  8 	a_OH1_AM2_C_sm
+   2  4  5 	a_OH1_C1_C1_sm
+   4  5  6 	a_C1_C1_C1_def
+   5  6  7 	a_C1_C1_C1_def
+   3  8  9 	a_AM2_C1_C1_sm
+   8  9 10 	a_C1_C1_C1_def
+   9 10 11 	a_C1_C1_C1_def

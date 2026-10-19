@@ -1,0 +1,27 @@
+; Martini 3.0 RNA Backbone Bonded Parameters v3.0.0
+; Atom indices: BB1=0, BB2=1, BB3=2
+; BB1n/BB2n refer to next-residue backbone beads
+
+[ bonds ]
+; i  j  funct  length  force.c.
+    0       1    1    0.351     18000 ; BB1-BB2
+    1       2    1    0.238     18000 ; BB2-BB3
+    1       0    1    0.375     12000 ; BB2-BB1n
+    2       0    1    0.414     12000 ; BB3-BB1n
+
+[ angles ]
+; i  j  k  funct  angle  force.c.
+    0       1       0   10   106.0000    50.0000 ; BB1-BB2-BB1n
+    1       0       1   10   123.0000   150.0000 ; BB2-BB1n-BB2n
+    0       1       2   10   142.0000   300.0000 ; BB1-BB2-BB3
+
+[ dihedrals ]
+; i  j  k  l  funct  C0  C1  C2  C3  C4  C5
+    0       1       0       1    3   13.0000   -7.0000  -25.0000   -6.0000   25.0000    2.0000 ; BB1-BB2-BB1n-BB2n
+; i  j  k  l  funct  angle  force.c.  mult
+   -2       0       1       0    1    0.0000    7.0000         1 ; BB2p-BB1-BB2-BB1n
+   -2       0       1       2    1 -105.0000   10.0000         1 ; BB2p-BB1-BB2-BB3
+
+[ exclusions ]
+0  2  ; BB1-BB3
+2  0  ; BB3-BB1n

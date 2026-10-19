@@ -1,0 +1,23 @@
+; Martini 3.0 RNA Guanine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : C8, H8, N9          (TG0)
+; SC2 : C4, N3              (TG1)
+; SC3 : C2, N2, H21, H22    (TG2)
+; SC4 : N1                  (TG3)
+; SC5 : C6, O6              (TG4)
+; SC6 : C5, N7              (TG5)
+
+[ mapping ]
+SC1  C8 H8 N9
+SC2  C4 N3
+SC3  C2 N2 H21 H22
+SC4  N1
+SC5  C6 O6
+SC6  C5 N7
+
+[ atomtypes ]
+SC1  TG0  0  50
+SC2  TG1  0  0
+SC3  TG2  0  50
+SC4  TG3  0  0
+SC5  TG4  0  50
+SC6  TG5  0  0

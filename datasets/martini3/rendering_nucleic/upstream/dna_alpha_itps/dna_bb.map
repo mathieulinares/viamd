@@ -1,0 +1,14 @@
+; Martini 3.0 DNA Backbone AA-to-CG Mapping v3.0.0
+; BB1 : phosphate + linker oxygens (Q1n, -1, 72)
+; BB2 : sugar ring (C5, 0, 60)
+; BB3 : sugar ring (SN3, 0, 60)
+
+[ mapping ]
+BB1  P OP1 OP2 O5' O3' HO5' HO3'
+BB2  C5' H5' H5'' C4' H4' O4' C3' H3'
+BB3  C1' H1' C2' H2' H2''
+
+[ atomtypes ]
+BB1  Q1n  -1  72
+BB2  C5    0  60
+BB3  SN3    0  60

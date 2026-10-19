@@ -1,0 +1,17 @@
+; Martini 3.0 RNA Cytosine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : N1, C5, C6          (TY0)
+; SC2 : C2, O2              (TY1)
+; SC3 : N3                  (TY2)
+; SC4 : N4, C4, H41, H42    (TY3)
+
+[ mapping ]
+SC1  N1 C5 C6
+SC2  C2 O2
+SC3  N3
+SC4  N4 C4 H41 H42
+
+[ atomtypes ]
+SC1  TY0  0  37
+SC2  TY1  0  37
+SC3  TY2  0  0
+SC4  TY3  0  37

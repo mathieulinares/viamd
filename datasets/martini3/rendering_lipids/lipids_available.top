@@ -1,0 +1,7 @@
+#include "../martini_v3.0.0.itp"
+#include "includes.itp"
+
+[ system ]
+Published Martini 3 lipid rendering templates (12 available; 5 unsupported)
+
+#include "molecules.top"

@@ -1,0 +1,376 @@
+{
+  "repository": "https://github.com/Martini-Force-Field-Initiative/M3-Small-Molecules",
+  "revision": "9a630c18934be270b4f77189722650f4397e4ef2",
+  "coordinateUnits": "nm",
+  "centerDefinition": "arithmetic centroid of every AA atom / every CG site independently",
+  "orientation": "AA rigidly aligned using frames from author mapping groups B0/B1/B2 and published CG sites 1/2/3; CG geometry only translated",
+  "molecules": [
+    {
+      "id": "CAFF",
+      "molecule": "LIG_CAFF",
+      "name": "Caffeine",
+      "formula": {
+        "C": 8,
+        "H": 10,
+        "N": 4,
+        "O": 2
+      },
+      "family": "poly",
+      "count": 24,
+      "beads": 7,
+      "center": [
+        78,
+        3,
+        4
+      ],
+      "smiles": "Cn1cnc2n(C)c(=O)n(C)c(=O)c12",
+      "mapping": [
+        {
+          "group": "B0",
+          "bead": "R1",
+          "aaIndices": [
+            19,
+            7,
+            21,
+            20,
+            6
+          ]
+        },
+        {
+          "group": "B1",
+          "bead": "O2",
+          "aaIndices": [
+            9,
+            8
+          ]
+        },
+        {
+          "group": "B2",
+          "bead": "R3",
+          "aaIndices": [
+            10,
+            11,
+            24,
+            22,
+            23
+          ]
+        },
+        {
+          "group": "B3",
+          "bead": "O4",
+          "aaIndices": [
+            12,
+            13
+          ]
+        },
+        {
+          "group": "B4",
+          "bead": "R5",
+          "aaIndices": [
+            5,
+            14
+          ]
+        },
+        {
+          "group": "B5",
+          "bead": "N6",
+          "aaIndices": [
+            4,
+            3,
+            18
+          ]
+        },
+        {
+          "group": "B6",
+          "bead": "R7",
+          "aaIndices": [
+            1,
+            2,
+            15,
+            16,
+            17
+          ]
+        }
+      ],
+      "aaSource": "CAFF_LigParGen.pdb",
+      "cgSource": "CAFF.gro",
+      "topologySource": "models_itps_opt-poly_CAFF.itp",
+      "mappingSource": "CAFF_oplsaaTOcg_cgbuilder.ndx",
+      "unmappedAAIndices": [],
+      "sections": {
+        "moleculetype": 1,
+        "atoms": 7,
+        "bonds": 0,
+        "constraints": 5,
+        "dihedrals": 1,
+        "virtual_sites2": 1,
+        "virtual_sites3": 2,
+        "exclusions": 6
+      }
+    },
+    {
+      "id": "CLPR",
+      "molecule": "LIG_CLPR",
+      "name": "Chlorpropham",
+      "formula": {
+        "C": 10,
+        "H": 12,
+        "Cl": 1,
+        "N": 1,
+        "O": 2
+      },
+      "family": "mono",
+      "count": 26,
+      "beads": 5,
+      "center": [
+        84,
+        3,
+        4
+      ],
+      "smiles": "CC(C)OC(=O)Nc1cc(ccc1)Cl",
+      "mapping": [
+        {
+          "group": "B0",
+          "bead": "X1",
+          "aaIndices": [
+            14,
+            10,
+            11,
+            24
+          ]
+        },
+        {
+          "group": "B1",
+          "bead": "R2",
+          "aaIndices": [
+            25,
+            12,
+            13,
+            26
+          ]
+        },
+        {
+          "group": "B2",
+          "bead": "R3",
+          "aaIndices": [
+            23,
+            9,
+            8
+          ]
+        },
+        {
+          "group": "B3",
+          "bead": "O4",
+          "aaIndices": [
+            22,
+            7,
+            5,
+            6,
+            4
+          ]
+        },
+        {
+          "group": "B4",
+          "bead": "C5",
+          "aaIndices": [
+            2,
+            18,
+            1,
+            16,
+            17,
+            15,
+            21,
+            3,
+            19,
+            20
+          ]
+        }
+      ],
+      "aaSource": "CLPR_LigParGen.pdb",
+      "cgSource": "CLPR.gro",
+      "topologySource": "models_itps_opt-mono_CLPR.itp",
+      "mappingSource": "CLPR_oplsaaTOcg_cgbuilder.ndx",
+      "unmappedAAIndices": [],
+      "sections": {
+        "moleculetype": 1,
+        "atoms": 5,
+        "bonds": 3,
+        "constraints": 3,
+        "angles": 2,
+        "dihedrals": 2,
+        "exclusions": 1
+      }
+    },
+    {
+      "id": "INDO",
+      "molecule": "LIG_INDO",
+      "name": "Indole",
+      "formula": {
+        "C": 8,
+        "H": 7,
+        "N": 1
+      },
+      "family": "poly",
+      "count": 16,
+      "beads": 5,
+      "center": [
+        90,
+        3,
+        4
+      ],
+      "smiles": "c12c(ccn2)cccc1",
+      "mapping": [
+        {
+          "group": "B0",
+          "bead": "R1",
+          "aaIndices": [
+            14,
+            6,
+            7,
+            13
+          ]
+        },
+        {
+          "group": "B1",
+          "bead": "R2",
+          "aaIndices": [
+            15,
+            8,
+            9,
+            16
+          ]
+        },
+        {
+          "group": "B2",
+          "bead": "R3",
+          "aaIndices": [
+            1,
+            2
+          ]
+        },
+        {
+          "group": "B3",
+          "bead": "R4",
+          "aaIndices": [
+            3,
+            10,
+            3,
+            10,
+            4
+          ]
+        },
+        {
+          "group": "B4",
+          "bead": "N5",
+          "aaIndices": [
+            12,
+            5,
+            12,
+            5,
+            4
+          ]
+        }
+      ],
+      "aaSource": "INDO_LigParGen.pdb",
+      "cgSource": "INDO.gro",
+      "topologySource": "models_itps_opt-poly_INDO.itp",
+      "mappingSource": "INDO_oplsaaTOcg_cgbuilder_refined.ndx",
+      "unmappedAAIndices": [
+        11
+      ],
+      "sections": {
+        "moleculetype": 1,
+        "atoms": 5,
+        "bonds": 0,
+        "constraints": 5,
+        "dihedrals": 1,
+        "virtual_sitesn": 1,
+        "exclusions": 4
+      }
+    },
+    {
+      "id": "BZTA",
+      "molecule": "LIG_BZTA",
+      "name": "Benzothiazole",
+      "formula": {
+        "C": 7,
+        "H": 5,
+        "N": 1,
+        "S": 1
+      },
+      "family": "poly",
+      "count": 14,
+      "beads": 5,
+      "center": [
+        96,
+        3,
+        4
+      ],
+      "smiles": "n1c2ccccc2sc1",
+      "mapping": [
+        {
+          "group": "B0",
+          "bead": "R1",
+          "aaIndices": [
+            12,
+            5,
+            6,
+            13
+          ]
+        },
+        {
+          "group": "B1",
+          "bead": "R2",
+          "aaIndices": [
+            11,
+            4,
+            3,
+            10
+          ]
+        },
+        {
+          "group": "B2",
+          "bead": "R3",
+          "aaIndices": [
+            7,
+            2
+          ]
+        },
+        {
+          "group": "B3",
+          "bead": "S4",
+          "aaIndices": [
+            8
+          ]
+        },
+        {
+          "group": "B4",
+          "bead": "N5",
+          "aaIndices": [
+            1,
+            9,
+            14
+          ]
+        }
+      ],
+      "aaSource": "BZTA_LigParGen.pdb",
+      "cgSource": "BZTA.gro",
+      "topologySource": "models_itps_opt-poly_BZTA.itp",
+      "mappingSource": "BZTA_oplsaaTOcg_cgbuilder.ndx",
+      "unmappedAAIndices": [],
+      "sections": {
+        "moleculetype": 1,
+        "atoms": 5,
+        "bonds": 0,
+        "constraints": 5,
+        "dihedrals": 1,
+        "virtual_sitesn": 1,
+        "exclusions": 4
+      }
+    }
+  ],
+  "totals": {
+    "aaAtoms": 80,
+    "cgAtoms": 22
+  }
+}

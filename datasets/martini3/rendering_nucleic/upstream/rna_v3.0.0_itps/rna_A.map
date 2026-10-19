@@ -1,0 +1,20 @@
+; Martini 3.0 RNA Adenine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : N9, C8, H8          (TA0)
+; SC2 : N3, C4              (TA1)
+; SC3 : N1, C2, H2          (TA2)
+; SC4 : N6, C6, H61, H62    (TA3)
+; SC5 : N7, C5              (TA4)
+
+[ mapping ]
+SC1  N9 C8 H8
+SC2  N3 C4
+SC3  N1 C2 H2
+SC4  N6 C6 H61 H62
+SC5  N7 C5
+
+[ atomtypes ]
+SC1  TA0  0  45
+SC2  TA1  0  0
+SC3  TA2  0  45
+SC4  TA3  0  45
+SC5  TA4  0  0

@@ -1,0 +1,162 @@
+[
+  {
+    "name": "ubiquitin_0",
+    "count": 1,
+    "atoms": 166
+  },
+  {
+    "name": "ompa_1_0",
+    "count": 1,
+    "atoms": 45
+  },
+  {
+    "name": "ompa_2_0",
+    "count": 1,
+    "atoms": 83
+  },
+  {
+    "name": "ompa_3_0",
+    "count": 1,
+    "atoms": 181
+  },
+  {
+    "name": "ompa_4_0",
+    "count": 1,
+    "atoms": 27
+  },
+  {
+    "name": "gpa_1_0",
+    "count": 1,
+    "atoms": 91
+  },
+  {
+    "name": "gpa_2_0",
+    "count": 1,
+    "atoms": 91
+  },
+  {
+    "name": "rendering_dna",
+    "count": 1,
+    "atoms": 190
+  },
+  {
+    "name": "rendering_rna",
+    "count": 1,
+    "atoms": 595
+  },
+  {
+    "name": "CHOL",
+    "count": 1,
+    "atoms": 9
+  },
+  {
+    "name": "POPC",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "DPPC",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "DOPC",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "POPE",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "DOPE",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "POPS",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "POPG",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "POPA",
+    "count": 1,
+    "atoms": 11
+  },
+  {
+    "name": "PSM",
+    "count": 1,
+    "atoms": 12
+  },
+  {
+    "name": "TO",
+    "count": 1,
+    "atoms": 15
+  },
+  {
+    "name": "PCER",
+    "count": 1,
+    "atoms": 11
+  },
+  {
+    "name": "DEP_SND3",
+    "count": 1,
+    "atoms": 2882
+  },
+  {
+    "name": "DEP_POPC",
+    "count": 715,
+    "atoms": 12
+  },
+  {
+    "name": "DEP_POPE",
+    "count": 514,
+    "atoms": 12
+  },
+  {
+    "name": "DEP_POPI",
+    "count": 186,
+    "atoms": 15
+  },
+  {
+    "name": "DEP_POPC",
+    "count": 727,
+    "atoms": 12
+  },
+  {
+    "name": "DEP_POPE",
+    "count": 523,
+    "atoms": 12
+  },
+  {
+    "name": "DEP_POPI",
+    "count": 189,
+    "atoms": 15
+  },
+  {
+    "name": "LIG_CAFF",
+    "count": 1,
+    "atoms": 7
+  },
+  {
+    "name": "LIG_CLPR",
+    "count": 1,
+    "atoms": 5
+  },
+  {
+    "name": "LIG_INDO",
+    "count": 1,
+    "atoms": 5
+  },
+  {
+    "name": "LIG_BZTA",
+    "count": 1,
+    "atoms": 5
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "ubiquitin",
+    "source": "1UBQ",
+    "atoms": 602,
+    "secondaryStructure": "EEEEEEECCEEEEEEEECCCCCHHHHHHHHHHHHCCCCCEEEEEECCEEECCCCCHHHHCCCCEEEEEEEEECCCC"
+  },
+  {
+    "name": "ompa_1",
+    "source": "1QJP",
+    "atoms": 136,
+    "secondaryStructure": "CCCCCEEEEEEEEEEEC"
+  },
+  {
+    "name": "ompa_2",
+    "source": "1QJP",
+    "atoms": 263,
+    "secondaryStructure": "CCCEEEEEEEEEEEEECCEEEEEEEEEEEECCC"
+  },
+  {
+    "name": "ompa_3",
+    "source": "1QJP",
+    "atoms": 589,
+    "secondaryStructure": "CEEEEEEEEEEEEEEECCCCEEEEEEEEEEEEEEEEECCCCCEEEEEEEEEEEEEEEEEEEECCEEEEEEEEEEC"
+  },
+  {
+    "name": "ompa_4",
+    "source": "1QJP",
+    "atoms": 90,
+    "secondaryStructure": "CEEEEEEEEECC"
+  },
+  {
+    "name": "gpa_1",
+    "source": "1AFO",
+    "atoms": 661,
+    "secondaryStructure": "CCCCCCCCCCHHHHHHHHHHHHHHHHHHHHHHHHHHHCCC"
+  },
+  {
+    "name": "gpa_2",
+    "source": "1AFO",
+    "atoms": 661,
+    "secondaryStructure": "CCCCCCCCCCHHHHHHHHHHHHHHHHHHHHHHHHHHHCCC"
+  }
+]

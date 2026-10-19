@@ -1,0 +1,23 @@
+; Martini 3.0 DNA Guanine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : C8, H8, N9       (TN1)
+; SC2 : C4, N3           (TN3a)
+; SC3 : C2, N2, H21, H22 (TP1d)
+; SC4 : N1               (TN5d)
+; SC5 : C6, O6           (TP1a)
+; SC6 : C5, N7           (TN2a)
+
+[ mapping ]
+SC1  C8 H8 N9
+SC2  C4 N3
+SC3  C2 N2 H21 H22
+SC4  N1 H1
+SC5  C6 O6
+SC6  C5 N7
+
+[ atomtypes ]
+SC1  TDG0  0  50
+SC2  TDG1  0  0
+SC3  TDG2  0  50
+SC4  TDG3  0  0
+SC5  TDG4  0  50
+SC6  TDG5  0  0

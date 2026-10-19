@@ -1,0 +1,22 @@
+[ bonds ]
+; i  j  funct  length  force.c.
+    0       1    1    0.2354     30000 ; BB1-BB2
+    1       2    1    0.2744     30000 ; BB2-BB3
+    1       0    1    0.5104   2552.2761 ; BB2-BB1n
+    2       0    1    0.4153   2420.2505 ; BB3-BB1n
+
+[ angles ]
+; i  j  k  funct  angle  force.c.
+    0       1       0   10   125.1247   89.5156 ; BB1-BB2-BB1n
+    1       0       1   10   109.6404   156.3397 ; BB2-BB1n-BB2n
+    0       1       2   10   104.9346   63.2648 ; BB1-BB2-BB3
+
+[ dihedrals ]
+; i  j  k  l  funct  angle  force.c.  mult
+    0       1       0       1    9   52.0027    4.0472         1 ; BB1-BB2-BB1n-BB2n
+   -2       0       1       0    9   -26.4825   44.9555         1 ; BB2p-BB1-BB2-BB1n
+   -2       0       1       2    9   -74.9287   24.7797         1 ; BB2p-BB1-BB2-BB3
+
+[ exclusions ]
+0  2  ; BB1-BB3
+2  0  ; BB3-BB1n

@@ -1,0 +1,72 @@
+[
+  {
+    "residue": 10,
+    "original": "2MG",
+    "parent": "G"
+  },
+  {
+    "residue": 16,
+    "original": "H2U",
+    "parent": "U"
+  },
+  {
+    "residue": 17,
+    "original": "H2U",
+    "parent": "U"
+  },
+  {
+    "residue": 26,
+    "original": "M2G",
+    "parent": "G"
+  },
+  {
+    "residue": 32,
+    "original": "OMC",
+    "parent": "C"
+  },
+  {
+    "residue": 34,
+    "original": "OMG",
+    "parent": "G"
+  },
+  {
+    "residue": 37,
+    "original": "YYG",
+    "parent": "G"
+  },
+  {
+    "residue": 39,
+    "original": "PSU",
+    "parent": "U"
+  },
+  {
+    "residue": 40,
+    "original": "5MC",
+    "parent": "C"
+  },
+  {
+    "residue": 46,
+    "original": "7MG",
+    "parent": "G"
+  },
+  {
+    "residue": 49,
+    "original": "5MC",
+    "parent": "C"
+  },
+  {
+    "residue": 54,
+    "original": "5MU",
+    "parent": "U"
+  },
+  {
+    "residue": 55,
+    "original": "PSU",
+    "parent": "U"
+  },
+  {
+    "residue": 58,
+    "original": "1MA",
+    "parent": "A"
+  }
+]

@@ -1,0 +1,17 @@
+; Martini 3.0 RNA Uracil Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : N1, C5, C6          (TU0)
+; SC2 : C2, O2              (TU1)
+; SC3 : N3                  (TU2)
+; SC4 : C4, O4              (TU3)
+
+[ mapping ]
+SC1  N1 C5 C6
+SC2  C2 O2
+SC3  N3
+SC4  C4 O4
+
+[ atomtypes ]
+SC1  TU0  0  37
+SC2  TU1  0  37
+SC3  TU2  0  0
+SC4  TU3  0  37

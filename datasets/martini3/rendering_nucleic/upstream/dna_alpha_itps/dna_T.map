@@ -1,0 +1,20 @@
+; Martini 3.0 DNA Thymine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : N1, C6  (TN1)
+; SC2 : C2, O2  (TP1a)
+; SC3 : N3      (TN5d)
+; SC4 : C4, O4  (TP1a)
+; SC5 : C5, C7  (TC3)
+
+[ mapping ]
+SC1  N1 C6 
+SC2  C2 O2
+SC3  N3 H3
+SC4  C4 O4
+SC5  C5 C7 H6 H71 H72 H73
+
+[ atomtypes ]
+SC1  TDT0  0  50
+SC2  TDT1  0  50
+SC3  TDT2  0  0
+SC4  TDT3  0  50
+SC5  TC3  0  0

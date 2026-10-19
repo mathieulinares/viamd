@@ -1,0 +1,569 @@
+{
+  "aaSource": {
+    "path": "datasets/rendering_all_atom_all_lipids.gro",
+    "sha256": "1dee6cbbfb772afbdde947263b2e812bd9d1e48e727c8d3086655bf2d81b4a33",
+    "centerDefinition": "arithmetic centroid of all atoms in each AA residue"
+  },
+  "requestedSlots": 17,
+  "availableMolecules": 12,
+  "atoms": 142,
+  "unsupported": [
+    "CDL",
+    "LPC",
+    "GLC",
+    "GAL",
+    "GNG"
+  ],
+  "entries": [
+    {
+      "slot": 1,
+      "aaResidue": "CHL",
+      "aaResidueNumber": 1,
+      "aaAtoms": 74,
+      "aaElementCountsFromAtomNames": {
+        "O": 1,
+        "C": 27,
+        "H": 46
+      },
+      "molecule": "CHOL",
+      "description": "Cholesterol",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_sterols_v1.itp",
+      "atoms": 9,
+      "charge": 0,
+      "centerNm": [
+        23.963851351351355,
+        11.965810810810808,
+        1.9692972972972975
+      ],
+      "topologyRecords": {
+        "bonds": 1,
+        "constraints": 3,
+        "angles": 1,
+        "dihedrals": 1,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 5,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 4.428390265598381e-9,
+      "rmsBondOrConstraintErrorNm": 2.2144660018971483e-9,
+      "maxConstraintErrorNm": 6.79369893674675e-11,
+      "maxAngleErrorDegrees": 0.000008046025811836444,
+      "objective": 8.80138615537585e-14
+    },
+    {
+      "slot": 2,
+      "aaResidue": "POPC",
+      "aaResidueNumber": 100,
+      "aaAtoms": 134,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 8,
+        "N": 1,
+        "C": 42,
+        "H": 82
+      },
+      "molecule": "POPC",
+      "description": "16:0/18:1 phosphatidylcholine",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PC_v2.itp",
+      "atoms": 12,
+      "charge": 0,
+      "centerNm": [
+        34.98390298507463,
+        4.043671641791043,
+        2.537492537313432
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 2.6406504705089873e-8,
+      "rmsBondOrConstraintErrorNm": 1.0264607152311261e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.000043534084824159436,
+      "objective": 2.0610871902569106e-12
+    },
+    {
+      "slot": 3,
+      "aaResidue": "DPPC",
+      "aaResidueNumber": 101,
+      "aaAtoms": 130,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 8,
+        "N": 1,
+        "C": 40,
+        "H": 80
+      },
+      "molecule": "DPPC",
+      "description": "16:0/16:0 phosphatidylcholine",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PC_v2.itp",
+      "atoms": 12,
+      "charge": 0,
+      "centerNm": [
+        45.09829999999999,
+        4.044907692307691,
+        2.4743615384615394
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 4.0336494255832633e-8,
+      "rmsBondOrConstraintErrorNm": 1.7078072161740755e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.0000920493117746446,
+      "objective": 6.9642901576462735e-12
+    },
+    {
+      "slot": 4,
+      "aaResidue": "DOPC",
+      "aaResidueNumber": 102,
+      "aaAtoms": 138,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 8,
+        "N": 1,
+        "C": 44,
+        "H": 84
+      },
+      "molecule": "DOPC",
+      "description": "18:1/18:1 phosphatidylcholine",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PC_v2.itp",
+      "atoms": 12,
+      "charge": 0,
+      "centerNm": [
+        54.96048550724638,
+        4.004304347826087,
+        2.5574710144927546
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 2.6224672933228277e-8,
+      "rmsBondOrConstraintErrorNm": 1.5818102589359317e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00007202515726589809,
+      "objective": 4.08480494380152e-12
+    },
+    {
+      "slot": 5,
+      "aaResidue": "POPE",
+      "aaResidueNumber": 103,
+      "aaAtoms": 125,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 8,
+        "N": 1,
+        "C": 39,
+        "H": 76
+      },
+      "molecule": "POPE",
+      "description": "16:0/18:1 phosphatidylethanolamine",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PE_v2.itp",
+      "atoms": 12,
+      "charge": 0,
+      "centerNm": [
+        64.968984,
+        3.949104000000001,
+        2.5944880000000006
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 3.672627740813894e-8,
+      "rmsBondOrConstraintErrorNm": 1.6611347791350395e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00009955797277427791,
+      "objective": 1.043294378927318e-11
+    },
+    {
+      "slot": 6,
+      "aaResidue": "DOPE",
+      "aaResidueNumber": 104,
+      "aaAtoms": 129,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 8,
+        "N": 1,
+        "C": 41,
+        "H": 78
+      },
+      "molecule": "DOPE",
+      "description": "18:1/18:1 phosphatidylethanolamine",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PE_v2.itp",
+      "atoms": 12,
+      "charge": 0,
+      "centerNm": [
+        34.967511627906966,
+        13.931558139534886,
+        2.449930232558139
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 4.0288501867991044e-8,
+      "rmsBondOrConstraintErrorNm": 1.8794264892192778e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00023832663511313967,
+      "objective": 3.883774233865514e-11
+    },
+    {
+      "slot": 7,
+      "aaResidue": "POPS",
+      "aaResidueNumber": 105,
+      "aaAtoms": 128,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 10,
+        "N": 1,
+        "C": 40,
+        "H": 76
+      },
+      "molecule": "POPS",
+      "description": "16:0/18:1 phosphatidylserine",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PS_v2.itp",
+      "atoms": 12,
+      "charge": -1,
+      "centerNm": [
+        45.054562499999996,
+        13.962531249999998,
+        2.5547656250000004
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 3.6040073092546976e-8,
+      "rmsBondOrConstraintErrorNm": 2.294507513908098e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00016307864343900746,
+      "objective": 1.726614341133234e-11
+    },
+    {
+      "slot": 8,
+      "aaResidue": "POPG",
+      "aaResidueNumber": 106,
+      "aaAtoms": 128,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 10,
+        "C": 40,
+        "H": 77
+      },
+      "molecule": "POPG",
+      "description": "16:0/18:1 phosphatidylglycerol",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PG_v2.itp",
+      "atoms": 12,
+      "charge": -1,
+      "centerNm": [
+        54.98950781249998,
+        14.0239609375,
+        2.516640624999999
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 3.042214030690715e-8,
+      "rmsBondOrConstraintErrorNm": 1.3154567943338718e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00008747743282810916,
+      "objective": 6.015355388778904e-12
+    },
+    {
+      "slot": 9,
+      "aaResidue": "POPA",
+      "aaResidueNumber": 107,
+      "aaAtoms": 117,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 8,
+        "C": 37,
+        "H": 71
+      },
+      "molecule": "POPA",
+      "description": "16:0/18:1 phosphatidic acid",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_PA_v2.itp",
+      "atoms": 11,
+      "charge": -1,
+      "centerNm": [
+        65.07842735042736,
+        14.054649572649568,
+        2.5427264957264946
+      ],
+      "topologyRecords": {
+        "bonds": 11,
+        "constraints": 0,
+        "angles": 9,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 2.2950065403648523e-8,
+      "rmsBondOrConstraintErrorNm": 1.1085840089910219e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00008031827647414502,
+      "objective": 4.636604211221623e-12
+    },
+    {
+      "slot": 10,
+      "aaResidue": "CDL",
+      "aaResidueNumber": 108,
+      "aaAtoms": 241,
+      "aaElementCountsFromAtomNames": {
+        "P": 2,
+        "O": 17,
+        "C": 81,
+        "H": 141
+      },
+      "description": "Cardiolipin: AA composition does not match published tetraoleoyl cardiolipin",
+      "status": "unsupported",
+      "centerNm": [
+        35.04023236514523,
+        23.92851452282159,
+        2.4956473029045645
+      ],
+      "atoms": 0
+    },
+    {
+      "slot": 11,
+      "aaResidue": "SPM",
+      "aaResidueNumber": 109,
+      "aaAtoms": 127,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 6,
+        "N": 2,
+        "C": 39,
+        "H": 79
+      },
+      "molecule": "PSM",
+      "description": "Palmitoyl sphingomyelin",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_phospholipids_SM_v2.itp",
+      "atoms": 12,
+      "charge": 0,
+      "centerNm": [
+        44.99296850393702,
+        24.0443937007874,
+        2.4677401574803164
+      ],
+      "topologyRecords": {
+        "bonds": 12,
+        "constraints": 0,
+        "angles": 10,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 1.2517720193727655e-8,
+      "rmsBondOrConstraintErrorNm": 5.465637840945702e-9,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00009233789930362946,
+      "objective": 8.201913909902995e-12
+    },
+    {
+      "slot": 12,
+      "aaResidue": "LPC",
+      "aaResidueNumber": 110,
+      "aaAtoms": 83,
+      "aaElementCountsFromAtomNames": {
+        "P": 1,
+        "O": 7,
+        "N": 1,
+        "C": 24,
+        "H": 50
+      },
+      "description": "Lysophosphatidylcholine",
+      "status": "unsupported",
+      "centerNm": [
+        55.01677108433735,
+        24.059048192771073,
+        2.5062048192771087
+      ],
+      "atoms": 0
+    },
+    {
+      "slot": 13,
+      "aaResidue": "TOG",
+      "aaResidueNumber": 111,
+      "aaAtoms": 167,
+      "aaElementCountsFromAtomNames": {
+        "O": 6,
+        "C": 57,
+        "H": 104
+      },
+      "molecule": "TO",
+      "description": "Triolein",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_triglycerides_v2.itp",
+      "atoms": 15,
+      "charge": 0,
+      "centerNm": [
+        65.05499401197606,
+        23.97114371257485,
+        2.6282694610778434
+      ],
+      "topologyRecords": {
+        "bonds": 15,
+        "constraints": 0,
+        "angles": 13,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 3.13135253837693e-8,
+      "rmsBondOrConstraintErrorNm": 1.500185242304412e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00014731987346294773,
+      "objective": 1.395620389582564e-11
+    },
+    {
+      "slot": 14,
+      "aaResidue": "CER",
+      "aaResidueNumber": 112,
+      "aaAtoms": 105,
+      "aaElementCountsFromAtomNames": {
+        "O": 3,
+        "N": 1,
+        "C": 34,
+        "H": 67
+      },
+      "molecule": "PCER",
+      "description": "Palmitoyl ceramide",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/Martini-Force-Field-Initiative/M3-Lipid-Parameters/2121527045696345069deb4d3df754724888a4f9/ITPs/martini_v3.0.0_ceramides_v2.itp",
+      "atoms": 11,
+      "charge": 0,
+      "centerNm": [
+        34.99996190476192,
+        33.97263809523809,
+        2.5176285714285713
+      ],
+      "topologyRecords": {
+        "bonds": 11,
+        "constraints": 0,
+        "angles": 9,
+        "dihedrals": 0,
+        "dihedral_restraints": 0,
+        "virtual_sites3": 0,
+        "virtual_sitesn": 0
+      },
+      "maxBondOrConstraintErrorNm": 8.365496156903518e-8,
+      "rmsBondOrConstraintErrorNm": 3.149991091008413e-8,
+      "maxConstraintErrorNm": 0,
+      "maxAngleErrorDegrees": 0.00014879661664224386,
+      "objective": 1.1886980517703028e-11
+    },
+    {
+      "slot": 15,
+      "aaResidue": "GLC",
+      "aaResidueNumber": 113,
+      "aaAtoms": 154,
+      "aaElementCountsFromAtomNames": {
+        "O": 8,
+        "N": 1,
+        "C": 50,
+        "H": 95
+      },
+      "description": "Glucocerebroside",
+      "status": "unsupported",
+      "centerNm": [
+        45.0083051948052,
+        33.96166883116883,
+        2.604512987012987
+      ],
+      "atoms": 0
+    },
+    {
+      "slot": 16,
+      "aaResidue": "GAL",
+      "aaResidueNumber": 114,
+      "aaAtoms": 135,
+      "aaElementCountsFromAtomNames": {
+        "O": 8,
+        "N": 1,
+        "C": 43,
+        "H": 83
+      },
+      "description": "Galactocerebroside",
+      "status": "unsupported",
+      "centerNm": [
+        55.04695555555554,
+        33.93962222222222,
+        2.4806148148148135
+      ],
+      "atoms": 0
+    },
+    {
+      "slot": 17,
+      "aaResidue": "GNG",
+      "aaResidueNumber": 115,
+      "aaAtoms": 191,
+      "aaElementCountsFromAtomNames": {
+        "O": 22,
+        "N": 2,
+        "C": 59,
+        "H": 108
+      },
+      "description": "Ganglioside: AA oxygenation does not match published GM3",
+      "status": "unsupported",
+      "centerNm": [
+        64.93640314136125,
+        34.06696335078533,
+        2.4688219895287946
+      ],
+      "atoms": 0
+    }
+  ]
+}

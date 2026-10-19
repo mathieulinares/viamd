@@ -1,0 +1,17 @@
+; Martini 3.0 DNA Cytosine Sidechain AA-to-CG Mapping v3.0.0
+; SC1 : N1, C5, C6          (SN2)
+; SC2 : C2, O2              (TP1a)
+; SC3 : N3                  (TN5a)
+; SC4 : N4, C4, H41, H42    (TP2d)
+
+[ mapping ]
+SC1  N1 C5 C6 H5 H6
+SC2  C2 O2
+SC3  N3
+SC4  N4 C4 H41 H42
+
+[ atomtypes ]
+SC1  TDY0  0  37
+SC2  TDY1  0  37
+SC3  TDY2  0  0
+SC4  TDY3  0  37

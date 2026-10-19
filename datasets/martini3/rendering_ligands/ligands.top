@@ -1,0 +1,11 @@
+#include "../martini_v3.0.0.itp"
+#include "includes.itp"
+
+[ system ]
+Four published Martini 3 ligands
+
+[ molecules ]
+LIG_CAFF 1
+LIG_CLPR 1
+LIG_INDO 1
+LIG_BZTA 1

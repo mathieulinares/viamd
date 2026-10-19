@@ -1,0 +1,24 @@
+#include "/home/tb/samukher/DATA/FF/martini_v300/martini_v3.0.0.itp"
+#include "/home/tb/samukher/DATA/FF/martini_v300/martini_v3.0.0_ions_v1.itp"
+#include "/home/tb/samukher/DATA/FF/martini_v300/martini_v3.0.0_phospholipids_v1.itp"
+#include "/home/tb/samukher/DATA/FF/martini_v300/martini_v3.0_phosphoinositides_v1.0.itp"
+#include "/home/tb/samukher/DATA/FF/martini_v300/martini_v3.0.0_solvents_v1.itp"
+#include "./molecule_0.itp"
+
+[ system ]
+; name
+molecule_0 in INSANE! Membrane UpperLeaflet>POPC:POPE:POPI=50.51:36.34:13.15 LowerLeaflet>POPC:POPE:POPI=50.51:36.34:13.15
+
+
+[ molecules ]
+; name  number
+molecule_0          1
+POPC           715
+POPE           514
+POPI           186
+POPC           727
+POPE           523
+POPI           189
+W           109531
+NA            1194
+CL            1218
