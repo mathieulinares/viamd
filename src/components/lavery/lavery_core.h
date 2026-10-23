@@ -1,6 +1,8 @@
 #pragma once
 
 #include <core/md_vec_math.h>
+#include <md_hbond.h>
+#include <md_attributes.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -73,7 +75,10 @@ enum SampleQuality : uint16_t {
     Quality_NonfiniteCoordinates = 1 << 7,
     Quality_DegenerateBase = 1 << 8,
     Quality_MissingAtoms = 1 << 9,
+    Quality_NoPairContacts = 1 << 10,
+    Quality_NoncanonicalPair = 1 << 11,
 };
+constexpr uint16_t Quality_Last = Quality_NoncanonicalPair;
 
 uint16_t pair_quality(const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr);
 const char* quality_description(uint16_t flag);
@@ -123,6 +128,14 @@ struct MetricStatistics {
 
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count);
 
+struct DistributionComparison {
+    std::vector<double> centers, density; // density is member-major, shared bins
+    std::vector<size_t> valid;
+    double bin_width = 0;
+};
+bool compute_distributions(DistributionComparison* out, const std::vector<float>& values,
+                           size_t member_count, size_t bins = 48);
+
 struct FrameOutliers {
     size_t outliers = 0;
     size_t valid = 0;
@@ -170,6 +183,61 @@ bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& 
 // Trajectory evaluation: reject absent fixed partners and clear stale values/frames.
 bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t* quality,
                                const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr);
+
+struct PairContact {
+    uint32_t donor = 0, acceptor = 0;
+    bool explicit_hydrogen = false;
+};
+
+struct PairChemistry {
+    std::vector<PairContact> contacts;
+    bool uses_hydrogens = false;
+    size_t expected_contacts = 2;
+};
+
+class PairingValidator {
+public:
+    PairingValidator() = default;
+    ~PairingValidator();
+    PairingValidator(const PairingValidator&) = delete;
+    PairingValidator& operator=(const PairingValidator&) = delete;
+    bool initialize(const md_system_t& sys, const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs);
+    bool evaluate(std::vector<uint16_t>& quality, std::vector<uint8_t>& contacts,
+                  const md_system_state_t& state) const;
+    const std::vector<PairChemistry>& chemistry() const { return pairs_; }
+private:
+    md_hbond_query_t query_ = {};
+    std::vector<PairChemistry> pairs_;
+    bool initialized_ = false;
+};
+
+// Canonical contacts are directional donor -> acceptor. Missing hydrogens use
+// >=2 heavy-atom contacts <=3.5 A, explicitly a proxy rather than H-bond evidence.
+uint16_t evaluate_pair_contacts(uint8_t* count, const PairChemistry& pair,
+                                const md_system_state_t& state, const md_hbond_set_t& bonds);
+
+struct FrameAnalysis {
+    std::vector<BasePairFrame> pair_frames;
+    std::vector<Values> pair_values, step_values;
+    std::vector<uint16_t> pair_quality, step_quality;
+    std::vector<uint8_t> contacts;
+};
+bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
+                    const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                    const std::vector<StepIndex>& steps, const PairingValidator& validator);
+
+struct AxisPath {
+    std::vector<vec3_t> points;
+    std::vector<vec3_t> tangents;
+    std::vector<size_t> offsets; // [segment_count + 1], no connection across gaps
+};
+AxisPath compute_axis(const std::vector<BasePairFrame>& frames, const std::vector<StepIndex>& steps,
+                       const md_unitcell_t* cell = nullptr, int samples_per_step = 8);
+std::string csv_axis(const std::string& run, double frame, const AxisPath& axis);
+
+bool publish_series(md_attributes_t* table, const std::string& run, const char* leaf, const char* label,
+                     md_attribute_type_t type, size_t frames, size_t members,
+                     const void* data, size_t bytes, md_unit_t unit);
 
 // The six step values use consecutive pair midpoint frames.
 bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b);

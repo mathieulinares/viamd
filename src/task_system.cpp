@@ -256,6 +256,11 @@ bool task_is_running(ID id) {
     return Task->m_id == id ? Task->Running() : false;
 }
 
+bool task_is_interrupted(ID id) {
+    const AsyncTask& task = pool::task_data[get_slot_idx(id)];
+    return task.m_id == id && task.m_interrupt.load();
+}
+
 str_t task_label(ID id) {
     uint32_t slot_idx = get_slot_idx(id);
     AsyncTask* Task = &pool::task_data[slot_idx];

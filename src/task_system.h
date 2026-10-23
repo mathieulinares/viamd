@@ -52,6 +52,8 @@ size_t pool_running_tasks(ID* out_id_arr, size_t id_arr_cap);
 
 // These are safe to call with an invalid id, in such case, they will just return some default value
 bool  task_is_running(ID);
+// Single-callback tasks can cooperate with per-task and global pool interruption.
+bool  task_is_interrupted(ID);
 str_t task_label(ID);
 float task_fraction_complete(ID);
 

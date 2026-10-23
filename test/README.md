@@ -85,6 +85,15 @@ cmake --build build --target viamd viamd_test
 build/bin/viamd_test --filter='lavery_core*'
 ```
 
+`test_lavery_analysis.cpp` additionally tests the production per-frame pipeline,
+canonical H-bond gating, explicit-H versus heavy-contact fallback, loss/recovery
+and adjacent-link exclusion, periodic/gap-aware smoothed axes and unit tangents,
+shared distribution bins and density normalization, displayed-axis CSV shape,
+run-relative script compilation **and evaluation**, publication/replacement and
+cleanup. Task-system regressions cover cooperative interruption inside a single
+callback and a queued callback interrupted before execution. No GUI launch is
+needed for these checks.
+
 `src/components/lavery/tests/test_lavery_core.cpp` checks all 12 intra-pair and
 step metrics against the numerical oracle in its `data/` folder. The oracle was
 generated locally with the official Curves+ v3.0nc executable and its
@@ -107,6 +116,35 @@ The defaults are `fit=T` and `refo=F`. Sections B and C of `reference.lis`
 provide the six metrics for 147 pairs and 146 steps. Store rotation components
 before translation components, as in the Lavery metric enum. The test tolerances
 of 0.06 degree and 0.006 Angstrom allow for the listing's rounding.
+
+### Independent RNA reference
+
+`src/components/lavery/tests/data/lavery_1rna.pdb` contains only coordinate,
+chain-boundary and unit-cell records from the public
+[RCSB 1RNA PDB data](https://files.rcsb.org/download/1RNA.pdb), the A-U RNA
+duplex U(U-A)6A (Dock-Bregeon et al., 1989,
+<https://doi.org/10.1016/0022-2836(89)90010-7>).
+The accompanying `lavery_rna_curves_reference.h` contains the 14 intra-pair and
+13 inter-pair reference rows from the official Curves+ v3.0nc calculation:
+
+```
+&inp file=lavery_1rna.pdb, lis=rna_reference, lib=standard, &end
+2 1 -1 0 0
+1:14
+28:15
+```
+
+The same tolerances apply. All 162 RNA parameter values pass through the
+production canonical-contact validity pipeline, using the explicitly labeled
+hydrogen-free heavy-atom fallback. Numerical fitting of the DNA fixture still
+checks all 1,758 reference transforms independently of contact validity; its
+production pipeline separately rejects one geometrically calculable pair with
+no canonical H-bonds, leaving 146 valid pairs and 144 valid inter-pair links.
+
+The midpoint-axis tests validate the documented smoothing/interpolation
+algorithm, not equivalence to Curves+'s screw-axis method. Docking, plot gestures,
+and 3D appearance require the user's manual GUI testing.
+
 ## Note on global state
 
 The event system and the task system are both global and neither offers a way to unregister. Tests

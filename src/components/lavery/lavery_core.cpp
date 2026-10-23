@@ -139,6 +139,8 @@ const char* quality_description(uint16_t flag) {
     case Quality_NonfiniteCoordinates: return "Nonfinite atomic coordinates";
     case Quality_DegenerateBase: return "Degenerate or invalid fitted base frame";
     case Quality_MissingAtoms: return "Required reference-fit or base-ring atoms are missing";
+    case Quality_NoPairContacts: return "No canonical H-bond remains, or fewer than two canonical heavy-atom contacts without hydrogens";
+    case Quality_NoncanonicalPair: return "Not a supported A-T/U or G-C pair, or canonical contact atoms are missing";
     default: return "Good";
     }
 }
@@ -241,7 +243,7 @@ std::string csv_sample(const CsvSample& s) {
         metric_is_angular(s.metric) ? "deg" : "Angstrom", s.value, std::isfinite(s.value) ? 1 : 0, s.quality);
     row += buf;
     std::string reason;
-    for (uint16_t bit = 1; bit <= Quality_MissingAtoms; bit <<= 1) {
+    for (uint16_t bit = 1; bit <= Quality_Last; bit <<= 1) {
         if (s.quality & bit) {
             if (!reason.empty()) reason += "; ";
             reason += quality_description(bit);

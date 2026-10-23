@@ -55,41 +55,81 @@ parameters follow [Lavery et al. (2009)](https://pmc.ncbi.nlm.nih.gov/articles/P
 The second base uses the Watson-Crick dyad convention; reverse Watson-Crick
 pairs and noncanonical bases are not supported.
 
+### Workspace
+
+Lavery is a synchronized, resizable three-panel workspace rather than one long
+scrolling analysis window:
+
+- **Overview:** outlier-count timeline and a heatmap that fills the remaining space.
+- **Inspector:** selected-member timeline, normalized distribution comparisons,
+  and severity-ranked current-frame outliers.
+- **Events & quality:** event table and per-member pairing evidence/coverage.
+
+Drag panel tabs to rearrange or detach them. The shared header selects
+**Intra-base pair** or **Inter-base pair**, parameter, member, frame, tolerance,
+and aggregate-outlier parameters. **Settings / Export** contains display options,
+exports, recomputation, and **Reset panel layout**. Panel docking is retained by
+VIAMD's normal ImGui layout persistence. Plot time navigation and selection
+remain linked across all panels and Animation.
+
 All 12 intra-pair/step parameters are regression-tested against the
 [official Curves+ v3.0nc program](https://curvesplus.bsc.es/misc)
 (`fit=T`, `refo=F`) across the repository's nucleosome structure: 147 pairs and
-146 steps, to 0.006 Angstrom and 0.06 degree, allowing for reference output
-rounding. This does not validate every nucleic-acid conformation or implement
+146 steps, and the A-U RNA duplex [RCSB 1RNA](https://www.rcsb.org/structure/1RNA):
+14 pairs and 13 steps, to 0.006 Angstrom and 0.06 degree, allowing for reference
+output rounding. This does not validate every nucleic-acid conformation or implement
 Curves+'s helical-axis analysis; the module remains experimental.
 
 Frame-zero pair detection uses geometric pairing
 criteria (ring-center distance 3-9 Angstrom, absolute normal alignment at least
 0.75, and displacement along either normal at most 2.5 Angstrom).
-After frame zero, fixed partner identities are tracked, but pairing is
-rechecked using the same criteria at every frame. A pair that fails is
+Only canonical A-T/U and G-C identities with the required contact atoms are
+retained. Fixed identities are tracked even if their first-frame contacts are
+already broken. At every frame, geometric criteria are combined with canonical,
+directional donor-acceptor contacts:
+
+- With explicit donor hydrogens, at least one canonical H-bond must remain,
+  evaluated by mdlib's GROMACS criterion (D-A <=3.5 Angstrom and H-D-A <=30 degrees).
+  Multiple hydrogens on one donor do not double-count a contact.
+- When neither partner has a hydrogen on its canonical donors, at least two
+  canonical heavy-atom contacts must be within 2.0-3.5 Angstrom. This is labeled
+  **heavy-atom proxy**, not H-bond evidence. Partial hydrogen coverage does not
+  silently fall back to the distance-only rule.
+
+A pair that fails is
 unavailable (NaN), even if its relative transform remains mathematically
 calculable. Both adjoining steps are also unavailable. Such samples are
 excluded from means, standard deviations, outlier counts and events; they are
 not interpreted as zero outliers. Quality flags explain the failed criteria,
-which are geometric proxies, not proof of hydrogen-bond rupture.
+not an energetic or definitive chemical classification.
 Missing/unsupported reference atoms,
 nonfinite coordinates, degenerate fitted frames and ambiguous relative transforms
 still produce NaNs. A step is missing when an adjacent pair has no calculable
 frame or its own transform is ambiguous. Distortions within the pairing criteria
 remain measurable. Heatmap tooltips explain sample quality and missing
 data, and the current-frame coverage readout reports valid members and quality
-flags. Analysis is recomputed when the dataset loads, removing broken-pair
-transforms from baselines produced by the earlier experimental implementation.
+flags. The header distinguishes **valid / tracked** pair and inter-pair counts:
+N-1 inter-pair links only applies to an uninterrupted chain. One unavailable
+internal pair invalidates two neighboring links; gaps and strand boundaries
+are never bridged. For the nucleosome structure fixture, the 147 tracked pairs
+include one without canonical H-bonds (one-based pair 127, D-A distances about
+4.86 and 4.20 Angstrom), giving 146 valid pairs and 144 valid links among the
+146 tracked links. Analysis is recomputed on dataset/run changes.
 
 The heatmap shows frames on X and all detected base pairs or steps on Y for the
 selected parameter. Click a cell to select its member; Ctrl-click jumps to its
 frame without changing the selected member, and Ctrl-drag scrubs through frames.
-Ordinary dragging pans without changing the selection. The taller heatmap can be resized vertically
-by dragging its bottom border. Mouse-wheel zoom over an axis affects only that
+Ordinary dragging pans without changing the selection. Resize the Overview panel
+to resize its heatmap. Mouse-wheel zoom over an axis affects only that
 axis; pan/zoom stay within the data bounds. Direct frame/member inputs, a
 selected-member guide and a Reset view button simplify navigation. Angular values
 are in degrees, translations in Angstroms, and heatmap colors are per-member
-trajectory z-scores. Script attributes include `attr("lavery/step/twist")`.
+trajectory z-scores, cyan for negative and crimson for positive deviations.
+Script attributes include `attr("lavery/step/twist")`. These resolve relative to
+the evaluated run; no root-level temporal aliases shadow the run-relative paths.
+Diagnostic attributes are `lavery/bp/quality`, `lavery/step/quality`,
+`lavery/bp/contact_count`, and `lavery/bp/hydrogen_evidence` (1 for explicit
+hydrogens, 0 for the heavy-atom proxy). Each is shaped [frames, members].
 Per-member finite-sample means and population standard deviations are cached
 after trajectory analysis. Constant finite series have zero z-score; missing
 samples remain NaN and are rendered as transparent heatmap cells. Pair labels
@@ -116,11 +156,17 @@ Hover for outlier and valid-member counts. Missing samples are excluded, constan
 finite series count as valid but not outlying, and frames with no valid samples
 are gaps rather than zero-outlier frames.
 
-The parameter-value timeline can optionally overlay all members; the distribution remains
-specific to the selected member. The current-frame outlier list covers all
+The parameter-value timeline can optionally overlay all members. The Inspector's
+**Compare with** selector overlays distributions of additional members alongside
+the selected one, using shared bin edges and individually normalized probability
+densities over finite samples. Comparisons are cached per parameter; empty
+members are not plotted. The current-frame outlier list covers all
 members of the active parameter. Viewport synchronization highlights the base
 atoms of **all** members exceeding the selected sigma threshold, using VIAMD's
-normal highlight style, not a dedicated emissive/glow overlay. Hovering a row in
+normal highlight style. A separate signed base-ring overlay uses crimson for
+positive and cyan for negative deviations, with optional soft transparent halos.
+Shared bases take the sign of their most severe selected contributor. These are
+unlit, always-visible overlays, **not physically emissive bloom**. Hovering a row in
 the current-frame outlier list temporarily highlights only that pair/step,
 including when automatic highlighting is off. Leaving the row restores the
 automatic mode; clicking a row selects the member, updates its timeline and
@@ -153,9 +199,10 @@ no-data frames. Each event reports its frame span, elapsed time between endpoint
 samples, peak absolute z-score and its frame, and maximum simultaneous outlier
 count. Clicking an event jumps to its severity peak. A one-frame event has zero
 elapsed duration. Count/tolerance controls stay above a separately scrollable
-detail area; member timelines and distributions are collapsed until requested.
+workspace; events/quality live in their own panel, and Inspector timeline and
+distribution sections are initially expanded.
 
-**Export CSV** writes all six parameters of the current class over all frames
+**Settings / Export > Export parameter CSV** writes all six parameters of the current class over all frames
 and members, not just outliers. Rows include run, frame, displayed time/unit,
 member and residue/pair identities, raw value/unit, validity, quality flags and
 reasons, baseline mean/population SD, z-score, sigma, selected-parameter mask,
@@ -165,6 +212,29 @@ Selection bits 0-5 follow
 Buckle/Propeller/Opening/Shear/Stretch/Stagger or
 Tilt/Roll/Twist/Shift/Slide/Rise. Export each class separately to obtain all 12
 parameters. Failed writes are reported in the application log.
+
+### Displayed midpoint axis and calculation lifecycle
+
+The optional gold **smoothed midpoint axis** is built from valid pair-frame
+origins. It unwraps each connected segment independently using periodic images,
+applies a local binomial smoothing filter, and samples a cubic Hermite /
+Catmull-Rom centerline. Broken pairs and topology gaps split the spline.
+Geometry is fitted from the currently displayed/interpolated coordinates in
+the lattice frame and transformed back with VIAMD's display rotation.
+Invalid displayed geometry and unavailable nearest-frame samples are omitted.
+This is a visualization of pair midpoints, **not the Curves+ screw/helical axis**,
+and does not add Curves+ axis-relative helical parameters.
+
+**Export displayed axis CSV** writes run, fractional displayed frame, segment,
+sample, displayed coordinates in Angstrom, and unit tangents. It requires an
+enabled axis with at least one valid connected segment.
+
+Analysis shows frame progress and a **Cancel analysis** button. Cancellation
+cooperates with VIAMD's global task interruption; reset, dataset/run changes,
+and shutdown wait for the worker before releasing its storage. Failed/cancelled
+runs have a visible retry action and never publish partial results. Script
+readers finish before analysis attributes are replaced or removed, and publication
+failures are reported rather than shown as successful calculations.
 
 ## Update
 If you want to stay informed about the latest updates of VIAMD, please register your email address on the [form](https://forms.gle/fAxuWob8nMLcrS5h9). 

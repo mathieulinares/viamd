@@ -112,3 +112,39 @@ UTEST(viamd_task_system, a_completed_task_reports_completion) {
     EXPECT_FALSE(task_system::task_is_running(task_system::INVALID_ID));
     task_system::task_wait_for(task_system::INVALID_ID);
 }
+
+UTEST(viamd_task_system, a_single_callback_cooperates_with_pool_interruption) {
+    ensure_task_system();
+    std::atomic<bool> started = false, interrupted = false;
+    task_system::ID id = task_system::INVALID_ID;
+    id = task_system::create_pool_task(STR_LIT("cooperative cancellation"), [&]() {
+        started = true;
+        for (int i = 0; i < 1000; ++i) {
+            if (task_system::task_is_interrupted(id)) {
+                interrupted = true;
+                return;
+            }
+            md_thread_sleep(1);
+        }
+    });
+    task_system::enqueue_task(id);
+    for (int i = 0; i < 1000 && !started.load(); ++i) md_thread_sleep(1);
+    EXPECT_TRUE(started.load());
+    task_system::pool_interrupt_running_tasks();
+    task_system::task_wait_for(id);
+    EXPECT_TRUE(interrupted.load());
+    EXPECT_FALSE(task_system::task_is_running(id));
+    EXPECT_FALSE(task_system::task_is_interrupted(task_system::INVALID_ID));
+}
+
+UTEST(viamd_task_system, interrupted_queued_callback_never_runs_and_can_be_waited_for) {
+    ensure_task_system();
+    std::atomic<bool> ran = false;
+    const auto id = task_system::create_pool_task(STR_LIT("cancel before enqueue"), [&]() { ran = true; });
+    task_system::task_interrupt(id);
+    task_system::enqueue_task(id);
+    task_system::task_wait_for(id);
+    EXPECT_FALSE(ran.load());
+    EXPECT_FALSE(task_system::task_is_running(id));
+    task_system::task_interrupt_and_wait_for(id);
+}
