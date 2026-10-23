@@ -112,10 +112,21 @@ struct Values {
     float metric[Metric_Count] = {};
 };
 
+enum Baseline : int {
+    Baseline_MeanSD,     // mean and population standard deviation
+    Baseline_MedianMAD,  // median and 1.4826 * median absolute deviation (falls back to SD when MAD is 0)
+    Baseline_Count,
+};
+const char* baseline_name(Baseline baseline);
+
+// 'mean' and 'sd' are the baseline's center and scale (mean/SD or median/scaled MAD).
+// Angular baselines measure deviations on the circle, wrapped to [-180, 180) degrees.
 struct MemberStatistics {
     double mean = 0.0;
     double sd = 0.0;
     size_t count = 0;
+    bool angular = false;
+    double deviation(float value) const;
     float zscore(float value) const;
     bool is_outlier(float value, float sigma) const;
 };
@@ -126,7 +137,10 @@ struct MetricStatistics {
     std::vector<float> heatmap;
 };
 
-bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count);
+// Angular series are unwrapped around their circular mean before the baseline is computed, so
+// series that never approach +/-180 degrees from it give exactly the linear result.
+bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
+                        bool angular = false, Baseline baseline = Baseline_MeanSD);
 
 struct DistributionComparison {
     std::vector<double> centers, density; // density is member-major, shared bins
@@ -141,13 +155,112 @@ struct FrameOutliers {
     size_t valid = 0;
 };
 
-struct OutlierEvent {
-    size_t begin = 0, end = 0, peak = 0, peak_count = 0;
-    float severity = 0;
+// One member (base pair or step) in one frame that takes part in event detection: outlying at the
+// lower "continue" threshold, or a base pair whose pairing was lost. z holds all six signed z-scores.
+struct MemberOutlier {
+    uint32_t member = 0;
+    bool step = false;
+    bool lost = false;          // base pair only: pairing broke in this frame (no values)
+    uint32_t contributors = 0;  // bits 0-5 within the class, |z| >= continue threshold
+    uint32_t strong = 0;        // subset of contributors with |z| >= start threshold
+    float z[6] = {};
 };
 
-std::vector<OutlierEvent> collect_outlier_events(const std::vector<FrameOutliers>& counts,
-                                               const std::vector<float>& severity);
+// A member's involvement over a whole event.
+struct EventMember {
+    struct Sample {
+        size_t frame = 0;
+        uint32_t parameters = 0;
+        bool lost = false;
+    };
+    uint32_t member = 0;
+    bool step = false;
+    uint32_t parameters = 0;   // union of contributing parameter bits
+    size_t frames = 0;         // frames of the event in which the member is outlying or lost
+    size_t lost_frames = 0;    // of which the pair was lost
+    size_t peak = 0;           // frame of its most extreme contributing z-score (first lost frame if none)
+    float peak_z = 0;
+    int peak_parameter = -1;   // 0-5 within the class
+    size_t parameter_peak[6] = {};
+    float parameter_peak_z[6] = {};
+    std::vector<Sample> samples; // Frame-sorted contributions belonging to this event, excluding bridged gaps.
+};
+
+const EventMember::Sample* event_member_sample(const EventMember& member, size_t frame);
+
+struct OutlierEvent {
+    size_t parent = SIZE_MAX;  // Index in the returned event list, SIZE_MAX for a top-level event.
+    float burst_sigma = 0;    // Child start threshold; zero for a top-level event.
+    size_t begin = 0, end = 0, peak = 0, peak_count = 0;
+    float severity = 0;        // peak |z|
+    float score = 0;           // sum over (frame, member) of the largest contributing |z|; lost samples count lost_weight
+    size_t outlier_frames = 0; // frames with outliers; less than the span when gaps are bridged
+    size_t lost_samples = 0;
+    uint32_t pair_first = 0, pair_last = 0; // range of base-pair indices touched (a step touches both its pairs)
+    float metric_score[Metric_Count] = {};  // sum of contributing |z| per parameter
+    float metric_signed[Metric_Count] = {}; // sum of contributing signed z per parameter
+    std::vector<EventMember> members;       // sorted by decreasing |peak_z|, lost-only members last
+};
+
+struct EventContribution {
+    uint32_t member = 0;
+    bool step = false;
+    uint32_t parameters = 0;
+    bool lost = false;
+};
+
+// Current-frame contributions merged by member and class. SIZE_MAX includes all active events;
+// an inspection index restricts feedback to that event alone.
+std::vector<EventContribution> event_contributions(const std::vector<OutlierEvent>& events, size_t frame,
+                                                  size_t inspected_event = SIZE_MAX);
+
+// Stable colour slots in input order; inclusive overlapping intervals never share a slot.
+std::vector<size_t> event_color_slots(const std::vector<OutlierEvent>& events);
+
+struct EventOptions {
+    size_t min_frames = 1;   // drop events with fewer outlying frames
+    size_t max_gap = 0;      // bridge up to this many consecutive frames without outliers
+    int neighbourhood = 2;   // join members at most this many base pairs apart along the helix; < 0: whole structure
+    float lost_weight = 0;   // score of one lost-pair sample
+    float burst_sigma = 0;   // >0 enables a second, higher-threshold level of localized child events.
+    float burst_hysteresis = 0.5f;
+    int burst_neighbourhood = 2; // Local reach for children when the parent uses Whole structure.
+};
+
+// Groups outlying (frame, member) samples into events. Two samples join when they are at most
+// max_gap + 1 frames apart and at most 'neighbourhood' base pairs apart along the helix: pair i
+// and pair j are |i - j| apart when steps link them, a step sits half-way between its two pairs,
+// and members of different duplexes never join. An event needs at least one strong (start
+// threshold) or lost sample; weak samples only extend events (hysteresis). Events are ordered by
+// first frame, then by first pair. With burst_sigma > 0, localized higher-threshold
+// components are retained as children of their containing event, without removing parent samples.
+std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutlier>>& frames, size_t pair_count,
+                                        const std::vector<StepIndex>& steps, const EventOptions& options = {});
+
+// Short rule-based description from the dominant parameter and its sign, e.g. "Unwinding",
+// "Opening (breathing / flip)"; "Pair loss" leads when a pair broke.
+std::string event_kind(const OutlierEvent& event);
+// Index (0-11) of the parameter with the largest summed |z|, -1 when none.
+int event_dominant_metric(const OutlierEvent& event);
+
+// Probability that a member with 'parameters' independent Gaussian parameters has at least one
+// |z| >= sigma by chance.
+double chance_outlier_probability(float sigma, int parameters);
+
+struct CsvEventRow {
+    std::string run, scope, baseline, label, time_unit, kind;
+    size_t event = 0, begin = 0, end = 0, peak = 0, member = 0, member_frames = 0, member_lost = 0, parameter_peak = 0;
+    size_t pair_first = 0, pair_last = 0; // 1-based
+    int neighbourhood = -1;
+    double begin_time = 0, end_time = 0;
+    float severity = 0, score = 0, sigma = 0, end_sigma = 0, parameter_z = 0, value = 0;
+    Metric metric = Buckle;
+    bool contributing = false;
+    size_t parent_event = 0; // One-based parent ID, zero for a top-level event.
+    float burst_sigma = 0;
+};
+const char* csv_event_header();
+std::string csv_event_row(const CsvEventRow& row);
 std::string csv_quote(const std::string& text);
 
 struct CsvSample {
@@ -161,6 +274,7 @@ struct CsvSample {
     float sigma = 2.5f;
     uint32_t selected_mask = 0;
     bool member_outlier = false;
+    Baseline baseline_method = Baseline_MeanSD;
 };
 
 const char* csv_header();

@@ -161,9 +161,18 @@ OutlierAssessment assess_outliers(const float* values, const MemberStatistics* s
     return out;
 }
 
+static double wrap_degrees(double delta) {
+    return delta - 360.0 * std::floor((delta + 180.0) / 360.0);
+}
+
+double MemberStatistics::deviation(float value) const {
+    const double delta = (double)value - mean;
+    return angular ? wrap_degrees(delta) : delta;
+}
+
 float MemberStatistics::zscore(float value) const {
     if (!count || !std::isfinite(value)) return std::numeric_limits<float>::quiet_NaN();
-    return sd > 0.0 ? (float)(((double)value - mean) / sd) : 0.0f;
+    return sd > 0.0 ? (float)(deviation(value) / sd) : 0.0f;
 }
 
 bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t* quality,
@@ -190,11 +199,29 @@ bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t*
 
 bool MemberStatistics::is_outlier(float value, float sigma) const {
     return count && sd > 0.0 && std::isfinite(value) &&
-        std::fabs((double)value - mean) > (double)sigma * sd;
+        std::fabs(deviation(value)) > (double)sigma * sd;
 }
 
-bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count) {
-    if (!out || (member_count == 0 ? !values.empty() : values.size() % member_count != 0)) {
+const char* baseline_name(Baseline baseline) {
+    switch (baseline) {
+    case Baseline_MeanSD: return "Mean / SD";
+    case Baseline_MedianMAD: return "Median / MAD";
+    default: return "Unknown";
+    }
+}
+
+static double median_of(std::vector<double>& v) {
+    const size_t mid = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + mid, v.end());
+    double m = v[mid];
+    if (v.size() % 2 == 0) m = 0.5 * (m + *std::max_element(v.begin(), v.begin() + mid));
+    return m;
+}
+
+bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
+                        bool angular, Baseline baseline) {
+    if (!out || (member_count == 0 ? !values.empty() : values.size() % member_count != 0) ||
+        baseline < 0 || baseline >= Baseline_Count) {
         MD_LOG_ERROR("Lavery: invalid metric matrix dimensions for statistics");
         return false;
     }
@@ -203,18 +230,44 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
     if (!member_count) return true;
     const size_t frames = values.size() / member_count;
     out->heatmap.resize(values.size(), std::numeric_limits<float>::quiet_NaN());
+    std::vector<double> samples;
+    samples.reserve(frames);
     for (size_t m = 0; m < member_count; ++m) {
         auto& stats = out->members[m];
+        stats.angular = angular;
+        samples.clear();
+        double reference = 0.0;
+        if (angular) {
+            double s = 0.0, c = 0.0;
+            for (size_t f = 0; f < frames; ++f) {
+                const float v = values[f * member_count + m];
+                if (!std::isfinite(v)) continue;
+                s += std::sin((double)v * (3.14159265358979323846 / 180.0));
+                c += std::cos((double)v * (3.14159265358979323846 / 180.0));
+            }
+            if (s != 0.0 || c != 0.0) reference = std::atan2(s, c) * (180.0 / 3.14159265358979323846);
+        }
         double m2 = 0.0;
         for (size_t f = 0; f < frames; ++f) {
-            const float v = values[f * member_count + m];
-            if (!std::isfinite(v)) continue;
+            const float raw = values[f * member_count + m];
+            if (!std::isfinite(raw)) continue;
+            double v = raw;
+            // Unwrap to within half a turn of the circular mean; a no-op unless the series crosses +/-180.
+            if (angular && std::fabs(v - reference) >= 180.0) v = reference + wrap_degrees(v - reference);
+            samples.push_back(v);
             ++stats.count;
-            const double delta = (double)v - stats.mean;
+            const double delta = v - stats.mean;
             stats.mean += delta / (double)stats.count;
-            m2 += delta * ((double)v - stats.mean);
+            m2 += delta * (v - stats.mean);
         }
         if (stats.count) stats.sd = std::sqrt(std::max(0.0, m2 / (double)stats.count));
+        if (baseline == Baseline_MedianMAD && stats.count) {
+            const double median = median_of(samples);
+            for (double& v : samples) v = std::fabs(v - median);
+            const double mad = 1.4826 * median_of(samples);
+            stats.mean = median;
+            if (mad > 0.0) stats.sd = mad;
+        }
         for (size_t f = 0; f < frames; ++f) {
             out->heatmap[(member_count - 1 - m) * frames + f] = stats.zscore(values[f * member_count + m]);
         }
@@ -229,7 +282,7 @@ std::string csv_quote(const std::string& text) {
 }
 
 const char* csv_header() {
-    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask\n";
+    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline\n";
 }
 
 std::string csv_sample(const CsvSample& s) {
@@ -250,37 +303,387 @@ std::string csv_sample(const CsvSample& s) {
         }
     }
     row += csv_quote(reason.empty() ? "Good" : reason);
-    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u\n",
+    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s\n",
         s.baseline.count ? s.baseline.mean : std::numeric_limits<double>::quiet_NaN(),
         s.baseline.count ? s.baseline.sd : std::numeric_limits<double>::quiet_NaN(),
         s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric % 6))) ? 1 : 0,
-        s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask);
+        s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask,
+        s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd");
     row += buf;
     return row;
 }
 
-std::vector<OutlierEvent> collect_outlier_events(const std::vector<FrameOutliers>& counts,
-                                               const std::vector<float>& severity) {
-    std::vector<OutlierEvent> events;
-    if (counts.size() != severity.size()) {
-        MD_LOG_ERROR("Lavery: invalid event input dimensions");
-        return events;
+const EventMember::Sample* event_member_sample(const EventMember& member, size_t frame) {
+    const auto it = std::lower_bound(member.samples.begin(), member.samples.end(), frame,
+        [](const EventMember::Sample& sample, size_t f) { return sample.frame < f; });
+    return it != member.samples.end() && it->frame == frame ? &*it : nullptr;
+}
+
+std::vector<size_t> event_color_slots(const std::vector<OutlierEvent>& events) {
+    std::vector<size_t> order(events.size()), slots(events.size()), ends;
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return events[a].begin < events[b].begin; });
+    for (size_t i : order) {
+        size_t slot = 0;
+        while (slot < ends.size() && ends[slot] >= events[i].begin) ++slot;
+        if (slot == ends.size()) ends.push_back(events[i].end);
+        else ends[slot] = events[i].end;
+        slots[i] = slot;
     }
-    for (size_t f = 0; f < counts.size(); ++f) {
-        if (!counts[f].valid || !counts[f].outliers) continue;
-        if (events.empty() || events.back().end + 1 != f) {
-            events.push_back({f, f, f, counts[f].outliers, severity[f]});
-        } else {
-            auto& event = events.back();
-            event.end = f;
-            if (severity[f] > event.severity) {
-                event.severity = severity[f];
-                event.peak = f;
-            }
-            event.peak_count = std::max(event.peak_count, counts[f].outliers);
+    return slots;
+}
+
+std::vector<EventContribution> event_contributions(const std::vector<OutlierEvent>& events, size_t frame, size_t inspected_event) {
+    std::vector<EventContribution> result;
+    if (inspected_event != SIZE_MAX && inspected_event >= events.size()) {
+        MD_LOG_ERROR("Lavery: invalid event inspection index");
+        return result;
+    }
+    for (size_t e = 0; e < events.size(); ++e) {
+        if (inspected_event != SIZE_MAX && inspected_event != e) continue;
+        const auto& event = events[e];
+        if (frame < event.begin || frame > event.end) continue;
+        for (const auto& member : event.members) {
+            const auto* sample = event_member_sample(member, frame);
+            if (sample) result.push_back({member.member, member.step, sample->parameters, sample->lost});
         }
     }
+    std::sort(result.begin(), result.end(), [](const EventContribution& a, const EventContribution& b) {
+        return a.step != b.step ? a.step < b.step : a.member < b.member;
+    });
+    size_t count = 0;
+    for (size_t i = 0; i < result.size(); ++i) {
+        if (count && result[count - 1].step == result[i].step && result[count - 1].member == result[i].member) {
+            result[count - 1].parameters |= result[i].parameters;
+            result[count - 1].lost |= result[i].lost;
+        } else {
+            result[count++] = result[i];
+        }
+    }
+    result.resize(count);
+    return result;
+}
+
+std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutlier>>& frames, size_t pair_count,
+                                        const std::vector<StepIndex>& steps, const EventOptions& options) {
+    std::vector<OutlierEvent> events;
+    if (!std::isfinite(options.burst_sigma) || options.burst_sigma < 0 ||
+        !std::isfinite(options.burst_hysteresis) || options.burst_hysteresis < 0 ||
+        options.burst_neighbourhood < 0) {
+        MD_LOG_ERROR("Lavery: invalid hierarchical event options");
+        return events;
+    }
+    const size_t node_count = pair_count + steps.size();
+    for (const auto& step : steps) {
+        if (step.a >= pair_count || step.b >= pair_count) {
+            MD_LOG_ERROR("Lavery: invalid step topology for event detection");
+            return events;
+        }
+    }
+
+    // Region of each node and the regions within reach. Pairs and steps form a chain graph
+    // (pair - step - pair); one edge is half a base pair, so the reach is 2 * neighbourhood edges.
+    const bool whole = options.neighbourhood < 0;
+    std::vector<std::vector<uint32_t>> reach(whole ? 1 : node_count);
+    if (!whole) {
+        std::vector<std::vector<uint32_t>> adjacent(node_count);
+        for (size_t s = 0; s < steps.size(); ++s) {
+            const uint32_t node = (uint32_t)(pair_count + s);
+            for (uint32_t p : {steps[s].a, steps[s].b}) {
+                adjacent[node].push_back(p);
+                adjacent[p].push_back(node);
+            }
+        }
+        const int max_hops = 2 * options.neighbourhood;
+        std::vector<int> hops(node_count, -1);
+        for (uint32_t n = 0; n < node_count; ++n) {
+            std::vector<uint32_t> queue = {n};
+            hops[n] = 0;
+            for (size_t q = 0; q < queue.size(); ++q) {
+                const uint32_t cur = queue[q];
+                if (hops[cur] == max_hops) continue;
+                for (uint32_t next : adjacent[cur]) {
+                    if (hops[next] >= 0) continue;
+                    hops[next] = hops[cur] + 1;
+                    queue.push_back(next);
+                }
+            }
+            reach[n] = queue;
+            for (uint32_t v : queue) hops[v] = -1;
+        }
+    } else {
+        reach[0] = {0};
+    }
+
+    struct Point { size_t frame; const MemberOutlier* sample; uint32_t node; };
+    std::vector<Point> points;
+    for (size_t f = 0; f < frames.size(); ++f) {
+        for (const auto& sample : frames[f]) {
+            if (!sample.contributors && !sample.lost) continue;
+            const size_t node = sample.step ? pair_count + sample.member : sample.member;
+            if ((sample.step ? sample.member >= steps.size() : sample.member >= pair_count) || (sample.lost && sample.step)) {
+                MD_LOG_ERROR("Lavery: invalid event sample");
+                return {};
+            }
+            points.push_back({f, &sample, (uint32_t)node});
+        }
+    }
+
+    std::vector<size_t> parent(points.size());
+    for (size_t i = 0; i < parent.size(); ++i) parent[i] = i;
+    auto find = [&](size_t i) {
+        while (parent[i] != i) i = parent[i] = parent[parent[i]];
+        return i;
+    };
+    const size_t none = SIZE_MAX;
+    std::vector<size_t> last(reach.size(), none);
+    for (size_t i = 0; i < points.size(); ++i) {
+        const uint32_t region = whole ? 0 : points[i].node;
+        for (uint32_t other : reach[region]) {
+            const size_t j = last[other];
+            if (j == none || points[i].frame - points[j].frame > options.max_gap + 1) continue;
+            parent[find(i)] = find(j);
+        }
+        last[region] = i;
+    }
+
+    // Clusters keep the order of their first point, which is chronological.
+    std::vector<size_t> cluster(points.size(), none);
+    std::vector<std::vector<size_t>> members;
+    for (size_t i = 0; i < points.size(); ++i) {
+        const size_t root = find(i);
+        if (cluster[root] == none) {
+            cluster[root] = members.size();
+            members.emplace_back();
+        }
+        members[cluster[root]].push_back(i);
+    }
+
+    const size_t min_frames = std::max<size_t>(1, options.min_frames);
+    for (const auto& group : members) {
+        bool strong = false;
+        for (size_t i : group) strong |= points[i].sample->strong != 0 || points[i].sample->lost;
+        if (!strong) continue;
+
+        OutlierEvent event;
+        event.begin = points[group.front()].frame;
+        event.end = points[group.back()].frame;
+        event.peak = event.begin;
+        event.pair_first = UINT32_MAX;
+        bool have_peak = false;
+        size_t frame = none, frame_count = 0;
+        for (size_t i : group) {
+            const Point& point = points[i];
+            const MemberOutlier& sample = *point.sample;
+            if (point.frame != frame) {
+                frame = point.frame;
+                frame_count = 0;
+                ++event.outlier_frames;
+            }
+            event.peak_count = std::max(event.peak_count, ++frame_count);
+            if (sample.step) {
+                event.pair_first = std::min({event.pair_first, steps[sample.member].a, steps[sample.member].b});
+                event.pair_last = std::max({event.pair_last, steps[sample.member].a, steps[sample.member].b});
+            } else {
+                event.pair_first = std::min(event.pair_first, sample.member);
+                event.pair_last = std::max(event.pair_last, sample.member);
+            }
+
+            auto it = std::find_if(event.members.begin(), event.members.end(), [&](const EventMember& m) {
+                return m.member == sample.member && m.step == sample.step;
+            });
+            if (it == event.members.end()) {
+                EventMember entry;
+                entry.member = sample.member;
+                entry.step = sample.step;
+                entry.peak = point.frame;
+                event.members.push_back(entry);
+                it = event.members.end() - 1;
+            }
+            ++it->frames;
+            it->samples.push_back({point.frame, sample.contributors, sample.lost});
+            if (sample.lost) {
+                ++it->lost_frames;
+                ++event.lost_samples;
+                event.score += options.lost_weight;
+                continue;
+            }
+            float largest = 0;
+            for (int k = 0; k < 6; ++k) {
+                if (!(sample.contributors & (1u << k))) continue;
+                const float z = sample.z[k];
+                const int metric = (sample.step ? (int)Tilt : 0) + k;
+                event.metric_score[metric] += std::fabs(z);
+                event.metric_signed[metric] += z;
+                largest = std::max(largest, std::fabs(z));
+                const bool first = !(it->parameters & (1u << k));
+                it->parameters |= 1u << k;
+                if (first || std::fabs(z) > std::fabs(it->parameter_peak_z[k])) {
+                    it->parameter_peak_z[k] = z;
+                    it->parameter_peak[k] = point.frame;
+                }
+                if (it->peak_parameter < 0 || std::fabs(z) > std::fabs(it->peak_z)) {
+                    it->peak_z = z;
+                    it->peak = point.frame;
+                    it->peak_parameter = k;
+                }
+                if (!have_peak || std::fabs(z) > event.severity) {
+                    event.severity = std::fabs(z);
+                    event.peak = point.frame;
+                    have_peak = true;
+                }
+            }
+            event.score += largest;
+        }
+        if (event.outlier_frames < min_frames) continue;
+        std::stable_sort(event.members.begin(), event.members.end(), [](const EventMember& a, const EventMember& b) {
+            if ((a.peak_parameter < 0) != (b.peak_parameter < 0)) return b.peak_parameter < 0;
+            return std::fabs(a.peak_z) > std::fabs(b.peak_z);
+        });
+        events.push_back(std::move(event));
+    }
+    if (options.burst_sigma > 0 && !events.empty()) {
+        std::vector<std::vector<MemberOutlier>> elevated(frames.size());
+        const float continue_sigma = std::max(0.5f, options.burst_sigma - options.burst_hysteresis);
+        for (size_t f = 0; f < frames.size(); ++f) {
+            for (auto sample : frames[f]) {
+                const uint32_t original = sample.contributors;
+                sample.contributors = sample.strong = 0;
+                for (int k = 0; k < 6; ++k) {
+                    if (!(original & (1u << k))) continue;
+                    const float z = std::fabs(sample.z[k]);
+                    if (z >= continue_sigma) sample.contributors |= 1u << k;
+                    if (z >= options.burst_sigma) sample.strong |= 1u << k;
+                }
+                if (sample.contributors || sample.lost) elevated[f].push_back(sample);
+            }
+        }
+        EventOptions child_options = options;
+        child_options.burst_sigma = 0;
+        if (options.neighbourhood < 0) child_options.neighbourhood = options.burst_neighbourhood;
+        auto children = detect_events(elevated, pair_count, steps, child_options);
+        auto region_size = [&](const OutlierEvent& event) {
+            std::vector<uint32_t> region;
+            for (const auto& member : event.members) {
+                if (member.step) {
+                    region.push_back(steps[member.member].a);
+                    region.push_back(steps[member.member].b);
+                } else region.push_back(member.member);
+            }
+            std::sort(region.begin(), region.end());
+            return (size_t)(std::unique(region.begin(), region.end()) - region.begin());
+        };
+        const size_t root_count = events.size();
+        std::vector<size_t> region_sizes;
+        for (const auto& event : events) region_sizes.push_back(region_size(event));
+        for (auto& child : children) {
+            const size_t child_size = region_size(child);
+            for (size_t p = 0; p < root_count; ++p) {
+                const auto& root = events[p];
+                if (child.begin < root.begin || child.end > root.end || child_size >= region_sizes[p]) continue;
+                bool contained = true;
+                for (const auto& member : child.members) {
+                    const auto parent_member = std::find_if(root.members.begin(), root.members.end(), [&](const EventMember& m) {
+                        return m.step == member.step && m.member == member.member;
+                    });
+                    if (parent_member == root.members.end()) { contained = false; break; }
+                    for (const auto& sample : member.samples) {
+                        const auto* parent_sample = event_member_sample(*parent_member, sample.frame);
+                        if (!parent_sample || (sample.parameters & ~parent_sample->parameters) ||
+                            (sample.lost && !parent_sample->lost)) {
+                            contained = false;
+                            break;
+                        }
+                    }
+                    if (!contained) break;
+                }
+                if (!contained) continue;
+                child.parent = p;
+                child.burst_sigma = options.burst_sigma;
+                events.push_back(std::move(child));
+                break;
+            }
+        }
+    }
+    std::vector<size_t> order(events.size()), new_index(events.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return events[a].begin != events[b].begin ? events[a].begin < events[b].begin :
+            events[a].pair_first < events[b].pair_first;
+    });
+    for (size_t i = 0; i < order.size(); ++i) new_index[order[i]] = i;
+    std::vector<OutlierEvent> sorted;
+    sorted.reserve(events.size());
+    for (size_t i : order) {
+        if (events[i].parent != SIZE_MAX) events[i].parent = new_index[events[i].parent];
+        sorted.push_back(std::move(events[i]));
+    }
+    events = std::move(sorted);
     return events;
+}
+
+int event_dominant_metric(const OutlierEvent& event) {
+    int best = -1;
+    for (int m = 0; m < (int)Metric_Count; ++m) {
+        if (event.metric_score[m] > 0 && (best < 0 || event.metric_score[m] > event.metric_score[best])) best = m;
+    }
+    return best;
+}
+
+std::string event_kind(const OutlierEvent& event) {
+    const int m = event_dominant_metric(event);
+    const bool positive = m >= 0 && event.metric_signed[m] >= 0;
+    const char* kind = "";
+    switch (m) {
+    case Buckle: case Propeller: kind = "Buckle / propeller"; break;
+    case Opening: kind = "Opening (breathing / flip)"; break;
+    case Shear: kind = "Shear (wobble)"; break;
+    case Stretch: kind = positive ? "Pair stretching" : "Pair compression"; break;
+    case Stagger: kind = "Stagger"; break;
+    case Tilt: kind = "Tilt"; break;
+    case Roll: kind = "Kink (roll)"; break;
+    case Twist: kind = positive ? "Overwinding" : "Unwinding"; break;
+    case Shift: case Slide: kind = "Step translation"; break;
+    case Rise: kind = positive ? "Unstacking" : "Compressed step"; break;
+    default: break;
+    }
+    if (event.lost_samples) return *kind ? std::string("Pair loss + ") + kind : std::string("Pair loss");
+    return kind;
+}
+
+double chance_outlier_probability(float sigma, int parameters) {
+    if (!std::isfinite(sigma) || parameters <= 0) return 0.0;
+    const double single = std::erfc(std::max(0.0f, sigma) / std::sqrt(2.0));
+    return 1.0 - std::pow(1.0 - single, (double)parameters);
+}
+
+const char* csv_event_header() {
+    return "run,event,begin_frame,end_frame,begin_time,end_time,time_unit,event_peak_frame,event_peak_sigma,event_score,event_type,"
+           "first_pair,last_pair,scope,baseline,sigma,end_sigma,neighbourhood,"
+           "class,member,label,member_outlier_frames,member_lost_frames,parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,"
+           "parent_event,burst_sigma\n";
+}
+
+std::string csv_event_row(const CsvEventRow& r) {
+    char buf[512];
+    std::string row = csv_quote(r.run);
+    snprintf(buf, sizeof(buf), ",%zu,%zu,%zu,%.17g,%.17g,", r.event, r.begin, r.end, r.begin_time, r.end_time);
+    row += buf;
+    row += csv_quote(r.time_unit);
+    snprintf(buf, sizeof(buf), ",%zu,%.9g,%.9g,", r.peak, r.severity, r.score);
+    row += buf;
+    row += csv_quote(r.kind);
+    snprintf(buf, sizeof(buf), ",%zu,%zu,", r.pair_first, r.pair_last);
+    row += buf;
+    row += csv_quote(r.scope) + "," + csv_quote(r.baseline);
+    snprintf(buf, sizeof(buf), ",%.9g,%.9g,%d,%s,%zu,", r.sigma, r.end_sigma, r.neighbourhood, metric_is_step(r.metric) ? "step" : "bp", r.member);
+    row += buf;
+    row += csv_quote(r.label);
+    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g\n", r.member_frames, r.member_lost, metric_path(r.metric),
+        metric_is_angular(r.metric) ? "deg" : "Angstrom", r.contributing ? 1 : 0, r.parameter_peak, r.parameter_z, r.value,
+        r.parent_event, r.burst_sigma);
+    row += buf;
+    return row;
 }
 
 size_t nearest_frame(double x, const float* times, size_t frame_count) {

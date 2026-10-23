@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -45,6 +46,26 @@ static vec3_t min_image(vec3_t delta, const md_unitcell_t& cell) {
     return delta;
 }
 
+constexpr PickingDomainID PickingDomain_Lavery = HASH_STR_LIT64("picking domain lavery outlier");
+constexpr uint32_t kEventAllParameters = (1u << Metric_Count) - 1;
+
+// A member preview requested by hovering a UI row; mask selects the class parameters assessed.
+struct Target {
+    bool step = false;
+    uint32_t index = 0;
+    uint32_t mask = 63;
+};
+
+// A member drawn in the viewport this frame.
+struct Marker {
+    bool step = false;
+    uint32_t index = 0;
+    uint32_t mask = 0;
+    uint32_t contributors = 0;
+    float z = 0;
+    bool lost = false;
+};
+
 static bool make_extract_state(md_system_state_t* state, size_t atom_count, md_allocator_i* alloc) {
     *state = {};
     state->alloc = alloc;
@@ -65,8 +86,42 @@ struct Lavery : viamd::EventHandler {
     bool show_axis = true;
     bool signed_overlay = true;
     bool overlay_halo = true;
-    bool reset_layout = false;
-    int hovered_outlier = -1;
+    bool reset_requested = false;
+    uint64_t timeline_fit_key = 0;      // what the inspector timeline shows; refit on change
+    uint64_t distribution_fit_key = 0;  // what the distribution plot shows; refit on change
+    std::vector<Target> preview;
+    std::vector<Marker> markers;
+    bool markers_explicit = false;
+    int baseline = Baseline_MeanSD;
+    int statistics_baseline = Baseline_MeanSD;
+    int calculation_baseline = Baseline_MeanSD;
+    // Parameters used for event detection, independent of the viewed class: bit k is Metric k
+    // (bits 0-5 intra-base pair, bits 6-11 inter-base pair).
+    uint32_t event_parameters = kEventAllParameters;
+    int event_min_frames = 3;
+    size_t inspected_event = SIZE_MAX;
+    double inspection_frame = -1;
+    int event_max_gap = 0;
+    int event_neighbourhood = 2;
+    bool event_whole_structure = false;
+    float event_hysteresis = 0.5f;
+    bool event_pair_loss = true;
+    bool event_hierarchy = true;
+    float event_burst_extra = 1.0f;
+    std::vector<int> event_order;      // table order of outlier_events
+    bool event_order_dirty = true;
+    std::vector<uint32_t> timeline_period_ids; // timeline periods made from events
+    std::vector<float> expected_counts;        // chance outliers per frame for the count plot
+    uint64_t counts_key = 0;
+    uint64_t event_data_key = 0;
+    std::vector<uint32_t> event_context_bases;
+    std::vector<ImVec4> event_context_colors;
+    std::vector<size_t> event_colors;
+    PickingRange picking_range = {};
+    std::vector<int32_t> atom_base;
+    std::vector<int32_t> base_pair;
+    std::vector<vec3_t> display_step_from, display_step_to;
+    std::vector<uint8_t> display_step_valid;
     std::array<std::vector<int>, 2> comparison_members;
     std::array<DistributionComparison, Metric_Count> distributions;
     std::vector<uint8_t> pair_contacts;
@@ -77,7 +132,6 @@ struct Lavery : viamd::EventHandler {
     AxisPath display_axis;
     bool aggregate_outliers = false;
     uint32_t selected_parameters = 63;
-    uint32_t counts_parameters = 0;
     std::vector<uint16_t> pair_quality_flags;
     std::vector<uint16_t> step_quality_flags;
     std::vector<OutlierEvent> outlier_events;
@@ -89,8 +143,6 @@ struct Lavery : viamd::EventHandler {
     bool heatmap_dragged = false;
     int heatmap_member_count = 0;
     std::vector<FrameOutliers> outlier_counts;
-    int outlier_counts_metric = -1;
-    float outlier_counts_sigma = -1;
     ImGuiID scrubbing_plot = 0;
     std::vector<std::string> pair_labels;
     std::vector<std::string> step_labels;
@@ -164,12 +216,23 @@ struct Lavery : viamd::EventHandler {
         display_axis = {};
         for (auto& d : distributions) d = {};
         for (auto& c : comparison_members) c.clear();
-        hovered_outlier = -1;
+        preview.clear();
+        markers.clear();
+        markers_explicit = false;
         step_quality_flags.clear();
         outlier_events.clear();
-        counts_parameters = 0;
-        outlier_counts_metric = -1;
-        outlier_counts_sigma = -1;
+        inspected_event = SIZE_MAX;
+        counts_key = 0;
+        event_data_key = 0;
+        event_context_bases.clear();
+        event_context_colors.clear();
+        event_colors.clear();
+        picking_range = {};
+        atom_base.clear();
+        base_pair.clear();
+        display_step_from.clear();
+        display_step_to.clear();
+        display_step_valid.clear();
         scrubbing_plot = 0;
         columns.fill(0);
         computed = false;
@@ -229,10 +292,49 @@ struct Lavery : viamd::EventHandler {
                     for (const bool flag : {show_axis, signed_overlay, overlay_halo, sync_viewport, aggregate_outliers}) {
                         key->key = md_hash64(&flag, sizeof(flag), key->key);
                     }
-                    key->key = md_hash64(&hovered_outlier, sizeof(hovered_outlier), key->key);
+                    for (const auto& marker : markers) {
+                        const uint32_t fields[5] = {marker.step ? 1u : 0u, marker.index, marker.mask, marker.contributors, marker.lost ? 1u : 0u};
+                        key->key = md_hash64(fields, sizeof(fields), key->key);
+                        key->key = md_hash64(&marker.z, sizeof(marker.z), key->key);
+                    }
                     key->key = md_hash64(&metric, sizeof(metric), key->key);
                     key->key = md_hash64(&selected_parameters, sizeof(selected_parameters), key->key);
                     key->key = md_hash64(&outlier_sigma, sizeof(outlier_sigma), key->key);
+                    key->key = md_hash64(&counts_key, sizeof(counts_key), key->key);
+                    key->key = md_hash64(&inspected_event, sizeof(inspected_event), key->key);
+                    if (!event_context_bases.empty()) {
+                        key->key = md_hash64(event_context_bases.data(), event_context_bases.size() * sizeof(uint32_t), key->key);
+                        key->key = md_hash64(event_context_colors.data(), event_context_colors.size() * sizeof(ImVec4), key->key);
+                    }
+                    key->key = md_hash64(&picking_range, sizeof(picking_range), key->key);
+                }
+                break;
+            }
+            case viamd::EventType_ViamdPickingRangeReserve: {
+                picking_range = {};
+                if (overlay_active() && signed_overlay) {
+                    picking_range_reserve(&picking_range, (PickingSpace*)e.payload, PickingDomain_Lavery, pairs.size() + steps.size());
+                }
+                break;
+            }
+            case viamd::EventType_ViamdPickingTooltipTextRequest: {
+                auto* req = (PickingTooltipTextRequest*)e.payload;
+                if (req && overlay_active()) fill_tooltip(req);
+                break;
+            }
+            case viamd::EventType_ViamdInteractionSurface: {
+                auto* event = (InteractionSurfaceEvent*)e.payload;
+                if (event && overlay_active() && event->surface_id == interaction_surface_main &&
+                    event->kind == InteractionSurfaceEventKind::Click &&
+                    event->selection_mode == InteractionSelectionMode::None &&
+                    event->hit.domain == PickingDomain_Lavery) {
+                    bool step = false;
+                    uint32_t index = 0;
+                    if (decode_pick(event->hit.local_idx, &step, &index)) {
+                        const size_t frame = current_frame();
+                        const auto result = assess_member(frame, step, index, marker_mask(step, index));
+                        select_target(step, index, result.peak_metric, frame);
+                    }
                 }
                 break;
             }
@@ -248,6 +350,16 @@ struct Lavery : viamd::EventHandler {
                 viamd::write_bool(state, STR_LIT("OverlayHalo"), overlay_halo);
                 viamd::write_bool(state, STR_LIT("AggregateOutliers"), aggregate_outliers);
                 viamd::write_int(state, STR_LIT("SelectedParameters"), (int)selected_parameters);
+                viamd::write_int(state, STR_LIT("Baseline"), baseline);
+                viamd::write_int(state, STR_LIT("EventParameters"), (int)event_parameters);
+                viamd::write_int(state, STR_LIT("EventMinFrames"), event_min_frames);
+                viamd::write_int(state, STR_LIT("EventMaxGap"), event_max_gap);
+                viamd::write_int(state, STR_LIT("EventNeighbourhood"), event_neighbourhood);
+                viamd::write_bool(state, STR_LIT("EventWholeStructure"), event_whole_structure);
+                viamd::write_flt(state, STR_LIT("EventHysteresis"), event_hysteresis);
+                viamd::write_bool(state, STR_LIT("EventPairLoss"), event_pair_loss);
+                viamd::write_bool(state, STR_LIT("EventHierarchy"), event_hierarchy);
+                viamd::write_flt(state, STR_LIT("EventBurstExtra"), event_burst_extra);
                 viamd::write_flt(state, STR_LIT("OutlierSigma"), outlier_sigma);
                 viamd::write_int(state, STR_LIT("Metric"), metric);
                 viamd::write_int(state, STR_LIT("Member"), member);
@@ -263,6 +375,17 @@ struct Lavery : viamd::EventHandler {
                 show_axis = signed_overlay = overlay_halo = true;
                 aggregate_outliers = false;
                 selected_parameters = 63;
+                baseline = Baseline_MeanSD;
+                event_parameters = kEventAllParameters;
+                event_min_frames = 3;
+                inspected_event = SIZE_MAX;
+                event_max_gap = 0;
+                event_neighbourhood = 2;
+                event_whole_structure = false;
+                event_hysteresis = 0.5f;
+                event_pair_loss = true;
+                event_hierarchy = true;
+                event_burst_extra = 1.0f;
                 break;
             case viamd::EventType_ViamdDeserialize: {
                 auto& state = *(viamd::deserialization_state_t*)e.payload;
@@ -283,6 +406,38 @@ struct Lavery : viamd::EventHandler {
                         selected_parameters = (uint32_t)mask & 63;
                     }
                     else if (str_eq(key, STR_LIT("OutlierSigma"))) viamd::extract_flt(outlier_sigma, arg);
+                    else if (str_eq(key, STR_LIT("Baseline"))) viamd::extract_enum(baseline, arg, Baseline_Count);
+                    else if (str_eq(key, STR_LIT("EventParameters"))) {
+                        int mask = (int)kEventAllParameters;
+                        viamd::extract_int(mask, arg);
+                        event_parameters = (uint32_t)mask & kEventAllParameters;
+                    }
+                    else if (str_eq(key, STR_LIT("EventMinFrames"))) {
+                        viamd::extract_int(event_min_frames, arg);
+                        event_min_frames = std::clamp(event_min_frames, 1, 100000);
+                    }
+                    else if (str_eq(key, STR_LIT("EventMaxGap"))) {
+                        viamd::extract_int(event_max_gap, arg);
+                        event_max_gap = std::clamp(event_max_gap, 0, 100000);
+                    }
+                    else if (str_eq(key, STR_LIT("EventNeighbourhood"))) {
+                        viamd::extract_int(event_neighbourhood, arg);
+                        event_neighbourhood = std::clamp(event_neighbourhood, 0, 1000);
+                    }
+                    else if (str_eq(key, STR_LIT("EventWholeStructure"))) viamd::extract_bool(event_whole_structure, arg);
+                    else if (str_eq(key, STR_LIT("EventHysteresis"))) {
+                        viamd::extract_flt(event_hysteresis, arg);
+                        event_hysteresis = std::isfinite(event_hysteresis) ? std::clamp(event_hysteresis, 0.0f, 2.0f) : 0.5f;
+                    }
+                    else if (str_eq(key, STR_LIT("EventPairLoss"))) viamd::extract_bool(event_pair_loss, arg);
+                    else if (str_eq(key, STR_LIT("EventHierarchy"))) viamd::extract_bool(event_hierarchy, arg);
+                    else if (str_eq(key, STR_LIT("EventBurstExtra"))) {
+                        viamd::extract_flt(event_burst_extra, arg);
+                        if (!std::isfinite(event_burst_extra) || event_burst_extra < 0.25f || event_burst_extra > 4.0f) {
+                            MD_LOG_ERROR("Lavery: EventBurstExtra must be between 0.25 and 4 sigma");
+                            event_burst_extra = 1.0f;
+                        }
+                    }
                     else if (str_eq(key, STR_LIT("Metric"))) viamd::extract_enum(metric, arg, Metric_Count);
                     else if (str_eq(key, STR_LIT("Member"))) viamd::extract_int(member, arg);
                 }
@@ -392,6 +547,12 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         steps = gather_steps(*sys, bases, pairs.data(), pairs.size());
+        atom_base.assign(sys->atom.count, -1);
+        for (size_t b = 0; b < bases.size(); ++b) {
+            for (uint32_t atom : bases[b].atoms) if (atom < atom_base.size()) atom_base[atom] = (int32_t)b;
+        }
+        base_pair.assign(bases.size(), -1);
+        for (size_t p = 0; p < pairs.size(); ++p) base_pair[pairs[p].a] = base_pair[pairs[p].b] = (int32_t)p;
         auto base_label = [&](uint32_t index) {
             const auto& base = bases[index];
             const str_t name = md_component_name(&sys->component, base.component);
@@ -425,7 +586,9 @@ struct Lavery : viamd::EventHandler {
         frames_done = 0;
         analysis_error.clear();
         calculating = true;
-        calculation = task_system::create_pool_task(STR_LIT("Lavery trajectory analysis"), [this, sys, frame_count]() {
+        calculation_baseline = baseline;
+        const Baseline method = (Baseline)baseline;
+        calculation = task_system::create_pool_task(STR_LIT("Lavery trajectory analysis"), [this, sys, frame_count, method]() {
             md_temp_scope_t temp_scope = md_temp_begin();
             md_allocator_i* alloc = md_temp_allocator(temp_scope);
             md_system_state_t state = {};
@@ -473,7 +636,7 @@ struct Lavery : viamd::EventHandler {
             if (ok && !analysis_cancelled()) {
                 for (int m = 0; m < (int)Metric_Count; ++m) {
                     if (analysis_cancelled()) { ok = false; break; }
-                    if (!compute_statistics(&statistics[m], values[m], columns[m])) {
+                    if (!compute_statistics(&statistics[m], values[m], columns[m], metric_is_angular((Metric)m), method)) {
                         ok = false;
                         break;
                     }
@@ -495,6 +658,8 @@ struct Lavery : viamd::EventHandler {
         task_system::task_wait_for(calculation);
         calculation = task_system::INVALID_ID;
         calculating = false;
+        statistics_baseline = calculation_baseline;
+        counts_key = 0;
         if (!calculation_ok.load()) {
             analysis_error = cancel_requested.load() ? "Analysis cancelled. Use Retry analysis to restart."
                 : "Trajectory analysis failed or was interrupted. See the application log; use Retry analysis.";
@@ -552,18 +717,18 @@ struct Lavery : viamd::EventHandler {
     }
 
     void draw() {
+        refresh_event_inspection();
         if (!ImGui::GetIO().KeyCtrl || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) scrubbing_plot = 0;
-        hovered_outlier = -1;
+        preview.clear();
+        markers.clear();
+        event_context_bases.clear();
+        markers_explicit = false;
         const ImVec2 work_size = ImGui::GetMainViewport()->WorkSize;
         ImGui::SetNextWindowSize({work_size.x * 0.9f, work_size.y * 0.9f}, ImGuiCond_FirstUseEver);
         const bool expanded = ImGui::Begin("Lavery", &show_window,
-            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        const ImGuiID dock = ImGui::GetID("LaveryWorkspace");
-        auto finish_status = [&]() {
-            if (!ImGui::DockBuilderGetNode(dock)) reset_layout = true;
-            ImGui::DockSpace(dock, ImVec2(0, 0), ImGuiDockNodeFlags_KeepAliveOnly);
-            ImGui::End();
-        };
+            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoDocking);
+        auto finish_status = [&]() { ImGui::End(); };
         if (!expanded) {
             clear_highlight();
             finish_status();
@@ -602,53 +767,66 @@ struct Lavery : viamd::EventHandler {
             return;
         }
 
-        draw_shared_controls();
-        const int count = (int)columns[metric];
+        const ImVec2 size = ImGui::GetContentRegionAvail();
         const size_t frame_count = run_num_frames(app);
-        if (count <= 0 || !frame_count) {
+        const float gap = ImGui::GetStyle().ItemSpacing.x;
+        const float sidebar_width = std::min(size.x * 0.28f, ImGui::GetFontSize() * 20.0f);
+        if (ImGui::BeginChild("Settings", ImVec2(sidebar_width, 0))) draw_shared_controls();
+        ImGui::EndChild();
+        if (reset_requested) {
+            reset_requested = false;
+            reset();
+            ImGui::End();
+            return;
+        }
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        if (statistics_baseline != baseline) recompute_statistics();
+        const int count = (int)columns[metric];
+        const bool ready = count > 0 && frame_count;
+        if (ready) member = std::clamp(member, 0, count - 1);
+        auto unavailable = [&]() {
             ImGui::TextDisabled("No inter-base-pair links found. Select Intra-base pair.");
-            finish_status();
+        };
+        const ImPlotInputMap input = ImPlot::GetInputMap();
+        if (ImGui::GetIO().KeyCtrl) ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
+        if (frame_count) update_counts(count, frame_count);
+        const float events_height = std::max(ImGui::GetFrameHeight() * 4, size.y * 0.34f);
+        if (ImGui::BeginChild("Events & quality", ImVec2(0, events_height))) {
+            if (frame_count) draw_events_quality(count, frame_count); else unavailable();
+        }
+        ImGui::EndChild();
+        const float overview_width = std::max(1.0f, (ImGui::GetContentRegionAvail().x - gap) * 0.52f);
+        if (ImGui::BeginChild("Overview", ImVec2(overview_width, 0))) {
+            if (ready) {
+                draw_outlier_timeline(count, frame_count);
+                if (show_heatmap) draw_heatmap(count, frame_count, statistics[metric].heatmap, &member);
+            } else unavailable();
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+        if (ImGui::BeginChild("Inspector", ImVec2(0, 0))) {
+            if (ready) draw_inspector(count, frame_count); else unavailable();
+        }
+        ImGui::EndChild();
+        ImGui::EndGroup();
+        ImGui::End();
+        ImPlot::GetInputMap() = input;
+        if (!frame_count) {
             clear_highlight();
             return;
         }
-        const ImVec2 size = ImGui::GetContentRegionAvail();
-        if (reset_layout || !ImGui::DockBuilderGetNode(dock)) {
-            ImGui::DockBuilderRemoveNode(dock);
-            ImGui::DockBuilderAddNode(dock, ImGuiDockNodeFlags_DockSpace);
-            ImGui::DockBuilderSetNodeSize(dock, size);
-            ImGuiID top = dock, bottom = 0, left = 0, right = 0;
-            ImGui::DockBuilderSplitNode(top, ImGuiDir_Down, 0.24f, &bottom, &top);
-            ImGui::DockBuilderSplitNode(top, ImGuiDir_Right, 0.38f, &right, &left);
-            ImGui::DockBuilderDockWindow("Lavery - Overview", left);
-            ImGui::DockBuilderDockWindow("Lavery - Inspector", right);
-            ImGui::DockBuilderDockWindow("Lavery - Events & quality", bottom);
-            ImGui::DockBuilderFinish(dock);
-            reset_layout = false;
-        }
-        ImGui::DockSpace(dock);
-        ImGui::End();
-        const ImPlotInputMap input = ImPlot::GetInputMap();
-        if (ImGui::GetIO().KeyCtrl) ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
-        update_counts(count, frame_count);
-        if (ImGui::Begin("Lavery - Overview", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) {
-            draw_outlier_timeline(count, frame_count);
-            if (show_heatmap) draw_heatmap(count, frame_count, statistics[metric].heatmap, &member);
-        }
-        ImGui::End();
-        if (ImGui::Begin("Lavery - Inspector", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) draw_inspector(count, frame_count);
-        ImGui::End();
-        if (ImGui::Begin("Lavery - Events & quality", nullptr, ImGuiWindowFlags_NoFocusOnAppearing)) draw_events_quality(count, frame_count);
-        ImGui::End();
-        ImPlot::GetInputMap() = input;
-        if (sync_viewport || hovered_outlier >= 0) update_outlier_highlight(count, frame_count, hovered_outlier);
+        build_markers(current_frame());
+        if (sync_viewport || markers_explicit || inspected_event != SIZE_MAX) update_outlier_highlight();
         else clear_highlight();
     }
 
     void draw_shared_controls() {
         static const char* bp_items[] = {"Buckle", "Propeller Twist", "Opening", "Shear", "Stretch", "Stagger"};
         static const char* step_items[] = {"Tilt", "Roll", "Twist", "Shift", "Slide", "Rise"};
+        ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.5f);
+        ImGui::SeparatorText("Selection");
         int group = metric_is_step((Metric)metric) ? 1 : 0;
-        ImGui::SetNextItemWidth(170);
         if (ImGui::Combo("Class", &group, "Intra-base pair\0Inter-base pair\0")) {
             metric = group * 6 + metric % 6;
             focus_heatmap_selection = true;
@@ -657,83 +835,179 @@ struct Lavery : viamd::EventHandler {
         const bool step_metric = group != 0;
         const int offset = step_metric ? (int)Tilt : (int)Buckle;
         int local_metric = std::clamp(metric - offset, 0, 5);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(155);
         ImGui::Combo("Parameter", &local_metric, step_metric ? step_items : bp_items, 6);
         metric = offset + local_metric;
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(150);
-        ImGui::SliderFloat("Tolerance", &outlier_sigma, 1.5f, 4.0f, "%.1f sigma");
-        ImGui::SameLine();
-        if (ImGui::Button("Settings / Export")) ImGui::OpenPopup("Lavery settings");
-        if (ImGui::BeginPopup("Lavery settings")) {
-            ImGui::Checkbox("Heatmap", &show_heatmap);
-            ImGui::Checkbox("Highlight all outliers", &sync_viewport);
-            ImGui::Checkbox("Signed outlier overlay", &signed_overlay);
-            ImGui::Checkbox("Soft overlay halos", &overlay_halo);
-            ImGui::Checkbox("Smoothed midpoint axis", &show_axis);
-            ImGui::TextDisabled("Axis is not the Curves+ screw axis; halos are not emissive bloom.");
-            ImGui::Separator();
-            if (ImGui::Button("Export parameter CSV")) export_csv(run_num_frames(app));
-            if (ImGui::Button("Export displayed axis CSV")) export_axis();
-            if (ImGui::Button("Reset panel layout")) reset_layout = true;
-            if (ImGui::Button("Recompute analysis")) {
-                reset();
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::TextDisabled("Canonical A/G/C/T/U; fixed partners identified in frame 0.");
-            ImGui::TextDisabled("Script: attr(\"lavery/step/twist\")");
-            ImGui::EndPopup();
-        }
         const int count = (int)columns[metric];
         if (count <= 0) {
             ImGui::TextDisabled("No consecutive inter-base-pair links were found.");
-            clear_highlight();
-            return;
+        } else {
+            member = std::clamp(member, 0, count - 1);
+            int member_number = member + 1;
+            if (ImGui::InputInt(step_metric ? "Step" : "Base pair", &member_number)) {
+                member = std::clamp(member_number, 1, count) - 1;
+                focus_heatmap_selection = true;
+            }
+            const auto& labels = step_metric ? step_labels : pair_labels;
+            ImGui::TextDisabled("%s (%s)", labels[member].c_str(), metric_unit((Metric)metric));
         }
-        member = std::clamp(member, 0, count - 1);
-        ImGui::SetNextItemWidth(100);
-        int member_number = member + 1;
-        if (ImGui::InputInt(step_metric ? "Inter-base pair" : "Intra-base pair", &member_number)) {
-            member = std::clamp(member_number, 1, count) - 1;
-            focus_heatmap_selection = true;
-        }
-        ImGui::SameLine();
         int frame_number = (int)std::llround(app->animation.frame);
-        ImGui::SetNextItemWidth(110);
         if (ImGui::InputInt("Frame", &frame_number)) {
             app->animation.frame = (double)std::clamp(frame_number, 0, (int)run_num_frames(app) - 1);
             app->animation.mode = PlaybackMode::Stopped;
             focus_heatmap_selection = true;
         }
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", metric_unit((Metric)metric));
         const size_t frame = nearest_frame(app->animation.frame, nullptr, run_num_frames(app));
         size_t valid_pairs = 0, valid_steps = 0;
         for (size_t p = 0; p < pairs.size(); ++p) if (!pair_quality_flags[frame * pairs.size() + p]) ++valid_pairs;
-        for (size_t s = 0; s < steps.size(); ++s) if (!step_quality_flags[frame * steps.size() + s]) ++valid_steps;
-        ImGui::Text("Intra-base pairs: %zu/%zu valid | Inter-base pairs: %zu/%zu valid | frame %zu",
-            valid_pairs, pairs.size(), valid_steps, steps.size(), frame);
+        for (size_t st = 0; st < steps.size(); ++st) if (!step_quality_flags[frame * steps.size() + st]) ++valid_steps;
+        ImGui::TextDisabled("Valid: %zu/%zu pairs, %zu/%zu steps", valid_pairs, pairs.size(), valid_steps, steps.size());
         ImGui::SetItemTooltip("Denominators are fixed tracked identities/links. A missing internal pair invalidates BOTH neighboring links; gaps are never bridged.");
-        const auto& labels = step_metric ? step_labels : pair_labels;
-        ImGui::TextDisabled("%s", labels[member].c_str());
-        ImGui::Checkbox("Outlier in any selected parameter", &aggregate_outliers);
-        ImGui::SameLine();
+
+        ImGui::SeparatorText("Outliers");
+        ImGui::SliderFloat("Tolerance", &outlier_sigma, 1.5f, 4.0f, "%.1f sigma");
+        ImGui::Combo("Baseline", &baseline, "Mean / SD\0Median / MAD\0");
+        ImGui::SetItemTooltip("Per-member reference for z-scores.\nMean / SD: classic; large excursions inflate their own SD.\n"
+            "Median / MAD: robust; scale is 1.4826 x MAD (SD if MAD is 0).\nAngular parameters are measured on the circle (wrap at +/-180 deg).");
+        ImGui::Checkbox("Any selected parameter", &aggregate_outliers);
+        ImGui::SetItemTooltip("A member is outlying when any of the chosen parameters of its class is (count plot, heatmap, 3D).");
         if (aggregate_outliers) {
-            if (ImGui::Button("Choose parameters")) ImGui::OpenPopup("Outlier parameters");
-            if (ImGui::BeginPopup("Outlier parameters")) {
+            if (ImGui::BeginTable("##aggregate", 2)) {
                 for (int k = 0; k < 6; ++k) {
+                    ImGui::TableNextColumn();
                     bool selected = (selected_parameters & (1u << k)) != 0;
                     if (ImGui::Checkbox(metric_name((Metric)(offset + k)), &selected)) {
                         if (selected) selected_parameters |= 1u << k;
                         else selected_parameters &= ~(1u << k);
                     }
                 }
-                ImGui::EndPopup();
+                ImGui::EndTable();
             }
             if (!selected_parameters) ImGui::TextDisabled("Select at least one parameter to detect outliers.");
         }
 
+        ImGui::SeparatorText("Events");
+        draw_event_settings();
+
+        ImGui::SeparatorText("Display");
+        ImGui::Checkbox("Heatmap", &show_heatmap);
+        ImGui::Checkbox("Highlight event contributions", &sync_viewport);
+        ImGui::SetItemTooltip("Show all active events: event-coloured context halos and current-frame contributors from both classes.");
+        ImGui::Checkbox("Signed outlier overlay", &signed_overlay);
+        ImGui::Checkbox("Soft overlay halos", &overlay_halo);
+        ImGui::Checkbox("Smoothed midpoint axis", &show_axis);
+        ImGui::SetItemTooltip("Axis is not the Curves+ screw axis; halos are not emissive bloom.");
+
+        ImGui::SeparatorText("Export & tools");
+        const float wide = -FLT_MIN;
+        if (ImGui::Button("Export parameter CSV", ImVec2(wide, 0))) export_csv(run_num_frames(app));
+        if (ImGui::Button("Export events CSV", ImVec2(wide, 0))) export_events_csv(run_num_frames(app));
+        if (ImGui::Button("Export displayed axis CSV", ImVec2(wide, 0))) export_axis();
+        if (ImGui::Button("Recompute analysis", ImVec2(wide, 0))) reset_requested = true;
+        ImGui::TextDisabled("Canonical A/G/C/T/U; fixed partners identified in frame 0.");
+        ImGui::TextDisabled("Script: attr(\"lavery/step/twist\")");
+        ImGui::PopItemWidth();
+    }
+
+    std::string event_parameters_label() const {
+        if (event_parameters == kEventAllParameters) return "all";
+        if (event_parameters == 63u) return "intra";
+        if (event_parameters == (63u << 6)) return "inter";
+        std::string label;
+        for (int k = 0; k < (int)Metric_Count; ++k) {
+            if (!(event_parameters & (1u << k))) continue;
+            if (!label.empty()) label += "+";
+            label += metric_name((Metric)k);
+        }
+        return label.empty() ? "none" : label;
+    }
+
+    void draw_event_parameters() {
+        ImGui::TextUnformatted("Detect on");
+        ImGui::SetItemTooltip("Parameters used to build events. Independent of the class and parameter shown in the plots.\n"
+            "With both classes, one event can list base pairs and steps together.");
+        struct Preset { const char* name; uint32_t mask; const char* tip; };
+        static const Preset presets[] = {
+            {"Intra", 63u, "Intra-base pair only: Buckle, Propeller, Opening, Shear, Stretch, Stagger"},
+            {"Inter", 63u << 6, "Inter-base pair only: Tilt, Roll, Twist, Shift, Slide, Rise"},
+            {"Both", kEventAllParameters, "All 12 parameters"},
+        };
+        const float width = (ImGui::GetContentRegionAvail().x - 2 * ImGui::GetStyle().ItemSpacing.x) / 3.0f;
+        for (int i = 0; i < 3; ++i) {
+            if (i) ImGui::SameLine();
+            const bool active = event_parameters == presets[i].mask;
+            if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::Button(presets[i].name, ImVec2(width, 0))) event_parameters = presets[i].mask;
+            if (active) ImGui::PopStyleColor();
+            ImGui::SetItemTooltip("%s", presets[i].tip);
+        }
+        if (ImGui::BeginTable("##event_parameters", 2, ImGuiTableFlags_SizingStretchSame)) {
+            for (int group = 0; group < 2; ++group) {
+                ImGui::TableNextColumn();
+                const uint32_t group_mask = 63u << (group * 6);
+                const uint32_t chosen = event_parameters & group_mask;
+                bool all = chosen == group_mask;
+                if (chosen && !all) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
+                if (ImGui::Checkbox(group ? "Inter##ev" : "Intra##ev", &all)) {
+                    event_parameters = all ? (event_parameters | group_mask) : (event_parameters & ~group_mask);
+                }
+                if (chosen && !all) ImGui::PopItemFlag();
+            }
+            for (int k = 0; k < 6; ++k) {
+                for (int group = 0; group < 2; ++group) {
+                    ImGui::TableNextColumn();
+                    const int id = group * 6 + k;
+                    bool on = (event_parameters & (1u << id)) != 0;
+                    ImGui::PushID(id);
+                    if (ImGui::Checkbox(metric_name((Metric)id), &on)) {
+                        if (on) event_parameters |= 1u << id;
+                        else event_parameters &= ~(1u << id);
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+        if (ImGui::Button("Use plotted parameters", ImVec2(-FLT_MIN, 0))) {
+            event_parameters = outlier_parameter_mask() << (metric_is_step((Metric)metric) ? 6 : 0);
+        }
+        ImGui::SetItemTooltip("Copy the class and parameter(s) of the outlier-count plot.");
+        if (!event_parameters) {
+            ImGui::TextDisabled(event_pair_loss ? "No parameter: only pair losses form events." : "No parameter: no events.");
+        }
+    }
+
+    void draw_event_settings() {
+        draw_event_parameters();
+        ImGui::BeginDisabled(event_whole_structure && !event_hierarchy);
+        if (ImGui::InputInt("Neighbourhood", &event_neighbourhood)) event_neighbourhood = std::clamp(event_neighbourhood, 0, 1000);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("In base pairs. Outliers join one event only when they are at most this far apart along the helix\n"
+            "(a step sits half-way between its two pairs). Separate duplexes never join.\n"
+            "In Whole structure mode, this still sets the local reach of hierarchical child events.");
+        ImGui::Checkbox("Whole structure", &event_whole_structure);
+        ImGui::SetItemTooltip("Ignore position: every outlier at the same time belongs to one event (global changes such as unwinding).");
+        ImGui::Checkbox("Hierarchical events", &event_hierarchy);
+        ImGui::SetItemTooltip("Keep broad events and also detect stronger local children inside them.\n"
+            "Two levels: parent context and local bursts. Children must involve fewer base pairs than their parent.");
+        if (event_hierarchy) {
+            ImGui::SliderFloat("Burst extra", &event_burst_extra, 0.25f, 4.0f, "+%.2f sigma");
+            ImGui::SetItemTooltip("Child events start at %.2f sigma and continue above %.2f sigma.\n"
+                "Uses the same Min frames, Bridge gaps and local Neighbourhood as parents.\n"
+                "Pair losses also qualify. Raising this value isolates stronger local bursts.",
+                outlier_sigma + event_burst_extra, std::max(0.5f, outlier_sigma + event_burst_extra - event_hysteresis));
+        }
+        ImGui::SliderFloat("Hysteresis", &event_hysteresis, 0.0f, 2.0f, "%.1f sigma");
+        ImGui::SetItemTooltip("An event starts at the tolerance (%.1f sigma) and continues while |z| stays above %.1f sigma,\n"
+            "so a value hovering around the threshold does not break one event into many.", outlier_sigma, event_end_sigma());
+        ImGui::Checkbox("Pair loss", &event_pair_loss);
+        ImGui::SetItemTooltip("Frames where a base pair breaks (no H-bonds, separated, misaligned) count as outlying\n"
+            "instead of ending the event. Each lost frame scores the tolerance.");
+        if (ImGui::InputInt("Min frames", &event_min_frames)) event_min_frames = std::clamp(event_min_frames, 1, 100000);
+        ImGui::SetItemTooltip("Require this many contributing frames for parents and children (default 3).\n"
+            "Bridged gaps do not count. Set 1 to retain single-frame spikes.\n"
+            "The appropriate minimum depends on trajectory sampling frequency.");
+        if (ImGui::InputInt("Bridge gaps", &event_max_gap)) event_max_gap = std::clamp(event_max_gap, 0, 100000);
+        ImGui::SetItemTooltip("Merge outliers separated by at most this many frames without outliers or data.");
     }
 
     void draw_inspector(int count, size_t frame_count) {
@@ -763,6 +1037,15 @@ struct Lavery : viamd::EventHandler {
             int stride;
         };
         ImGui::PushID(time_label);
+        uint64_t timeline_key = md_hash64(&metric, sizeof(metric), 0x71E1);
+        timeline_key = md_hash64(&compare_all, sizeof(compare_all), timeline_key);
+        timeline_key = md_hash64(&frame_count, sizeof(frame_count), timeline_key);
+        timeline_key = md_hash64(&statistics_baseline, sizeof(statistics_baseline), timeline_key);
+        if (!compare_all) timeline_key = md_hash64(&member, sizeof(member), timeline_key);
+        if (timeline_key != timeline_fit_key) {
+            timeline_fit_key = timeline_key;
+            ImPlot::SetNextAxesToFit();
+        }
         if (ImPlot::BeginPlot("Timeline", ImVec2(-1, 220))) {
             ImPlot::SetupAxes(time_label, metric_unit((Metric)metric));
             const double first_x = times ? times[0] : 0;
@@ -800,12 +1083,25 @@ struct Lavery : viamd::EventHandler {
                 ImGui::EndCombo();
             }
             if (ImGui::Button("Clear comparison")) pinned.clear();
-            ImGui::Text("Mean %.3f  SD %.3f  valid %zu/%zu",
-                member_stats.mean, member_stats.sd, member_stats.count, frame_count);
+            if (statistics_baseline == Baseline_MedianMAD) {
+                ImGui::Text("Median %.3f  scaled MAD %.3f  valid %zu/%zu",
+                    member_stats.mean, member_stats.sd, member_stats.count, frame_count);
+            } else {
+                ImGui::Text("Mean %.3f  SD %.3f  valid %zu/%zu",
+                    member_stats.mean, member_stats.sd, member_stats.count, frame_count);
+            }
             auto& histogram = distributions[metric];
             if (histogram.valid.empty() && !compute_distributions(&histogram, data, (size_t)count)) {
                 ImGui::TextUnformatted("Could not calculate distributions. See the application log.");
                 return;
+            }
+            uint64_t distribution_key = md_hash64(&metric, sizeof(metric), 0xD157);
+            distribution_key = md_hash64(&member, sizeof(member), distribution_key);
+            distribution_key = md_hash64(&frame_count, sizeof(frame_count), distribution_key);
+            if (!pinned.empty()) distribution_key = md_hash64(pinned.data(), pinned.size() * sizeof(int), distribution_key);
+            if (distribution_key != distribution_fit_key) {
+                distribution_fit_key = distribution_key;
+                ImPlot::SetNextAxesToFit();
             }
             if (ImPlot::BeginPlot("Distribution", ImVec2(-1, 180))) {
                 ImPlot::SetupAxes(metric_unit((Metric)metric), "Probability density");
@@ -827,7 +1123,7 @@ struct Lavery : viamd::EventHandler {
         } else if (!member_stats.count) {
             ImGui::TextDisabled("No finite values for this member; other members remain available below.");
         }
-        hovered_outlier = draw_current_outliers(count, frame_count);
+        draw_current_outliers(count, frame_count);
         ImGui::TextColored(ImVec4(1.0f, 0.255f, 0.373f, 1), "Positive deviation");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.157f, 0.843f, 1.0f, 1), "Negative deviation");
@@ -842,15 +1138,105 @@ struct Lavery : viamd::EventHandler {
         return aggregate_outliers ? selected_parameters : 1u << (metric % 6);
     }
 
-    OutlierAssessment assess(size_t frame, size_t index) const {
-        const int offset = metric_is_step((Metric)metric) ? (int)Tilt : 0;
+    // sigma < 0 uses the tolerance. 'strong' receives the mask bits that also reach the tolerance.
+    OutlierAssessment assess_member(size_t frame, bool step, size_t index, uint32_t mask, float* z = nullptr,
+                                    float sigma = -1, uint32_t* strong = nullptr) const {
+        const int offset = step ? (int)Tilt : 0;
         float sample[6];
         MemberStatistics baselines[6];
+        if (strong) *strong = 0;
         for (int k = 0; k < 6; ++k) {
             sample[k] = values[offset + k][frame * columns[offset + k] + index];
             baselines[k] = statistics[offset + k].members[index];
+            if (z) z[k] = baselines[k].zscore(sample[k]);
+            if (strong && (mask & (1u << k)) && baselines[k].is_outlier(sample[k], outlier_sigma)) *strong |= 1u << k;
         }
-        return assess_outliers(sample, baselines, 6, outlier_parameter_mask(), outlier_sigma);
+        return assess_outliers(sample, baselines, 6, mask, sigma < 0 ? outlier_sigma : sigma);
+    }
+
+    float event_end_sigma() const { return std::max(0.5f, outlier_sigma - std::max(0.0f, event_hysteresis)); }
+
+    bool pair_lost(size_t frame, size_t pair) const {
+        constexpr uint16_t broken = Quality_Separation | Quality_Alignment | Quality_PlaneOffset | Quality_NoPairContacts;
+        return statistics[0].members[pair].count && (pair_quality_flags[frame * pairs.size() + pair] & broken) &&
+            !(pair_quality_flags[frame * pairs.size() + pair] & ~(broken | Quality_AdjacentPair));
+    }
+
+    OutlierAssessment assess(size_t frame, size_t index) const {
+        return assess_member(frame, metric_is_step((Metric)metric), index, outlier_parameter_mask());
+    }
+
+    size_t current_frame() const {
+        const size_t frames = app ? run_num_frames(app) : 0;
+        return frames ? nearest_frame(app->animation.frame, nullptr, frames) : 0;
+    }
+
+    void refresh_event_inspection() {
+        if (inspected_event != SIZE_MAX && (app->animation.mode == PlaybackMode::Playing ||
+            app->animation.frame != inspection_frame || inspected_event >= outlier_events.size())) {
+            inspected_event = SIZE_MAX;
+        }
+    }
+
+    bool event_visible(size_t index, size_t frame) const {
+        const auto& event = outlier_events[index];
+        return (inspected_event == SIZE_MAX || inspected_event == index) &&
+            frame >= event.begin && frame <= event.end;
+    }
+
+    void inspect_event(size_t index, size_t frame) {
+        app->animation.frame = (double)frame;
+        app->animation.mode = PlaybackMode::Stopped;
+        inspected_event = index;
+        inspection_frame = app->animation.frame;
+        focus_heatmap_selection = true;
+    }
+
+    bool overlay_active() const {
+        return app && show_window && computed && !calculating && calculation_ok.load() &&
+            !pairs.empty() && statistics[0].members.size() == pairs.size();
+    }
+
+    bool decode_pick(uint32_t local, bool* step, uint32_t* index) const {
+        if (local < pairs.size()) {
+            *step = false;
+            *index = local;
+            return true;
+        }
+        if (local - pairs.size() < steps.size()) {
+            *step = true;
+            *index = local - (uint32_t)pairs.size();
+            return true;
+        }
+        return false;
+    }
+
+    uint32_t marker_mask(bool step, uint32_t index) const {
+        for (const auto& m : markers) if (m.step == step && m.index == index) return m.mask;
+        return 0;
+    }
+
+    // Selects a member (switching class when needed), optionally a parameter (0-5), and jumps to a frame.
+    void select_target(bool step, uint32_t index, int parameter, size_t frame) {
+        const int offset = step ? (int)Tilt : 0;
+        const bool class_changed = metric_is_step((Metric)metric) != step;
+        metric = offset + (parameter >= 0 && parameter < 6 ? parameter : metric % 6);
+        member = (int)index;
+        if (class_changed) reset_heatmap_view = true;
+        app->animation.frame = (double)frame;
+        app->animation.mode = PlaybackMode::Stopped;
+        focus_heatmap_selection = true;
+        show_window = true;
+    }
+
+    void recompute_statistics() {
+        for (int m = 0; m < (int)Metric_Count; ++m) {
+            if (!compute_statistics(&statistics[m], values[m], columns[m], metric_is_angular((Metric)m), (Baseline)baseline)) {
+                MD_LOG_ERROR("Lavery: could not recompute statistics for %s", metric_name((Metric)m));
+            }
+        }
+        statistics_baseline = baseline;
+        counts_key = 0;
     }
 
     uint16_t quality_at(size_t frame, size_t index) const {
@@ -899,26 +1285,72 @@ struct Lavery : viamd::EventHandler {
 
     void update_counts(int count, size_t frame_count) {
         const uint32_t mask = outlier_parameter_mask();
-        if (outlier_counts_metric != metric || outlier_counts_sigma != outlier_sigma || counts_parameters != mask) {
-            outlier_counts.assign(frame_count, {});
-            std::vector<float> severities(frame_count);
-            for (size_t f = 0; f < frame_count; ++f) {
-                float severity = 0;
-                for (int m = 0; m < count; ++m) {
-                    const auto result = assess(f, (size_t)m);
-                    if (result.valid) ++outlier_counts[f].valid;
-                    if (result.contributors) {
-                        ++outlier_counts[f].outliers;
-                        severity = std::max(severity, std::fabs(result.peak_z));
-                    }
-                }
-                severities[f] = severity;
+        uint64_t key = md_hash64(&outlier_sigma, sizeof(outlier_sigma), 0x1A7E);
+        key = md_hash64(&statistics_baseline, sizeof(statistics_baseline), key);
+        key = md_hash64(&event_parameters, sizeof(event_parameters), key);
+        key = md_hash64(&event_min_frames, sizeof(event_min_frames), key);
+        key = md_hash64(&event_max_gap, sizeof(event_max_gap), key);
+        key = md_hash64(&event_neighbourhood, sizeof(event_neighbourhood), key);
+        key = md_hash64(&event_whole_structure, sizeof(event_whole_structure), key);
+        key = md_hash64(&event_hysteresis, sizeof(event_hysteresis), key);
+        key = md_hash64(&event_pair_loss, sizeof(event_pair_loss), key);
+        key = md_hash64(&event_hierarchy, sizeof(event_hierarchy), key);
+        key = md_hash64(&event_burst_extra, sizeof(event_burst_extra), key);
+        key = md_hash64(&frame_count, sizeof(frame_count), key);
+        if (event_data_key != key) inspected_event = SIZE_MAX;
+        event_data_key = key;
+        key = md_hash64(&metric, sizeof(metric), key);
+        key = md_hash64(&mask, sizeof(mask), key);
+        if (key == counts_key && outlier_counts.size() == frame_count) return;
+        counts_key = key;
+        const bool step = metric_is_step((Metric)metric);
+        const float end_sigma = event_end_sigma();
+        const double chance = chance_outlier_probability(outlier_sigma, std::max(1, (int)std::bitset<6>(mask).count()));
+        outlier_counts.assign(frame_count, {});
+        expected_counts.assign(frame_count, 0.0f);
+        std::vector<std::vector<MemberOutlier>> frame_outliers(frame_count);
+        float z[6];
+        auto record = [&](size_t f, bool member_step, size_t m, uint32_t member_mask) {
+            uint32_t strong = 0;
+            const auto result = assess_member(f, member_step, m, member_mask, z, end_sigma, &strong);
+            MemberOutlier outlier;
+            outlier.member = (uint32_t)m;
+            outlier.step = member_step;
+            outlier.lost = !member_step && event_pair_loss && !result.valid && pair_lost(f, m);
+            if (!result.contributors && !outlier.lost) return;
+            outlier.contributors = result.contributors;
+            outlier.strong = strong;
+            std::copy(z, z + 6, outlier.z);
+            frame_outliers[f].push_back(outlier);
+        };
+        for (size_t f = 0; f < frame_count; ++f) {
+            for (int m = 0; m < count; ++m) {
+                const auto result = assess_member(f, step, (size_t)m, mask);
+                if (result.valid) ++outlier_counts[f].valid;
+                if (result.contributors) ++outlier_counts[f].outliers;
             }
-            outlier_events = collect_outlier_events(outlier_counts, severities);
-            outlier_counts_metric = metric;
-            outlier_counts_sigma = outlier_sigma;
-            counts_parameters = mask;
+            expected_counts[f] = (float)(chance * (double)outlier_counts[f].valid);
+            for (const bool member_step : {false, true}) {
+                const uint32_t class_mask = (event_parameters >> (member_step ? 6 : 0)) & 63u;
+                // A lost pair joins events even when no intra-base-pair parameter is tested.
+                if (!class_mask && (member_step || !event_pair_loss)) continue;
+                const size_t members = member_step ? steps.size() : pairs.size();
+                for (size_t m = 0; m < members; ++m) {
+                    if (class_mask || pair_lost(f, m)) record(f, member_step, m, class_mask);
+                }
+            }
         }
+        EventOptions options;
+        options.min_frames = (size_t)std::max(1, event_min_frames);
+        options.max_gap = (size_t)std::max(0, event_max_gap);
+        options.neighbourhood = event_whole_structure ? -1 : std::max(0, event_neighbourhood);
+        options.lost_weight = outlier_sigma;
+        options.burst_sigma = event_hierarchy ? outlier_sigma + event_burst_extra : 0;
+        options.burst_hysteresis = event_hysteresis;
+        options.burst_neighbourhood = event_neighbourhood;
+        outlier_events = detect_events(frame_outliers, pairs.size(), steps, options);
+        event_colors = event_color_slots(outlier_events);
+        event_order_dirty = true;
     }
 
     void draw_outlier_timeline(int count, size_t frame_count) {
@@ -940,7 +1372,16 @@ struct Lavery : viamd::EventHandler {
         if (ImGui::Button("Previous outlier frame")) jump_outlier(selected_frame, false);
         ImGui::SameLine();
         if (ImGui::Button("Next outlier frame")) jump_outlier(selected_frame, true);
-        ImGui::TextDisabled("Ctrl-click / Ctrl-drag: jump / scrub. Hover for valid counts; missing samples excluded.");
+        double observed = 0, expected = 0;
+        for (size_t f = 0; f < frame_count; ++f) {
+            observed += (double)outlier_counts[f].outliers;
+            expected += expected_counts[f];
+        }
+        ImGui::Text("Over the trajectory: %.0f outlying member-frames, ~%.0f expected by chance", observed, expected);
+        ImGui::SetItemTooltip("Chance level assumes Gaussian, independent parameters: each tested parameter exceeds %.1f sigma\n"
+            "with probability %.2g. Observed counts near the dashed line are mostly noise; raise the tolerance\n"
+            "or Min frames, or rely on events with a high score.", outlier_sigma, chance_outlier_probability(outlier_sigma, 1));
+        ImGui::TextDisabled("Ctrl-click / Ctrl-drag: jump / scrub. Shaded bands: outlier events. Dashed: expected by chance.");
         ImGui::PushID(metric);
         ImGui::PushID(x_label);
         if (ImPlot::BeginPlot("Outliers over time", ImVec2(-1, 180), ImPlotFlags_NoLegend)) {
@@ -957,6 +1398,8 @@ struct Lavery : viamd::EventHandler {
                 return ImPlotPoint(p.times ? (double)p.times[index] : (double)index,
                     sample.valid ? (double)sample.outliers : std::numeric_limits<double>::quiet_NaN());
             }, &payload, (int)frame_count);
+            draw_expected_line(x_at, frame_count);
+            draw_event_bands(x_at);
             scrub_timeline("##outlier_scrub", times, frame_count);
             draw_time_cursor(times, frame_count);
             const bool hovered = ImPlot::IsPlotHovered();
@@ -965,7 +1408,15 @@ struct Lavery : viamd::EventHandler {
                 const auto& sample = outlier_counts[f];
                 ImGui::BeginTooltip();
                 ImGui::Text("Frame %zu | %s: %.3f", f, x_label, x_at(f));
-                ImGui::Text("%zu outliers / %zu valid (%d total)", sample.outliers, sample.valid, count);
+                ImGui::Text("%zu outliers / %zu valid (%d total); ~%.2f expected by chance", sample.outliers, sample.valid, count,
+                    (double)expected_counts[f]);
+                for (size_t e = 0; e < outlier_events.size(); ++e) {
+                    const auto& event = outlier_events[e];
+                    if (f < event.begin || f > event.end) continue;
+                    const std::string kind = event_kind(event);
+                    ImGui::Text("Event #%zu: %s, bp %u-%u, peak %.2f sigma", e + 1, kind.empty() ? "-" : kind.c_str(),
+                        event.pair_first + 1, event.pair_last + 1, event.severity);
+                }
                 ImGui::EndTooltip();
             }
             ImPlot::EndPlot();
@@ -974,38 +1425,60 @@ struct Lavery : viamd::EventHandler {
         ImGui::PopID();
     }
 
+    template <typename X>
+    void draw_expected_line(X&& x_at, size_t frame_count) const {
+        if (expected_counts.size() != frame_count || frame_count < 2) return;
+        ImDrawList* draw = ImPlot::GetPlotDrawList();
+        const ImU32 color = ImGui::GetColorU32(ImVec4(0.75f, 0.75f, 0.75f, 0.8f));
+        constexpr float dash = 6, gap = 4;
+        float phase = 0;
+        ImPlot::PushPlotClipRect();
+        for (size_t f = 1; f < frame_count; ++f) {
+            const ImVec2 a = ImPlot::PlotToPixels(x_at(f - 1), expected_counts[f - 1]);
+            const ImVec2 b = ImPlot::PlotToPixels(x_at(f), expected_counts[f]);
+            const float length = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+            if (!(length > 0)) continue;
+            for (float t = 0; t < length;) {
+                const float period = dash + gap;
+                const float in = std::fmod(phase + t, period);
+                const float step = std::min(length - t, in < dash ? dash - in : period - in);
+                if (in < dash) {
+                    draw->AddLine(ImVec2(a.x + (b.x - a.x) * t / length, a.y + (b.y - a.y) * t / length),
+                        ImVec2(a.x + (b.x - a.x) * (t + step) / length, a.y + (b.y - a.y) * (t + step) / length), color, 1.0f);
+                }
+                t += std::max(step, 0.01f);
+            }
+            phase = std::fmod(phase + length, dash + gap);
+        }
+        ImPlot::PopPlotClipRect();
+    }
+
+    template <typename X>
+    void draw_event_bands(X&& x_at) const {
+        if (outlier_events.empty()) return;
+        ImDrawList* draw = ImPlot::GetPlotDrawList();
+        const ImPlotRect limits = ImPlot::GetPlotLimits();
+        const size_t frame = current_frame();
+        ImPlot::PushPlotClipRect();
+        for (size_t e = 0; e < outlier_events.size(); ++e) {
+            const auto& event = outlier_events[e];
+            ImVec2 a = ImPlot::PlotToPixels(x_at(event.begin), limits.Y.Max);
+            ImVec2 b = ImPlot::PlotToPixels(x_at(event.end), limits.Y.Min);
+            if (b.x - a.x < 3) { const float c = 0.5f * (a.x + b.x); a.x = c - 1.5f; b.x = c + 1.5f; }
+            const bool current = frame >= event.begin && frame <= event.end;
+            ImVec4 tint = event_color(e);
+            tint.w = current ? 0.28f : 0.14f;
+            draw->AddRectFilled(a, b, ImGui::GetColorU32(tint));
+        }
+        ImPlot::PopPlotClipRect();
+    }
+
     void draw_events_quality(int count, size_t frame_count) {
         const size_t frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame), (int64_t)0, (int64_t)frame_count - 1);
         const auto& labels = metric_is_step((Metric)metric) ? step_labels : pair_labels;
         if (!ImGui::BeginTabBar("EventsQuality")) return;
         if (ImGui::BeginTabItem("Outlier events")) {
-            const float* times = timeline_times(frame_count);
-            char unit[64];
-            timeline_label(unit, sizeof(unit), times);
-            ImGui::Text("%zu events | duration in %s | click a row to jump to its peak", outlier_events.size(), unit);
-            if (ImGui::BeginTable("Events", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) {
-                for (const char* title : {"Frames", "Duration", "Peak frame", "Peak sigma", "Max outliers"}) ImGui::TableSetupColumn(title);
-                ImGui::TableHeadersRow();
-                for (const auto& event : outlier_events) {
-                    ImGui::PushID((int)event.begin);
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    char label[64];
-                    snprintf(label, sizeof(label), "%zu - %zu", event.begin, event.end);
-                    if (ImGui::Selectable(label, false, ImGuiSelectableFlags_SpanAllColumns)) {
-                        app->animation.frame = (double)event.peak;
-                        app->animation.mode = PlaybackMode::Stopped;
-                        focus_heatmap_selection = true;
-                    }
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%.4g", times ? (double)times[event.end] - times[event.begin] : (double)(event.end - event.begin));
-                    ImGui::TableNextColumn(); ImGui::Text("%zu", event.peak);
-                    ImGui::TableNextColumn(); ImGui::Text("%.2f", event.severity);
-                    ImGui::TableNextColumn(); ImGui::Text("%zu", event.peak_count);
-                    ImGui::PopID();
-                }
-                ImGui::EndTable();
-            }
+            draw_events(frame, frame_count);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Pairing & coverage")) {
@@ -1043,6 +1516,374 @@ struct Lavery : viamd::EventHandler {
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
+    }
+
+    static ImVec4 sign_color(float z, float alpha) {
+        return z > 0 ? ImVec4(1.0f, 0.255f, 0.373f, alpha) : ImVec4(0.157f, 0.843f, 1.0f, alpha);
+    }
+
+    ImVec4 event_color(size_t event) const {
+        static const ImVec4 palette[] = {
+            {1.0f, 0.78f, 0.30f, 1}, {0.62f, 0.48f, 1.0f, 1},
+            {0.30f, 0.85f, 0.48f, 1}, {1.0f, 0.48f, 0.72f, 1},
+            {0.35f, 0.60f, 1.0f, 1}, {1.0f, 0.52f, 0.25f, 1},
+            {0.30f, 0.85f, 0.78f, 1}, {0.83f, 0.83f, 0.35f, 1},
+        };
+        const size_t slot = event_colors[event];
+        if (slot < sizeof(palette) / sizeof(palette[0])) return palette[slot];
+        ImVec4 color(0, 0, 0, 1);
+        ImGui::ColorConvertHSVtoRGB(std::fmod((float)slot * 0.61803398875f, 1.0f), 0.55f, 1.0f, color.x, color.y, color.z);
+        return color;
+    }
+
+    void draw_events(size_t frame, size_t frame_count) {
+        const float* times = timeline_times(frame_count);
+        char unit[64];
+        timeline_label(unit, sizeof(unit), times);
+        if (ImGui::Button("All to timeline")) {
+            for (int e : event_order) if (!add_event_period((size_t)e)) break;
+        }
+        ImGui::SetItemTooltip("Add every event, in table order, as a period on the main timeline (VIAMD holds up to %d periods).", TIMELINE_MAX_PERIODS);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(timeline_period_ids.empty());
+        if (ImGui::Button("Remove from timeline")) remove_event_periods();
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Remove the timeline periods added from Lavery events.");
+
+        const size_t children = (size_t)std::count_if(outlier_events.begin(), outlier_events.end(),
+            [](const OutlierEvent& event) { return event.parent != SIZE_MAX; });
+        ImGui::Text("%zu parents + %zu local bursts | start %.1f sigma, continue %.1f sigma | %s | duration in %s",
+            outlier_events.size() - children, children, outlier_sigma,
+            event_end_sigma(), event_whole_structure ? "whole structure" : "local", unit);
+        ImGui::TextDisabled("Click: inspect only this event at peak. Play or change frame: all active events. Hover: details.");
+        if (!ImGui::BeginTable("Events", 8, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable)) return;
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Event / member", ImGuiTableColumnFlags_WidthStretch, 1.8f);
+        ImGui::TableSetupColumn("Region", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+        ImGui::TableSetupColumn("Frames / span", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Peak frame", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+        ImGui::TableSetupColumn("Peak sigma", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortDescending, 0.5f);
+        ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort |
+            ImGuiTableColumnFlags_PreferSortDescending, 0.5f);
+        ImGui::TableSetupColumn("Actions / parameters (peak sigma)", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_NoSort, 2.6f);
+        ImGui::TableHeadersRow();
+        sort_events(ImGui::TableGetSortSpecs(), times);
+
+        for (int e : event_order) {
+            const auto& event = outlier_events[(size_t)e];
+            ImGui::PushID(e);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const ImVec2 swatch = ImGui::GetCursorScreenPos();
+            const float side = ImGui::GetFontSize() * 0.65f;
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(swatch.x, swatch.y + 3), ImVec2(swatch.x + side, swatch.y + 3 + side),
+                ImGui::GetColorU32(event_color((size_t)e)), 2.0f);
+            ImGui::Dummy(ImVec2(side, ImGui::GetTextLineHeight()));
+            ImGui::SameLine();
+            char label[64];
+            if (event.parent == SIZE_MAX) snprintf(label, sizeof(label), "#%d  %zu - %zu", e + 1, event.begin, event.end);
+            else snprintf(label, sizeof(label), "#%d  child of #%zu", e + 1, event.parent + 1);
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAllColumns | ImGuiTreeNodeFlags_OpenOnArrow |
+                ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_AllowOverlap;
+            if (event_visible((size_t)e, frame)) flags |= ImGuiTreeNodeFlags_Selected;
+            if (event.members.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+            const bool open = ImGui::TreeNodeEx(label, flags);
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+                inspect_event((size_t)e, event.peak);
+            }
+            const std::string kind = event_kind(event);
+            if (ImGui::IsItemHovered()) {
+                for (const auto& m : event.members) preview.push_back({m.step, m.member, m.parameters});
+                char hierarchy[128] = {};
+                if (event.parent != SIZE_MAX) snprintf(hierarchy, sizeof(hierarchy),
+                    "\nLocal burst inside #%zu; start %.2f sigma, continue %.2f sigma",
+                    event.parent + 1, event.burst_sigma, std::max(0.5f, event.burst_sigma - event_hysteresis));
+                ImGui::SetTooltip("Event #%d: %s\nBase pairs %u-%u, frames %zu-%zu (%zu outlying)\nPeak %.2f sigma at frame %zu; "
+                    "up to %zu members outlying at once\nScore %.1f (sum of |z| over member-frames)%s%s",
+                    e + 1, kind.empty() ? "-" : kind.c_str(), event.pair_first + 1, event.pair_last + 1, event.begin, event.end,
+                    event.outlier_frames, event.severity, event.peak, event.peak_count, event.score,
+                    event.lost_samples ? "\nIncludes frames where a base pair was lost" : "", hierarchy);
+            }
+            size_t bp = 0, st = 0;
+            for (const auto& m : event.members) (m.step ? st : bp)++;
+            ImGui::TableNextColumn();
+            if (event.pair_first == event.pair_last) ImGui::Text("bp %u", event.pair_first + 1);
+            else ImGui::Text("bp %u-%u", event.pair_first + 1, event.pair_last + 1);
+            ImGui::TableNextColumn();
+            const int dominant = event_dominant_metric(event);
+            if (dominant >= 0) ImGui::TextColored(sign_color(event.metric_signed[dominant], 1), "%s", kind.c_str());
+            else ImGui::TextUnformatted(kind.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%zu contributing %s", event.outlier_frames, event.outlier_frames == 1 ? "frame" : "frames");
+            if (times) ImGui::TextDisabled("%.4g %s span", (double)times[event.end] - times[event.begin], unit);
+            else ImGui::TextDisabled("%zu-frame span", event.end - event.begin + 1);
+            ImGui::SetItemTooltip("Contributing frames exclude bridged gaps.\n"
+                "Frame span includes both endpoints; elapsed time is last time minus first time.\n"
+                "A single sample is 1 frame, with zero elapsed time.");
+            ImGui::TableNextColumn(); ImGui::Text("%zu", event.peak);
+            ImGui::TableNextColumn(); ImGui::Text("%.2f", event.severity);
+            ImGui::TableNextColumn(); ImGui::Text("%.1f", event.score);
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Select")) select_event_residues(event);
+            ImGui::SetItemTooltip("Replace the VIAMD selection with the nucleotides of this event's members.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Timeline")) add_event_period((size_t)e);
+            ImGui::SetItemTooltip("Add this event as a period on the main timeline.");
+            ImGui::SameLine();
+            ImGui::TextDisabled("%zu bp, %zu steps", bp, st);
+            if (open) {
+                for (const auto& m : event.members) draw_event_member(m, (size_t)e);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    void sort_events(ImGuiTableSortSpecs* specs, const float* times) {
+        const bool stale = event_order.size() != outlier_events.size();
+        if (!stale && !event_order_dirty && !(specs && specs->SpecsDirty)) return;
+        event_order.resize(outlier_events.size());
+        for (size_t i = 0; i < event_order.size(); ++i) event_order[i] = (int)i;
+        if (specs && specs->SpecsCount > 0) {
+            const ImGuiTableColumnSortSpecs spec = specs->Specs[0];
+            auto duration = [&](const OutlierEvent& e) {
+                return (double)e.outlier_frames;
+            };
+            std::vector<std::string> kinds;
+            if (spec.ColumnIndex == 2) for (const auto& e : outlier_events) kinds.push_back(event_kind(e));
+            std::stable_sort(event_order.begin(), event_order.end(), [&](int ia, int ib) {
+                const OutlierEvent& a = outlier_events[(size_t)ia];
+                const OutlierEvent& b = outlier_events[(size_t)ib];
+                int c = 0;
+                switch (spec.ColumnIndex) {
+                case 0: c = a.begin < b.begin ? -1 : a.begin > b.begin; break;
+                case 1: c = a.pair_first < b.pair_first ? -1 : a.pair_first > b.pair_first; break;
+                case 2: c = kinds[(size_t)ia].compare(kinds[(size_t)ib]); break;
+                case 3: c = duration(a) < duration(b) ? -1 : duration(a) > duration(b); break;
+                case 4: c = a.peak < b.peak ? -1 : a.peak > b.peak; break;
+                case 5: c = a.severity < b.severity ? -1 : a.severity > b.severity; break;
+                default: c = a.score < b.score ? -1 : a.score > b.score; break;
+                }
+                return spec.SortDirection == ImGuiSortDirection_Descending ? c > 0 : c < 0;
+            });
+        }
+        if (specs) specs->SpecsDirty = false;
+        event_order_dirty = false;
+    }
+
+    template <typename F>
+    void for_each_event_base(const OutlierEvent& event, F&& f) const {
+        for (const auto& m : event.members) {
+            if (m.step) {
+                if (m.member >= steps.size()) continue;
+                for (uint32_t p : {steps[m.member].a, steps[m.member].b}) { f(pairs[p].a); f(pairs[p].b); }
+            } else if (m.member < pairs.size()) {
+                f(pairs[m.member].a);
+                f(pairs[m.member].b);
+            }
+        }
+    }
+
+    void select_event_residues(const OutlierEvent& event) {
+        auto& mask = app->selection.selection_mask;
+        md_bitmask_clear(&mask);
+        for_each_event_base(event, [&](uint32_t base) {
+            if (base < bases.size()) for (uint32_t atom : bases[base].atoms) md_bitmask_set_bit(&mask, atom);
+        });
+    }
+
+    bool add_event_period(size_t index) {
+        if (!app || index >= outlier_events.size()) return false;
+        const OutlierEvent& event = outlier_events[index];
+        const std::string kind = event_kind(event);
+        char name[TIMELINE_PERIOD_NAME_CAP];
+        snprintf(name, sizeof(name), "Lavery #%zu %s bp %u-%u", index + 1, kind.c_str(), event.pair_first + 1, event.pair_last + 1);
+        auto& periods = app->timeline.periods;
+        for (int i = 0; i < periods.count; ++i) {
+            const TimelinePeriod& r = periods.items[i];
+            if (r.beg == (int32_t)event.begin && r.end == (int32_t)event.end && !strcmp(r.name, name)) return true;
+        }
+        TimelinePeriod* period = timeline_periods_add(&periods, name, (int32_t)event.begin, (int32_t)event.end, false);
+        if (!period) {
+            MD_LOG_ERROR("Lavery: the timeline holds at most %d periods; remove some to add more events", TIMELINE_MAX_PERIODS);
+            return false;
+        }
+        std::string note;
+        char line[256];
+        snprintf(line, sizeof(line), "%s\nBase pairs %u-%u, frames %zu-%zu\nPeak %.2f sigma at frame %zu, score %.1f\n",
+            kind.empty() ? "Lavery outlier event" : kind.c_str(), event.pair_first + 1, event.pair_last + 1, event.begin, event.end,
+            event.severity, event.peak, event.score);
+        note = line;
+        if (event.parent != SIZE_MAX) {
+            snprintf(line, sizeof(line), "Child of #%zu; burst threshold %.2f sigma\n", event.parent + 1, event.burst_sigma);
+            note += line;
+        }
+        note += "Members:";
+        size_t shown = 0;
+        for (const auto& m : event.members) {
+            const auto& labels = m.step ? step_labels : pair_labels;
+            if (m.member >= labels.size()) continue;
+            if (++shown > 6) { note += "\n..."; break; }
+            note += "\n";
+            note += labels[m.member];
+        }
+        snprintf(period->note, sizeof(period->note), "%s", note.c_str());
+        const ImVec4 c = event_color(index);
+        period->color = vec4_set(c.x, c.y, c.z, 1);
+        timeline_period_ids.push_back(period->id);
+        return true;
+    }
+
+    void remove_event_periods() {
+        if (!app) return;
+        for (uint32_t id : timeline_period_ids) {
+            if (timeline_periods_find(&app->timeline.periods, id)) timeline_periods_remove(&app->timeline.periods, id);
+        }
+        timeline_period_ids.clear();
+    }
+
+    void draw_event_member(const EventMember& m, size_t event_index) {
+        const auto& labels = m.step ? step_labels : pair_labels;
+        if (m.member >= labels.size()) return;
+        const int offset = m.step ? (int)Tilt : 0;
+        ImGui::PushID((int)(m.member * 2 + (m.step ? 1 : 0)));
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        char text[512];
+        snprintf(text, sizeof(text), "%s %s", m.step ? "[inter]" : "[intra]", labels[m.member].c_str());
+        const bool selected = member == (int)m.member && metric_is_step((Metric)metric) == m.step;
+        ImGui::Indent(ImGui::GetTreeNodeToLabelSpacing());
+        if (ImGui::Selectable(text, selected)) {
+            select_target(m.step, m.member, m.peak_parameter, m.peak);
+            inspect_event(event_index, m.peak);
+        }
+        ImGui::Unindent(ImGui::GetTreeNodeToLabelSpacing());
+        if (ImGui::IsItemHovered()) {
+            preview.push_back({m.step, m.member, m.parameters});
+            if (m.peak_parameter >= 0) {
+                ImGui::SetTooltip("%s\nClick: select it, its strongest parameter (%s) and peak frame %zu.",
+                    m.step ? "Inter-base pair (step)" : "Intra-base pair", metric_name((Metric)(offset + m.peak_parameter)), m.peak);
+            } else {
+                ImGui::SetTooltip("Intra-base pair, lost (broken) in %zu frames\nClick: select it at frame %zu.", m.lost_frames, m.peak);
+            }
+        }
+        ImGui::TableNextColumn();
+        ImGui::TableNextColumn();
+        ImGui::TableNextColumn();
+        if (m.lost_frames) ImGui::TextDisabled("%zu frames (%zu lost)", m.frames, m.lost_frames);
+        else ImGui::TextDisabled("%zu frames", m.frames);
+        ImGui::TableNextColumn(); ImGui::Text("%zu", m.peak);
+        ImGui::TableNextColumn();
+        if (m.peak_parameter >= 0) ImGui::TextColored(sign_color(m.peak_z, 1), "%+.2f", m.peak_z);
+        else ImGui::TextDisabled("-");
+        ImGui::TableNextColumn();
+        ImGui::TableNextColumn();
+        bool first = true;
+        if (m.lost_frames) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.55f, 0.55f, 0.45f));
+            if (ImGui::SmallButton("Pair lost##lost")) {
+                select_target(m.step, m.member, m.peak_parameter, m.peak);
+                inspect_event(event_index, m.peak);
+            }
+            ImGui::PopStyleColor();
+            ImGui::SetItemTooltip("This base pair broke (no H-bonds, separated or misaligned) in %zu frames of the event.", m.lost_frames);
+            first = false;
+        }
+        for (int k = 0; k < 6; ++k) {
+            if (!(m.parameters & (1u << k))) continue;
+            const int id = offset + k;
+            if (!first) ImGui::SameLine();
+            first = false;
+            char chip[64];
+            snprintf(chip, sizeof(chip), "%s %+.1f##p%d", metric_name((Metric)id), m.parameter_peak_z[k], k);
+            ImGui::PushStyleColor(ImGuiCol_Button, sign_color(m.parameter_peak_z[k], 0.35f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, sign_color(m.parameter_peak_z[k], 0.6f));
+            const bool active = selected && metric == id;
+            if (active) ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            if (ImGui::SmallButton(chip)) {
+                select_target(m.step, m.member, k, m.parameter_peak[k]);
+                inspect_event(event_index, m.parameter_peak[k]);
+            }
+            if (active) ImGui::PopStyleVar();
+            ImGui::PopStyleColor(2);
+            if (ImGui::IsItemHovered()) {
+                preview.push_back({m.step, m.member, 1u << k});
+                const size_t f = m.parameter_peak[k];
+                const float v = values[id][f * columns[id] + m.member];
+                ImGui::SetTooltip("%s at peak frame %zu: %.3f %s (%+.2f sigma)\nClick: show %s for this member at that frame.",
+                    metric_name((Metric)id), f, v, metric_unit((Metric)id), m.parameter_peak_z[k], metric_name((Metric)id));
+            }
+        }
+        ImGui::PopID();
+    }
+
+    void export_events_csv(size_t frames) {
+        char path[4096] = {};
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
+        md_file_t file = {};
+        if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+            MD_LOG_ERROR("Lavery: could not open events CSV export '%s'", path);
+            return;
+        }
+        const float* times = timeline_times(frames);
+        char unit[32] = "frame";
+        if (times) md_unit_print(unit, sizeof(unit), app->timeline.time_unit);
+        std::string buffer = csv_event_header();
+        bool ok = true;
+        for (size_t e = 0; e < outlier_events.size() && ok; ++e) {
+            const auto& event = outlier_events[e];
+            for (const auto& m : event.members) {
+                const int offset = m.step ? (int)Tilt : 0;
+                const auto& labels = m.step ? step_labels : pair_labels;
+                for (int k = 0; k < 6; ++k) {
+                    const int id = offset + k;
+                    CsvEventRow row;
+                    row.run = run;
+                    row.event = e + 1;
+                    row.begin = event.begin;
+                    row.end = event.end;
+                    row.begin_time = times ? (double)times[event.begin] : (double)event.begin;
+                    row.end_time = times ? (double)times[event.end] : (double)event.end;
+                    row.time_unit = unit;
+                    row.peak = event.peak;
+                    row.severity = event.severity;
+                    row.score = event.score;
+                    row.kind = event_kind(event);
+                    row.pair_first = event.pair_first + 1;
+                    row.pair_last = event.pair_last + 1;
+                    row.sigma = event.parent == SIZE_MAX ? outlier_sigma : event.burst_sigma;
+                    row.end_sigma = std::max(0.5f, row.sigma - event_hysteresis);
+                    row.neighbourhood = event.parent == SIZE_MAX && event_whole_structure ? -1 : event_neighbourhood;
+                    row.parent_event = event.parent == SIZE_MAX ? 0 : event.parent + 1;
+                    row.burst_sigma = event.burst_sigma;
+                    row.member_lost = m.lost_frames;
+                    row.scope = event_parameters_label();
+                    row.baseline = statistics_baseline == Baseline_MedianMAD ? "median_mad" : "mean_sd";
+                    row.metric = (Metric)id;
+                    row.member = m.member + 1;
+                    row.label = labels[m.member];
+                    row.member_frames = m.frames;
+                    row.contributing = (m.parameters & (1u << k)) != 0;
+                    row.parameter_peak = row.contributing ? m.parameter_peak[k] : m.peak;
+                    row.value = values[id][row.parameter_peak * columns[id] + m.member];
+                    row.parameter_z = row.contributing ? m.parameter_peak_z[k]
+                        : statistics[id].members[m.member].zscore(row.value);
+                    buffer += csv_event_row(row);
+                }
+            }
+            if (buffer.size() >= 65536) {
+                if (md_file_write(file, buffer.data(), buffer.size()) != buffer.size()) ok = false;
+                buffer.clear();
+            }
+        }
+        if (ok && !buffer.empty() && md_file_write(file, buffer.data(), buffer.size()) != buffer.size()) ok = false;
+        if (!md_file_close(&file)) ok = false;
+        if (!ok) MD_LOG_ERROR("Lavery: events CSV export failed; '%s' may be incomplete", path);
+        else MD_LOG_INFO("Lavery: exported events CSV to '%s'", path);
     }
 
     void jump_outlier(size_t current, bool forward) {
@@ -1099,6 +1940,7 @@ struct Lavery : viamd::EventHandler {
                 sample.sigma = outlier_sigma;
                 sample.selected_mask = outlier_parameter_mask();
                 sample.member_outlier = assessment.contributors != 0;
+                sample.baseline_method = (Baseline)statistics_baseline;
                 for (int k = 0; k < 6; ++k) {
                     const int id = offset + k;
                     sample.metric = (Metric)id;
@@ -1115,13 +1957,12 @@ struct Lavery : viamd::EventHandler {
         else MD_LOG_INFO("Lavery: exported CSV to '%s'", path);
     }
 
-    int draw_current_outliers(int count, size_t frame_count) {
-        int hovered_member = -1;
+    void draw_current_outliers(int count, size_t frame_count) {
         const auto& labels = metric_is_step((Metric)metric) ? step_labels : pair_labels;
         const size_t frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame),
             (int64_t)0, (int64_t)frame_count - 1);
         if (ImGui::CollapsingHeader("Current-frame outliers (all members)", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextDisabled("Hover to preview only this outlier in 3D; click to select it.");
+            ImGui::TextDisabled("Hover: add a paused 3D preview (unless inspecting an event). Click: select.");
             const int offset = metric_is_step((Metric)metric) ? (int)Tilt : 0;
             std::vector<std::pair<int, OutlierAssessment>> ranked;
             for (int m = 0; m < count; ++m) {
@@ -1149,7 +1990,7 @@ struct Lavery : viamd::EventHandler {
                     focus_heatmap_selection = true;
                 }
                 if (ImGui::IsItemHovered()) {
-                    hovered_member = m;
+                    preview.push_back({metric_is_step((Metric)metric), (uint32_t)m, outlier_parameter_mask()});
                     ImGui::BeginTooltip();
                     for (int k = 0; k < 6; ++k) {
                         if (!(entry.second.contributors & (1u << k))) continue;
@@ -1166,7 +2007,6 @@ struct Lavery : viamd::EventHandler {
             ImGui::EndChild();
             ImGui::Text("%zu / %d outliers in frame %zu", outliers, count, frame);
         }
-        return hovered_member;
     }
 
     void draw_heatmap(int count, size_t frame_count, const std::vector<float>& heatmap_data, int* selected_member) {
@@ -1277,13 +2117,69 @@ struct Lavery : viamd::EventHandler {
         ImGui::EndChild();
     }
 
-    void update_outlier_highlight(int count, size_t frame_count, int hovered_member) {
-        const int frame = std::clamp((int)std::llround(app->animation.frame), 0, (int)frame_count - 1);
+    void build_markers(size_t frame) {
+        refresh_event_inspection();
+        markers.clear();
+        event_context_bases.clear();
+        if (sync_viewport || inspected_event != SIZE_MAX) {
+            event_context_colors.assign(bases.size(), ImVec4(0, 0, 0, 0));
+            for (size_t e = 0; e < outlier_events.size(); ++e) {
+                const auto& event = outlier_events[e];
+                if (!event_visible(e, frame)) continue;
+                std::vector<uint32_t> region;
+                for_each_event_base(event, [&](uint32_t base) { region.push_back(base); });
+                std::sort(region.begin(), region.end());
+                region.erase(std::unique(region.begin(), region.end()), region.end());
+                const ImVec4 color = event_color(e);
+                // Local children remain visible inside a broad parent's context halo.
+                const float weight = event.parent == SIZE_MAX ? 1.0f : 3.0f;
+                for (uint32_t base : region) {
+                    event_context_bases.push_back(base);
+                    auto& blended = event_context_colors[base];
+                    blended.x += color.x * weight;
+                    blended.y += color.y * weight;
+                    blended.z += color.z * weight;
+                    blended.w += weight;
+                }
+            }
+            std::sort(event_context_bases.begin(), event_context_bases.end());
+            event_context_bases.erase(std::unique(event_context_bases.begin(), event_context_bases.end()), event_context_bases.end());
+            for (uint32_t base : event_context_bases) {
+                auto& color = event_context_colors[base];
+                color.x /= color.w;
+                color.y /= color.w;
+                color.z /= color.w;
+                color.w = 1.0f;
+            }
+            for (const auto& contribution : event_contributions(outlier_events, frame, inspected_event)) {
+                const auto result = assess_member(frame, contribution.step, contribution.member,
+                    contribution.parameters, nullptr, event_end_sigma());
+                markers.push_back({contribution.step, contribution.member, contribution.parameters, contribution.parameters,
+                    std::isfinite(result.peak_z) ? result.peak_z : 0.0f, contribution.lost});
+            }
+        }
+        markers_explicit = inspected_event == SIZE_MAX && !preview.empty() && app->animation.mode != PlaybackMode::Playing;
+        if (markers_explicit) {
+            for (const auto& target : preview) {
+                const size_t members = target.step ? steps.size() : pairs.size();
+                if (target.index >= members) continue;
+                const bool duplicate = std::any_of(markers.begin(), markers.end(), [&](const Marker& m) {
+                    return m.step == target.step && m.index == target.index;
+                });
+                if (duplicate) continue;
+                const auto result = assess_member(frame, target.step, target.index, target.mask);
+                markers.push_back({target.step, target.index, target.mask, result.contributors,
+                    std::isfinite(result.peak_z) ? result.peak_z : 0.0f});
+            }
+        }
+    }
+
+    void update_outlier_highlight() {
         auto& mask = app->selection.highlight_mask;
         const uint64_t previous_hash = md_bitset_hash64(md_bitmask_view(&mask), 0);
         if (highlight_owned && previous_hash != highlight_hash) highlight_owned = false;
         // Explicit row hover takes precedence; automatic highlighting yields to other hover feedback.
-        if (hovered_member < 0 && !highlight_owned && !md_bitmask_empty(&mask)) return;
+        if (!markers_explicit && !highlight_owned && !md_bitmask_empty(&mask)) return;
 
         md_bitmask_clear(&mask);
         auto add_pair = [&](uint32_t index) {
@@ -1292,16 +2188,12 @@ struct Lavery : viamd::EventHandler {
                 for (uint32_t atom : bases[base_index].atoms) md_bitmask_set_bit(&mask, atom);
             }
         };
-        const bool step_metric = metric_is_step((Metric)metric);
-        const int first = hovered_member >= 0 ? hovered_member : 0;
-        const int end = hovered_member >= 0 ? hovered_member + 1 : count;
-        for (int m = first; m < end; ++m) {
-            if (!assess((size_t)frame, (size_t)m).contributors) continue;
-            if (step_metric) {
-                add_pair(steps[m].a);
-                add_pair(steps[m].b);
+        for (const auto& marker : markers) {
+            if (marker.step) {
+                add_pair(steps[marker.index].a);
+                add_pair(steps[marker.index].b);
             } else {
-                add_pair((uint32_t)m);
+                add_pair(marker.index);
             }
         }
         highlight_owned = !md_bitmask_empty(&mask);
@@ -1312,10 +2204,115 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
+    void tooltip_member(PickingTooltipTextRequest* req, bool step, uint32_t index, uint32_t mask) const {
+        const auto& labels = step ? step_labels : pair_labels;
+        if (index >= labels.size()) return;
+        const size_t frame = current_frame();
+        const int offset = step ? (int)Tilt : 0;
+        float z[6];
+        const auto result = assess_member(frame, step, index, mask, z);
+        tooltip_title(req, "Lavery %s" TOOLTIP_SEP "%s", step ? "inter-base pair" : "intra-base pair", labels[index].c_str());
+        uint32_t event_parameters_now = 0;
+        for (size_t e = 0; e < outlier_events.size(); ++e) {
+            const auto& event = outlier_events[e];
+            if ((!sync_viewport && inspected_event == SIZE_MAX) || !event_visible(e, frame)) continue;
+            bool context = false;
+            const EventMember::Sample* contribution = nullptr;
+            for (const auto& m : event.members) {
+                if (m.step == step && m.member == index) contribution = event_member_sample(m, frame);
+                if (!step) {
+                    context |= m.step ? steps[m.member].a == index || steps[m.member].b == index : m.member == index;
+                } else {
+                    context |= m.step && m.member == index;
+                }
+            }
+            if (context) {
+                tooltip_row(req, STR_LIT("event"), "#%zu" TOOLTIP_SEP "%s" TOOLTIP_SEP "frames %zu-%zu",
+                    e + 1, event_kind(event).c_str(), event.begin, event.end);
+                if (event.parent != SIZE_MAX) tooltip_row(req, STR_LIT("hierarchy"),
+                    "Local burst inside #%zu" TOOLTIP_SEP "%.2f sigma", event.parent + 1, event.burst_sigma);
+                tooltip_row(req, STR_LIT("event detail"), "%s", !contribution ? "Context only in this frame" :
+                    contribution->lost ? "Pair lost" : "Contributing in this frame");
+                if (contribution) {
+                    event_parameters_now |= contribution->parameters;
+                    std::string names;
+                    for (int k = 0; k < 6; ++k) {
+                        if (!(contribution->parameters & (1u << k))) continue;
+                        if (!names.empty()) names += ", ";
+                        names += metric_name((Metric)(offset + k));
+                    }
+                    if (!names.empty()) tooltip_row(req, STR_LIT("event parameters"), "%s", names.c_str());
+                }
+            }
+        }
+        tooltip_row(req, STR_LIT("frame"), "%zu" TOOLTIP_SEP "%.1f sigma" TOOLTIP_SEP "%s", frame, outlier_sigma,
+            baseline_name((Baseline)statistics_baseline));
+        for (int k = 0; k < 6; ++k) {
+            const int id = offset + k;
+            const float v = values[id][frame * columns[id] + index];
+            const str_t key = str_from_cstr(metric_name((Metric)id));
+            if (!std::isfinite(v)) {
+                tooltip_row(req, key, "no valid sample");
+                continue;
+            }
+            const char* unit = metric_is_angular((Metric)id) ? "\xC2\xB0" : " " TOOLTIP_ANGSTROM;
+            const bool contributes = (event_parameters_now & (1u << k)) != 0;
+            const bool outlier = (result.contributors & (1u << k)) != 0;
+            tooltip_row(req, key, "%.2f%s" TOOLTIP_SEP "%+.2f sigma%s", v, unit, z[k],
+                contributes ? "  EVENT CONTRIBUTOR" :
+                outlier ? (k == result.peak_metric ? "  OUTLIER (peak)" : "  OUTLIER") : "");
+        }
+        const uint16_t flags = step ? step_quality_flags[frame * steps.size() + index] : pair_quality_flags[frame * pairs.size() + index];
+        for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
+            if (flags & bit) tooltip_row(req, STR_LIT("quality"), "%s", quality_description(bit));
+        }
+    }
+
+    void tooltip_pair(PickingTooltipTextRequest* req, uint32_t pair) const {
+        bool described = false;
+        for (const auto& marker : markers) {
+            const bool involved = marker.step
+                ? steps[marker.index].a == pair || steps[marker.index].b == pair : marker.index == pair;
+            if (involved) {
+                tooltip_member(req, marker.step, marker.index, marker.mask);
+                described = true;
+            }
+        }
+        if (!described) tooltip_member(req, false, pair, 0);
+    }
+
+    void fill_tooltip(PickingTooltipTextRequest* req) const {
+        const PickingHit& hit = req->hit;
+        if (hit.domain == PickingDomain_Lavery) {
+            bool step = false;
+            uint32_t index = 0;
+            if (decode_pick(hit.local_idx, &step, &index)) {
+                if (step) tooltip_member(req, true, index, marker_mask(true, index));
+                else tooltip_pair(req, index);
+            }
+        } else if (hit.domain == PickingDomain_Atom && hit.local_idx < atom_base.size() &&
+                   (!markers.empty() || !event_context_bases.empty())) {
+            const int32_t base = atom_base[hit.local_idx];
+            const int32_t pair = base >= 0 ? base_pair[base] : -1;
+            if (pair < 0) return;
+            const bool context = std::binary_search(event_context_bases.begin(), event_context_bases.end(), (uint32_t)base);
+            const bool involved = std::any_of(markers.begin(), markers.end(), [&](const Marker& marker) {
+                return marker.step ? steps[marker.index].a == (uint32_t)pair || steps[marker.index].b == (uint32_t)pair
+                    : marker.index == (uint32_t)pair;
+            });
+            if (context || involved) {
+                tooltip_pair(req, (uint32_t)pair);
+            }
+        }
+    }
+
     void prepare_display_geometry() {
         display_axis = {};
         display_bases.clear();
         display_pair_quality.clear();
+        display_step_from.clear();
+        display_step_to.clear();
+        display_step_valid.clear();
         if ((!show_axis && !signed_overlay) || !display_validator || !app->mold.state.xyz) return;
         // The displayed coordinates may be turned relative to the cell. Fit and
         // unwrap in the lattice frame, then turn the resulting geometry back.
@@ -1336,6 +2333,19 @@ struct Lavery : viamd::EventHandler {
         for (size_t p = 0; p < pairs.size(); ++p) {
             display_pair_quality[p] |= pair_quality_flags[frame * pairs.size() + p];
             if (display_pair_quality[p]) current.pair_frames[p] = {};
+        }
+        // Steps are drawn between pair midpoints, joined through the nearest periodic image.
+        display_step_from.resize(steps.size());
+        display_step_to.resize(steps.size());
+        display_step_valid.assign(steps.size(), 0);
+        for (size_t s = 0; s < steps.size(); ++s) {
+            const size_t a = steps[s].a, b = steps[s].b;
+            if (display_pair_quality[a] || display_pair_quality[b]) continue;
+            const vec3_t from = current.pair_frames[a].origin;
+            const vec3_t to = vec3_add(from, min_image(vec3_sub(current.pair_frames[b].origin, from), state.unitcell));
+            display_step_from[s] = mat4_mul_vec3(app->operations.state_rotation, from, 1);
+            display_step_to[s] = mat4_mul_vec3(app->operations.state_rotation, to, 1);
+            display_step_valid[s] = 1;
         }
         if (show_axis) {
             display_axis = compute_axis(current.pair_frames, steps, &state.unitcell);
@@ -1361,46 +2371,74 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
-    void draw_signed_overlay() {
-        if (!signed_overlay || display_bases.empty() || (!sync_viewport && hovered_outlier < 0)) return;
-        const size_t frame = nearest_frame(app->animation.frame, nullptr, run_num_frames(app));
-        const bool step = metric_is_step((Metric)metric);
-        std::vector<float> severity(bases.size());
-        auto add_pair = [&](size_t p, float z) {
-            if (display_pair_quality[p]) return;
-            for (uint32_t b : {pairs[p].a, pairs[p].b}) {
-                if (std::fabs(z) > std::fabs(severity[b])) severity[b] = z;
+    void draw_event_context() {
+        if (event_context_bases.empty()) return;
+        immediate::Scope scope(app->gfx.overlay, "Lavery active event context");
+        const bool pickable = picking_range.domain == PickingDomain_Lavery &&
+            picking_range.end - picking_range.beg == pairs.size() + steps.size();
+        if (pickable) immediate::set_picking_base_idx(scope, picking_range.beg);
+        for (uint32_t base : event_context_bases) {
+            if (base >= display_bases.size()) continue;
+            const auto& center = display_bases[base].center;
+            ImVec4 color = event_context_colors[base];
+            const uint32_t pick = pickable && base < base_pair.size() && base_pair[base] >= 0
+                ? (uint32_t)base_pair[base] : 0xFFFFFFFFu;
+            for (int layer = 2; layer >= 0; --layer) {
+                color.w = (layer == 0 ? 18.0f : layer == 1 ? 10.0f : 5.0f) / 255.0f;
+                immediate::sphere(scope, center, 3.4f + layer * 1.0f,
+                    ImGui::ColorConvertFloat4ToU32(color), pick, 12, 8);
             }
-        };
-        const int first = hovered_outlier >= 0 ? hovered_outlier : 0;
-        const int end = hovered_outlier >= 0 ? first + 1 : (int)columns[metric];
-        for (int m = first; m < end; ++m) {
-            const auto result = assess(frame, (size_t)m);
-            if (!result.contributors) continue;
-            if (step) {
-                add_pair(steps[m].a, result.peak_z);
-                add_pair(steps[m].b, result.peak_z);
-            } else add_pair((size_t)m, result.peak_z);
         }
+    }
+
+    void draw_signed_overlay() {
+        if (!signed_overlay || display_bases.empty()) return;
+        draw_event_context();
+        if (markers.empty()) return;
         immediate::Scope scope(app->gfx.overlay, "Lavery signed outliers");
-        for (size_t b = 0; b < bases.size(); ++b) {
-            if (severity[b] == 0) continue;
-            const auto& base = display_bases[b];
-            const bool positive = severity[b] > 0;
-            auto color = [&](int alpha) { return positive ? IM_COL32(255, 65, 95, alpha) : IM_COL32(40, 215, 255, alpha); };
+        const bool pickable = picking_range.domain == PickingDomain_Lavery &&
+            picking_range.end - picking_range.beg == pairs.size() + steps.size();
+        if (pickable) immediate::set_picking_base_idx(scope, picking_range.beg);
+        const int layers = overlay_halo ? 3 : 1;
+        for (const auto& marker : markers) {
+            const bool outlier = marker.contributors != 0;
+            const bool positive = marker.z > 0;
+            // Previewed members that are not outlying in this frame are drawn neutral.
+            auto color = [&](int alpha) {
+                if (marker.lost) return IM_COL32(255, 185, 55, alpha);
+                if (!outlier) return IM_COL32(235, 235, 235, alpha * 2 / 3);
+                return positive ? IM_COL32(255, 65, 95, alpha) : IM_COL32(40, 215, 255, alpha);
+            };
+            const uint32_t pick = pickable ? (marker.step ? (uint32_t)pairs.size() + marker.index : marker.index) : 0xFFFFFFFFu;
             // Layered, unlit transparency is a visual halo, not HDR emission.
-            const int layers = overlay_halo ? 3 : 1;
-            for (int layer = layers - 1; layer >= 0; --layer) {
-                const float radius = 2.0f + layer * 0.22f;
-                vec3_t previous = vec3_add(base.center, vec3_mul1(base.x, radius));
-                for (int s = 1; s <= 24; ++s) {
-                    const float angle = (float)s * (6.28318530718f / 24);
-                    const vec3_t point = vec3_add(base.center, vec3_mul1(vec3_add(
-                        vec3_mul1(base.x, std::cos(angle)), vec3_mul1(base.y, std::sin(angle))), radius));
-                    immediate::cylinder(scope, previous, point, 0.08f + layer * 0.12f,
-                        color(layer ? 25 : 220), 0xFFFFFFFF, 6);
-                    previous = point;
+            if (!marker.step) {
+                if (marker.index >= display_pair_quality.size() || (!marker.lost && display_pair_quality[marker.index])) continue;
+                for (uint32_t b : {pairs[marker.index].a, pairs[marker.index].b}) {
+                    const auto& base = display_bases[b];
+                    for (int layer = layers - 1; layer >= 0; --layer) {
+                        const float radius = 2.0f + layer * 0.22f;
+                        vec3_t previous = vec3_add(base.center, vec3_mul1(base.x, radius));
+                        for (int s = 1; s <= 24; ++s) {
+                            const float angle = (float)s * (6.28318530718f / 24);
+                            const vec3_t point = vec3_add(base.center, vec3_mul1(vec3_add(
+                                vec3_mul1(base.x, std::cos(angle)), vec3_mul1(base.y, std::sin(angle))), radius));
+                            immediate::cylinder(scope, previous, point, 0.08f + layer * 0.12f,
+                                color(layer ? 25 : 220), pick, 6);
+                            previous = point;
+                        }
+                    }
                 }
+            } else {
+                // Inter-base-pair parameters relate two pairs: a bar between their midpoints.
+                if (marker.index >= display_step_valid.size() || !display_step_valid[marker.index]) continue;
+                const vec3_t from = display_step_from[marker.index];
+                const vec3_t to = display_step_to[marker.index];
+                if (vec3_length(vec3_sub(to, from)) < 1.0e-4f) continue;
+                for (int layer = layers - 1; layer >= 0; --layer) {
+                    immediate::cylinder(scope, from, to, 0.3f + layer * 0.18f, color(layer ? 25 : 220), pick, 12);
+                }
+                immediate::sphere(scope, from, 0.55f, color(220), pick, 8, 12);
+                immediate::sphere(scope, to, 0.55f, color(220), pick, 8, 12);
             }
         }
     }
