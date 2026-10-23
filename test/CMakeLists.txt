@@ -80,3 +80,10 @@ target_include_directories(viamd_test PRIVATE
 target_link_libraries(viamd_test PRIVATE mdlib enkiTS)
 
 add_test(NAME viamd_test COMMAND viamd_test)
+
+add_executable(viamd_plot_test ui/test_heatmap.cpp)
+target_compile_features(viamd_plot_test PRIVATE cxx_std_20)
+target_compile_definitions(viamd_plot_test PRIVATE UTEST_USE_OLD_QPC)
+target_include_directories(viamd_plot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ext/mdlib/unittest)
+target_link_libraries(viamd_plot_test PRIVATE implot imgui)
+add_test(NAME viamd_plot_test COMMAND viamd_plot_test)

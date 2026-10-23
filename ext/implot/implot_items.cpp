@@ -2401,6 +2401,10 @@ struct GetterHeatmapRowMaj {
         RectC rect;
         rect.Pos = p;
         rect.HalfSize = HalfSize;
+        if (ImNanOrInf(val)) {
+            rect.Color = 0;
+            return rect;
+        }
         const float t = ImClamp((float)ImRemap01(val, ScaleMin, ScaleMax),0.0f,1.0f);
         ImPlotContext& gp = *GImPlot;
         rect.Color = gp.ColormapData.LerpTable(gp.Style.Colormap, t);
@@ -2436,6 +2440,10 @@ struct GetterHeatmapColMaj {
         RectC rect;
         rect.Pos = p;
         rect.HalfSize = HalfSize;
+        if (ImNanOrInf(val)) {
+            rect.Color = 0;
+            return rect;
+        }
         const float t = ImClamp((float)ImRemap01(val, ScaleMin, ScaleMax),0.0f,1.0f);
         ImPlotContext& gp = *GImPlot;
         rect.Color = gp.ColormapData.LerpTable(gp.Style.Colormap, t);
@@ -2483,6 +2491,10 @@ void RenderHeatmap(ImDrawList& draw_list, const T* values, int rows, int cols, d
         if (col_maj) {
             for (int c = 0; c < cols; ++c) {
                 for (int r = 0; r < rows; ++r) {
+                    if (ImNanOrInf((double)values[i])) {
+                        i++;
+                        continue;
+                    }
                     ImPlotPoint p;
                     p.x = bounds_min.x + 0.5*w + c*w;
                     p.y = yref + ydir * (0.5*h + r*h);
@@ -2501,6 +2513,10 @@ void RenderHeatmap(ImDrawList& draw_list, const T* values, int rows, int cols, d
         else {
             for (int r = 0; r < rows; ++r) {
                 for (int c = 0; c < cols; ++c) {
+                    if (ImNanOrInf((double)values[i])) {
+                        i++;
+                        continue;
+                    }
                     ImPlotPoint p;
                     p.x = bounds_min.x + 0.5*w + c*w;
                     p.y = yref + ydir * (0.5*h + r*h);

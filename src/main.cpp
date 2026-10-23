@@ -4414,7 +4414,7 @@ static void draw_timeline_window(ApplicationState* data) {
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 is_dragging = false;
             }
-            if (!ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+            if (!ImGui::GetIO().KeyCtrl) {
                 is_dragging = false;
             }
 
@@ -4624,10 +4624,14 @@ static void draw_timeline_window(ApplicationState* data) {
                         }
                     }
 
-                    if (is_dragging) {
-                        time = ImPlot::GetPlotMousePos().x;
-                    } else if (ImPlot::IsPlotHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+                    if (ImPlot::IsPlotHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::GetIO().KeyCtrl) {
                         is_dragging = true;
+                    }
+                    if (is_dragging) {
+                        const double frame = std::clamp(std::floor(time_to_frame(ImPlot::GetPlotMousePos().x, x_values) + 0.5),
+                            0.0, (double)num_x_values - 1);
+                        time = x_values[(size_t)frame];
+                        data->animation.mode = PlaybackMode::Stopped;
                     }
 
                     for (int j = 0; j < sp.count; ++j) {

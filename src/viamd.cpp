@@ -1201,6 +1201,10 @@ void free_trajectory_data(ApplicationState* state) {
 
     // Before anything they read goes: the contexts hold the run's files open.
     end_frame_extracts(state);
+    if (state->mold.run[0]) {
+        viamd::event_system_broadcast_event(viamd::EventType_ViamdTrajectoryFree,
+            viamd::EventPayloadType_ApplicationState, state);
+    }
 
     // The run, and with it the files it was opened from and the series loaded along it
     file_list_drop_runs(&state->files.list);
@@ -1674,6 +1678,8 @@ static bool open_run(ApplicationState* state, str_t path, const loader::LoaderSt
     }
     file_list_record(&state->files.list, file_entry(path, load_state), FileRole_Trajectory, state->allocator.persistent);
     md_array_last(state->files.list.runs)->frame_count = num_frames;
+    viamd::event_system_broadcast_event(viamd::EventType_ViamdTrajectoryInit,
+        viamd::EventPayloadType_ApplicationState, state);
     return true;
 }
 
