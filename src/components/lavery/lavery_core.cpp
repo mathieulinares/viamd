@@ -152,7 +152,7 @@ OutlierAssessment assess_outliers(const float* values, const MemberStatistics* s
                                   size_t count, uint32_t selected, float sigma) {
     OutlierAssessment out;
     for (size_t i = 0; i < count && i < 32; ++i) {
-        if (!(selected & (1u << i)) || !statistics[i].count || !std::isfinite(values[i])) continue;
+        if (!(selected & (1u << i)) || !std::isfinite(values[i]) || !statistics[i].reference(values[i]).count) continue;
         ++out.valid;
         const float z = statistics[i].zscore(values[i]);
         if (out.peak_metric < 0 || std::fabs(z) > std::fabs(out.peak_z)) {
@@ -233,7 +233,7 @@ static double median_of(std::vector<double>& v) {
 }
 
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
-                        bool angular, Baseline baseline, int state_metric) {
+                        bool angular, Baseline baseline, int state_metric, size_t first_frame, size_t end_frame) {
     if (!out || (member_count == 0 ? !values.empty() : values.size() % member_count != 0) ||
         baseline < 0 || baseline >= Baseline_Count || state_metric >= (int)Metric_Count) {
         MD_LOG_ERROR("Lavery: invalid metric matrix dimensions for statistics");
@@ -243,6 +243,11 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
     out->members.resize(member_count);
     if (!member_count) return true;
     const size_t frames = values.size() / member_count;
+    if (end_frame == SIZE_MAX) end_frame = frames;
+    if (first_frame > end_frame || end_frame > frames) {
+        MD_LOG_ERROR("Lavery: invalid baseline frame range");
+        return false;
+    }
     out->heatmap.resize(values.size(), std::numeric_limits<float>::quiet_NaN());
     std::vector<double> samples;
     samples.reserve(frames);
@@ -254,7 +259,7 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
         samples.clear();
         if (states > 0) {
             std::array<std::vector<float>, 3> state_samples;
-            for (size_t f = 0; f < frames; ++f) {
+            for (size_t f = first_frame; f < end_frame; ++f) {
                 const float value = values[f * member_count + m];
                 const int st = metric_state(state_kind, value);
                 if (st >= 0) state_samples[st].push_back(value);
@@ -285,7 +290,7 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
         double reference = 0.0;
         if (angular) {
             double s = 0.0, c = 0.0;
-            for (size_t f = 0; f < frames; ++f) {
+            for (size_t f = first_frame; f < end_frame; ++f) {
                 const float v = values[f * member_count + m];
                 if (!in_baseline(v)) continue;
                 s += std::sin((double)v * (3.14159265358979323846 / 180.0));
@@ -294,7 +299,7 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
             if (s != 0.0 || c != 0.0) reference = std::atan2(s, c) * (180.0 / 3.14159265358979323846);
         }
         double m2 = 0.0;
-        for (size_t f = 0; f < frames; ++f) {
+        for (size_t f = first_frame; f < end_frame; ++f) {
             const float raw = values[f * member_count + m];
             if (!in_baseline(raw)) continue;
             double v = raw;
@@ -413,7 +418,7 @@ std::string csv_state_switch_row(const std::string& run, const std::string& labe
 }
 
 const char* csv_header() {
-    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline\n";
+    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline,baseline_begin,baseline_end\n";
 }
 
 std::string csv_sample(const CsvSample& s) {
@@ -435,12 +440,12 @@ std::string csv_sample(const CsvSample& s) {
     }
     row += csv_quote(reason.empty() ? "Good" : reason);
     const auto ref = s.baseline.reference(s.value);
-    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s\n",
+    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s,%.17g,%.17g\n",
         ref.count ? ref.mean : std::numeric_limits<double>::quiet_NaN(),
         ref.count ? ref.sd : std::numeric_limits<double>::quiet_NaN(),
         s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric - class_first_metric(metric_class(s.metric))))) ? 1 : 0,
         s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask,
-        s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd");
+        s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd", s.baseline_begin, s.baseline_end);
     row += buf;
     return row;
 }
@@ -518,9 +523,9 @@ std::vector<EventContribution> event_contributions(const std::vector<OutlierEven
     return result;
 }
 
-bool event_time_range(EventOptions* options, double begin, double end) {
+bool event_time_range(EventOptions* options, double begin, double end, const char* context) {
     if (!options || options->times.empty() || !std::isfinite(begin) || !std::isfinite(end) || begin > end) {
-        MD_LOG_ERROR("Lavery: invalid event detection time range");
+        MD_LOG_ERROR("Lavery: invalid %s time range", context);
         return false;
     }
     for (size_t f = 0; f < options->times.size(); ++f) {
@@ -532,7 +537,7 @@ bool event_time_range(EventOptions* options, double begin, double end) {
     const auto first = std::lower_bound(options->times.begin(), options->times.end(), begin);
     const auto last = std::upper_bound(options->times.begin(), options->times.end(), end);
     if (first == last) {
-        MD_LOG_ERROR("Lavery: event detection time range contains no samples");
+        MD_LOG_ERROR("Lavery: %s time range contains no samples", context);
         return false;
     }
     options->first_frame = (size_t)(first - options->times.begin());
@@ -931,7 +936,7 @@ const char* csv_event_header() {
     return "run,event,begin_frame,end_frame,begin_time,end_time,time_unit,event_peak_frame,event_peak_sigma,event_score,event_type,"
            "first_pair,last_pair,scope,baseline,sigma,end_sigma,neighbourhood,"
            "class,member,label,member_outlier_frames,member_lost_frames,parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,"
-           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode\n";
+           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode,baseline_begin,baseline_end\n";
 }
 
 std::string csv_event_row(const CsvEventRow& r) {
@@ -949,11 +954,11 @@ std::string csv_event_row(const CsvEventRow& r) {
     snprintf(buf, sizeof(buf), ",%.9g,%.9g,%d,%s,%zu,", r.sigma, r.end_sigma, r.neighbourhood, class_csv_name(metric_class(r.metric)), r.member);
     row += buf;
     row += csv_quote(r.label);
-    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s\n", r.member_frames, r.member_lost, metric_path(r.metric),
+    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g\n", r.member_frames, r.member_lost, metric_path(r.metric),
         metric_uses_degrees(r.metric) ? "deg" : "Angstrom", r.contributing ? 1 : 0, r.parameter_peak, r.parameter_z, r.value,
         r.parent_event, r.burst_sigma, r.truncated_begin ? 1 : 0, r.truncated_end ? 1 : 0,
         r.min_duration, r.max_gap_duration, r.detection_begin, r.detection_end,
-        !r.parent_event ? "" : r.residual ? "background" : "stronger");
+        !r.parent_event ? "" : r.residual ? "background" : "stronger", r.baseline_begin, r.baseline_end);
     row += buf;
     return row;
 }
@@ -981,7 +986,7 @@ bool compute_outlier_counts(std::vector<FrameOutliers>* out, const std::vector<f
     for (size_t f = 0; f < out->size(); ++f) {
         for (size_t m = 0; m < members.size(); ++m) {
             const float value = values[f * members.size() + m];
-            if (!members[m].count || !std::isfinite(value)) continue;
+            if (!std::isfinite(value) || !members[m].reference(value).count) continue;
             ++(*out)[f].valid;
             if (members[m].is_outlier(value, sigma)) ++(*out)[f].outliers;
         }

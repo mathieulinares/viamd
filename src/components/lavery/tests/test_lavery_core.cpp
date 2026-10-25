@@ -1,4 +1,5 @@
 #include <components/lavery/lavery_core.h>
+#include <timeline_periods.h>
 
 #include <utest.h>
 
@@ -1198,6 +1199,201 @@ UTEST(lavery_core, median_mad_baseline_resists_large_excursions) {
     EXPECT_FALSE(compute_statistics(&constant, {1}, 1, false, (Baseline)7));
 }
 
+UTEST(lavery_core, baseline_range_uses_only_reference_frames_but_scores_the_whole_matrix) {
+    const std::vector<float> values = {1000,1000, 0,10, 1,12, 2,14, 8,30, 9,32};
+    for (int method = 0; method < Baseline_Count; ++method) {
+        MetricStatistics stats, full, explicit_full;
+        ASSERT_TRUE(compute_statistics(&stats, values, 2, false, (Baseline)method, -1, 1, 4));
+        ASSERT_TRUE(compute_statistics(&full, values, 2, false, (Baseline)method));
+        ASSERT_TRUE(compute_statistics(&explicit_full, values, 2, false, (Baseline)method, -1, 0, 6));
+        ASSERT_EQ(stats.heatmap.size(), values.size());
+        EXPECT_NEAR(stats.members[0].mean, 1, 1e-9);
+        EXPECT_NEAR(stats.members[1].mean, 12, 1e-9);
+        const double scale = method == Baseline_MeanSD ? std::sqrt(2.0 / 3.0) : 1.4826;
+        EXPECT_NEAR(stats.members[0].sd, scale, 1e-9);
+        EXPECT_NEAR(stats.members[1].sd, 2 * scale, 1e-9);
+        for (size_t m = 0; m < 2; ++m) {
+            EXPECT_EQ(stats.members[m].count, (size_t)3);
+            EXPECT_EQ(full.members[m].mean, explicit_full.members[m].mean);
+            EXPECT_EQ(full.members[m].sd, explicit_full.members[m].sd);
+            for (size_t f = 0; f < 6; ++f) {
+                EXPECT_EQ(stats.heatmap[(1-m)*6+f], stats.members[m].zscore(values[f*2+m]));
+                EXPECT_EQ(full.heatmap[(1-m)*6+f], explicit_full.heatmap[(1-m)*6+f]);
+            }
+        }
+        EXPECT_TRUE(stats.members[0].is_outlier(8, 3));
+        EXPECT_TRUE(stats.members[1].is_outlier(30, 3));
+    }
+}
+
+UTEST(lavery_core, baseline_range_preserves_circular_and_robust_reference_conventions) {
+    const std::vector<float> values = {0, 179,-179,178,-178, 0,0};
+    const std::vector<float> reference(values.begin()+1, values.begin()+5);
+    for (int method = 0; method < Baseline_Count; ++method) {
+        MetricStatistics stats, cropped;
+        ASSERT_TRUE(compute_statistics(&stats, values, 1, true, (Baseline)method, -1, 1, 5));
+        ASSERT_TRUE(compute_statistics(&cropped, reference, 1, true, (Baseline)method));
+        EXPECT_NEAR(std::fabs(stats.members[0].mean), 180, 1e-9);
+        EXPECT_EQ(stats.members[0].mean, cropped.members[0].mean);
+        EXPECT_EQ(stats.members[0].sd, cropped.members[0].sd);
+        EXPECT_EQ(stats.members[0].count, (size_t)4);
+        EXPECT_TRUE(stats.members[0].is_outlier(0, 3));
+    }
+}
+
+UTEST(lavery_core, absent_reference_states_are_not_scored_or_counted_as_valid) {
+    const std::vector<float> phase = {10,12,8, 160,165,170};
+    MetricStatistics stats;
+    ASSERT_TRUE(compute_statistics(&stats, phase, 1, true, Baseline_MeanSD, Phase, 0, 3));
+    const auto& member = stats.members[0];
+    EXPECT_EQ(member.count, (size_t)3);
+    EXPECT_EQ(member.state, 0);
+    EXPECT_EQ(member.state_fraction, 1.0f);
+    EXPECT_EQ(member.reference(165).count, (size_t)0);
+    EXPECT_TRUE(std::isnan(member.zscore(165)));
+    EXPECT_FALSE(member.is_outlier(165, 3));
+    const auto assessment = assess_outliers(&phase[4], &member, 1, 1, 3);
+    EXPECT_EQ(assessment.valid, (size_t)0);
+    EXPECT_EQ(assessment.contributors, (uint32_t)0);
+    std::vector<FrameOutliers> counts;
+    ASSERT_TRUE(compute_outlier_counts(&counts, phase, stats.members, 3));
+    for (size_t f = 3; f < phase.size(); ++f) {
+        EXPECT_TRUE(std::isnan(stats.heatmap[f]));
+        EXPECT_EQ(counts[f].valid, (size_t)0);
+    }
+    EventOptions options;
+    options.min_frames = 3;
+    std::vector<StateSwitch> changes;
+    ASSERT_TRUE(detect_state_switches(&changes, phase, 1, Phase, options));
+    ASSERT_EQ(changes.size(), (size_t)1);
+    EXPECT_EQ(changes[0].begin, (size_t)3);
+    CsvSample sample;
+    sample.metric = Phase;
+    sample.value = 165;
+    sample.baseline = member;
+    EXPECT_TRUE(csv_sample(sample).find(",nan,nan,nan,") != std::string::npos);
+}
+
+UTEST(lavery_core, baseline_and_detection_intervals_are_independent_with_irregular_times) {
+    const std::vector<float> values = {0,1,2, 8,9,10};
+    EventOptions reference, detection;
+    reference.times = detection.times = {0,2,5,9,14,20};
+    ASSERT_TRUE(event_time_range(&reference, 0, 5, "baseline"));
+    ASSERT_TRUE(event_time_range(&detection, 9, 20));
+    MetricStatistics stats;
+    ASSERT_TRUE(compute_statistics(&stats, values, 1, false, Baseline_MeanSD, -1,
+        reference.first_frame, reference.last_frame+1));
+    std::vector<std::vector<MemberOutlier>> frames(values.size());
+    for (size_t f = 0; f < values.size(); ++f) {
+        if (stats.members[0].is_outlier(values[f], 3))
+            frames[f].push_back(event_sample(0, Class_Pair, 0, stats.members[0].zscore(values[f])));
+    }
+    detection.min_frames = 1;
+    detection.min_duration = 10;
+    const auto events = detect_events(frames, 1, {}, detection);
+    ASSERT_EQ(events.size(), (size_t)1);
+    EXPECT_EQ(events[0].begin, (size_t)3);
+    EXPECT_EQ(events[0].end, (size_t)5);
+    EXPECT_EQ(stats.members[0].count, (size_t)3);
+    EXPECT_EQ(stats.members[0].mean, 1.0);
+    ASSERT_TRUE(event_time_range(&detection, 2, 5));
+    EXPECT_TRUE(detect_events(frames, 1, {}, detection).empty());
+    EXPECT_EQ(stats.members[0].mean, 1.0);
+}
+
+UTEST(lavery_core, timeline_periods_supply_independent_reference_and_detection_frames) {
+    TimelinePeriods periods = {};
+    TimelinePeriod* reference = timeline_periods_add(&periods, "Equilibrium", 2, 0, false);
+    TimelinePeriod* search = timeline_periods_add(&periods, "Heating", 3, 5, false);
+    ASSERT_TRUE(reference != nullptr);
+    ASSERT_TRUE(search != nullptr);
+    const uint32_t reference_id = reference->id, search_id = search->id;
+    const std::vector<float> values = {0,1,2, 8,9,10};
+    const std::vector<double> times = {0,2,5,9,14,20};
+    int first = -1, last = -1;
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *timeline_periods_find(&periods, reference_id), 0, 6));
+    EXPECT_EQ(first, 0);
+    EXPECT_EQ(last, 2);
+    MetricStatistics stats;
+    ASSERT_TRUE(compute_statistics(&stats, values, 1, false, Baseline_MeanSD, -1, first, last+1));
+    EXPECT_EQ(stats.members[0].mean, 1.0);
+    std::vector<std::vector<MemberOutlier>> frames(values.size());
+    for (size_t f = 0; f < values.size(); ++f) {
+        if (stats.members[0].is_outlier(values[f], 3))
+            frames[f].push_back(event_sample(0, Class_Pair, 0, stats.members[0].zscore(values[f])));
+    }
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *timeline_periods_find(&periods, search_id), 0, 6));
+    EventOptions options;
+    options.times = times;
+    options.first_frame = first;
+    options.last_frame = last;
+    options.min_frames = 1;
+    options.min_duration = 10;
+    auto events = detect_events(frames, 1, {}, options);
+    ASSERT_EQ(events.size(), (size_t)1);
+    EXPECT_EQ(events[0].begin, (size_t)3);
+    EXPECT_EQ(events[0].end, (size_t)5);
+    EXPECT_EQ(times[first], 9.0);
+    EXPECT_EQ(times[last], 20.0);
+    search->end = 4;
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *search, 0, 6));
+    options.last_frame = last;
+    EXPECT_TRUE(detect_events(frames, 1, {}, options).empty());
+    reference->end = 1;
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *reference, 0, 6));
+    ASSERT_TRUE(compute_statistics(&stats, values, 1, false, Baseline_MeanSD, -1, first, last+1));
+    EXPECT_EQ(stats.members[0].mean, 0.5);
+    EXPECT_EQ(stats.members[0].count, (size_t)2);
+    timeline_periods_remove(&periods, reference_id);
+    EXPECT_TRUE(timeline_periods_find(&periods, reference_id) == nullptr);
+    EXPECT_TRUE(timeline_periods_find(&periods, search_id) != nullptr);
+}
+
+UTEST(lavery_core, following_period_references_use_native_clamping_and_current_frame) {
+    TimelinePeriods periods = {};
+    TimelinePeriod* period = timeline_periods_add(&periods, "Recent", -2, 0, true);
+    ASSERT_TRUE(period != nullptr);
+    const std::vector<float> values = {0,2,4,6,8,10};
+    int first = -1, last = -1;
+    MetricStatistics stats;
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *period, 1, 6));
+    EXPECT_EQ(first, 0);
+    EXPECT_EQ(last, 1);
+    ASSERT_TRUE(compute_statistics(&stats, values, 1, false, Baseline_MeanSD, -1, first, last+1));
+    EXPECT_EQ(stats.members[0].mean, 1.0);
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *period, 4, 6));
+    EXPECT_EQ(first, 2);
+    EXPECT_EQ(last, 4);
+    ASSERT_TRUE(compute_statistics(&stats, values, 1, false, Baseline_MeanSD, -1, first, last+1));
+    EXPECT_EQ(stats.members[0].mean, 6.0);
+    period->follow = false;
+    period->beg = period->end = 3;
+    ASSERT_TRUE(timeline_period_frames(&first, &last, *period, 0, 6));
+    ASSERT_TRUE(compute_statistics(&stats, values, 1, false, Baseline_MeanSD, -1, first, last+1));
+    EXPECT_EQ(stats.members[0].count, (size_t)1);
+    EXPECT_EQ(stats.members[0].sd, 0.0);
+    period->beg = 8;
+    period->end = 10;
+    EXPECT_FALSE(timeline_period_frames(&first, &last, *period, 0, 6));
+    EXPECT_FALSE(timeline_period_frames(&first, &last, *period, 0, 0));
+}
+
+UTEST(lavery_core, empty_or_invalid_baseline_ranges_do_not_borrow_samples) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    MetricStatistics stats;
+    ASSERT_TRUE(compute_statistics(&stats, {1,2,3}, 1, false, Baseline_MeanSD, -1, 1, 1));
+    EXPECT_EQ(stats.members[0].count, (size_t)0);
+    for (float z : stats.heatmap) EXPECT_TRUE(std::isnan(z));
+    ASSERT_TRUE(compute_statistics(&stats, {1,nan,3}, 1, false, Baseline_MeanSD, -1, 1, 2));
+    EXPECT_TRUE(std::isnan(stats.members[0].zscore(3)));
+    EXPECT_FALSE(compute_statistics(&stats, {1,2,3}, 1, false, Baseline_MeanSD, -1, 2, 1));
+    EXPECT_FALSE(compute_statistics(&stats, {1,2,3}, 1, false, Baseline_MeanSD, -1, 0, 4));
+    EventOptions options;
+    options.times = {0,2,5};
+    EXPECT_FALSE(event_time_range(&options, 2.1, 4.9, "baseline"));
+    EXPECT_FALSE(event_time_range(&options, 5, 2, "baseline"));
+}
+
 UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     CsvEventRow row;
     row.run = "run1";
@@ -1227,15 +1423,17 @@ UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     row.parameter_peak = 6;
     row.parameter_z = -4.5f;
     row.value = 21.5f;
+    row.baseline_begin = 5;
+    row.baseline_end = 25;
     const std::string text = csv_event_row(row);
     EXPECT_STREQ(text.c_str(),
-        "\"run1\",2,4,9,40,90,\"ps\",6,4.5,12.25,\"Unwinding\",7,9,\"all\",\"median_mad\",2.5,2,2,step,7,\"7-8: \"\"x\"\"\",3,1,step/twist,deg,1,6,-4.5,21.5,0,0,0,0,0,0,0,0,\n");
+        "\"run1\",2,4,9,40,90,\"ps\",6,4.5,12.25,\"Unwinding\",7,9,\"all\",\"median_mad\",2.5,2,2,step,7,\"7-8: \"\"x\"\"\",3,1,step/twist,deg,1,6,-4.5,21.5,0,0,0,0,0,0,0,0,,5,25\n");
     size_t header = 1, fields = 1;
     for (const char* p = csv_event_header(); *p; ++p) if (*p == ',') ++header;
     row.label = "plain";
     for (char c : csv_event_row(row)) if (c == ',') ++fields;
     EXPECT_EQ(header, fields);
-    EXPECT_EQ(header, (size_t)38);
+    EXPECT_EQ(header, (size_t)40);
     row.parent_event = 1;
     row.burst_sigma = 3.5f;
     row.truncated_begin = true;
@@ -1244,9 +1442,9 @@ UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     row.detection_begin = 10;
     row.detection_end = 100;
     const auto nested = csv_event_row(row);
-    EXPECT_TRUE(nested.find(",1,3.5,1,0,20,5,10,100,stronger\n") != std::string::npos);
+    EXPECT_TRUE(nested.find(",1,3.5,1,0,20,5,10,100,stronger,5,25\n") != std::string::npos);
     row.residual = true;
-    EXPECT_TRUE(csv_event_row(row).find(",100,background\n") != std::string::npos);
+    EXPECT_TRUE(csv_event_row(row).find(",100,background,5,25\n") != std::string::npos);
 }
 
 UTEST(lavery_core, csv_fields_preserve_quotes_commas_and_newlines) {
@@ -1273,11 +1471,13 @@ UTEST(lavery_core, csv_sample_has_reproducible_values_quality_baseline_and_flags
     sample.sigma = 2;
     sample.selected_mask = 16;
     sample.member_outlier = true;
+    sample.baseline_begin = 10;
+    sample.baseline_end = 40;
     const auto row = csv_sample(sample);
-    EXPECT_STREQ(row.c_str(), "\"run1\",3,60,\"ps\",bp,2,\"pair2\",\"S1:DA2 / S2:DT9\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,2,1,1,1,16,mean_sd\n");
+    EXPECT_STREQ(row.c_str(), "\"run1\",3,60,\"ps\",bp,2,\"pair2\",\"S1:DA2 / S2:DT9\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,2,1,1,1,16,mean_sd,10,40\n");
     size_t columns = 1;
     for (const char* p = csv_header(); *p; ++p) if (*p == ',') ++columns;
-    EXPECT_EQ(columns, (size_t)24);
+    EXPECT_EQ(columns, (size_t)26);
     sample.value = std::numeric_limits<float>::quiet_NaN();
     sample.quality = Quality_NonfiniteCoordinates | Quality_InvalidBase;
     const auto missing = csv_sample(sample);

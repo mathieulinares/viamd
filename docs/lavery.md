@@ -44,8 +44,57 @@ treated as circular quantities:
 - Unwrapping only changes values that are at least 180° from the reference.
   Ordinary data is therefore processed exactly as before.
 
-Changing the baseline recomputes the statistics immediately; the parameters are
-not recalculated.
+Changing the baseline method or reference interval recomputes statistics on
+edit release; the geometric parameters are not recalculated.
+
+### Baseline range versus detection range
+
+Both controls default to **Full trajectory**. Choose **Custom** for inclusive
+**From / To** time bounds (ps/ns), or inclusive frame bounds without timestamps.
+Alternatively choose **Timeline period** and select an existing named VIAMD
+period. Dragging a timeline period onto either range selector selects it directly.
+The period chooser highlights hovered entries in VIAMD's timeline.
+
+- **Baseline range** defines the reference center/scale, circular unwrapping
+  reference and within-state statistics/occupancy.
+- **Detection range** defines where outlier events and residence-qualified state
+  switches are searched for. It does not change the reference statistics.
+
+The intervals may be disjoint. For example, select an equilibrated 300 K plateau
+as the reference and detect deviations during heating. Heatmaps and count plots
+still cover the full trajectory, using that reference; raw timelines and density
+distributions remain full-trajectory as well.
+
+Period links use VIAMD's persistent period IDs, not names or list positions, so
+renaming or reordering does not break them. Resizing updates analysis on edit
+release. Resolution reuses `timeline_period_frames`: endpoints are normalized
+and clamped to the trajectory; following periods track the rounded current frame.
+The UI shows the name, resolved time/frame bounds and whether the period follows.
+Markers are allowed as one-sample intervals (subject to the ordinary zero-spread
+baseline and minimum-duration rules). Following baselines recompute as their
+resolved frames change, so long trajectories may be slower during playback;
+fixed equilibrium periods are preferable for a stable scientific reference.
+
+Deleted/unselected periods and periods covering no trajectory samples are
+reported explicitly, with no fallback to Full trajectory. A missing baseline
+period removes sigma references but not baseline-independent state switches.
+A missing detection period clears both event and state-switch searches.
+Old workspaces retain Full/Custom behavior; period modes and IDs are saved
+alongside VIAMD's own periods.
+
+Only finite reference samples contribute. A member/state with no reference
+samples is labelled **No baseline**: its z-score is `nan`, it is excluded from
+sigma-tested coverage and it cannot become a sigma outlier. No other state's
+statistics are substituted. State-switch detection still works without that
+reference because it uses state assignments and residence, not sigma.
+Singleton/constant reference samples retain the existing zero-spread behavior
+(zero z-score, no sigma outlier), not a statistically calibrated reference.
+
+Time intervals may intersect the trajectory without matching sample timestamps
+exactly; only saved samples inside them are used. Empty, reversed or non-finite
+baseline intervals report an error and remove sigma references instead of
+silently using the full trajectory. Both ranges are saved in the workspace;
+older workspaces retain their detection range and use a full-trajectory baseline.
 
 ### Nucleotide class (sugar and backbone)
 
@@ -124,9 +173,11 @@ center/scale for each state; a sample's z-score uses its current state's
 reference. A switch does not acquire an enormous z merely because the dominant
 state is tightly clustered. Singleton/constant states have zero z, not a
 borrowed reference from another state. Tooltips and the inspector show the
-current state, e.g. "State: South (usually North, 93% of frames)". The heatmap
+current state and the dominant state's fraction of baseline samples. The heatmap
 uses the same baselines. The inspector reference and parameter CSV center/scale
-also use the current state; the total valid count includes every state.
+also use the current state; the total reference count includes every state
+represented inside the baseline range. Occupancy is a sample fraction, not
+elapsed-time weighting for irregular sampling.
 
 ### Residence-qualified state switches
 
@@ -221,7 +272,7 @@ sections.
 - **Settings** (left sidebar):
   *Selection* (class, parameter, member, frame; valid-member counts in the
   member tooltip) and *Detection* (Tolerance, Min duration / Min frames,
-  Detection range) are always visible. Collapsed sections:
+  Baseline range, Detection range) are always visible. Collapsed sections:
   *Event parameters* (the 2x6 grid; the header names the subset),
   *Advanced detection* (baseline, neighbourhood or whole structure,
   hierarchy and burst extra, hysteresis, pair loss, bridge gaps, Time in ns,
@@ -343,8 +394,9 @@ rate. Without physical time metadata, the sidebar explicitly uses **Min frames**
 or decreasing physical timestamps are reported, not silently interpreted as frames.
 
 **Detection range** restricts clustering to samples in the inclusive **From / To**
-interval (or inclusive frame bounds in fallback mode). Full-trajectory baselines,
-count plots and reference distributions remain unchanged. Out-of-trajectory bounds
+interval (or inclusive frame bounds in fallback mode). The independently selected
+baseline range, full-trajectory count plots and distributions remain unchanged.
+Out-of-trajectory bounds
 can intersect the trajectory; an empty, reversed or non-finite interval reports an
 error and clears detected events. Events touching an interior sample boundary
 are marked **clipped** (a `*` after the table Region, explained in its tooltip),
@@ -801,11 +853,17 @@ One row per frame, member and parameter of the current class. `class` is
 ```
 run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,
 quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,
-member_outlier,selected_mask,baseline
+member_outlier,selected_mask,baseline,baseline_begin,baseline_end
 ```
 
 The `baseline` column is `mean_sd` or `median_mad`. The `mean` and `sd` columns
-contain that baseline's center and scale.
+contain that baseline's center and scale for the current state. Appended
+`baseline_begin` / `baseline_end` give the first/last included reference sample
+coordinates in `time_unit` (or `frame`); invalid intervals export `nan`.
+These are interval endpoints, not a claim that every member/state has valid data
+throughout. `valid` still describes the measured value: a finite value can have
+`nan` reference statistics/z-score if its state is absent from the baseline.
+There are 26 columns.
 
 ### Events CSV (Export events CSV)
 
@@ -817,7 +875,7 @@ event_peak_sigma,event_score,event_type,first_pair,last_pair,scope,baseline,sigm
 end_sigma,neighbourhood,class,member,label,member_outlier_frames,member_lost_frames,
 parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,
 parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,
-detection_begin,detection_end,burst_mode
+detection_begin,detection_end,burst_mode,baseline_begin,baseline_end
 ```
 
 | Column | Meaning |
@@ -835,9 +893,14 @@ detection_begin,detection_end,burst_mode
 | truncated_begin, truncated_end | 1 when touching an interior detection-range boundary; potentially truncated |
 | min_duration, max_gap_duration | Detection minimum and quiet-gap limit, in `time_unit`; in frame fallback the minimum is contributing frames and the gap is quiet frames |
 | detection_begin, detection_end | Requested inclusive detection bounds in `time_unit`, or trajectory endpoints when unrestricted |
+| baseline_begin, baseline_end | First/last included baseline sample coordinates in `time_unit`, independent of detection bounds |
 
-The events CSV has 38 columns. Time-valued settings are converted from internal
+The events CSV has 40 columns. Time-valued settings are converted from internal
 ps to the exported trajectory `time_unit`; fallback exports use `frame`.
+For a period-based search, `detection_begin` / `detection_end` are the resolved
+first/last sample coordinates, not unused custom-entry bounds. Baseline columns
+likewise describe the resolved reference samples. Event-to-timeline annotations
+also include the selected period names.
 `sigma` and `end_sigma` describe that row's
 event (the higher thresholds for children), and child `neighbourhood` is
 always local, even under a Whole structure parent. Lost-pair score weight
@@ -863,12 +926,19 @@ application log.
 | OutlierSigma | float | - |
 | Metric, Member | int | - |
 | Baseline | 0 = Mean/SD, 1 = Median/MAD | 0 |
+| BaselineRangeEnabled | bool; 0 = Full trajectory, 1 = Custom or Timeline period | 0 |
+| BaselineRangePeriod | bool; when enabled, use Timeline period instead of Custom | 0 |
+| BaselinePeriodId | uint32, persistent VIAMD period ID; 0 = unselected | 0 |
+| BaselineRangeBeginPs, BaselineRangeEndPs | float, inclusive reference bounds in ps | 0 |
+| BaselineRangeFirst, BaselineRangeLast | int, inclusive reference frame fallback bounds | 0 |
 | EventParameters | int (24-bit mask, bit k = Metric k: Buckle..Stagger, Tilt..Rise, grooves, Alpha..Epsilon − Zeta) | 16777215 |
 | EventMinFrames | int, 1-100000 | 3 |
 | EventMaxGap | int, 0-100000 | 0 |
 | EventMinTimePs | float, nonnegative ps; -1 requests migration | -1 |
 | EventGapTimePs | float, nonnegative ps; -1 requests migration | -1 |
 | EventRangeEnabled | bool | 0 |
+| EventRangePeriod | bool; when enabled, use Timeline period instead of Custom | 0 |
+| EventPeriodId | uint32, persistent VIAMD period ID; 0 = unselected | 0 |
 | EventRangeBeginPs, EventRangeEndPs | float, inclusive ps bounds | 0 |
 | EventRangeFirst, EventRangeLast | int, inclusive frame fallback bounds | 0 |
 | EventTimeNs | bool, time-control display unit | 0 |
@@ -943,7 +1013,7 @@ non-finite layout values are clamped or reset.
   meaningful transition or automatically exclude finite geometry.
 - Groove widths follow 3DNA minus 5.8 Å; they are not Curves+ groove widths and
   are missing for the 2–3 steps nearest each helix end.
-- Changing the baseline recomputes statistics synchronously, which can take a
+- Changing the baseline method/range recomputes statistics synchronously on edit release, which can take a
   moment on very long trajectories.
 - The outlier count plot always uses the plotted class and parameter(s). Only the
   events use the Event parameters setting, so event bands can come from parameters
@@ -1261,9 +1331,10 @@ for the first-pass comparison.
    temperature-associated broadening. Compare raw angular/linear values and
    state occupancies as well: sigma alone cannot distinguish heating from a
    local conformational change.
-4. Repeat with independently recomputed plateau-specific baselines as a
-   *separate offline analysis*. The current GUI Detection range changes
-   detection bounds only, not its full-run baseline. Heating/cooling ramps
+4. Repeat with plateau-specific references using **Baseline range**, and
+   restrict each search using the independent **Detection range**. A common
+   reference and per-plateau references answer different questions; report both.
+   Heating/cooling ramps
    are nonstationary and should not be pooled with equilibrium plateaus.
    Neither a 500 ps plateau nor several cycles automatically guarantees
    equilibrium or independent observations.
@@ -1427,4 +1498,8 @@ The core tests cover:
   exact step midframes, native dihedral/value agreement and degree units for
   the linearly treated pucker amplitude;
 - Median/MAD robustness;
-- the events CSV, and the `baseline` column in the parameter CSV.
+- independent baseline/detection intervals, full-range equivalence, circular
+  and robust references, absent-state sigma coverage and invalid/empty intervals;
+- native timeline periods as reference/search windows, reversed/clipped bounds,
+  following windows, markers, edits and missing IDs;
+- the events CSV and the baseline method/interval columns in parameter CSV.

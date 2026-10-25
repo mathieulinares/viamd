@@ -195,8 +195,11 @@ struct MetricStatistics {
 // series that never approach +/-180 degrees from it give exactly the linear result.
 // State metrics use a separate baseline within each conformational state. State switches are detected
 // separately by residence time, not by distance from the dominant state's center.
+// Baseline frames are [first_frame, end_frame); heatmaps still cover every input frame.
+// An empty interval or absent state has no reference (NaN z-scores), never a borrowed baseline.
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
-                        bool angular = false, Baseline baseline = Baseline_MeanSD, int state_metric = -1);
+                        bool angular = false, Baseline baseline = Baseline_MeanSD, int state_metric = -1,
+                        size_t first_frame = 0, size_t end_frame = SIZE_MAX);
 
 // Conformational states of bimodal nucleotide parameters; 0 states for other metrics.
 int metric_state_count(Metric metric);
@@ -359,7 +362,7 @@ std::string csv_state_switch_row(const std::string& run, const std::string& labe
                                  double source_begin, double source_end);
 
 // Resolve inclusive physical-time bounds to sampled frame bounds. Reports invalid/empty ranges.
-bool event_time_range(EventOptions* options, double begin, double end);
+bool event_time_range(EventOptions* options, double begin, double end, const char* context = "detection");
 
 // Groups outlying (frame, member) samples into events. Two samples join when they are at most
 // max_gap + 1 frames apart (or within max_gap_duration of quiet time when times are supplied)
@@ -396,6 +399,7 @@ struct CsvEventRow {
     bool residual = false;
     bool truncated_begin = false, truncated_end = false;
     double min_duration = 0, max_gap_duration = 0, detection_begin = 0, detection_end = 0;
+    double baseline_begin = 0, baseline_end = 0;
 };
 const char* csv_event_header();
 std::string csv_event_row(const CsvEventRow& row);
@@ -413,6 +417,7 @@ struct CsvSample {
     uint32_t selected_mask = 0;
     bool member_outlier = false;
     Baseline baseline_method = Baseline_MeanSD;
+    double baseline_begin = 0, baseline_end = 0;
 };
 
 const char* csv_header();

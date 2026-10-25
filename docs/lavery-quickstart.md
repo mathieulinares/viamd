@@ -67,8 +67,24 @@ For the full reference, see [lavery.md](./lavery.md).
    time. Toggle **Time in ns** for ps/ns input. Any positive minimum removes
    single-sample spikes; set zero to retain them. The initial minimum is two
    median sampling intervals, not a universal physical lifetime.
-   Enable **Detection range** to detect only between **From** and **To**
-   (inclusive), without changing the full-trajectory baseline or distributions.
+   **Baseline range** and **Detection range** both default to **Full trajectory**.
+   Choose **Custom** to set inclusive **From / To** time bounds (or frame bounds
+   without timestamps). Baseline range defines the reference statistics;
+   detection range defines where to search for events and state switches.
+   Or choose **Timeline period**, then an existing named VIAMD period. You can
+   also drag a period from the timeline onto either range selector. The selected
+   name and resolved time/frame span are shown. Renaming/resizing a period keeps
+   the link; following periods move with the current frame using VIAMD's usual
+   clamping. A deleted period or one covering no samples shows a warning, never
+   a silent switch to Full trajectory. Create periods by Shift-dragging in
+   VIAMD's timeline; the two ranges may use different periods.
+   For example, use an equilibrated 300 K segment as the baseline and search
+   during heating without letting heating redefine the reference.
+   The count plot, heatmap and distributions still cover the full trajectory,
+   but sigma values use the chosen baseline. States absent from that interval
+   show **No baseline**, not an outlier or a borrowed reference; state-switch
+   detection does not need a baseline. Singleton/constant references have zero
+   spread and do not provide a calibrated sigma.
    Boundary-touching events have a `*` after their region: they may extend beyond
    the range. The same duration and gap rules apply to parents and children.
    **Duration** shows elapsed time (hover for contributing frames). Without
@@ -256,14 +272,15 @@ boundary flags. Detection thresholds and qualification rules are unchanged.
 | Min duration | Minimum elapsed first-to-last contribution time, including bridged gaps; zero retains spikes |
 | Bridge gaps | Maximum quiet-gap time; adjacent samples always connect (subject to spatial grouping) |
 | Time in ns | Switch duration, gap and range inputs between ps and ns without changing their physical values |
-| Detection range | Inclusive time interval for detection only; baseline and overview remain full-trajectory |
+| Baseline range | Full trajectory (default), Custom or Timeline period for reference center/scale and state occupancy |
+| Detection range | Full trajectory (default), Custom or Timeline period for the search, independent of the baseline |
 | Min frames / Bridge gaps (frame fallback) | Without timestamps: contributing-frame minimum (default 3), and maximum quiet frames |
 | Timeline... (events toolbar) | Add or remove every event as a period on the main timeline |
 | Active now | Show only events spanning the current frame |
 | Filter (events toolbar) | Type/parameter words and base-pair numbers or ranges; all terms must match |
 | Up / Down (events table focused) | Inspect the previous / next shown event |
 | Export events CSV | One row per event, member and parameter |
-| Export CSV | Per-frame parameter values, z-scores and flags (ends with a `baseline` column) |
+| Export CSV | Per-frame parameter values, z-scores and flags, with baseline method and interval |
 
 The outlier-count plot shades events and draws a dashed line at the number of
 outliers expected by chance. If the curve stays near that line, most hits are
@@ -390,6 +407,6 @@ sigma, hierarchy and gap bridging apply only to outlier events.
   flags for currently analysed paired nucleotides are implemented.
 - [ ] Compare groove widths with Curves+ (curvilinear) grooves.
 
-Automated validation currently covers 98 regular Lavery tests and one optional
+Automated validation currently covers 105 regular Lavery tests and one optional
 local-trajectory check. This does not replace
 the GUI and scientific checks above.

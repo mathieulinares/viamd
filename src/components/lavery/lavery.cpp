@@ -15,6 +15,7 @@
 #include <viamd.h>
 #include <event.h>
 #include <task_system.h>
+#include <timeline_periods_ui.h>
 #include <serialization_utils.h>
 #include <gfx/immediate_draw_utils.h>
 #include <gfx/scene_label.h>
@@ -27,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -104,12 +106,23 @@ struct Lavery : viamd::EventHandler {
     int baseline = Baseline_MeanSD;
     int statistics_baseline = Baseline_MeanSD;
     int calculation_baseline = Baseline_MeanSD;
+    bool baseline_range_enabled = false;
+    bool baseline_range_period = false;
+    uint32_t baseline_period_id = 0;
+    float baseline_range_begin_ps = 0, baseline_range_end_ps = 0;
+    int baseline_range_first = 0, baseline_range_last = 0;
+    uint64_t statistics_key = 0;
+    size_t statistics_first_frame = 0, statistics_end_frame = 0;
+    std::string baseline_range_error;
     // Parameters used for event detection, independent of the viewed class: bit k is Metric k
     // (bits 0-5 intra-base pair, 6-13 inter-base pair incl. grooves, 14-23 nucleotide).
     uint32_t event_parameters = kEventAllParameters;
     int event_min_frames = 3;
     float event_min_time_ps = -1, event_gap_time_ps = -1;
     bool event_range_enabled = false;
+    bool event_range_period = false;
+    uint32_t event_period_id = 0;
+    size_t detection_first_frame = 0, detection_last_frame = 0;
     float event_range_begin_ps = 0, event_range_end_ps = 0;
     int event_range_first = 0, event_range_last = 0;
     bool event_time_ns = false;
@@ -290,6 +303,8 @@ struct Lavery : viamd::EventHandler {
         event_detection_error.clear();
         inspected_event = SIZE_MAX;
         counts_key = 0;
+        statistics_key = 0;
+        baseline_range_error.clear();
         event_data_key = 0;
         event_context_bases.clear();
         event_context_groups.clear();
@@ -471,11 +486,20 @@ struct Lavery : viamd::EventHandler {
                 viamd::write_bool(state, STR_LIT("AggregateOutliers"), aggregate_outliers);
                 viamd::write_int(state, STR_LIT("SelectedParameters"), (int)selected_parameters);
                 viamd::write_int(state, STR_LIT("Baseline"), baseline);
+                viamd::write_bool(state, STR_LIT("BaselineRangeEnabled"), baseline_range_enabled);
+                viamd::write_bool(state, STR_LIT("BaselineRangePeriod"), baseline_range_period);
+                viamd::write_int(state, STR_LIT("BaselinePeriodId"), baseline_period_id);
+                viamd::write_flt(state, STR_LIT("BaselineRangeBeginPs"), baseline_range_begin_ps);
+                viamd::write_flt(state, STR_LIT("BaselineRangeEndPs"), baseline_range_end_ps);
+                viamd::write_int(state, STR_LIT("BaselineRangeFirst"), baseline_range_first);
+                viamd::write_int(state, STR_LIT("BaselineRangeLast"), baseline_range_last);
                 viamd::write_int(state, STR_LIT("EventParameters"), (int)event_parameters);
                 viamd::write_int(state, STR_LIT("EventMinFrames"), event_min_frames);
                 viamd::write_flt(state, STR_LIT("EventMinTimePs"), event_min_time_ps);
                 viamd::write_flt(state, STR_LIT("EventGapTimePs"), event_gap_time_ps);
                 viamd::write_bool(state, STR_LIT("EventRangeEnabled"), event_range_enabled);
+                viamd::write_bool(state, STR_LIT("EventRangePeriod"), event_range_period);
+                viamd::write_int(state, STR_LIT("EventPeriodId"), event_period_id);
                 viamd::write_flt(state, STR_LIT("EventRangeBeginPs"), event_range_begin_ps);
                 viamd::write_flt(state, STR_LIT("EventRangeEndPs"), event_range_end_ps);
                 viamd::write_int(state, STR_LIT("EventRangeFirst"), event_range_first);
@@ -520,10 +544,17 @@ struct Lavery : viamd::EventHandler {
                 aggregate_outliers = false;
                 selected_parameters = 1023;
                 baseline = Baseline_MeanSD;
+                baseline_range_enabled = false;
+                baseline_range_period = false;
+                baseline_period_id = 0;
+                baseline_range_begin_ps = baseline_range_end_ps = 0;
+                baseline_range_first = baseline_range_last = 0;
                 event_parameters = kEventAllParameters;
                 event_min_frames = 3;
                 event_min_time_ps = event_gap_time_ps = -1;
                 event_range_enabled = false;
+                event_range_period = false;
+                event_period_id = 0;
                 event_range_begin_ps = event_range_end_ps = 0;
                 event_range_first = event_range_last = 0;
                 event_time_ns = false;
@@ -585,6 +616,13 @@ struct Lavery : viamd::EventHandler {
                     }
                     else if (str_eq(key, STR_LIT("OutlierSigma"))) viamd::extract_flt(outlier_sigma, arg);
                     else if (str_eq(key, STR_LIT("Baseline"))) viamd::extract_enum(baseline, arg, Baseline_Count);
+                    else if (str_eq(key, STR_LIT("BaselineRangeEnabled"))) viamd::extract_bool(baseline_range_enabled, arg);
+                    else if (str_eq(key, STR_LIT("BaselineRangePeriod"))) viamd::extract_bool(baseline_range_period, arg);
+                    else if (str_eq(key, STR_LIT("BaselinePeriodId"))) extract_period_id(baseline_period_id, arg);
+                    else if (str_eq(key, STR_LIT("BaselineRangeBeginPs"))) viamd::extract_flt(baseline_range_begin_ps, arg);
+                    else if (str_eq(key, STR_LIT("BaselineRangeEndPs"))) viamd::extract_flt(baseline_range_end_ps, arg);
+                    else if (str_eq(key, STR_LIT("BaselineRangeFirst"))) viamd::extract_int(baseline_range_first, arg);
+                    else if (str_eq(key, STR_LIT("BaselineRangeLast"))) viamd::extract_int(baseline_range_last, arg);
                     else if (str_eq(key, STR_LIT("EventParameters"))) {
                         int mask = (int)kEventAllParameters;
                         viamd::extract_int(mask, arg);
@@ -599,6 +637,8 @@ struct Lavery : viamd::EventHandler {
                     else if (str_eq(key, STR_LIT("EventMinTimePs"))) viamd::extract_flt(event_min_time_ps, arg);
                     else if (str_eq(key, STR_LIT("EventGapTimePs"))) viamd::extract_flt(event_gap_time_ps, arg);
                     else if (str_eq(key, STR_LIT("EventRangeEnabled"))) viamd::extract_bool(event_range_enabled, arg);
+                    else if (str_eq(key, STR_LIT("EventRangePeriod"))) viamd::extract_bool(event_range_period, arg);
+                    else if (str_eq(key, STR_LIT("EventPeriodId"))) extract_period_id(event_period_id, arg);
                     else if (str_eq(key, STR_LIT("EventRangeBeginPs"))) viamd::extract_flt(event_range_begin_ps, arg);
                     else if (str_eq(key, STR_LIT("EventRangeEndPs"))) viamd::extract_flt(event_range_end_ps, arg);
                     else if (str_eq(key, STR_LIT("EventRangeFirst"))) viamd::extract_int(event_range_first, arg);
@@ -1073,7 +1113,8 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         ImGui::BeginGroup();
-        if (statistics_baseline != baseline) recompute_statistics();
+        update_statistics(frame_count);
+        if (!baseline_range_error.empty()) ImGui::TextWrapped("%s", baseline_range_error.c_str());
         int count = (int)columns[metric];
         bool ready = count > 0 && frame_count;
         if (ready) member = std::clamp(member, 0, count - 1);
@@ -1399,12 +1440,115 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
-    // Always-visible event controls: minimum duration and optional detection range.
+    static void extract_period_id(uint32_t& id, str_t arg) {
+        int64_t value = 0;
+        if (!viamd::extract_int64(value, arg)) return;
+        if (value < 0 || value > UINT32_MAX) {
+            MD_LOG_ERROR("Lavery: invalid timeline period ID");
+            return;
+        }
+        id = (uint32_t)value;
+    }
+
+    std::pair<int, int> period_frames(uint32_t id, size_t frame_count) const {
+        const TimelinePeriod* period = timeline_periods_find(&app->timeline.periods, id);
+        int first = 0, last = 0;
+        if (!period || frame_count > INT_MAX ||
+            !timeline_period_frames(&first, &last, *period, app->animation.frame, (int)frame_count)) return {-1, -1};
+        return {first, last};
+    }
+
+    void draw_analysis_range(const char* label, bool& enabled, bool& use_period, uint32_t& period_id,
+                             float& begin_ps, float& end_ps,
+                             int& first, int& last, const float* times, size_t frame_count, const char* tooltip) {
+        ImGui::PushID(label);
+        int mode = enabled ? use_period ? 2 : 1 : 0;
+        if (ImGui::Combo(label, &mode, "Full trajectory\0Custom\0Timeline period\0")) {
+            enabled = mode != 0;
+            use_period = mode == 2;
+            if (mode == 1) {
+                if (times) {
+                    const double to_ps = md_unit_scale(app->timeline.time_unit) / md_unit_scale(md_unit_picosecond());
+                    begin_ps = (float)(times[0] * to_ps);
+                    end_ps = (float)(times[frame_count - 1] * to_ps);
+                } else {
+                    first = 0;
+                    last = (int)frame_count - 1;
+                }
+            }
+        }
+        ImGui::SetItemTooltip("%s", tooltip);
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(TIMELINE_PERIOD_DND)) {
+                if (payload->DataSize == sizeof(uint32_t)) {
+                    period_id = *(const uint32_t*)payload->Data;
+                    enabled = use_period = true;
+                } else {
+                    MD_LOG_ERROR("Lavery: invalid timeline period drag payload");
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+        if (enabled && use_period) {
+            const auto& periods = app->timeline.periods;
+            const TimelinePeriod* selected = timeline_periods_find(&periods, period_id);
+            if (ImGui::BeginCombo("Period", selected ? selected->name : "Select a period...")) {
+                for (int i = 0; i < periods.count; ++i) {
+                    const auto& period = periods.items[i];
+                    ImGui::PushID((int)period.id);
+                    if (ImGui::Selectable(period.name, period.id == period_id)) period_id = period.id;
+                    if (ImGui::IsItemHovered()) timeline_periods_highlight(period.id);
+                    ImGui::PopID();
+                }
+                if (!periods.count) ImGui::TextDisabled("Create a period in VIAMD's timeline.");
+                ImGui::EndCombo();
+            }
+            selected = timeline_periods_find(&periods, period_id);
+            if (selected && ImGui::IsItemHovered()) timeline_periods_highlight(selected->id);
+            const auto [first_frame, last_frame] = period_frames(period_id, frame_count);
+            if (first_frame < 0) {
+                ImGui::TextWrapped("%s", !selected
+                    ? "Selected period is missing. Select an existing period; Full trajectory is not substituted."
+                    : "Selected period covers no trajectory samples.");
+            } else {
+                if (times) {
+                    const double scale = md_unit_scale(app->timeline.time_unit) /
+                        md_unit_scale(md_unit_picosecond()) / (event_time_ns ? 1000.0 : 1.0);
+                    ImGui::TextDisabled("%.6g - %.6g %s", times[first_frame] * scale,
+                        times[last_frame] * scale, event_time_ns ? "ns" : "ps");
+                }
+                ImGui::TextDisabled("Frames %d - %d%s", first_frame, last_frame,
+                    selected->follow ? " (follows current frame)" : "");
+            }
+            ImGui::PopID();
+            return;
+        }
+        if (times) {
+            const float scale = event_time_ns ? 1000.0f : 1.0f;
+            if (enabled) {
+                float begin = begin_ps / scale, end = end_ps / scale;
+                if (ImGui::InputFloat(event_time_ns ? "From (ns)" : "From (ps)", &begin, 0, 0, "%.6g")) begin_ps = begin * scale;
+                if (ImGui::InputFloat(event_time_ns ? "To (ns)" : "To (ps)", &end, 0, 0, "%.6g")) end_ps = end * scale;
+            } else {
+                const double display_scale = md_unit_scale(app->timeline.time_unit) /
+                    md_unit_scale(md_unit_picosecond()) / scale;
+                ImGui::TextDisabled("%.6g - %.6g %s", times[0] * display_scale,
+                    times[frame_count - 1] * display_scale, event_time_ns ? "ns" : "ps");
+            }
+        } else if (enabled) {
+            ImGui::InputInt("First frame", &first);
+            ImGui::InputInt("Last frame", &last);
+        } else {
+            ImGui::TextDisabled("Frames 0 - %zu", frame_count - 1);
+        }
+        ImGui::PopID();
+    }
+
+    // Always-visible duration and independent reference/search intervals.
     void draw_event_time_settings() {
         const size_t frame_count = run_num_frames(app);
         const float* times = timeline_times(frame_count);
         if (times) {
-            const double to_ps = md_unit_scale(app->timeline.time_unit) / md_unit_scale(md_unit_picosecond());
             initialize_event_times(times, frame_count);
             const float scale = event_time_ns ? 1000.0f : 1.0f;
             auto input_time = [&](const char* label, float& ps) {
@@ -1414,33 +1558,25 @@ struct Lavery : viamd::EventHandler {
             input_time(event_time_ns ? "Min duration (ns)" : "Min duration (ps)", event_min_time_ps);
             ImGui::SetItemTooltip("Elapsed time from first to last contributing sample, including bridged gaps.\n"
                 "0 retains single-frame spikes. Initial value: two median sampling intervals.");
-            if (ImGui::Checkbox("Detection range", &event_range_enabled) && event_range_enabled) {
-                event_range_begin_ps = (float)(times[0] * to_ps);
-                event_range_end_ps = (float)(times[frame_count - 1] * to_ps);
-            }
-            ImGui::SetItemTooltip("Detect events only within this inclusive interval.\n"
-                "Baselines, count plot and distributions remain full-trajectory.");
-            if (event_range_enabled) {
-                input_time(event_time_ns ? "From (ns)" : "From (ps)", event_range_begin_ps);
-                input_time(event_time_ns ? "To (ns)" : "To (ps)", event_range_end_ps);
-            }
         } else if (!md_unit_base_equal(app->timeline.time_unit, md_unit_second())) {
             if (ImGui::InputInt("Min frames", &event_min_frames)) event_min_frames = std::clamp(event_min_frames, 1, 100000);
             ImGui::SetItemTooltip("No time metadata: frame-based detection.\n"
                 "Require contributing frames for parents and children (default 3).\n"
                 "Bridged gaps do not count. Set 1 to retain single-frame spikes.");
-            if (ImGui::Checkbox("Detection range (frames)", &event_range_enabled) && event_range_enabled) {
-                event_range_first = 0;
-                event_range_last = (int)frame_count - 1;
-            }
-            ImGui::SetItemTooltip("Detect events only within these inclusive frames.\n"
-                "Baselines, count plot and distributions remain full-trajectory.");
-            if (event_range_enabled) {
-                ImGui::InputInt("First frame", &event_range_first);
-                ImGui::InputInt("Last frame", &event_range_last);
-            }
         } else {
             ImGui::TextWrapped("Physical timestamps do not match the trajectory. Event detection is unavailable.");
+        }
+        if (frame_count && (times || !md_unit_base_equal(app->timeline.time_unit, md_unit_second()))) {
+            draw_analysis_range("Baseline range", baseline_range_enabled, baseline_range_period, baseline_period_id,
+                baseline_range_begin_ps, baseline_range_end_ps,
+                baseline_range_first, baseline_range_last, times, frame_count,
+                "Reference interval for center/scale and within-state occupancy, independent of detection.\n"
+                "States absent from the reference have no baseline; no other state's statistics are borrowed.");
+            draw_analysis_range("Detection range", event_range_enabled, event_range_period, event_period_id,
+                event_range_begin_ps, event_range_end_ps,
+                event_range_first, event_range_last, times, frame_count,
+                "Search for outlier events and state switches within this inclusive interval.\n"
+                "Does not change the baseline. Count plot and distributions still cover the full trajectory.");
         }
     }
 
@@ -1575,15 +1711,18 @@ struct Lavery : viamd::EventHandler {
                 if (ImGui::SmallButton("Clear")) pinned.clear();
             }
             ImGui::SameLine();
-            if (statistics_baseline == Baseline_MedianMAD) {
+            if (!current_reference.count) {
+                ImGui::TextColored(ImVec4(1,0.7f,0.3f,1), "No baseline for this sample/state");
+            } else if (statistics_baseline == Baseline_MedianMAD) {
                 ImGui::TextDisabled("median %.3f, MAD %.3f, n %zu/%zu",
-                    current_reference.mean, current_reference.sd, current_reference.count, frame_count);
+                    current_reference.mean, current_reference.sd, current_reference.count, statistics_end_frame - statistics_first_frame);
             } else {
                 ImGui::TextDisabled("mean %.3f, SD %.3f, n %zu/%zu",
-                    current_reference.mean, current_reference.sd, current_reference.count, frame_count);
+                    current_reference.mean, current_reference.sd, current_reference.count, statistics_end_frame - statistics_first_frame);
             }
             if (member_stats.state_metric >= 0) {
-                ImGui::SetItemTooltip("Center and scale for the current state; the density still includes all states.");
+                ImGui::SetItemTooltip("Center/scale use the baseline range and current state; the density includes all frames/states.\n"
+                    "A missing state has no reference. Singleton/constant references have zero spread, not a calibrated sigma.");
             }
             auto& histogram = distributions[metric];
             if (histogram.valid.empty() && !compute_distributions(&histogram, data, (size_t)count)) {
@@ -1812,16 +1951,16 @@ struct Lavery : viamd::EventHandler {
 
     int metric_cls() const { return metric_class((Metric)metric); }
 
-    // "\nState: syn (usually anti, 94% of frames)" for state-aware metrics, empty otherwise.
     std::string state_text(Metric id, size_t index, float value) const {
         if (!metric_state_count(id) || index >= statistics[id].members.size()) return {};
         const auto& stats = statistics[id].members[index];
         const int now = metric_state(id, value);
-        if (now < 0 || stats.state < 0) return {};
+        if (now < 0) return {};
         char buf[160];
-        if (now == stats.state) snprintf(buf, sizeof(buf), "\nState: %s (dominant, %.0f%% of frames)",
+        if (!stats.reference(value).count) snprintf(buf, sizeof(buf), "\nState: %s (no baseline)", metric_state_name(id, now));
+        else if (now == stats.state) snprintf(buf, sizeof(buf), "\nState: %s (dominant, %.0f%% of baseline samples)",
             metric_state_name(id, now), 100.0f * stats.state_fraction);
-        else snprintf(buf, sizeof(buf), "\nState: %s (usually %s, %.0f%% of frames)",
+        else snprintf(buf, sizeof(buf), "\nState: %s (baseline usually %s, %.0f%%)",
             metric_state_name(id, now), metric_state_name(id, stats.state), 100.0f * stats.state_fraction);
         return buf;
     }
@@ -1858,15 +1997,85 @@ struct Lavery : viamd::EventHandler {
         show_window = true;
     }
 
-    void recompute_statistics() {
+    void update_statistics(size_t frame_count) {
+        uint64_t key = md_hash64(&baseline, sizeof(baseline), 0xBA5E);
+        key = md_hash64(&baseline_range_enabled, sizeof(baseline_range_enabled), key);
+        key = md_hash64(&baseline_range_period, sizeof(baseline_range_period), key);
+        key = md_hash64(&baseline_period_id, sizeof(baseline_period_id), key);
+        const auto baseline_period_frames = baseline_range_enabled && baseline_range_period
+            ? period_frames(baseline_period_id, frame_count) : std::pair<int, int>{0, 0};
+        key = md_hash64(&baseline_period_frames.first, sizeof(int), key);
+        key = md_hash64(&baseline_period_frames.second, sizeof(int), key);
+        key = md_hash64(&baseline_range_begin_ps, sizeof(baseline_range_begin_ps), key);
+        key = md_hash64(&baseline_range_end_ps, sizeof(baseline_range_end_ps), key);
+        key = md_hash64(&baseline_range_first, sizeof(baseline_range_first), key);
+        key = md_hash64(&baseline_range_last, sizeof(baseline_range_last), key);
+        key = md_hash64(&frame_count, sizeof(frame_count), key);
+        const float* times = timeline_times(frame_count);
+        const bool physical_time = md_unit_base_equal(app->timeline.time_unit, md_unit_second());
+        key = md_hash64(&physical_time, sizeof(physical_time), key);
+        if (times) {
+            key = md_hash64(times, frame_count * sizeof(float), key);
+            const double scale = md_unit_scale(app->timeline.time_unit);
+            key = md_hash64(&scale, sizeof(scale), key);
+        }
+        if (statistics_key == key) return;
+        if (statistics_key && ImGui::IsAnyItemActive()) return;
+        baseline_range_error.clear();
+        statistics_first_frame = 0;
+        statistics_end_frame = frame_count;
+        bool valid = true;
+        if (baseline_range_enabled) {
+            if (baseline_range_period) {
+                valid = baseline_period_frames.first >= 0;
+                if (valid) {
+                    statistics_first_frame = (size_t)baseline_period_frames.first;
+                    statistics_end_frame = (size_t)baseline_period_frames.second + 1;
+                }
+            } else if (times) {
+                EventOptions range;
+                const double to_ps = md_unit_scale(app->timeline.time_unit) / md_unit_scale(md_unit_picosecond());
+                range.times.resize(frame_count);
+                for (size_t f = 0; f < frame_count; ++f) range.times[f] = times[f] * to_ps;
+                valid = event_time_range(&range, baseline_range_begin_ps, baseline_range_end_ps, "baseline");
+                if (valid) {
+                    statistics_first_frame = range.first_frame;
+                    statistics_end_frame = range.last_frame + 1;
+                }
+            } else {
+                valid = !physical_time && baseline_range_first >= 0 && baseline_range_last >= baseline_range_first &&
+                    (size_t)baseline_range_last < frame_count;
+                if (valid) {
+                    statistics_first_frame = (size_t)baseline_range_first;
+                    statistics_end_frame = (size_t)baseline_range_last + 1;
+                }
+            }
+        }
+        if (!valid) {
+            baseline_range_error = baseline_range_period
+                ? "Baseline period is missing or covers no samples. Select an existing period. Sigma analysis has no reference; state-switch detection is independent."
+                : "Invalid baseline range: use ordered limits containing at least one sample. Sigma analysis has no reference; state-switch detection is independent.";
+            MD_LOG_ERROR("Lavery: %s", baseline_range_error.c_str());
+            statistics_first_frame = statistics_end_frame = 0;
+        }
         for (int m = 0; m < (int)Metric_Count; ++m) {
             if (!compute_statistics(&statistics[m], values[m], columns[m], metric_is_angular((Metric)m), (Baseline)baseline,
-                    metric_state_count((Metric)m) ? m : -1)) {
+                    metric_state_count((Metric)m) ? m : -1, statistics_first_frame, statistics_end_frame)) {
                 MD_LOG_ERROR("Lavery: could not recompute statistics for %s", metric_name((Metric)m));
             }
         }
+        statistics_key = key;
         statistics_baseline = baseline;
         counts_key = 0;
+    }
+
+    std::pair<double, double> baseline_bounds(const float* times) const {
+        if (statistics_end_frame <= statistics_first_frame) {
+            const double missing = std::numeric_limits<double>::quiet_NaN();
+            return {missing, missing};
+        }
+        return {times ? (double)times[statistics_first_frame] : (double)statistics_first_frame,
+                times ? (double)times[statistics_end_frame - 1] : (double)statistics_end_frame - 1};
     }
 
     uint16_t parameter_quality(size_t frame, size_t index, int id) const {
@@ -1985,6 +2194,7 @@ struct Lavery : viamd::EventHandler {
         initialize_event_times(timeline_times(frame_count), frame_count);
         const uint32_t mask = outlier_parameter_mask();
         uint64_t key = md_hash64(&outlier_sigma, sizeof(outlier_sigma), 0x1A7E);
+        key = md_hash64(&statistics_key, sizeof(statistics_key), key);
         key = md_hash64(&statistics_baseline, sizeof(statistics_baseline), key);
         key = md_hash64(&event_parameters, sizeof(event_parameters), key);
         key = md_hash64(&event_min_frames, sizeof(event_min_frames), key);
@@ -1994,6 +2204,12 @@ struct Lavery : viamd::EventHandler {
         key = md_hash64(&state_min_time_ps, sizeof(state_min_time_ps), key);
         key = md_hash64(&state_min_frames, sizeof(state_min_frames), key);
         key = md_hash64(&event_range_enabled, sizeof(event_range_enabled), key);
+        key = md_hash64(&event_range_period, sizeof(event_range_period), key);
+        key = md_hash64(&event_period_id, sizeof(event_period_id), key);
+        const auto event_period_frames = event_range_enabled && event_range_period
+            ? period_frames(event_period_id, frame_count) : std::pair<int, int>{0, 0};
+        key = md_hash64(&event_period_frames.first, sizeof(int), key);
+        key = md_hash64(&event_period_frames.second, sizeof(int), key);
         key = md_hash64(&event_range_begin_ps, sizeof(event_range_begin_ps), key);
         key = md_hash64(&event_range_end_ps, sizeof(event_range_end_ps), key);
         key = md_hash64(&event_range_first, sizeof(event_range_first), key);
@@ -2094,16 +2310,25 @@ struct Lavery : viamd::EventHandler {
             for (size_t f = 0; f < frame_count; ++f) {
                 valid_options &= std::isfinite(options.times[f]) && (!f || options.times[f] > options.times[f - 1]);
             }
-            if (event_range_enabled) {
+            if (event_range_enabled && !event_range_period) {
                 valid_options = valid_options && event_time_range(&options, event_range_begin_ps, event_range_end_ps);
             }
-        } else if (event_range_enabled) {
+        } else if (event_range_enabled && !event_range_period) {
             valid_options &= event_range_first >= 0 && event_range_last >= event_range_first &&
                 (size_t)event_range_last < frame_count;
             options.first_frame = (size_t)std::max(0, event_range_first);
             options.last_frame = (size_t)std::max(0, event_range_last);
         }
+        if (event_range_enabled && event_range_period) {
+            valid_options &= event_period_frames.first >= 0;
+            if (valid_options) {
+                options.first_frame = (size_t)event_period_frames.first;
+                options.last_frame = (size_t)event_period_frames.second;
+            }
+        }
         if (valid_options) {
+            detection_first_frame = options.first_frame;
+            detection_last_frame = std::min(frame_count - 1, options.last_frame);
             outlier_events = detect_events(frame_outliers, pairs.size(), steps, options);
             state_switches.clear();
             inspected_switch = SIZE_MAX;
@@ -2127,7 +2352,9 @@ struct Lavery : viamd::EventHandler {
         if (!valid_options) {
             outlier_events.clear();
             state_switches.clear();
-            event_detection_error = "Invalid timestamps, duration/gap or range. Times must increase, limits must be nonnegative, and the range must contain a sample.";
+            event_detection_error = event_range_enabled && event_range_period && event_period_frames.first < 0
+                ? "Detection period is missing or covers no samples. Select an existing period; detection is unavailable."
+                : "Invalid timestamps, duration/gap or range. Times must increase, limits must be nonnegative, and the range must contain a sample.";
             MD_LOG_ERROR("Lavery: %s", event_detection_error.c_str());
         }
         event_colors = event_color_slots(outlier_events);
@@ -2173,7 +2400,7 @@ struct Lavery : viamd::EventHandler {
         ImGui::AlignTextToFramePadding();
         ImGui::Text("Outliers: %zu / %zu valid", selected_counts.outliers, selected_counts.valid);
         ImGui::SetItemTooltip("Counting %s at %.1f sigma over all %s.\n"
-            "Frame %zu: coverage %.1f%%; %zu/%d unavailable (pairing loss or invalid geometry).\n"
+            "Frame %zu: coverage %.1f%%; %zu/%d unavailable (invalid geometry or missing baseline).\n"
             "Selected parameter: %zu quality-flagged members (includes retained warnings).\n"
             "Whole trajectory: %.0f outlying member-frames, ~%.0f expected by chance.\n"
             "Chance level assumes Gaussian, independent parameters (p = %.2g per test);\n"
@@ -2770,14 +2997,35 @@ struct Lavery : viamd::EventHandler {
         if (timeline_times(outlier_counts.size())) {
             snprintf(line, sizeof(line), "Min duration %.6g ps; gap limit %.6g ps\n", event_min_time_ps, event_gap_time_ps);
             note += line;
-            if (event_range_enabled) {
-                snprintf(line, sizeof(line), "Detection range %.6g-%.6g ps (full-trajectory baseline)\n", event_range_begin_ps, event_range_end_ps);
+            if (event_range_enabled && !event_range_period) {
+                snprintf(line, sizeof(line), "Detection range %.6g-%.6g ps\n", event_range_begin_ps, event_range_end_ps);
                 note += line;
             }
         } else {
             snprintf(line, sizeof(line), "Min %d contributing frames; gap limit %d frames\n", event_min_frames, event_max_gap);
             note += line;
+            if (event_range_enabled && !event_range_period) {
+                snprintf(line, sizeof(line), "Detection frames %d-%d\n", event_range_first, event_range_last);
+                note += line;
+            }
         }
+        if (event_range_enabled && event_range_period) {
+            const TimelinePeriod* selected = timeline_periods_find(&app->timeline.periods, event_period_id);
+            snprintf(line, sizeof(line), "Detection period: %s, frames %zu-%zu\n",
+                selected ? selected->name : "missing", detection_first_frame, detection_last_frame);
+            note += line;
+        }
+        if (baseline_range_enabled && baseline_range_period) {
+            const TimelinePeriod* selected = timeline_periods_find(&app->timeline.periods, baseline_period_id);
+            snprintf(line, sizeof(line), "Baseline period: %s\n", selected ? selected->name : "missing");
+            note += line;
+        }
+        const float* times = timeline_times(outlier_counts.size());
+        const auto [baseline_begin, baseline_end] = baseline_bounds(times);
+        char unit[32] = "frame";
+        if (times) md_unit_print(unit, sizeof(unit), app->timeline.time_unit);
+        snprintf(line, sizeof(line), "Baseline samples %.6g-%.6g %s\n", baseline_begin, baseline_end, unit);
+        note += line;
         if (event.parent != SIZE_MAX) {
             snprintf(line, sizeof(line), event.residual ? "Child of #%zu; stands out from parent background by %.2f sigma\n" :
                 "Child of #%zu; burst threshold %.2f sigma\n", event.parent + 1, event.burst_sigma);
@@ -2933,9 +3181,16 @@ struct Lavery : viamd::EventHandler {
                         ? (times ? event_range_begin_ps * ps_to_time : event_range_first) : (times ? times[0] : 0);
                     row.detection_end = event_range_enabled
                         ? (times ? event_range_end_ps * ps_to_time : event_range_last) : (times ? times[frames - 1] : (double)frames - 1);
+                    if (event_range_enabled && event_range_period) {
+                        row.detection_begin = times ? times[detection_first_frame] : (double)detection_first_frame;
+                        row.detection_end = times ? times[detection_last_frame] : (double)detection_last_frame;
+                    }
                     row.member_lost = m.lost_frames;
                     row.scope = event_parameters_label();
                     row.baseline = statistics_baseline == Baseline_MedianMAD ? "median_mad" : "mean_sd";
+                    const auto bounds = baseline_bounds(times);
+                    row.baseline_begin = bounds.first;
+                    row.baseline_end = bounds.second;
                     row.metric = (Metric)id;
                     row.member = m.member + 1;
                     row.label = labels[m.member];
@@ -3014,6 +3269,9 @@ struct Lavery : viamd::EventHandler {
                 sample.selected_mask = outlier_parameter_mask();
                 sample.member_outlier = assessment.contributors != 0;
                 sample.baseline_method = (Baseline)statistics_baseline;
+                const auto bounds = baseline_bounds(times);
+                sample.baseline_begin = bounds.first;
+                sample.baseline_end = bounds.second;
                 for (int k = 0; k < class_parameter_count(cls); ++k) {
                     const int id = offset + k;
                     sample.metric = (Metric)id;
@@ -3447,6 +3705,10 @@ struct Lavery : viamd::EventHandler {
             const bool outlier = (result.contributors & (1u << k)) != 0;
             const int state = metric_state((Metric)id, v);
             const auto& stats = statistics[id].members[index];
+            if (!stats.reference(v).count) {
+                tooltip_row(req, key, "%.2f%s" TOOLTIP_SEP "no baseline for this sample/state", v, unit);
+                continue;
+            }
             char state_note[64] = {};
             if (state >= 0) snprintf(state_note, sizeof(state_note), TOOLTIP_SEP "%s%s", metric_state_name((Metric)id, state),
                 stats.state >= 0 && state != stats.state ? " (non-dominant)" : "");
@@ -3532,8 +3794,9 @@ struct Lavery : viamd::EventHandler {
                     const auto& stats = statistics[parameter].members[index];
                     const float v = values[parameter][current_frame()*columns[parameter]+index];
                     const auto ref = stats.reference(v);
-                    tooltip_row(req, STR_LIT("reference"), "center %.3f" TOOLTIP_SEP "scale %.3f" TOOLTIP_SEP "%zu valid frames",
+                    if (ref.count) tooltip_row(req, STR_LIT("reference"), "center %.3f" TOOLTIP_SEP "scale %.3f" TOOLTIP_SEP "%zu baseline samples",
                         ref.mean, ref.sd, ref.count);
+                    else tooltip_row(req, STR_LIT("reference"), "No baseline for this sample/state");
                 } else if (cls != Class_Pair) tooltip_member(req, cls, index, marker_mask(cls, index));
                 else tooltip_pair(req, index);
             }
@@ -3873,7 +4136,9 @@ struct Lavery : viamd::EventHandler {
                 const int state = metric_state(id, detail_value);
                 if (state >= 0) {
                     const auto& stats = statistics[id].members[target.index];
-                    snprintf(label, sizeof(label), "%s (usually %s, %.0f%%)", metric_state_name(id,state),
+                    if (!stats.reference(detail_value).count)
+                        snprintf(label, sizeof(label), "%s (no baseline)", metric_state_name(id,state));
+                    else snprintf(label, sizeof(label), "%s (baseline usually %s, %.0f%%)", metric_state_name(id,state),
                         metric_state_name(id,stats.state), stats.state_fraction*100);
                     measurement_label(anchor, label);
                 }

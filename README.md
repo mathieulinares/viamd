@@ -89,7 +89,11 @@ restores all); sizes are saved in the workspace. The sections scroll
 independently, without dock tabs or extra window title bars. Help text is in
 tooltips, and rarely used settings sit in collapsed sections. The sidebar selects **Intra-base pair** or
 **Inter-base pair** or **Nucleotide**, parameter, member, tolerance and detection time settings
-always visible; event parameters, advanced detection (baseline, grouping,
+always visible. Independent **Baseline range** (reference statistics) and
+**Detection range** (event/state-switch search) both default to **Full trajectory**.
+Each also accepts custom bounds or an existing named **Timeline period**, linked
+by persistent ID and updated when the period changes.
+Event parameters, advanced detection (baseline method, grouping,
 hierarchy, hysteresis, gaps), exports (including events CSV)
 and recomputation are collapsed. Visual controls sit in the compact
 **Visual feedback...** popup with **Event regions** and **Measurements** tabs.
@@ -260,8 +264,11 @@ loss** on (default), frames where a base pair breaks count as outlying
 instead of ending the event. With timestamps, **Min duration** and **Bridge gaps**
 use physical time (ps/ns); a positive minimum excludes single-sample spikes.
 Initial/legacy thresholds migrate using the median sampling interval.
-An optional **Detection range** restricts events without changing the
-full-trajectory baseline or distributions; boundary-touching events are marked
+**Baseline range** chooses the reference interval; the independent
+**Detection range** restricts the event/state-switch search. Both default to
+**Full trajectory**. Distributions still cover the full trajectory;
+states absent from the reference show **No baseline**, not borrowed statistics.
+Boundary-touching events are marked
 potentially clipped. Without time metadata, explicit frame controls remain.
 The **Duration** column shows elapsed time (contributing frames in its
 tooltip); clipped events carry a `*` after their region. **Event parameters** chooses the event parameters independently of the
