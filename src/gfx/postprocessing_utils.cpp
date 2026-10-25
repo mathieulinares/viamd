@@ -826,6 +826,11 @@ constexpr str_t f_shader_src_marks = STR_LIT(R"(
 uniform sampler2D u_texture;
 uniform sampler2D u_marks;          // the output's size, filtered: selection in view, at all; highlight in view, at all
 uniform sampler2D u_marks_group;    // the highlight's group: 1 + it, 8 more in view, 0 none (in 1/255)
+uniform sampler2D u_contours;
+uniform sampler2D u_contour_group;
+uniform vec3 u_contour_colors[8];
+uniform bool u_has_marks;
+uniform bool u_has_contours;
 uniform float u_time;
 
 uniform vec4  u_visible[2];         // selection, highlight
@@ -834,6 +839,7 @@ uniform vec4  u_outline[2];
 uniform vec3  u_groups[7];          // the highlight's groups after the first
 uniform float u_highlight;          // how much of the highlight shows
 uniform int   u_outline_step;
+uniform float u_contour_step;
 
 out vec4 out_frag;
 
@@ -844,23 +850,40 @@ float hash(vec2 p) {
 }
 
 // The mean of the four 2x2 blocks of pixels about this one, r pixels out diagonally
-vec4 marks_about(vec2 px, float r, vec2 inv_size) {
-    return 0.25 * (texture(u_marks, (px + vec2(-r, -r)) * inv_size) +
-                   texture(u_marks, (px + vec2( r, -r)) * inv_size) +
-                   texture(u_marks, (px + vec2(-r,  r)) * inv_size) +
-                   texture(u_marks, (px + vec2( r,  r)) * inv_size));
+vec4 marks_about(sampler2D marks, vec2 px, float r, vec2 inv_size) {
+    return 0.25 * (texture(marks, (px + vec2(-r, -r)) * inv_size) +
+                   texture(marks, (px + vec2( r, -r)) * inv_size) +
+                   texture(marks, (px + vec2(-r,  r)) * inv_size) +
+                   texture(marks, (px + vec2( r,  r)) * inv_size));
+}
+
+vec4 marks_ring(sampler2D marks, vec4 center, vec2 inv_size, float step) {
+    return step > 1.0
+        ? 0.5 * (center + marks_about(marks, gl_FragCoord.xy, step - 0.5, inv_size))
+        : center;
+}
+
+vec2 outline_edge(vec2 mask) {
+    return clamp(2.0 - 2.0 * abs(2.0 * mask - 1.0), 0.0, 1.0);
 }
 
 // The highlight's group at the pixel, of the 3x3 about it where it has none (by its tent its marks reach that far):
 // the one in view first, of those the last
-int group_about(vec2 px, vec2 inv_size) {
-    float g = texelFetch(u_marks_group, ivec2(px), 0).r;
+int group_about(sampler2D groups, vec2 px, vec2 inv_size, float step) {
+    float g = texelFetch(groups, ivec2(px), 0).r;
     if (g == 0.0) {
-        vec4 m = max(max(textureGather(u_marks_group, (px + vec2(-0.49, -0.49)) * inv_size),
-                         textureGather(u_marks_group, (px + vec2( 0.49, -0.49)) * inv_size)),
-                     max(textureGather(u_marks_group, (px + vec2(-0.49,  0.49)) * inv_size),
-                         textureGather(u_marks_group, (px + vec2( 0.49,  0.49)) * inv_size)));
+        vec4 m = max(max(textureGather(groups, (px + vec2(-0.49, -0.49)) * inv_size),
+                         textureGather(groups, (px + vec2( 0.49, -0.49)) * inv_size)),
+                     max(textureGather(groups, (px + vec2(-0.49,  0.49)) * inv_size),
+                         textureGather(groups, (px + vec2( 0.49,  0.49)) * inv_size)));
         g = max(max(m.x, m.y), max(m.z, m.w));
+        if (g == 0.0 && step > 1.0) {
+            float r = step - 0.5;
+            for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) {
+                vec4 taps = textureGather(groups, (px + vec2(x, y) * r) * inv_size);
+                g = max(g, max(max(taps.x, taps.y), max(taps.z, taps.w)));
+            }
+        }
     }
     int code = int(g * 255.0 + 0.5);
     return code > 0 ? (code - 1) % 8 : 0;
@@ -868,26 +891,33 @@ int group_about(vec2 px, vec2 inv_size) {
 
 void main() {
     vec4 c = texelFetch(u_texture, ivec2(gl_FragCoord.xy), 0);
-    vec2 inv_size = 1.0 / vec2(textureSize(u_marks, 0));
+    vec2 inv_size = 1.0 / vec2(textureSize(u_texture, 0));
+
+    if (u_has_contours) {
+        vec4 m = marks_about(u_contours, gl_FragCoord.xy, 0.5, inv_size);
+        vec4 ring = marks_ring(u_contours, m, inv_size, u_contour_step);
+        float edge = outline_edge(ring.yw).y;
+        if (edge > 0.0) {
+            int g = group_about(u_contour_group, gl_FragCoord.xy, inv_size, u_contour_step);
+            c.rgb = mix(c.rgb, u_contour_colors[g], 0.9 * edge);
+        }
+    }
 
     // The tent of the marks about the pixel, and for the outline, wider with the taps further out
-    vec4 m = marks_about(gl_FragCoord.xy, 0.5, inv_size);
-    vec4 ring = m;
-    if (u_outline_step > 1) {
-        ring = 0.5 * (m + marks_about(gl_FragCoord.xy, float(u_outline_step) - 0.5, inv_size));
-    }
+    vec4 m = u_has_marks ? marks_about(u_marks, gl_FragCoord.xy, 0.5, inv_size) : vec4(0.0);
+    vec4 ring = u_has_marks ? marks_ring(u_marks, m, inv_size, float(u_outline_step)) : m;
 
     if (max(max(ring.y, ring.w), max(m.y, m.w)) > 0.0) {
         vec2 vis    = m.xz;
         vec2 hidden = max(m.yw - m.xz, 0.0);
-        vec2 edge   = clamp(2.0 - 2.0 * abs(2.0 * ring.yw - 1.0), 0.0, 1.0);
+        vec2 edge   = outline_edge(ring.yw);
 
         // The highlight over the selection, in the colours of its group
         vec3 visible[2] = vec3[2](u_visible[0].rgb, u_visible[1].rgb);
         vec3 hidden_c[2] = vec3[2](u_hidden[0].rgb, u_hidden[1].rgb);
         vec3 outline[2] = vec3[2](u_outline[0].rgb, u_outline[1].rgb);
         if (max(ring.w, m.w) > 0.0) {
-            int g = group_about(gl_FragCoord.xy, inv_size);
+            int g = group_about(u_marks_group, gl_FragCoord.xy, inv_size, float(u_outline_step));
             if (g > 0) {
                 visible[1] = hidden_c[1] = outline[1] = u_groups[g - 1];
             }
@@ -2311,10 +2341,10 @@ static void blit_texture_dither(GLuint tex, float time) {
 }
 
 // The final copy, with the marks over it (Settings::marks)
-static void present_marks(GLuint tex, GLuint marks, GLuint marks_group, const postprocess_pipeline::Settings& settings, float time) {
+static void present_marks(GLuint tex, GLuint marks, GLuint marks_group, const postprocess_pipeline::Settings& settings, float time,
+                          const postprocess_pipeline::Contours* contours = nullptr) {
     ASSERT(glIsTexture(tex));
-    ASSERT(glIsTexture(marks));
-    ASSERT(glIsTexture(marks_group));
+    ASSERT((marks && marks_group) || contours);
     const GLuint p = blit::program_marks;
     glUseProgram(p);
     glActiveTexture(GL_TEXTURE0);
@@ -2323,9 +2353,19 @@ static void present_marks(GLuint tex, GLuint marks, GLuint marks_group, const po
     glBindTexture(GL_TEXTURE_2D, marks);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, marks_group);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, contours ? contours->marks : 0);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, contours ? contours->group : 0);
     glUniform1i(glGetUniformLocation(p, "u_texture"), 0);
     glUniform1i(glGetUniformLocation(p, "u_marks"), 1);
     glUniform1i(glGetUniformLocation(p, "u_marks_group"), 2);
+    glUniform1i(glGetUniformLocation(p, "u_contours"), 3);
+    glUniform1i(glGetUniformLocation(p, "u_contour_group"), 4);
+    glUniform1i(glGetUniformLocation(p, "u_has_marks"), marks && marks_group);
+    glUniform1i(glGetUniformLocation(p, "u_has_contours"), contours != nullptr);
+    glUniform1f(glGetUniformLocation(p, "u_contour_step"), contours ? MAX(contours->outline_step, 1.0f) : 1.0f);
+    if (contours) glUniform3fv(glGetUniformLocation(p, "u_contour_colors"), 8, contours->colors[0].elem);
     glUniform3fv(glGetUniformLocation(p, "u_groups"), 7, settings.marks.groups[0].elem);
     glUniform1f(glGetUniformLocation(p, "u_time"), time);
     glUniform4fv(glGetUniformLocation(p, "u_visible"), 2, settings.marks.visible[0].elem);
@@ -2835,7 +2875,7 @@ void execute(const Inputs& in, const Settings& settings, const ViewParam& view) 
     postprocessing::execute(in, settings, view);
 }
 
-void present(GLuint image, GLuint marks, GLuint marks_group, const Settings& settings) {
+void present(GLuint image, GLuint marks, GLuint marks_group, const Settings& settings, const Contours* contours) {
     ASSERT(glIsTexture(image));
     // For the dither, as execute() seeds it
     static float time = 0.f;
@@ -2846,9 +2886,9 @@ void present(GLuint image, GLuint marks, GLuint marks_group, const Settings& set
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glDepthMask(0);
-    if (marks && marks_group) {
+    if ((marks && marks_group) || contours) {
         PUSH_GPU_SECTION("Present marks")
-        postprocessing::present_marks(image, marks, marks_group, settings, time);
+        postprocessing::present_marks(image, marks, marks_group, settings, time, contours);
         POP_GPU_SECTION()
     } else {
         postprocessing::blit_texture_dither(image, time);

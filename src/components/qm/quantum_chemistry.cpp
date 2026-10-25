@@ -8254,8 +8254,8 @@ struct QuantumChemistry : viamd::EventHandler {
                     postprocess_inputs.velocity = nto.gbuf.tex.velocity;
                     postprocess_inputs.transparency = nto.gbuf.tex.transparency;
                     if (draw_marks) {
-                        postprocess_inputs.marks = nto.gbuf.tex.marks;
-                        postprocess_inputs.marks_group = nto.gbuf.tex.marks_group;
+                        postprocess_inputs.marks = nto.gbuf.marks.texture;
+                        postprocess_inputs.marks_group = nto.gbuf.marks.group;
                         marks_settings(&postprocess_settings, state, 1.0f, MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x)));
                     }
 

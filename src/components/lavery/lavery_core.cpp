@@ -141,6 +141,9 @@ const char* quality_description(uint16_t flag) {
     case Quality_MissingAtoms: return "Required reference-fit or base-ring atoms are missing";
     case Quality_NoPairContacts: return "No canonical H-bond remains, or fewer than two canonical heavy-atom contacts without hydrogens";
     case Quality_NoncanonicalPair: return "Not a supported A-T/U or G-C pair, or canonical contact atoms are missing";
+    case Quality_DegenerateNucleotide: return "Undefined nucleotide geometry (collinear torsion or zero-amplitude pucker phase)";
+    case Quality_UnusualBond: return "Warning: defining heavy-atom bond outside 1.0-2.1 Angstrom; finite measurement retained";
+    case Quality_PoorPuckerFit: return "Warning: sugar ring Fourier-fit RMS residual above 5 degrees; finite measurement retained";
     default: return "Good";
     }
 }
@@ -165,14 +168,24 @@ static double wrap_degrees(double delta) {
     return delta - 360.0 * std::floor((delta + 180.0) / 360.0);
 }
 
+MemberStatistics::Reference MemberStatistics::reference(float value) const {
+    if (state_metric >= 0) {
+        const int s = metric_state((Metric)state_metric, value);
+        if (s >= 0 && (size_t)s < state_references.size()) return state_references[s];
+        return {};
+    }
+    return {mean, sd, count};
+}
+
 double MemberStatistics::deviation(float value) const {
-    const double delta = (double)value - mean;
+    const double delta = (double)value - reference(value).mean;
     return angular ? wrap_degrees(delta) : delta;
 }
 
 float MemberStatistics::zscore(float value) const {
-    if (!count || !std::isfinite(value)) return std::numeric_limits<float>::quiet_NaN();
-    return sd > 0.0 ? (float)(deviation(value) / sd) : 0.0f;
+    const auto ref = reference(value);
+    if (!ref.count || !std::isfinite(value)) return std::numeric_limits<float>::quiet_NaN();
+    return ref.sd > 0.0 ? (float)(deviation(value) / ref.sd) : 0.0f;
 }
 
 bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t* quality,
@@ -198,8 +211,9 @@ bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t*
 }
 
 bool MemberStatistics::is_outlier(float value, float sigma) const {
-    return count && sd > 0.0 && std::isfinite(value) &&
-        std::fabs(deviation(value)) > (double)sigma * sd;
+    const auto ref = reference(value);
+    return ref.count && ref.sd > 0.0 && std::isfinite(value) &&
+        std::fabs(deviation(value)) > (double)sigma * ref.sd;
 }
 
 const char* baseline_name(Baseline baseline) {
@@ -219,9 +233,9 @@ static double median_of(std::vector<double>& v) {
 }
 
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
-                        bool angular, Baseline baseline) {
+                        bool angular, Baseline baseline, int state_metric) {
     if (!out || (member_count == 0 ? !values.empty() : values.size() % member_count != 0) ||
-        baseline < 0 || baseline >= Baseline_Count) {
+        baseline < 0 || baseline >= Baseline_Count || state_metric >= (int)Metric_Count) {
         MD_LOG_ERROR("Lavery: invalid metric matrix dimensions for statistics");
         return false;
     }
@@ -232,16 +246,48 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
     out->heatmap.resize(values.size(), std::numeric_limits<float>::quiet_NaN());
     std::vector<double> samples;
     samples.reserve(frames);
+    const Metric state_kind = (Metric)std::max(0, state_metric);
+    const int states = state_metric >= 0 ? metric_state_count(state_kind) : 0;
     for (size_t m = 0; m < member_count; ++m) {
         auto& stats = out->members[m];
         stats.angular = angular;
         samples.clear();
+        if (states > 0) {
+            std::array<std::vector<float>, 3> state_samples;
+            for (size_t f = 0; f < frames; ++f) {
+                const float value = values[f * member_count + m];
+                const int st = metric_state(state_kind, value);
+                if (st >= 0) state_samples[st].push_back(value);
+            }
+            size_t dominant_count = 0;
+            for (int s = 0; s < states; ++s) {
+                MetricStatistics local;
+                if (!compute_statistics(&local, state_samples[s], 1, angular, baseline)) return false;
+                const auto& ref = local.members[0];
+                stats.state_references[s] = {ref.mean, ref.sd, ref.count};
+                stats.count += ref.count;
+                if (ref.count > dominant_count) {
+                    dominant_count = ref.count;
+                    stats.state = s;
+                    stats.mean = ref.mean;
+                    stats.sd = ref.sd;
+                }
+            }
+            stats.state_metric = state_metric;
+            if (stats.count) stats.state_fraction = (float)dominant_count / (float)stats.count;
+            for (size_t f = 0; f < frames; ++f)
+                out->heatmap[(member_count - 1 - m) * frames + f] = stats.zscore(values[f * member_count + m]);
+            continue;
+        }
+        auto in_baseline = [&](float v) {
+            return std::isfinite(v);
+        };
         double reference = 0.0;
         if (angular) {
             double s = 0.0, c = 0.0;
             for (size_t f = 0; f < frames; ++f) {
                 const float v = values[f * member_count + m];
-                if (!std::isfinite(v)) continue;
+                if (!in_baseline(v)) continue;
                 s += std::sin((double)v * (3.14159265358979323846 / 180.0));
                 c += std::cos((double)v * (3.14159265358979323846 / 180.0));
             }
@@ -250,7 +296,7 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
         double m2 = 0.0;
         for (size_t f = 0; f < frames; ++f) {
             const float raw = values[f * member_count + m];
-            if (!std::isfinite(raw)) continue;
+            if (!in_baseline(raw)) continue;
             double v = raw;
             // Unwrap to within half a turn of the circular mean; a no-op unless the series crosses +/-180.
             if (angular && std::fabs(v - reference) >= 180.0) v = reference + wrap_degrees(v - reference);
@@ -281,6 +327,91 @@ std::string csv_quote(const std::string& text) {
     return out + '"';
 }
 
+bool detect_state_switches(std::vector<StateSwitch>* out, const std::vector<float>& values,
+                           size_t members, Metric metric, const EventOptions& options) {
+    if (!out || !metric_state_count(metric) || !members || values.size() % members ||
+        !std::isfinite(options.min_duration) || options.min_duration < 0) {
+        MD_LOG_ERROR("Lavery: invalid state-switch inputs");
+        return false;
+    }
+    out->clear();
+    const size_t frames = values.size() / members;
+    const auto& times = options.times;
+    if (!times.empty()) {
+        if (times.size() != frames) {
+            MD_LOG_ERROR("Lavery: state-switch timestamp count does not match values");
+            return false;
+        }
+        for (size_t f = 0; f < frames; ++f) if (!std::isfinite(times[f]) || (f && times[f] <= times[f-1])) {
+            MD_LOG_ERROR("Lavery: state-switch timestamps must be finite and strictly increasing");
+            return false;
+        }
+    }
+    if (!frames) return true;
+    const size_t last = std::min(options.last_frame, frames-1);
+    if (options.first_frame > last) {
+        MD_LOG_ERROR("Lavery: invalid state-switch detection range");
+        return false;
+    }
+    constexpr double rad = 3.14159265358979323846 / 180;
+    for (size_t m = 0; m < members; ++m) {
+        int source = -1;
+        double source_mean = 0;
+        size_t source_begin = 0, source_end = 0;
+        for (size_t first = options.first_frame; first <= last;) {
+            const int state = metric_state(metric, values[first*members+m]);
+            if (state < 0) { source = -1; ++first; continue; }
+            size_t end = first;
+            double sine = 0, cosine = 0;
+            while (end <= last && metric_state(metric, values[end*members+m]) == state) {
+                const double angle = values[end*members+m]*rad;
+                sine += std::sin(angle);
+                cosine += std::cos(angle);
+                ++end;
+            }
+            const size_t stop = end-1;
+            const bool qualified = times.empty() ? end-first >= std::max(size_t(1), options.min_frames) :
+                (options.min_duration == 0 || (stop > first && times[stop]-times[first] >= options.min_duration));
+            if (qualified) {
+                const double mean = std::atan2(sine,cosine)/rad;
+                if (source >= 0 && source != state) {
+                    out->push_back({metric, (uint32_t)m, first, stop, source, state, (float)wrap_degrees(mean-source_mean),
+                        source_begin, source_end, source_begin == options.first_frame, stop == last, stop == frames-1});
+                }
+                source = state;
+                source_mean = mean;
+                source_begin = first;
+                source_end = stop;
+            }
+            first = end;
+        }
+    }
+    std::stable_sort(out->begin(), out->end(), [](const StateSwitch& a, const StateSwitch& b) {
+        return a.begin < b.begin;
+    });
+    return true;
+}
+
+const char* csv_state_switch_header() {
+    return "run,class,member,label,parameter,begin_frame,end_frame,begin_time,end_time,time_unit,from_state,to_state,angular_change_deg,residence,min_residence,source_begin_frame,source_end_frame,intervening_samples,source_clipped,destination_clipped,destination_at_trajectory_end,source_begin_time,source_end_time\n";
+}
+
+std::string csv_state_switch_row(const std::string& run, const std::string& label, const StateSwitch& change,
+                                 double begin, double end, const std::string& time_unit, double min_residence,
+                                 double source_begin, double source_end) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), ",%s,%u,", class_csv_name(metric_class(change.metric)), change.member+1);
+    std::string row = csv_quote(run)+buf+csv_quote(label);
+    snprintf(buf, sizeof(buf), ",%s,%zu,%zu,%.17g,%.17g,", metric_path(change.metric), change.begin, change.end, begin,end);
+    row += buf + csv_quote(time_unit) + "," + csv_quote(metric_state_name(change.metric,change.from)) + "," +
+        csv_quote(metric_state_name(change.metric,change.to));
+    const double residence = time_unit == "frame" ? (double)(change.end-change.begin+1) : end-begin;
+    snprintf(buf, sizeof(buf), ",%.9g,%.17g,%.17g,%zu,%zu,%zu,%d,%d,%d,%.17g,%.17g\n", change.angular_change, residence, min_residence,
+        change.source_begin, change.source_end, change.intervening_samples(), change.source_clipped, change.destination_clipped,
+        change.destination_at_trajectory_end, source_begin, source_end);
+    return row+buf;
+}
+
 const char* csv_header() {
     return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline\n";
 }
@@ -289,11 +420,11 @@ std::string csv_sample(const CsvSample& s) {
     char buf[1024];
     snprintf(buf, sizeof(buf), ",%zu,%.17g,", s.frame, s.time);
     std::string row = csv_quote(s.run) + buf + csv_quote(s.time_unit);
-    snprintf(buf, sizeof(buf), ",%s,%zu,", metric_is_step(s.metric) ? "step" : "bp", s.member);
+    snprintf(buf, sizeof(buf), ",%s,%zu,", class_csv_name(metric_class(s.metric)), s.member);
     row += buf;
     row += csv_quote(s.label) + "," + csv_quote(s.pair_a) + "," + csv_quote(s.pair_b);
     snprintf(buf, sizeof(buf), ",%s,%s,%.9g,%d,%u,", metric_path(s.metric),
-        metric_is_angular(s.metric) ? "deg" : "Angstrom", s.value, std::isfinite(s.value) ? 1 : 0, s.quality);
+        metric_uses_degrees(s.metric) ? "deg" : "Angstrom", s.value, std::isfinite(s.value) ? 1 : 0, s.quality);
     row += buf;
     std::string reason;
     for (uint16_t bit = 1; bit <= Quality_Last; bit <<= 1) {
@@ -303,14 +434,25 @@ std::string csv_sample(const CsvSample& s) {
         }
     }
     row += csv_quote(reason.empty() ? "Good" : reason);
+    const auto ref = s.baseline.reference(s.value);
     snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s\n",
-        s.baseline.count ? s.baseline.mean : std::numeric_limits<double>::quiet_NaN(),
-        s.baseline.count ? s.baseline.sd : std::numeric_limits<double>::quiet_NaN(),
-        s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric % 6))) ? 1 : 0,
+        ref.count ? ref.mean : std::numeric_limits<double>::quiet_NaN(),
+        ref.count ? ref.sd : std::numeric_limits<double>::quiet_NaN(),
+        s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric - class_first_metric(metric_class(s.metric))))) ? 1 : 0,
         s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask,
         s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd");
     row += buf;
     return row;
+}
+
+// Base-pair range a member touches: a step both its pairs, a nucleotide its own pair.
+static void member_pairs(int cls, uint32_t member, const std::vector<StepIndex>& steps, uint32_t* lo, uint32_t* hi) {
+    if (cls == Class_Step) {
+        *lo = std::min(steps[member].a, steps[member].b);
+        *hi = std::max(steps[member].a, steps[member].b);
+    } else {
+        *lo = *hi = cls == Class_Nucleotide ? member / 2 : member;
+    }
 }
 
 const EventMember::Sample* event_member_sample(const EventMember& member, size_t frame) {
@@ -320,15 +462,27 @@ const EventMember::Sample* event_member_sample(const EventMember& member, size_t
 }
 
 std::vector<size_t> event_color_slots(const std::vector<OutlierEvent>& events) {
-    std::vector<size_t> order(events.size()), slots(events.size()), ends;
+    std::vector<size_t> order(events.size()), slots(events.size(), SIZE_MAX);
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return events[a].begin < events[b].begin; });
+    std::vector<size_t> preferred(events.size());
+    for (size_t rank = 0; rank < order.size(); ++rank) preferred[order[rank]] = rank % EVENT_COLOR_COUNT;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return events[a].score > events[b].score; });
+    std::vector<size_t> assigned;
+    std::vector<bool> used;
     for (size_t i : order) {
-        size_t slot = 0;
-        while (slot < ends.size() && ends[slot] >= events[i].begin) ++slot;
-        if (slot == ends.size()) ends.push_back(events[i].end);
-        else ends[slot] = events[i].end;
+        used.assign(std::max(assigned.size() + 1, EVENT_COLOR_COUNT), false);
+        for (size_t j : assigned) {
+            if (events[j].begin <= events[i].end && events[i].begin <= events[j].end && slots[j] < used.size()) used[slots[j]] = true;
+        }
+        size_t slot = EVENT_COLOR_COUNT;
+        for (size_t offset = 0; offset < EVENT_COLOR_COUNT; ++offset) {
+            const size_t candidate = (preferred[i] + offset) % EVENT_COLOR_COUNT;
+            if (!used[candidate]) { slot = candidate; break; }
+        }
+        while (slot < used.size() && used[slot]) ++slot;
         slots[i] = slot;
+        assigned.push_back(i);
     }
     return slots;
 }
@@ -345,15 +499,15 @@ std::vector<EventContribution> event_contributions(const std::vector<OutlierEven
         if (frame < event.begin || frame > event.end) continue;
         for (const auto& member : event.members) {
             const auto* sample = event_member_sample(member, frame);
-            if (sample) result.push_back({member.member, member.step, sample->parameters, sample->lost});
+            if (sample) result.push_back({member.member, member.cls, sample->parameters, sample->lost});
         }
     }
     std::sort(result.begin(), result.end(), [](const EventContribution& a, const EventContribution& b) {
-        return a.step != b.step ? a.step < b.step : a.member < b.member;
+        return a.cls != b.cls ? a.cls < b.cls : a.member < b.member;
     });
     size_t count = 0;
     for (size_t i = 0; i < result.size(); ++i) {
-        if (count && result[count - 1].step == result[i].step && result[count - 1].member == result[i].member) {
+        if (count && result[count - 1].cls == result[i].cls && result[count - 1].member == result[i].member) {
             result[count - 1].parameters |= result[i].parameters;
             result[count - 1].lost |= result[i].lost;
         } else {
@@ -364,11 +518,47 @@ std::vector<EventContribution> event_contributions(const std::vector<OutlierEven
     return result;
 }
 
+bool event_time_range(EventOptions* options, double begin, double end) {
+    if (!options || options->times.empty() || !std::isfinite(begin) || !std::isfinite(end) || begin > end) {
+        MD_LOG_ERROR("Lavery: invalid event detection time range");
+        return false;
+    }
+    for (size_t f = 0; f < options->times.size(); ++f) {
+        if (!std::isfinite(options->times[f]) || (f && options->times[f] <= options->times[f - 1])) {
+            MD_LOG_ERROR("Lavery: event timestamps must be finite and strictly increasing");
+            return false;
+        }
+    }
+    const auto first = std::lower_bound(options->times.begin(), options->times.end(), begin);
+    const auto last = std::upper_bound(options->times.begin(), options->times.end(), end);
+    if (first == last) {
+        MD_LOG_ERROR("Lavery: event detection time range contains no samples");
+        return false;
+    }
+    options->first_frame = (size_t)(first - options->times.begin());
+    options->last_frame = (size_t)(last - options->times.begin() - 1);
+    return true;
+}
+
 std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutlier>>& frames, size_t pair_count,
                                         const std::vector<StepIndex>& steps, const EventOptions& options) {
     std::vector<OutlierEvent> events;
+    if ((!options.times.empty() && options.times.size() != frames.size()) ||
+        !std::isfinite(options.min_duration) || options.min_duration < 0 ||
+        !std::isfinite(options.max_gap_duration) || options.max_gap_duration < 0 ||
+        options.first_frame > options.last_frame) {
+        MD_LOG_ERROR("Lavery: invalid event time/range options");
+        return events;
+    }
+    for (size_t f = 0; f < options.times.size(); ++f) {
+        if (!std::isfinite(options.times[f]) || (f && options.times[f] <= options.times[f - 1])) {
+            MD_LOG_ERROR("Lavery: event timestamps must be finite and strictly increasing");
+            return events;
+        }
+    }
     if (!std::isfinite(options.burst_sigma) || options.burst_sigma < 0 ||
         !std::isfinite(options.burst_hysteresis) || options.burst_hysteresis < 0 ||
+        !std::isfinite(options.residual_sigma) || options.residual_sigma < 0 ||
         options.burst_neighbourhood < 0) {
         MD_LOG_ERROR("Lavery: invalid hierarchical event options");
         return events;
@@ -418,13 +608,16 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
     struct Point { size_t frame; const MemberOutlier* sample; uint32_t node; };
     std::vector<Point> points;
     for (size_t f = 0; f < frames.size(); ++f) {
+        if (f < options.first_frame || f > options.last_frame) continue;
         for (const auto& sample : frames[f]) {
             if (!sample.contributors && !sample.lost) continue;
-            const size_t node = sample.step ? pair_count + sample.member : sample.member;
-            if ((sample.step ? sample.member >= steps.size() : sample.member >= pair_count) || (sample.lost && sample.step)) {
+            const size_t limit = sample.cls == Class_Step ? steps.size() : sample.cls == Class_Nucleotide ? 2 * pair_count : pair_count;
+            if (sample.cls >= Class_Count || sample.member >= limit || (sample.lost && sample.cls != Class_Pair)) {
                 MD_LOG_ERROR("Lavery: invalid event sample");
                 return {};
             }
+            const size_t node = sample.cls == Class_Step ? pair_count + sample.member :
+                sample.cls == Class_Nucleotide ? sample.member / 2 : sample.member;
             points.push_back({f, &sample, (uint32_t)node});
         }
     }
@@ -441,7 +634,15 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
         const uint32_t region = whole ? 0 : points[i].node;
         for (uint32_t other : reach[region]) {
             const size_t j = last[other];
-            if (j == none || points[i].frame - points[j].frame > options.max_gap + 1) continue;
+            if (j == none) continue;
+            const size_t current = points[i].frame, previous = points[j].frame;
+            if (options.times.empty()) {
+                if (current - previous > options.max_gap + 1) continue;
+            } else {
+                // Quiet-gap time excludes the final sampling interval: consecutive samples join at zero gap.
+                const double gap = current == previous ? 0 : options.times[current - 1] - options.times[previous];
+                if (gap > options.max_gap_duration) continue;
+            }
             parent[find(i)] = find(j);
         }
         last[region] = i;
@@ -481,21 +682,18 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
                 ++event.outlier_frames;
             }
             event.peak_count = std::max(event.peak_count, ++frame_count);
-            if (sample.step) {
-                event.pair_first = std::min({event.pair_first, steps[sample.member].a, steps[sample.member].b});
-                event.pair_last = std::max({event.pair_last, steps[sample.member].a, steps[sample.member].b});
-            } else {
-                event.pair_first = std::min(event.pair_first, sample.member);
-                event.pair_last = std::max(event.pair_last, sample.member);
-            }
+            uint32_t lo = 0, hi = 0;
+            member_pairs(sample.cls, sample.member, steps, &lo, &hi);
+            event.pair_first = std::min(event.pair_first, lo);
+            event.pair_last = std::max(event.pair_last, hi);
 
             auto it = std::find_if(event.members.begin(), event.members.end(), [&](const EventMember& m) {
-                return m.member == sample.member && m.step == sample.step;
+                return m.member == sample.member && m.cls == sample.cls;
             });
             if (it == event.members.end()) {
                 EventMember entry;
                 entry.member = sample.member;
-                entry.step = sample.step;
+                entry.cls = sample.cls;
                 entry.peak = point.frame;
                 event.members.push_back(entry);
                 it = event.members.end() - 1;
@@ -509,10 +707,10 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
                 continue;
             }
             float largest = 0;
-            for (int k = 0; k < 6; ++k) {
+            for (int k = 0; k < class_parameter_count(sample.cls); ++k) {
                 if (!(sample.contributors & (1u << k))) continue;
                 const float z = sample.z[k];
-                const int metric = (sample.step ? (int)Tilt : 0) + k;
+                const int metric = class_first_metric(sample.cls) + k;
                 event.metric_score[metric] += std::fabs(z);
                 event.metric_signed[metric] += z;
                 largest = std::max(largest, std::fabs(z));
@@ -536,6 +734,10 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
             event.score += largest;
         }
         if (event.outlier_frames < min_frames) continue;
+        if (!options.times.empty() && options.times[event.end] - options.times[event.begin] < options.min_duration) continue;
+        event.truncated_begin = options.first_frame > 0 && event.begin == options.first_frame;
+        const size_t last_frame = frames.empty() ? 0 : std::min(options.last_frame, frames.size() - 1);
+        event.truncated_end = last_frame + 1 < frames.size() && event.end == last_frame;
         std::stable_sort(event.members.begin(), event.members.end(), [](const EventMember& a, const EventMember& b) {
             if ((a.peak_parameter < 0) != (b.peak_parameter < 0)) return b.peak_parameter < 0;
             return std::fabs(a.peak_z) > std::fabs(b.peak_z);
@@ -543,32 +745,92 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
         events.push_back(std::move(event));
     }
     if (options.burst_sigma > 0 && !events.empty()) {
+        const bool residual = options.residual_sigma > 0 && options.member_z;
+        const float start_sigma = residual ? options.residual_sigma : options.burst_sigma;
+        const float continue_sigma = std::max(0.5f, start_sigma - options.burst_hysteresis);
         std::vector<std::vector<MemberOutlier>> elevated(frames.size());
-        const float continue_sigma = std::max(0.5f, options.burst_sigma - options.burst_hysteresis);
-        for (size_t f = 0; f < frames.size(); ++f) {
-            for (auto sample : frames[f]) {
-                const uint32_t original = sample.contributors;
-                sample.contributors = sample.strong = 0;
-                for (int k = 0; k < 6; ++k) {
-                    if (!(original & (1u << k))) continue;
-                    const float z = std::fabs(sample.z[k]);
-                    if (z >= continue_sigma) sample.contributors |= 1u << k;
-                    if (z >= options.burst_sigma) sample.strong |= 1u << k;
+        auto elevate = [&](MemberOutlier sample, const float* background) {
+            const uint32_t original = sample.contributors;
+            sample.contributors = sample.strong = 0;
+            for (int k = 0; k < class_parameter_count(sample.cls); ++k) {
+                if (!(original & (1u << k))) continue;
+                const float z = std::fabs(background ? sample.z[k] - background[k] : sample.z[k]);
+                if (!std::isfinite(z)) continue;
+                if (z >= continue_sigma) sample.contributors |= 1u << k;
+                if (z >= start_sigma) sample.strong |= 1u << k;
+            }
+            return sample;
+        };
+        if (!residual) {
+            for (size_t f = 0; f < frames.size(); ++f) {
+                for (const auto& original : frames[f]) {
+                    const auto sample = elevate(original, nullptr);
+                    if (sample.contributors || sample.lost) elevated[f].push_back(sample);
                 }
-                if (sample.contributors || sample.lost) elevated[f].push_back(sample);
+            }
+        } else {
+            // Each sample belongs to exactly one parent; subtract that parent's per-frame regional median.
+            std::vector<float> scratch;
+            for (const auto& parent : events) {
+                const size_t span = parent.end - parent.begin + 1;
+                std::vector<float> background[Class_Count];
+                std::vector<uint8_t> ready[Class_Count];
+                constexpr int K = MAX_CLASS_PARAMETERS;
+                auto background_at = [&](size_t f, int cls) -> const float* {
+                    auto& bg = background[cls];
+                    auto& done = ready[cls];
+                    if (bg.empty()) { bg.assign(span * K, std::numeric_limits<float>::quiet_NaN()); done.assign(span, 0); }
+                    const size_t i = f - parent.begin;
+                    if (!done[i]) {
+                        done[i] = 1;
+                        const size_t count = cls == Class_Step ? steps.size() : cls == Class_Nucleotide ? 2 * pair_count : pair_count;
+                        for (int k = 0; k < class_parameter_count(cls); ++k) {
+                            scratch.clear();
+                            for (size_t m = 0; m < count; ++m) {
+                                uint32_t lo = 0, hi = 0;
+                                member_pairs(cls, (uint32_t)m, steps, &lo, &hi);
+                                if (lo < parent.pair_first || hi > parent.pair_last) continue;
+                                const float z = options.member_z(f, cls, (uint32_t)m, k);
+                                if (std::isfinite(z)) scratch.push_back(z);
+                            }
+                            if (scratch.size() < std::max<size_t>(1, options.background_min_members)) continue;
+                            const size_t mid = scratch.size() / 2;
+                            std::nth_element(scratch.begin(), scratch.begin() + mid, scratch.end());
+                            float median = scratch[mid];
+                            if (scratch.size() % 2 == 0) {
+                                median = 0.5f * (median + *std::max_element(scratch.begin(), scratch.begin() + mid));
+                            }
+                            bg[i * K + k] = median;
+                        }
+                    }
+                    return bg.data() + i * K;
+                };
+                for (const auto& member : parent.members) {
+                    for (const auto& s : member.samples) {
+                        const auto& frame = frames[s.frame];
+                        const auto it = std::find_if(frame.begin(), frame.end(), [&](const MemberOutlier& o) {
+                            return o.cls == member.cls && o.member == member.member;
+                        });
+                        if (it == frame.end()) continue;
+                        const auto sample = elevate(*it, it->lost ? nullptr : background_at(s.frame, member.cls));
+                        if (sample.contributors || sample.lost) elevated[s.frame].push_back(sample);
+                    }
+                }
             }
         }
         EventOptions child_options = options;
         child_options.burst_sigma = 0;
+        child_options.residual_sigma = 0;
+        child_options.member_z = nullptr;
         if (options.neighbourhood < 0) child_options.neighbourhood = options.burst_neighbourhood;
         auto children = detect_events(elevated, pair_count, steps, child_options);
         auto region_size = [&](const OutlierEvent& event) {
             std::vector<uint32_t> region;
             for (const auto& member : event.members) {
-                if (member.step) {
-                    region.push_back(steps[member.member].a);
-                    region.push_back(steps[member.member].b);
-                } else region.push_back(member.member);
+                uint32_t lo = 0, hi = 0;
+                member_pairs(member.cls, member.member, steps, &lo, &hi);
+                region.push_back(lo);
+                region.push_back(hi);
             }
             std::sort(region.begin(), region.end());
             return (size_t)(std::unique(region.begin(), region.end()) - region.begin());
@@ -584,7 +846,7 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
                 bool contained = true;
                 for (const auto& member : child.members) {
                     const auto parent_member = std::find_if(root.members.begin(), root.members.end(), [&](const EventMember& m) {
-                        return m.step == member.step && m.member == member.member;
+                        return m.cls == member.cls && m.member == member.member;
                     });
                     if (parent_member == root.members.end()) { contained = false; break; }
                     for (const auto& sample : member.samples) {
@@ -599,7 +861,8 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
                 }
                 if (!contained) continue;
                 child.parent = p;
-                child.burst_sigma = options.burst_sigma;
+                child.burst_sigma = start_sigma;
+                child.residual = residual;
                 events.push_back(std::move(child));
                 break;
             }
@@ -645,6 +908,13 @@ std::string event_kind(const OutlierEvent& event) {
     case Twist: kind = positive ? "Overwinding" : "Unwinding"; break;
     case Shift: case Slide: kind = "Step translation"; break;
     case Rise: kind = positive ? "Unstacking" : "Compressed step"; break;
+    case MinorGroove: kind = positive ? "Minor groove widening" : "Minor groove narrowing"; break;
+    case MajorGroove: kind = positive ? "Major groove widening" : "Major groove narrowing"; break;
+    case Phase: case Amplitude: case Delta: kind = "Sugar fluctuation"; break;
+    case Epsilon: case Zeta: case EpsilonZeta: kind = "Epsilon / zeta fluctuation"; break;
+    case Alpha: case Gamma: kind = "Alpha / gamma fluctuation"; break;
+    case Beta: kind = "Beta crankshaft"; break;
+    case Chi: kind = "Chi fluctuation"; break;
     default: break;
     }
     if (event.lost_samples) return *kind ? std::string("Pair loss + ") + kind : std::string("Pair loss");
@@ -661,7 +931,7 @@ const char* csv_event_header() {
     return "run,event,begin_frame,end_frame,begin_time,end_time,time_unit,event_peak_frame,event_peak_sigma,event_score,event_type,"
            "first_pair,last_pair,scope,baseline,sigma,end_sigma,neighbourhood,"
            "class,member,label,member_outlier_frames,member_lost_frames,parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,"
-           "parent_event,burst_sigma\n";
+           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode\n";
 }
 
 std::string csv_event_row(const CsvEventRow& r) {
@@ -676,12 +946,14 @@ std::string csv_event_row(const CsvEventRow& r) {
     snprintf(buf, sizeof(buf), ",%zu,%zu,", r.pair_first, r.pair_last);
     row += buf;
     row += csv_quote(r.scope) + "," + csv_quote(r.baseline);
-    snprintf(buf, sizeof(buf), ",%.9g,%.9g,%d,%s,%zu,", r.sigma, r.end_sigma, r.neighbourhood, metric_is_step(r.metric) ? "step" : "bp", r.member);
+    snprintf(buf, sizeof(buf), ",%.9g,%.9g,%d,%s,%zu,", r.sigma, r.end_sigma, r.neighbourhood, class_csv_name(metric_class(r.metric)), r.member);
     row += buf;
     row += csv_quote(r.label);
-    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g\n", r.member_frames, r.member_lost, metric_path(r.metric),
-        metric_is_angular(r.metric) ? "deg" : "Angstrom", r.contributing ? 1 : 0, r.parameter_peak, r.parameter_z, r.value,
-        r.parent_event, r.burst_sigma);
+    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s\n", r.member_frames, r.member_lost, metric_path(r.metric),
+        metric_uses_degrees(r.metric) ? "deg" : "Angstrom", r.contributing ? 1 : 0, r.parameter_peak, r.parameter_z, r.value,
+        r.parent_event, r.burst_sigma, r.truncated_begin ? 1 : 0, r.truncated_end ? 1 : 0,
+        r.min_duration, r.max_gap_duration, r.detection_begin, r.detection_end,
+        !r.parent_event ? "" : r.residual ? "background" : "stronger");
     row += buf;
     return row;
 }
@@ -795,7 +1067,25 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys) {
                     }
                 }
             }
-            if (base.ring.size() >= 3) bases.push_back(std::move(base));
+            if (base.ring.size() < 3) continue;
+            const auto& na = bb.segment.atoms[s];
+            const int32_t own[] = {na.p, na.o5, na.c5, na.c4, na.c3, na.o3, na.c1, na.c2, na.o4};
+            for (int k = 0; k <= BB_O4; ++k) base.backbone[k] = own[k];
+            // Neighbouring backbone atoms only across an actual O3'-P bond (no chain breaks).
+            if (s > bb.range.offset[r]) {
+                const int32_t o3 = bb.segment.atoms[s - 1].o3;
+                if (o3 >= 0 && na.p >= 0 && md_bond_find(&sys.bond, o3, na.p) != -1) base.backbone[BB_PrevO3] = o3;
+            }
+            if (s + 1 < bb.range.offset[r + 1]) {
+                const auto& next = bb.segment.atoms[s + 1];
+                if (na.o3 >= 0 && next.p >= 0 && md_bond_find(&sys.bond, na.o3, next.p) != -1) {
+                    base.backbone[BB_NextP] = next.p;
+                    base.backbone[BB_NextO5] = next.o5;
+                }
+            }
+            base.backbone[BB_GlycosidicN] = nitrogen;
+            base.backbone[BB_ChiBase] = atom_named("N9") == nitrogen ? atom_named("C4") : atom_named("C2");
+            bases.push_back(std::move(base));
         }
     }
     return bases;
@@ -939,12 +1229,13 @@ bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& 
     return true;
 }
 
-bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b) {
+bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, BasePairFrame* frame) {
     if (!out) return false;
     BasePairFrame midpoint;
     float translation[3], rotation[3];
     if (!rigid_parameters(&midpoint, translation, rotation,
         {a.origin, a.x, a.y, a.z}, {b.origin, b.x, b.y, b.z})) return false;
+    if (frame) *frame = midpoint;
     for (int k = 0; k < 3; ++k) {
         out->metric[Tilt + k] = rotation[k];
         out->metric[Shift + k] = translation[k];
@@ -955,8 +1246,10 @@ bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b) {
 const char* metric_name(Metric metric) {
     static const char* names[] = {
         "Buckle", "Propeller Twist", "Opening", "Shear", "Stretch", "Stagger",
-        "Tilt", "Roll", "Twist", "Shift", "Slide", "Rise",
+        "Tilt", "Roll", "Twist", "Shift", "Slide", "Rise", "Minor Groove", "Major Groove",
+        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Chi", "Pucker Phase", "Pucker Amplitude", "Epsilon - Zeta",
     };
+    static_assert(sizeof(names) / sizeof(names[0]) == Metric_Count, "metric names");
     return metric < Metric_Count ? names[metric] : "Unknown";
 }
 
@@ -964,17 +1257,242 @@ const char* metric_path(Metric metric) {
     static const char* paths[] = {
         "bp/buckle", "bp/propeller", "bp/opening", "bp/shear", "bp/stretch", "bp/stagger",
         "step/tilt", "step/roll", "step/twist", "step/shift", "step/slide", "step/rise",
+        "step/minor_groove", "step/major_groove",
+        "nt/alpha", "nt/beta", "nt/gamma", "nt/delta", "nt/epsilon", "nt/zeta", "nt/chi",
+        "nt/pucker_phase", "nt/pucker_amplitude", "nt/epsilon_minus_zeta",
     };
+    static_assert(sizeof(paths) / sizeof(paths[0]) == Metric_Count, "metric paths");
     return metric < Metric_Count ? paths[metric] : "";
 }
 
 bool metric_is_step(Metric metric) {
-    return metric >= Tilt && metric < Metric_Count;
+    return metric >= Tilt && metric <= MajorGroove;
 }
 
 bool metric_is_angular(Metric metric) {
     return metric == Buckle || metric == Propeller || metric == Opening ||
-           metric == Tilt || metric == Roll || metric == Twist;
+           metric == Tilt || metric == Roll || metric == Twist ||
+           (metric >= Alpha && metric <= EpsilonZeta && metric != Amplitude);
+}
+
+bool metric_uses_degrees(Metric metric) {
+    return metric_is_angular(metric) || metric == Amplitude;
+}
+
+int class_first_metric(int cls) {
+    return cls == Class_Step ? (int)Tilt : cls == Class_Nucleotide ? (int)Alpha : 0;
+}
+
+int class_parameter_count(int cls) {
+    return cls == Class_Pair ? 6 : cls == Class_Step ? 8 : cls == Class_Nucleotide ? 10 : 0;
+}
+
+MemberClass metric_class(Metric metric) {
+    return metric >= Alpha ? Class_Nucleotide : metric >= Tilt ? Class_Step : Class_Pair;
+}
+
+const char* class_name(int cls) {
+    static const char* names[] = {"Intra-base pair", "Inter-base pair", "Nucleotide"};
+    return cls >= 0 && cls < Class_Count ? names[cls] : "Unknown";
+}
+
+const char* class_csv_name(int cls) {
+    static const char* names[] = {"bp", "step", "nt"};
+    return cls >= 0 && cls < Class_Count ? names[cls] : "";
+}
+
+int metric_state_count(Metric metric) {
+    switch (metric) {
+    case Phase: case EpsilonZeta: case Chi: return 2;
+    case Alpha: case Gamma: return 3;
+    default: return 0;
+    }
+}
+
+int metric_state(Metric metric, float value) {
+    if (!metric_state_count(metric) || !std::isfinite(value)) return -1;
+    const float a = (float)(value - 360.0 * std::floor(value / 360.0)); // [0, 360)
+    switch (metric) {
+    case Phase: return a >= 90.0f && a < 270.0f ? 1 : 0;              // North / South
+    case EpsilonZeta: return wrap_degrees(value) < 0.0 ? 0 : 1;       // BI / BII
+    case Chi: return a > 270.0f || a < 90.0f ? 1 : 0;                 // anti / syn
+    case Alpha: case Gamma: return a < 120.0f ? 0 : a < 240.0f ? 1 : 2; // g+ / t / g-
+    default: return -1;
+    }
+}
+
+const char* metric_state_name(Metric metric, int state) {
+    static const char* pucker[] = {"North (C3'-endo)", "South (C2'-endo)"};
+    static const char* bi[] = {"BI", "BII"};
+    static const char* chi[] = {"anti", "syn"};
+    static const char* rot[] = {"g+", "t", "g-"};
+    if (state < 0 || state >= metric_state_count(metric)) return "";
+    switch (metric) {
+    case Phase: return pucker[state];
+    case EpsilonZeta: return bi[state];
+    case Chi: return chi[state];
+    case Alpha: case Gamma: return rot[state];
+    default: return "";
+    }
+}
+
+static bool finite3(vec3_t v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+static vec3_t bond(vec3_t from, vec3_t to, const md_unitcell_t* cell) {
+    vec3_t d = vec3_sub(to, from);
+    if (cell) md_util_min_image_vec3(&d, 1, cell);
+    return d;
+}
+
+float torsion(vec3_t a, vec3_t b, vec3_t c, vec3_t d, const md_unitcell_t* cell) {
+    if (!finite3(a) || !finite3(b) || !finite3(c) || !finite3(d)) return std::numeric_limits<float>::quiet_NaN();
+    const vec3_t b1 = bond(a, b, cell), b2 = bond(b, c, cell), b3 = bond(c, d, cell);
+    const vec3_t n1 = vec3_cross(b1, b2), n2 = vec3_cross(b2, b3);
+    const float len = vec3_length(b2);
+    if (vec3_length(n1) < 1e-6f || vec3_length(n2) < 1e-6f || len < 1e-6f) return std::numeric_limits<float>::quiet_NaN();
+    const float y = vec3_dot(vec3_cross(n1, n2), b2) / len;
+    const float x = vec3_dot(n1, n2);
+    return (float)(std::atan2((double)y, (double)x) * (180.0 / 3.14159265358979323846));
+}
+
+void pseudorotation(const float nu[5], float* phase, float* amplitude) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    if (phase) *phase = nan;
+    if (amplitude) *amplitude = nan;
+    for (int i = 0; i < 5; ++i) if (!std::isfinite(nu[i])) return;
+    constexpr double rad = 3.14159265358979323846 / 180.0;
+    const double y = ((double)nu[4] + nu[1]) - ((double)nu[3] + nu[0]);
+    const double x = 2.0 * nu[2] * (std::sin(36.0 * rad) + std::sin(72.0 * rad));
+    double p = std::atan2(y, x) / rad;
+    if (p < 0) p += 360.0;
+    if (phase) *phase = (float)p;
+    // Equals nu2 / cos(P) but stays finite when cos(P) is near zero.
+    if (amplitude) *amplitude = (float)(std::sqrt(y * y + x * x) / (2.0 * (std::sin(36.0 * rad) + std::sin(72.0 * rad))));
+}
+
+void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell,
+                        NucleotideQuality* quality, uint32_t present_atoms) {
+    if (!out || !atoms) return;
+    NucleotideQuality flags = {};
+    auto t = [&](uint16_t& q, int a, int b, int c, int d) {
+        const int slots[] = {a,b,c,d};
+        for (int slot : slots) {
+            if (!(present_atoms & (1u << slot))) q |= Quality_MissingAtoms;
+            else if (!finite3(atoms[slot])) q |= Quality_NonfiniteCoordinates;
+        }
+        if (q & (Quality_MissingAtoms | Quality_NonfiniteCoordinates))
+            return std::numeric_limits<float>::quiet_NaN();
+        for (int i = 1; i < 4; ++i) {
+            const float length = vec3_length(bond(atoms[slots[i-1]], atoms[slots[i]], cell));
+            if (length < 1.0f || length > 2.1f) q |= Quality_UnusualBond;
+        }
+        const float value = torsion(atoms[a], atoms[b], atoms[c], atoms[d], cell);
+        if (!std::isfinite(value)) q |= Quality_DegenerateNucleotide;
+        return value;
+    };
+    BaseTopology slots;
+    for (int k = 0; k < BB_Count; ++k) slots.backbone[k] = k;
+    for (int id = Alpha; id <= (int)Chi; ++id) {
+        const auto a = nucleotide_torsion_atoms(slots, (Metric)id);
+        out->metric[id] = t(flags[id-Alpha], a[0], a[1], a[2], a[3]);
+    }
+    uint16_t ring_quality = 0;
+    const float nu[5] = {
+        t(ring_quality, BB_C4, BB_O4, BB_C1, BB_C2), t(ring_quality, BB_O4, BB_C1, BB_C2, BB_C3),
+        t(ring_quality, BB_C1, BB_C2, BB_C3, BB_C4), t(ring_quality, BB_C2, BB_C3, BB_C4, BB_O4),
+        t(ring_quality, BB_C3, BB_C4, BB_O4, BB_C1),
+    };
+    pseudorotation(nu, &out->metric[Phase], &out->metric[Amplitude]);
+    if (std::isfinite(out->metric[Amplitude])) {
+        double a = 0, b = 0;
+        constexpr double rad = 3.14159265358979323846/180.0;
+        for (int j = 0; j < 5; ++j) {
+            a += 0.4*nu[j]*std::cos(144*j*rad);
+            b += 0.4*nu[j]*std::sin(144*j*rad);
+        }
+        double residual2 = 0;
+        for (int j = 0; j < 5; ++j) {
+            const double residual = nu[j] - a*std::cos(144*j*rad) - b*std::sin(144*j*rad);
+            residual2 += residual*residual;
+        }
+        if (std::sqrt(residual2/5) > 5.0) ring_quality |= Quality_PoorPuckerFit;
+    }
+    flags[Phase-Alpha] = flags[Amplitude-Alpha] = ring_quality;
+    if (out->metric[Amplitude] < 1e-4f) {
+        out->metric[Phase] = std::numeric_limits<float>::quiet_NaN();
+        flags[Phase-Alpha] |= Quality_DegenerateNucleotide;
+    }
+    const float e = out->metric[Epsilon], z = out->metric[Zeta];
+    out->metric[EpsilonZeta] = std::isfinite(e) && std::isfinite(z) ? (float)wrap_degrees((double)e - z)
+                                                                     : std::numeric_limits<float>::quiet_NaN();
+    flags[EpsilonZeta-Alpha] = flags[Epsilon-Alpha] | flags[Zeta-Alpha];
+    if (quality) *quality = flags;
+}
+
+void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p2, size_t n, const md_unitcell_t* cell) {
+    if (!minor || !major || n < 2 || !p1 || !p2) return;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    constexpr float offset = 5.8f; // phosphate van der Waals diameter, as in Curves / El Hassan & Calladine
+    // 1-based pair index k -> P1(k), P2(k); NaN when outside [1, n] or missing.
+    auto dist = [&](long i, long j) -> float {
+        if (i < 1 || j < 1 || i > (long)n || j > (long)n) return nan;
+        const vec3_t a = p1[i - 1], b = p2[j - 1];
+        if (!finite3(a) || !finite3(b)) return nan;
+        return vec3_length(bond(a, b, cell));
+    };
+    for (size_t s = 0; s + 1 < n; ++s) {
+        for (Metric metric : {MinorGroove, MajorGroove}) {
+            const auto indices = groove_phosphate_indices(metric, s, n);
+            float width = 0;
+            for (size_t k = 0; k < indices.count; ++k) {
+                const auto& index = indices.indices[k];
+                width += dist(index[0] + 1, index[1] + 1);
+            }
+            (metric == MinorGroove ? minor[s] : major[s]) = !indices.count ? nan : width / indices.count - offset;
+        }
+    }
+}
+
+GroovePhosphates groove_phosphate_indices(Metric metric, size_t step, size_t pair_count) {
+    if (step >= pair_count || pair_count - step < 2) return {};
+    if (metric == MinorGroove && step >= 2 && pair_count - step > 3) {
+        return {{{{(uint32_t)step + 2, (uint32_t)step - 2}, {(uint32_t)step + 3, (uint32_t)step - 1}}}, 2};
+    }
+    if (metric == MajorGroove && step >= 1 && pair_count - step > 2) {
+        return {{{{(uint32_t)step - 1, (uint32_t)step + 2}, {0, 0}}}, 1};
+    }
+    return {};
+}
+
+std::array<int32_t, 4> nucleotide_torsion_atoms(const BaseTopology& base, Metric metric) {
+    static constexpr int atoms[][4] = {
+        {BB_PrevO3, BB_P, BB_O5, BB_C5}, {BB_P, BB_O5, BB_C5, BB_C4},
+        {BB_O5, BB_C5, BB_C4, BB_C3}, {BB_C5, BB_C4, BB_C3, BB_O3},
+        {BB_C4, BB_C3, BB_O3, BB_NextP}, {BB_C3, BB_O3, BB_NextP, BB_NextO5},
+        {BB_O4, BB_C1, BB_GlycosidicN, BB_ChiBase},
+    };
+    if (metric < Alpha || metric > Chi) return {-1, -1, -1, -1};
+    const auto& a = atoms[metric - Alpha];
+    return {base.backbone[a[0]], base.backbone[a[1]], base.backbone[a[2]], base.backbone[a[3]]};
+}
+
+std::vector<std::vector<uint32_t>> helix_chains(size_t pair_count, const std::vector<StepIndex>& steps) {
+    std::vector<int64_t> next(pair_count, -1), prev(pair_count, -1);
+    for (const auto& step : steps) {
+        if (step.a >= pair_count || step.b >= pair_count || step.a == step.b) continue;
+        if (next[step.a] < 0 && prev[step.b] < 0) { next[step.a] = step.b; prev[step.b] = step.a; }
+    }
+    std::vector<std::vector<uint32_t>> chains;
+    std::vector<uint8_t> seen(pair_count, 0);
+    for (size_t p = 0; p < pair_count; ++p) {
+        if (prev[p] >= 0 || seen[p] || next[p] < 0) continue;
+        std::vector<uint32_t> chain;
+        for (int64_t q = (int64_t)p; q >= 0 && !seen[q]; q = next[q]) { seen[q] = 1; chain.push_back((uint32_t)q); }
+        chains.push_back(std::move(chain));
+    }
+    return chains;
 }
 
 } // namespace lavery

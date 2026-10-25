@@ -2,6 +2,7 @@
 
 #include <gfx/gl_utils.h>
 #include <color_utils.h>
+#include <md_script.h>
 
 #include <core/md_common.h>
 #include <core/md_array.h>
@@ -9,6 +10,8 @@
 #include <core/md_log.h>
 
 #include <stddef.h>
+#include <vector>
+#include <cmath>
 
 namespace immediate {
 
@@ -280,6 +283,65 @@ void lines(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult) 
 void triangles(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult) {
     Queue& q = require_queue(queue);
     draw_triangles_v(q, verts, count, color_mult);
+}
+
+void script_geometry(Queue* queue, const md_script_vis_t& vis,
+                     vec4_t point_color, vec4_t line_color, vec4_t triangle_color, uint32_t picking_idx,
+                     const ScriptLineStyle* line_style) {
+    std::vector<Vertex> vertices;
+    auto submit = [&](const md_script_vis_vertex_t* source, size_t count, vec4_t color,
+                      void (*draw)(Queue*, const Vertex*, size_t, vec4_t)) {
+        if (!count) return;
+        vertices.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            vertices[i] = {source[i].pos, source[i].color, source[i].normal,
+                picking_idx == 0xFFFFFFFF ? source[i].picking_idx : picking_idx};
+        }
+        draw(queue, vertices.data(), count, color);
+    };
+    submit(vis.points, md_array_size(vis.points), point_color, points);
+    submit(vis.triangles, md_array_size(vis.triangles), triangle_color, triangles);
+    if (!line_style || line_style->width <= 1.0f) {
+        submit(vis.lines, md_array_size(vis.lines), line_color, lines);
+        return;
+    }
+    if (!(line_style->viewport.x > 0 && line_style->viewport.y > 0 && std::isfinite(line_style->width))) {
+        MD_LOG_ERROR("Script geometry: invalid screen-space line style");
+        return;
+    }
+    const mat4_t mvp = line_style->transform.proj * line_style->transform.view;
+    const mat4_t inverse = mat4_inverse(mvp);
+    for (size_t i = 1; i < md_array_size(vis.lines); i += 2) {
+        vec4_t a = mvp * vec4_from_vec3(vis.lines[i-1].pos, 1);
+        vec4_t b = mvp * vec4_from_vec3(vis.lines[i].pos, 1);
+        // Clip to the near plane before dividing, including segments crossing the eye.
+        const float da = a.z+a.w, db = b.z+b.w;
+        if (da < 0 && db < 0) continue;
+        if (da < 0) a = a+(b-a)*(da/(da-db));
+        else if (db < 0) b = b+(a-b)*(db/(db-da));
+        if (a.w <= 0 || b.w <= 0) continue;
+        const float dx = (b.x/b.w-a.x/a.w)*line_style->viewport.x;
+        const float dy = (b.y/b.w-a.y/a.w)*line_style->viewport.y;
+        const float length = std::hypot(dx, dy);
+        if (length < 1e-6f) continue;
+        const float ox = -dy/length*line_style->width/line_style->viewport.x;
+        const float oy = dx/length*line_style->width/line_style->viewport.y;
+        auto corner = [&](vec4_t clip, float sign) {
+            clip.x += sign*ox*clip.w;
+            clip.y += sign*oy*clip.w;
+            const vec4_t world = inverse*clip;
+            return vec3_t{world.x/world.w, world.y/world.w, world.z/world.w};
+        };
+        const vec3_t p[] = {corner(a,1), corner(a,-1), corner(b,1), corner(b,-1)};
+        const uint32_t color_a = u32_from_vec4(vec4_from_u32(vis.lines[i-1].color)*line_color);
+        const uint32_t color_b = u32_from_vec4(vec4_from_u32(vis.lines[i].color)*line_color);
+        const uint32_t pick_a = picking_idx == UINT32_MAX ? vis.lines[i-1].picking_idx : picking_idx;
+        const uint32_t pick_b = picking_idx == UINT32_MAX ? vis.lines[i].picking_idx : picking_idx;
+        const Vertex ribbon[] = {{p[0],color_a,{0,0,1},pick_a}, {p[1],color_a,{0,0,1},pick_a},
+            {p[2],color_b,{0,0,1},pick_b}, {p[2],color_b,{0,0,1},pick_b},
+            {p[1],color_a,{0,0,1},pick_a}, {p[3],color_b,{0,0,1},pick_b}};
+        triangles(queue, ribbon, 6);
+    }
 }
 
 void triangles_wireframe(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult) {

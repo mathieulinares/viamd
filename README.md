@@ -56,6 +56,20 @@ C1'). Tsukuba reference frames and symmetric rotation-vector/mid-frame
 parameters follow [Lavery et al. (2009)](https://pmc.ncbi.nlm.nih.gov/articles/PMC2761274/).
 The second base uses the Watson-Crick dyad convention; reverse Watson-Crick
 pairs and noncanonical bases are not supported.
+A third **Nucleotide** class adds backbone torsions (alpha-zeta, chi), sugar
+pucker (pseudorotation phase and amplitude) and epsilon-zeta (BI/BII) for every
+paired nucleotide; the step class also reports 3DNA minor/major groove widths
+(minus 5.8 Å). Bimodal parameters use within-state baselines. Persistent
+conformational switches (repuckering, BI/BII, syn/anti) are detected separately
+by minimum source/destination residence, not ranked by exaggerated sigma.
+Cartoon-first feedback includes phosphate-spanning groove bands, sugar
+outlines, native distance/dihedral measurements, and labelled local-frame
+components for the selected parameter. Measurement text is optional and off
+by default; hover tooltips remain available. Event-coloured silhouette contours
+reuse VIAMD's selection renderer, without interior tint or changing selection.
+The compact **Visual feedback...** popup offers Contour / Glow / Both / Off,
+contour thickness and glow strength, plus shared native measurement line
+thickness, opacity and colours. Settings are saved with the workspace.
 
 ### Workspace
 
@@ -67,13 +81,19 @@ scrolling analysis window:
   and severity-ranked current-frame outliers.
 - **Events & quality:** event table and per-member pairing evidence/coverage.
 
-Fixed layout within one resizable, non-dockable window: **Settings** sidebar
+One non-dockable window: **Settings** sidebar
 on the left; **Events & quality** on top-right; **Overview** and **Inspector**
-below it. The sections scroll independently, without dock tabs or extra window
-title bars. The sidebar selects **Intra-base pair** or
-**Inter-base pair**, parameter, member, tolerance, baseline, event options,
-aggregate-outlier parameters, display options, exports (including events CSV),
-and recomputation. The inspector timeline and
+below it. Drag the thin dividers between sections, or under each plot and
+list, to resize (double-click restores the default; **Visual feedback... > Reset layout**
+restores all); sizes are saved in the workspace. The sections scroll
+independently, without dock tabs or extra window title bars. Help text is in
+tooltips, and rarely used settings sit in collapsed sections. The sidebar selects **Intra-base pair** or
+**Inter-base pair** or **Nucleotide**, parameter, member, tolerance and detection time settings
+always visible; event parameters, advanced detection (baseline, grouping,
+hierarchy, hysteresis, gaps), exports (including events CSV)
+and recomputation are collapsed. Visual controls sit in the compact
+**Visual feedback...** popup with **Event regions** and **Measurements** tabs.
+The inspector timeline and
 distribution refit automatically when the selected series changes. Plot time navigation and selection
 remain linked across all panels and Animation.
 
@@ -168,10 +188,15 @@ finite series count as valid but not outlying, and frames with no valid samples
 are gaps rather than zero-outlier frames.
 
 The parameter-value timeline can optionally overlay all members. The Inspector's
-**Compare with** selector overlays distributions of additional members alongside
+**Compare** selector overlays distributions of additional members alongside
 the selected one, using shared bin edges and individually normalized probability
 densities over finite samples. Comparisons are cached per parameter; empty
-members are not plotted. The current-frame outlier list covers all
+members are not plotted. Inspecting an event adds a full-span event distribution
+for the selected member/parameter, in the event's colour, using shared bins and
+independent normalization. Fewer than 10 valid samples appear as sample marks;
+counts, median and range summarize the span. Valid gap/non-contributing frames
+are included; missing samples are excluded. The current-value cursor remains.
+The current-frame outlier list covers all
 members of the active parameter. **Highlight event contributions** highlights
 the base atoms of current-frame contributors from **all active events**, using VIAMD's
 normal highlight style. A separate signed overlay uses crimson for
@@ -179,7 +204,7 @@ positive and cyan for negative deviations, with optional soft transparent halos:
 intra-base-pair outliers draw rings on both bases, inter-base-pair (step)
 outliers draw a bar between the two pair midpoints. Previewed members that are
 not outlying in the displayed frame are drawn neutral grey. Hover a marker in
-the viewport for a tooltip listing all six parameters of that pair or step,
+the viewport for a tooltip listing all parameters of that member's class,
 their values and z-scores, which ones are outliers and any quality flags;
 hovering an atom of a highlighted base adds the same section. Clicking a marker
 selects that member and its most extreme parameter in all plots. These are
@@ -191,6 +216,12 @@ distribution, and centers the heatmap on that member and the current frame
 while preserving the zoom level. The heatmap's Go to selection button does the
 same without changing the selection. Other active hover highlights
 take precedence over automatic highlighting, but not explicit outlier-row hover.
+
+Nucleotide quality is parameter-specific: missing atoms, nonfinite coordinates
+and degenerate geometry invalidate only affected measurements. Unusual defining
+bond lengths and poor sugar-pucker fits are warnings, not exclusions: finite
+values remain in statistics and events. Reasons appear in plot/viewport tooltips,
+Pairing & coverage, parameter CSV rows and per-parameter script quality attributes.
 
 Lavery follows the master Animation frame during scrubbing and playback:
 current-frame values, outlier counts/list, viewport highlights and plot cursors
@@ -210,27 +241,31 @@ least one selected parameter is finite; an empty selection has no valid members.
 Current-frame rows are sorted by absolute z-score severity, name their most
 extreme selected parameter, and list all contributing parameters on hover.
 
-Previous/Next outlier frame finds the nearest earlier/later frame with an outlier
+Previous/Next outlier arrows find the nearest earlier/later frame with an outlier
 (no wrapping). The count plot shades every outlier event and draws a dashed
 line at the number of outliers expected by chance (Gaussian, independent
-parameters); a header line compares observed and expected totals.
+parameters); the summary-line tooltip compares observed and expected totals,
+and a "near chance" note appears when observed is below twice expected.
 
 Events group outlying (frame, member) samples that are close in time **and**
-along the helix. Two samples join when they are at most **Bridge gaps** + 1
-frames apart and at most **Neighbourhood** base pairs apart (default 2; a step
+along the helix. Two samples join when their quiet gap is within **Bridge gaps**
+(in frame fallback, at most **Bridge gaps** + 1 frames apart), and they are at
+most **Neighbourhood** base pairs apart (default 2; a step
 sits half-way between its two pairs). Pairs in separate duplexes never join.
 **Whole structure** ignores position, which gives the earlier behaviour of
 one event per stretch of outlying frames and suits global changes such as
 unwinding. An event starts at the tolerance and continues while |z| stays
 above the tolerance minus **Hysteresis** (default 0.5 sigma). With **Pair
 loss** on (default), frames where a base pair breaks count as outlying
-instead of ending the event. **Min frames** defaults to 3 contributing frames
-for parents and children, excluding bridged gaps; set 1 to retain spikes.
-Existing workspaces retain their saved minimum. The **Frames / span** column
-separates contributing-frame count from elapsed time (or inclusive frame span):
-a single sample is 1 frame, not "0 frames". **Detect on** chooses the event parameters independently of the
-plotted class: the **Intra**, **Inter** or **Both** presets (default Both), or
-any of the 12 parameters via the 2x6 checkbox grid (column headers toggle a
+instead of ending the event. With timestamps, **Min duration** and **Bridge gaps**
+use physical time (ps/ns); a positive minimum excludes single-sample spikes.
+Initial/legacy thresholds migrate using the median sampling interval.
+An optional **Detection range** restricts events without changing the
+full-trajectory baseline or distributions; boundary-touching events are marked
+potentially clipped. Without time metadata, explicit frame controls remain.
+The **Duration** column shows elapsed time (contributing frames in its
+tooltip); clipped events carry a `*` after their region. **Event parameters** chooses the event parameters independently of the
+plotted class (default all 12) via the 2x6 checkbox grid (column headers toggle a
 whole class). **Use plotted parameters** copies the count-plot selection.
 
 **Hierarchical events** (default on) retains those events as parents and adds
@@ -238,9 +273,12 @@ localized higher-threshold children, so a long DNA-wide event need not hide a
 strong local burst. Child start = tolerance + **Burst extra** (default +1 sigma),
 with the same hysteresis and duration/gap filters. Children always use the local
 neighbourhood, even with Whole structure parents, and must touch fewer base
-pairs and belong entirely to their parent. The table labels them **child of #N**.
-This is a two-level intensity hierarchy; increase Burst extra if the broad
-background still connects the burst. Turning hierarchy off restores flat grouping.
+pairs and belong entirely to their parent. The table labels them **in #N**.
+This is a two-level hierarchy; increase Burst extra if the broad background
+still connects the burst, or set **Sub-events** to **Stand out from background**:
+children are then where z differs from the parent's per-frame median z
+(**Residual**, default 2 sigma), so local activity no stronger than the broad
+event is found. Turning hierarchy off restores flat grouping.
 Parent and child scores share samples and must not be added as independent counts.
 
 The table is sortable and is sorted by **Score** by default: the sum, over
@@ -258,25 +296,31 @@ outlying parameter with its peak z-score. Clicking a member selects it
 (switching class if needed), its strongest parameter and peak frame; clicking
 a parameter selects that parameter at its own peak frame. Every plot follows.
 Hovering an event, member or parameter adds a viewport preview while paused.
-During playback, every active event automatically gets a broad coloured context
-halo over its overall member region, with precise rings/bars for current-frame
+During playback, every active event automatically gets a thin coloured silhouette
+contour over its overall member region, with precise rings/bars for current-frame
 contributors and amber rings for lost pairs. Overlapping regions and shared
-members are drawn once, blending glow colours at shared bases without adding
-brightness. Events overlapping in time have different stable colour slots;
+members are drawn once, without filling the molecular interior. Events overlapping in time have different stable colour slots;
 colours match table swatches, count-plot bands and newly added timeline periods.
-Child colours receive greater weight inside parent halos so local bursts remain visible.
+Children own the contour within their parent; otherwise the highest-scoring
+event owns shared bases. Hover still identifies all involved events.
+Six colour-blind-friendly colours go to the highest-scoring events; further
+overlaps are grey (**+N grey** in the overview).
 Crimson/cyan detail markers still encode deviation sign, not event identity.
 Hover shows involved event IDs, types, parameter names,
 values and z-scores; there is no permanent viewport status box or focus mode.
-Bridged gaps retain context without invented detail. **Select**
-puts the event's nucleotides in the VIAMD selection. **Timeline** (or **All to
-timeline**) adds the event as a coloured period, with a note, on the main
-timeline; **Remove from timeline** removes those periods again. A one-frame event has zero
-elapsed duration. Controls stay in the left sidebar;
+Bridged gaps retain context without invented detail. Right-click an event row
+for **Select atoms** (the event's nucleotides become the VIAMD selection) or
+**Add to timeline** (a coloured period with a note on the main timeline);
+**Timeline...** above the table adds all events or removes the added periods.
+**Active now** filters the table to events spanning the current frame; a filter
+box matches type/parameter words and base-pair numbers or ranges; Up/Down steps
+through events; hovering a row shows a members x frames footprint. Each
+event is a single line; Peak frame is a hideable column (right-click the
+header). A one-frame event has zero elapsed duration. Controls stay in the left sidebar;
 events/quality live above the plots, and Inspector timeline and
 distribution sections are initially expanded.
 
-**Settings / Export > Export parameter CSV** writes all six parameters of the current class over all frames
+**Settings / Export > Export parameter CSV** writes all parameters of the current class over all frames
 and members, not just outliers. Rows include run, frame, displayed time/unit,
 member and residue/pair identities, raw value/unit, validity, quality flags and
 reasons, baseline mean/population SD, z-score, sigma, selected-parameter mask,

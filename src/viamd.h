@@ -1410,6 +1410,9 @@ struct ApplicationState {
 
     struct {
 		immediate::Queue* world = nullptr;
+        immediate::Queue* depth_overlay = nullptr;
+        immediate::Queue* occluded_overlay = nullptr;
+        immediate::Queue* color_overlay = nullptr;
 		immediate::Queue* overlay = nullptr;
     } gfx;
 
@@ -1711,6 +1714,7 @@ struct ApplicationState {
     struct {
         vec4_t point_color      = {1,0,0,0.8f};
         vec4_t line_color       = {0,0,0,0.6f};
+        float line_width       = 1.0f; // Logical screen pixels, shared by script and native measurement feedback.
         vec4_t triangle_color   = {0.55f,0.55f,1.0f,0.5f};
         vec4_t text_color       = {1,1,1,1};
         vec4_t text_bg_color    = {0,0,0,0.5f};
@@ -1776,6 +1780,7 @@ struct ApplicationState {
     struct {
         uint64_t scene_key = 0;         // of the image kept
         uint64_t marks_key = 0;         // of the marks kept, 0 for none
+        uint64_t contours_key = 0;
         uint32_t settle_frames = 0;     // still to make after the last change
         bool image_valid = false;       // gbuffer.tex.image holds the scene (not after the G-buffer is made anew)
         uint64_t version = 0;           // render_invalidate()
@@ -1847,6 +1852,24 @@ struct RenderKey {
     const ApplicationState* state = nullptr;
     uint64_t key = 0;
 };
+
+// Borrowed until rendering returns. Groups are 0 for no contour, 1..8 for palette entries.
+// Independent of the user's selection/highlight; the native representation mark pass draws them.
+struct RepresentationContours {
+    const uint8_t* atom_groups = nullptr;
+    size_t num_atoms = 0;
+    vec3_t colors[HIGHLIGHT_GROUP_COLORS] = {};
+    float thickness = 1.0f; // Multiplier of native outline width, before framebuffer scaling.
+    uint64_t key = 0;
+};
+
+void reset_measurement_style(ApplicationState* app);
+void draw_measurement_style_controls(ApplicationState* app);
+static inline immediate::ScriptLineStyle measurement_line_style(const ApplicationState& app) {
+    return {{app.view.param.matrix.curr.view, app.view.param.matrix.curr.proj},
+        {(float)app.gbuffer.width, (float)app.gbuffer.height},
+        app.script.line_width*(float)app.gbuffer.width/MAX(app.app.window.width, 1)};
+}
 
 // This is the supplied event payload for requesting a view fit.
 // The idea is to construct a weighted point cloud of whatever is 'highlighted'

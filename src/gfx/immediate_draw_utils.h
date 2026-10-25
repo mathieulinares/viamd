@@ -2,6 +2,8 @@
 
 #include <core/md_vec_math.h>
 
+struct md_script_vis_t;
+
 namespace immediate {
 
 constexpr uint32_t COLOR_WHITE = 0xffffffff;
@@ -84,6 +86,14 @@ void points(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult 
 void lines(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult = {1,1,1,1});
 void triangles(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult = {1,1,1,1});
 void triangles_wireframe(Queue* queue, const Vertex verts[], size_t count, vec4_t color_mult = { 1,1,1,1 });
+struct ScriptLineStyle {
+    RenderParams transform;
+    vec2_t viewport = {};
+    float width = 1.0f; // Framebuffer pixels; quads avoid driver-dependent wide GL lines.
+};
+void script_geometry(Queue* queue, const md_script_vis_t& vis,
+    vec4_t point_color, vec4_t line_color, vec4_t triangle_color, uint32_t picking_idx = 0xFFFFFFFF,
+    const ScriptLineStyle* line_style = nullptr);
 
 /*
 __________________

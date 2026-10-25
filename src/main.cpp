@@ -41,6 +41,7 @@
 #include <gfx/camera.h>
 #include <gfx/camera_utils.h>
 #include <gfx/immediate_draw_utils.h>
+#include <gfx/scene_label.h>
 #include <gfx/postprocessing_utils.h>
 #include <gfx/volumerender_utils.h>
 #include <gfx/isomesh_utils.h>
@@ -851,6 +852,9 @@ int main(int argc, char** argv) {
     VIAMD_LOG_DEBUG("Initializing immediate draw...");
     immediate::initialize();
     state.gfx.world   = immediate::queue_create("world");
+    state.gfx.depth_overlay = immediate::queue_create("depth overlay");
+    state.gfx.occluded_overlay = immediate::queue_create("occluded overlay");
+    state.gfx.color_overlay = immediate::queue_create("colour-only overlay");
 	state.gfx.overlay = immediate::queue_create("overlay");
 
     VIAMD_LOG_DEBUG("Initializing post processing...");
@@ -1407,16 +1411,11 @@ int main(int argc, char** argv) {
                 // Script text
                 const ImU32 text_color = convert_color(state.script.text_color);
                 const ImU32 rect_color = convert_color(state.script.text_bg_color);
-                const float rect_rounding = 5.f;
-                const ImVec2 rect_padding = ImVec2(4.f, 2.f);
 
                 const md_script_vis_text_t* texts = state.script.vis_shown->text;
                 size_t num_text = md_array_size(texts);
                 for (size_t i = 0; i < num_text; ++i) {
                     const md_script_vis_text_t& vis_text = texts[i];
-
-                    const vec4_t p = mat4_mul_vec4(mvp, vec4_from_vec3(vis_text.pos, 1.0f));
-                    const vec4_t c = p / p.w;
 
                     // A label carrying a unit is a quantity, so it is shown in the same unit as the
                     // plots and re-formatted here rather than taken as mdlib spelled it. Anything
@@ -1432,15 +1431,8 @@ int main(int argc, char** argv) {
                         str = {buf, (size_t)CLAMP(len, 0, (int)sizeof(buf) - 1)};
                     }
 
-                    const ImVec2 text_size = ImGui::CalcTextSize(str.beg(), str.end());
-
-                    if (-1 < c.x && c.x < 1 && -1 < c.y && c.y < 1 && -1 < c.z && c.z < 1) {
-                        ImVec2 tc = {(c.x * 0.5f + 0.5f) * res.x, (-c.y * 0.5f + 0.5f) * res.y};
-                        ImVec2 p0 = tc - text_size * 0.5f;
-                        ImVec2 p1 = tc + text_size * 0.5f;
-                        dl->AddRectFilled(p0 - rect_padding, p1 + rect_padding, rect_color, rect_rounding);
-                        dl->AddText(p0, text_color, str.beg(), str.end());
-                    }
+                    immediate::scene_label(dl, mvp, ImVec2(res.x, res.y), vis_text.pos,
+                        str.beg(), str.end(), text_color, rect_color);
                 }
             }
             POP_CPU_SECTION();
@@ -1605,10 +1597,16 @@ int main(int argc, char** argv) {
     // shutdown subsystems
     VIAMD_LOG_DEBUG("Shutting down immediate draw...");
     immediate::queue_destroy(state.gfx.world);
+    immediate::queue_destroy(state.gfx.depth_overlay);
+    immediate::queue_destroy(state.gfx.occluded_overlay);
+    immediate::queue_destroy(state.gfx.color_overlay);
     immediate::queue_destroy(state.gfx.overlay);
     immediate::shutdown();
 
     state.gfx.world = nullptr;
+    state.gfx.depth_overlay = nullptr;
+    state.gfx.occluded_overlay = nullptr;
+    state.gfx.color_overlay = nullptr;
     state.gfx.overlay = nullptr;
 
     profiler::shutdown();
@@ -5736,9 +5734,11 @@ static void draw_script_editor_window(ApplicationState* state) {
                 if (ImGui::MenuItem("Retro blue palette"))
                     state->editor.SetPalette(script_editor::retro_blue_palette());
                 ImGui::Separator();
-                ImGui::ColorEdit4("Point Color",    state->script.point_color.elem);
-                ImGui::ColorEdit4("Line Color",     state->script.line_color.elem);
-                ImGui::ColorEdit4("Triangle Color", state->script.triangle_color.elem);
+                if (ImGui::BeginMenu("Measurement visuals")) {
+                    draw_measurement_style_controls(state);
+                    if (ImGui::Button("Reset measurement defaults")) reset_measurement_style(state);
+                    ImGui::EndMenu();
+                }
                 ImGui::ColorEdit4("Text Color",     state->script.text_color.elem);
                 ImGui::ColorEdit4("Text Bg Color",  state->script.text_bg_color.elem);
                 ImGui::EndMenu();
@@ -6731,6 +6731,35 @@ void draw_structure_export_window(ApplicationState* data) {
     ImGui::End();
 }
 
+static uint8_t* representation_atom_flags(ApplicationState* data) {
+    const size_t count = data->mold.sys.atom.count;
+    uint8_t* flags = (uint8_t*)md_vm_arena_push(frame_alloc, count);
+    MEMSET(flags, 0, count);
+    md_bitset_iter_t it = md_bitmask_iter(&data->selection.highlight_mask);
+    while (md_bitset_iter_next(&it)) flags[it.idx] |= AtomBit_Highlighted | AtomBit_Marked;
+    const auto& groups = data->selection.highlight_groups;
+    for (size_t g = 0; g < groups.count; ++g) {
+        const uint8_t color = (uint8_t)((g % HIGHLIGHT_GROUP_COLORS) << AtomBit_GroupShift);
+        it = md_bitset_iter(groups.sets[g]);
+        while (md_bitset_iter_next(&it)) {
+            if (it.idx < count) flags[it.idx] = (uint8_t)((flags[it.idx] & ~AtomBit_GroupMask) | color);
+        }
+    }
+    it = md_bitmask_iter(&data->selection.selection_mask);
+    while (md_bitset_iter_next(&it)) flags[it.idx] |= AtomBit_Selected | AtomBit_Marked;
+    if (!md_bitmask_empty(&data->selection.selection_mask)) {
+        for (size_t i = 0; i < count; ++i) if (!(flags[i] & AtomBit_Selected)) flags[i] |= AtomBit_Dimmed;
+    }
+    it = md_bitmask_iter(&data->representation.visibility_mask);
+    while (md_bitset_iter_next(&it)) flags[it.idx] |= AtomBit_Visible;
+    return flags;
+}
+
+static void representation_upload_flags(ApplicationState* data, const uint8_t* flags) {
+    md_gl_mol_set_atom_flags(data->mold.gl_mol, 0, (uint32_t)data->mold.sys.atom.count, flags, 0);
+    cartoon_glyphs_update_flags(data->mold.cartoon_glyphs, flags, data->mold.sys.atom.count);
+}
+
 static void update_md_buffers(ApplicationState* data) {
     ASSERT(data);
     const md_system_t& sys = data->mold.sys;
@@ -6793,48 +6822,7 @@ static void update_md_buffers(ApplicationState* data) {
         md_temp_scope_t tmp = md_temp_begin_in(frame_alloc);
         defer { md_temp_end(tmp); };
 
-        uint8_t* flags = (uint8_t*)md_vm_arena_push(frame_alloc, sys.atom.count * sizeof(uint8_t));
-        MEMSET(flags, 0, sys.atom.count * sizeof(uint8_t));
-
-        {
-            md_bitset_iter_t it = md_bitmask_iter(&data->selection.highlight_mask);
-            while (md_bitset_iter_next(&it)) {
-                uint64_t idx = it.idx;
-                flags[idx] |= AtomBit_Highlighted | AtomBit_Marked;
-            }
-        }
-        {
-            // The colour of the group of the highlight each atom is in: of the last group it is in
-            const auto& groups = data->selection.highlight_groups;
-            for (size_t g = 0; g < groups.count; ++g) {
-                const uint8_t color = (uint8_t)((g % HIGHLIGHT_GROUP_COLORS) << AtomBit_GroupShift);
-                md_bitset_iter_t it = md_bitset_iter(groups.sets[g]);
-                while (md_bitset_iter_next(&it)) {
-                    if (it.idx < sys.atom.count) flags[it.idx] = (uint8_t)((flags[it.idx] & ~AtomBit_GroupMask) | color);
-                }
-            }
-        }
-        {
-            md_bitset_iter_t it = md_bitmask_iter(&data->selection.selection_mask);
-            while (md_bitset_iter_next(&it)) {
-                uint64_t idx = it.idx;
-                flags[idx] |= AtomBit_Selected | AtomBit_Marked;
-            }
-        }
-        if (!md_bitmask_empty(&data->selection.selection_mask)) {
-            for (size_t i = 0; i < sys.atom.count; ++i) {
-                if (!(flags[i] & AtomBit_Selected)) flags[i] |= AtomBit_Dimmed;
-            }
-        }
-        {
-            md_bitset_iter_t it = md_bitmask_iter(&data->representation.visibility_mask);
-            while (md_bitset_iter_next(&it)) {
-                uint64_t idx = it.idx;
-                flags[idx] |= AtomBit_Visible;
-            }
-        }
-        md_gl_mol_set_atom_flags(data->mold.gl_mol, 0, (uint32_t)sys.atom.count, flags, 0);
-        cartoon_glyphs_update_flags(data->mold.cartoon_glyphs, flags, sys.atom.count);
+        representation_upload_flags(data, representation_atom_flags(data));
     }
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyBonds) {
@@ -7047,6 +7035,7 @@ static uint64_t scene_key(const ApplicationState* state) {
     h = md_hash64(&vis, sizeof(vis), h);
     const vec4_t vis_colors[3] = {state->script.point_color, state->script.line_color, state->script.triangle_color};
     h = md_hash64(vis_colors, sizeof(vis_colors), h);
+    h = md_hash64(&state->script.line_width, sizeof(state->script.line_width), h);
     h = md_hash64(&state->render.version, sizeof(state->render.version), h);
     h = md_hash64(&use_gfx, sizeof(use_gfx), h);
 
@@ -7084,17 +7073,9 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
         static const md_script_vis_t nothing = {};
         const md_script_vis_t& vis = state->script.vis_shown ? *state->script.vis_shown : nothing;
 
-        if (vis.points) {
-            immediate::points(vis_scope, (immediate::Vertex*)vis.points, md_array_size(vis.points), state->script.point_color);
-        }
-
-        if (vis.triangles) {
-            immediate::triangles(vis_scope, (immediate::Vertex*)vis.triangles, md_array_size(vis.triangles), state->script.triangle_color);
-        }
-
-        if (vis.lines) {
-            immediate::lines(vis_scope, (immediate::Vertex*)vis.lines, md_array_size(vis.lines), state->script.line_color);
-        }
+        const auto line_style = measurement_line_style(*state);
+        immediate::script_geometry(vis_scope, vis, state->script.point_color, state->script.line_color,
+            state->script.triangle_color, UINT32_MAX, &line_style);
 
         const size_t num_matrices = md_array_size(vis.sdf.matrices);
         const size_t num_structures = md_array_size(vis.sdf.structures);
@@ -7176,8 +7157,26 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
     glDisablei(GL_BLEND, 2);
     glDisablei(GL_BLEND, 3);
 
+    PUSH_GPU_SECTION("Immediate depth overlay")
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    immediate::render(state->gfx.depth_overlay, params);
+    POP_GPU_SECTION()
+
+    PUSH_GPU_SECTION("Immediate occluded overlay")
+    // Hidden measurement hints affect colour only, never picking or motion underneath the cartoon.
+    glDrawBuffer(GL_COLOR_ATTACHMENT_TRANSPARENCY);
+    glDepthFunc(GL_GREATER);
+    immediate::render(state->gfx.occluded_overlay, params);
+    glDepthFunc(GL_LESS);
+    glDrawBuffers(ARRAY_SIZE(draw_buffers_transparent), draw_buffers_transparent);
+    POP_GPU_SECTION()
+
     PUSH_GPU_SECTION("Immediate overlay")
     glDisable(GL_DEPTH_TEST);
+    glDrawBuffer(GL_COLOR_ATTACHMENT_TRANSPARENCY);
+    immediate::render(state->gfx.color_overlay, params);
+    glDrawBuffers(ARRAY_SIZE(draw_buffers_transparent), draw_buffers_transparent);
     immediate::render(state->gfx.overlay, params);
     POP_GPU_SECTION()
 
@@ -7318,6 +7317,44 @@ static void render(ApplicationState* state) {
     const bool meshes_settled = iso_mesh_converged || iso_mesh_target.frame >= isomesh::MAX_FRAMES;
     const bool settled = lazy.image_valid && lazy.settle_frames == 0 && meshes_settled;
 
+    RepresentationContours contour_request = {};
+    viamd::event_system_broadcast_event(viamd::EventType_ViamdRepresentationContours,
+        viamd::EventPayloadType_RepresentationContours, &contour_request);
+    bool draw_contours = !use_gfx && contour_request.atom_groups && contour_request.key;
+    if (draw_contours && contour_request.num_atoms != state->mold.sys.atom.count) {
+        MD_LOG_ERROR("Representation contours: atom count does not match the loaded system");
+        draw_contours = false;
+    }
+    if (draw_contours) {
+        uint64_t contours_key = md_hash64(&contour_request.key, sizeof(contour_request.key), lazy.scene_key);
+        contours_key = contours_key ? contours_key : 1;
+        auto& target = state->gbuffer.contours;
+        const bool resized = target.width != state->gbuffer.out_width || target.height != state->gbuffer.out_height;
+        if (scene || resized || contours_key != lazy.contours_key) {
+            PUSH_GPU_SECTION("Representation contours")
+            gbuffer_marks_init(&target, state->gbuffer.out_width, state->gbuffer.out_height);
+            md_temp_scope_t tmp = md_temp_begin_in(frame_alloc);
+            defer { md_temp_end(tmp); };
+            const size_t count = contour_request.num_atoms;
+            const uint8_t* original = representation_atom_flags(state);
+            uint8_t* flags = md_temp_alloc_array(tmp, uint8_t, count);
+            for (size_t i = 0; i < count; ++i) {
+                const uint8_t group = contour_request.atom_groups[i];
+                ASSERT(group <= HIGHLIGHT_GROUP_COLORS);
+                flags[i] = original[i] & AtomBit_Visible;
+                if (group) flags[i] |= AtomBit_Marked | AtomBit_Highlighted |
+                    (uint8_t)((group-1) << AtomBit_GroupShift);
+            }
+            representation_upload_flags(state, flags);
+            gbuffer_marks_begin(&state->gbuffer, target);
+            draw_representations_marks(state);
+            gbuffer_marks_end(&state->gbuffer);
+            representation_upload_flags(state, original);
+            POP_GPU_SECTION()
+            lazy.contours_key = contours_key;
+        }
+    } else lazy.contours_key = 0;
+
     // The marks of the selection and the highlight: the selected and highlighted atoms drawn once, both, into a target
     // of the size of the image made, unjittered, each fragment marked in view or behind the scene (its depth, from the
     // G-buffer); put over the image as it is presented. They are not part of the scene: changing them changes nothing in
@@ -7346,6 +7383,7 @@ static void render(ApplicationState* state) {
     auto present = [&]() {
         PUSH_GPU_SECTION("Present")
         postprocess_pipeline::Settings settings = {};
+        settings.marks.outline_step = MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x));
         if (draw_marks) {
             // The highlight fades in, the outline is as wide on a display of more pixels per point
             constexpr double HIGHLIGHT_FADE_IN_S = 0.12;
@@ -7353,7 +7391,16 @@ static void render(ApplicationState* state) {
             const int outline_step = MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x));
             marks_settings(&settings, *state, t * t * (3.0f - 2.0f * t), outline_step);
         }
-        postprocess_pipeline::present(state->gbuffer.tex.image, draw_marks ? state->gbuffer.tex.marks : 0, draw_marks ? state->gbuffer.tex.marks_group : 0, settings);
+        postprocess_pipeline::Contours contours = {};
+        if (draw_contours) {
+            contours.marks = state->gbuffer.contours.texture;
+            contours.group = state->gbuffer.contours.group;
+            contours.outline_step = contour_request.thickness * settings.marks.outline_step;
+            static_assert(sizeof(contours.colors) == sizeof(contour_request.colors));
+            MEMCPY(contours.colors, contour_request.colors, sizeof(contours.colors));
+        }
+        postprocess_pipeline::present(state->gbuffer.tex.image, draw_marks ? state->gbuffer.marks.texture : 0,
+            draw_marks ? state->gbuffer.marks.group : 0, settings, draw_contours ? &contours : nullptr);
         POP_GPU_SECTION()
     };
 
@@ -7387,6 +7434,7 @@ static void render(ApplicationState* state) {
         }
     }
 
+    viamd::event_system_broadcast_event(viamd::EventType_ViamdDrawSceneLabels, viamd::EventPayloadType_ApplicationState, state);
     PUSH_GPU_SECTION("Imgui render")
     application::render_imgui(&state->app);
     POP_GPU_SECTION()

@@ -33,3 +33,16 @@ static const float rna_curves_step[13][6] = {
     {-0.1f,14.8f,35.0f,0.16f,-1.40f,3.46f},
     {-6.0f,4.0f,36.2f,-0.11f,-1.13f,2.65f},
 };
+
+// Fourier phase/amplitude (degrees), indexed by input residue 1..28.
+// Independently regenerated with the official Curves+ v3.0nc executable, 2026-10-25.
+static const float rna_curves_pucker[28][2] = {
+    {16.1f,37.2f}, {18.8f,40.9f}, {18.9f,41.0f}, {17.6f,44.1f},
+    {18.2f,40.2f}, {17.6f,40.7f}, {15.8f,40.9f}, {18.9f,39.5f},
+    {18.1f,38.7f}, {20.9f,36.8f}, {18.6f,38.5f}, {17.4f,41.4f},
+    {18.0f,37.9f}, {19.4f,40.8f},
+    {18.7f,36.8f}, {18.1f,38.9f}, {17.5f,43.2f}, {17.7f,38.7f},
+    {16.9f,37.2f}, {17.7f,41.5f}, {20.7f,39.3f}, {16.6f,40.8f},
+    {19.5f,40.4f}, {14.8f,37.3f}, {18.7f,39.3f}, {17.4f,40.0f},
+    {14.9f,39.3f}, {16.5f,37.7f},
+};

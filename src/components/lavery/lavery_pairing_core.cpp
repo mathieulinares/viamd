@@ -204,6 +204,51 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
         if (compute_step(&values, a, b)) out->step_values[s] = values;
         else quality |= Quality_AmbiguousTransform;
     }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const vec3_t none = {nan, nan, nan};
+    auto coord = [&](int32_t atom) { return atom >= 0 ? md_state_coord(&state, atom) : none; };
+    // Backbone and sugar geometry belongs to the nucleotide, so it is measured whether or not the pair is intact.
+    out->nucleotide_values.assign(2 * pairs.size(), missing);
+    out->nucleotide_quality.resize(2 * pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        for (int side = 0; side < 2; ++side) {
+            const auto& base = bases[side ? pairs[p].b : pairs[p].a];
+            vec3_t atoms[BB_Count];
+            uint32_t present = 0;
+            for (int k = 0; k < BB_Count; ++k) {
+                atoms[k] = coord(base.backbone[k]);
+                if (base.backbone[k] >= 0) present |= 1u << k;
+            }
+            compute_nucleotide(&out->nucleotide_values[2 * p + side], atoms, &state.unitcell,
+                &out->nucleotide_quality[2 * p + side], present);
+        }
+    }
+    // Groove widths from phosphorus positions along each helix; strand I is the strand of the first pair's base a.
+    std::vector<int64_t> step_from(pairs.size(), -1);
+    for (size_t s = steps.size(); s-- > 0;) if (steps[s].a < pairs.size()) step_from[steps[s].a] = (int64_t)s;
+    std::vector<vec3_t> p1, p2;
+    std::vector<float> minor, major;
+    for (const auto& chain : helix_chains(pairs.size(), steps)) {
+        const size_t n = chain.size();
+        const uint32_t strand = bases[pairs[chain[0]].a].strand;
+        p1.assign(n, none);
+        p2.assign(n, none);
+        for (size_t k = 0; k < n; ++k) {
+            const auto& a = bases[pairs[chain[k]].a];
+            const auto& b = bases[pairs[chain[k]].b];
+            if (a.strand == strand && b.strand != strand) { p1[k] = coord(a.backbone[BB_P]); p2[k] = coord(b.backbone[BB_P]); }
+            else if (b.strand == strand && a.strand != strand) { p1[k] = coord(b.backbone[BB_P]); p2[k] = coord(a.backbone[BB_P]); }
+        }
+        minor.assign(n, nan);
+        major.assign(n, nan);
+        groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n, &state.unitcell);
+        for (size_t k = 0; k + 1 < n; ++k) {
+            const int64_t s = step_from[chain[k]];
+            if (s < 0 || steps[s].b != chain[k + 1]) continue;
+            out->step_values[s].metric[MinorGroove] = minor[k];
+            out->step_values[s].metric[MajorGroove] = major[k];
+        }
+    }
     return true;
 }
 

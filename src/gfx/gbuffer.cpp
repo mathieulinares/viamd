@@ -35,8 +35,6 @@ void gbuffer_init(GBuffer* gbuf, int width, int height, int out_width, int out_h
     if (!gbuf->tex.picking) glGenTextures(1, &gbuf->tex.picking);
     if (!gbuf->tex.history) glGenTextures(1, &gbuf->tex.history);
     if (!gbuf->tex.history_prev) glGenTextures(1, &gbuf->tex.history_prev);
-    if (!gbuf->tex.marks) glGenTextures(1, &gbuf->tex.marks);
-    if (!gbuf->tex.marks_group) glGenTextures(1, &gbuf->tex.marks_group);
     if (!gbuf->tex.image) glGenTextures(1, &gbuf->tex.image);
 
     glBindTexture(GL_TEXTURE_2D, gbuf->tex.depth);
@@ -105,21 +103,6 @@ void gbuffer_init(GBuffer* gbuf, int width, int height, int out_width, int out_h
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
-
-    // The marks are drawn over the image made, at its size, unjittered (render()); filtered when they are put over it
-    glBindTexture(GL_TEXTURE_2D, gbuf->tex.marks);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, out_width, out_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glBindTexture(GL_TEXTURE_2D, gbuf->tex.marks_group);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, out_width, out_height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     // The image made, display referred as the TAA's history is: shown again while nothing in it changes (render())
     glBindTexture(GL_TEXTURE_2D, gbuf->tex.image);
@@ -196,18 +179,7 @@ void gbuffer_init(GBuffer* gbuf, int width, int height, int out_width, int out_h
         }
     }
 
-    if (!gbuf->fbo_marks) {
-        glGenFramebuffers(1, &gbuf->fbo_marks);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuf->fbo_marks);
-        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gbuf->tex.marks, 0);
-        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, gbuf->tex.marks_group, 0);
-        const GLenum marks_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-        glDrawBuffers(2, marks_buffers);
-        const GLenum marks_status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
-        if (marks_status != GL_FRAMEBUFFER_COMPLETE) {
-            MD_LOG_ERROR("Marks framebuffer is incomplete (0x%04X)", (unsigned int)marks_status);
-        }
-    }
+    gbuffer_marks_init(&gbuf->marks, out_width, out_height);
 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
@@ -243,6 +215,8 @@ void gbuffer_clear(GBuffer* gbuffer) {
 
 void gbuffer_free(GBuffer* gbuf) {
     ASSERT(gbuf);
+    gbuffer_marks_free(&gbuf->marks);
+    gbuffer_marks_free(&gbuf->contours);
     if (gbuf->fbo) glDeleteFramebuffers(1, &gbuf->fbo);
     if (gbuf->tex.depth) glDeleteTextures(1, &gbuf->tex.depth);
     if (gbuf->tex.color) glDeleteTextures(1, &gbuf->tex.color);
@@ -253,16 +227,53 @@ void gbuffer_free(GBuffer* gbuf) {
     if (gbuf->tex.picking) glDeleteTextures(1, &gbuf->tex.picking);
     if (gbuf->tex.history) glDeleteTextures(1, &gbuf->tex.history);
     if (gbuf->tex.history_prev) glDeleteTextures(1, &gbuf->tex.history_prev);
-    if (gbuf->tex.marks) glDeleteTextures(1, &gbuf->tex.marks);
-    if (gbuf->tex.marks_group) glDeleteTextures(1, &gbuf->tex.marks_group);
     if (gbuf->tex.image) glDeleteTextures(1, &gbuf->tex.image);
     if (gbuf->fbo_image) glDeleteFramebuffers(1, &gbuf->fbo_image);
-    if (gbuf->fbo_marks) glDeleteFramebuffers(1, &gbuf->fbo_marks);
 }
 
 void gbuffer_marks_begin(GBuffer* gbuf) {
+    gbuffer_marks_begin(gbuf, gbuf->marks);
+}
+
+void gbuffer_marks_init(MarksBuffer* marks, int width, int height) {
+    ASSERT(marks && width > 0 && height > 0);
+    if (marks->width == (uint32_t)width && marks->height == (uint32_t)height) return;
+    if (!marks->fbo) glGenFramebuffers(1, &marks->fbo);
+    if (!marks->texture) glGenTextures(1, &marks->texture);
+    if (!marks->group) glGenTextures(1, &marks->group);
+    const GLuint textures[] = {marks->texture, marks->group};
+    for (int i = 0; i < 2; ++i) {
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, i ? GL_R8 : GL_RGBA8, width, height, 0,
+            i ? GL_RED : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, i ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, i ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, marks->fbo);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, marks->texture, 0);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, marks->group, 0);
+    const GLenum buffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, buffers);
+    const GLenum status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) MD_LOG_ERROR("Annotation marks framebuffer is incomplete (0x%04X)", (unsigned int)status);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    marks->width = width;
+    marks->height = height;
+}
+
+void gbuffer_marks_free(MarksBuffer* marks) {
+    if (marks->fbo) glDeleteFramebuffers(1, &marks->fbo);
+    if (marks->texture) glDeleteTextures(1, &marks->texture);
+    if (marks->group) glDeleteTextures(1, &marks->group);
+    *marks = {};
+}
+
+void gbuffer_marks_begin(GBuffer* gbuf, const MarksBuffer& marks) {
     ASSERT(gbuf);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, gbuf->fbo_marks);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, marks.fbo);
     const GLenum marks_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, marks_buffers);
     glViewport(0, 0, gbuf->out_width, gbuf->out_height);

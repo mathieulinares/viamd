@@ -178,7 +178,12 @@ void execute(const Inputs& in, const Settings& settings, const ViewParam& view);
 // Presents an image execute() made without presenting it (its size: the viewport's) into the framebuffer bound:
 // dithered, with the marks of the selection and the highlight over it when there are any (Inputs::marks,
 // Settings::marks). For showing the image again while nothing in it has changed.
-void present(GLuint image, GLuint marks, GLuint marks_group, const Settings& settings);
+struct Contours {
+    GLuint marks = 0, group = 0;
+    vec3_t colors[8] = {};
+    float outline_step = 1.0f;
+};
+void present(GLuint image, GLuint marks, GLuint marks_group, const Settings& settings, const Contours* contours = nullptr);
 void shutdown();
 
 // The lights of the compose pass for a shading mode, in view space: they move with the camera. The isosurfaces

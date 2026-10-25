@@ -6,7 +6,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <functional>
 #include <vector>
+#include <array>
 #include <string>
 
 struct md_system_t;
@@ -28,8 +30,37 @@ enum Metric : uint32_t {
     Shift,
     Slide,
     Rise,
+    MinorGroove, // 3DNA direct P-P width minus 5.8 Angstrom; inter-base-pair class
+    MajorGroove,
+    Alpha,       // Nucleotide class: backbone torsions, glycosidic torsion and sugar pucker
+    Beta,
+    Gamma,
+    Delta,
+    Epsilon,
+    Zeta,
+    Chi,
+    Phase,       // Altona-Sundaralingam pseudorotation phase P, [0, 360)
+    Amplitude,   // pseudorotation amplitude (degrees, linear)
+    EpsilonZeta, // epsilon - zeta, wrapped; BI < 0 < BII
     Metric_Count,
 };
+
+// Members are base pairs, steps between consecutive pairs, or nucleotides of paired bases
+// (member 2p + side, side 0 = pairs[p].a); a nucleotide sits at its pair's position on the helix.
+enum MemberClass : uint8_t {
+    Class_Pair,
+    Class_Step,
+    Class_Nucleotide,
+    Class_Count,
+};
+constexpr int MAX_CLASS_PARAMETERS = 10;
+int class_first_metric(int cls);
+int class_parameter_count(int cls);
+MemberClass metric_class(Metric metric);
+const char* class_name(int cls);       // "Intra-base pair", "Inter-base pair", "Nucleotide"
+const char* class_csv_name(int cls);   // "bp", "step", "nt"
+inline uint32_t class_all_parameters(int cls) { return (1u << class_parameter_count(cls)) - 1u; }
+
 
 struct BaseFrame {
     vec3_t origin = {};
@@ -47,7 +78,16 @@ struct Pair {
     uint32_t b = 0;
 };
 
+// Sugar-phosphate atoms of one nucleotide: its own, the previous nucleotide's O3' and the next one's P and O5'
+// along the strand, and the glycosidic N with the base atom defining chi (C4 purine / C2 pyrimidine).
+enum BackboneAtom : int {
+    BB_P, BB_O5, BB_C5, BB_C4, BB_C3, BB_O3, BB_C1, BB_C2, BB_O4,
+    BB_PrevO3, BB_NextP, BB_NextO5, BB_GlycosidicN, BB_ChiBase,
+    BB_Count,
+};
+
 struct BaseTopology {
+    int32_t backbone[BB_Count] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
     uint32_t component = 0;
     uint32_t strand = 0;
     uint32_t chain_order = UINT32_MAX;
@@ -77,8 +117,13 @@ enum SampleQuality : uint16_t {
     Quality_MissingAtoms = 1 << 9,
     Quality_NoPairContacts = 1 << 10,
     Quality_NoncanonicalPair = 1 << 11,
+    Quality_DegenerateNucleotide = 1 << 12,
+    Quality_UnusualBond = 1 << 13,
+    Quality_PoorPuckerFit = 1 << 14,
 };
-constexpr uint16_t Quality_Last = Quality_NoncanonicalPair;
+constexpr uint16_t Quality_Last = Quality_PoorPuckerFit;
+constexpr uint16_t Quality_NucleotideWarnings = Quality_UnusualBond | Quality_PoorPuckerFit;
+using NucleotideQuality = std::array<uint16_t, 10>; // Alpha..EpsilonZeta, per parameter
 
 uint16_t pair_quality(const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr);
 const char* quality_description(uint16_t flag);
@@ -126,6 +171,15 @@ struct MemberStatistics {
     double sd = 0.0;
     size_t count = 0;
     bool angular = false;
+    int state = -1;            // dominant conformational state, for occupancy display
+    float state_fraction = 0;  // share of valid samples in that state
+    struct Reference {
+        double mean = 0, sd = 0;
+        size_t count = 0;
+    };
+    int state_metric = -1;
+    std::array<Reference, 3> state_references = {};
+    Reference reference(float value) const;
     double deviation(float value) const;
     float zscore(float value) const;
     bool is_outlier(float value, float sigma) const;
@@ -139,8 +193,41 @@ struct MetricStatistics {
 
 // Angular series are unwrapped around their circular mean before the baseline is computed, so
 // series that never approach +/-180 degrees from it give exactly the linear result.
+// State metrics use a separate baseline within each conformational state. State switches are detected
+// separately by residence time, not by distance from the dominant state's center.
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
-                        bool angular = false, Baseline baseline = Baseline_MeanSD);
+                        bool angular = false, Baseline baseline = Baseline_MeanSD, int state_metric = -1);
+
+// Conformational states of bimodal nucleotide parameters; 0 states for other metrics.
+int metric_state_count(Metric metric);
+int metric_state(Metric metric, float value); // -1 when not a state metric or not finite
+const char* metric_state_name(Metric metric, int state);
+
+// Dihedral angle a-b-c-d in degrees (-180, 180], with minimum-image bond vectors; NaN for missing atoms.
+float torsion(vec3_t a, vec3_t b, vec3_t c, vec3_t d, const md_unitcell_t* cell = nullptr);
+// Altona-Sundaralingam pseudorotation from nu0..nu4 (degrees): phase in [0, 360) and amplitude.
+void pseudorotation(const float nu[5], float* phase, float* amplitude);
+// Fills Alpha..EpsilonZeta and optional per-parameter quality; present_atoms distinguishes absent
+// topology atoms from nonfinite coordinates. Distortion warnings retain finite values.
+// A zero-amplitude sugar has undefined phase but retains its finite amplitude.
+void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell = nullptr,
+                        NucleotideQuality* quality = nullptr, uint32_t present_atoms = (1u << BB_Count)-1);
+// 3DNA direct P-P groove widths (El Hassan & Calladine 1998) minus 5.8 A, for the n - 1 steps of one helix
+// of n consecutive pairs. p1/p2: phosphorus of the strand I / strand II nucleotide of each pair (non-finite
+// when missing). Minor (1-based step i) = mean(|P1(i+2) - P2(i-2)|, |P1(i+3) - P2(i-1)|), major = |P1(i-1) - P2(i+2)|;
+// NaN when an index falls outside the helix.
+void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p2, size_t n,
+                   const md_unitcell_t* cell = nullptr);
+// Pair chains linked by steps (step.a -> step.b), each in helix order.
+std::vector<std::vector<uint32_t>> helix_chains(size_t pair_count, const std::vector<StepIndex>& steps);
+// Zero-based phosphate indices on strands I and II, in helix order.
+struct GroovePhosphates {
+    std::array<std::array<uint32_t, 2>, 2> indices = {};
+    size_t count = 0;
+};
+GroovePhosphates groove_phosphate_indices(Metric metric, size_t step, size_t pair_count);
+// Defining atoms for a true nucleotide torsion; -1 for unavailable atoms or a derived parameter.
+std::array<int32_t, 4> nucleotide_torsion_atoms(const BaseTopology& base, Metric metric);
 
 struct DistributionComparison {
     std::vector<double> centers, density; // density is member-major, shared bins
@@ -150,20 +237,30 @@ struct DistributionComparison {
 bool compute_distributions(DistributionComparison* out, const std::vector<float>& values,
                            size_t member_count, size_t bins = 48);
 
+struct EventDistribution {
+    std::vector<double> samples, density;
+    size_t missing = 0;
+    double median = 0, minimum = 0, maximum = 0;
+};
+// Inclusive event span, for one member, using the full-trajectory histogram's bins.
+bool compute_event_distribution(EventDistribution* out, const std::vector<float>& values,
+                                size_t member_count, size_t member, size_t begin, size_t end,
+                                const DistributionComparison& reference);
+
 struct FrameOutliers {
     size_t outliers = 0;
     size_t valid = 0;
 };
 
-// One member (base pair or step) in one frame that takes part in event detection: outlying at the
-// lower "continue" threshold, or a base pair whose pairing was lost. z holds all six signed z-scores.
+// One member (base pair, step or nucleotide) in one frame that takes part in event detection: outlying at the
+// lower "continue" threshold, or a base pair whose pairing was lost. z holds the class's signed z-scores.
 struct MemberOutlier {
     uint32_t member = 0;
-    bool step = false;
+    uint8_t cls = Class_Pair;
     bool lost = false;          // base pair only: pairing broke in this frame (no values)
-    uint32_t contributors = 0;  // bits 0-5 within the class, |z| >= continue threshold
+    uint32_t contributors = 0;  // parameter bits within the class, |z| >= continue threshold
     uint32_t strong = 0;        // subset of contributors with |z| >= start threshold
-    float z[6] = {};
+    float z[MAX_CLASS_PARAMETERS] = {};
 };
 
 // A member's involvement over a whole event.
@@ -174,15 +271,15 @@ struct EventMember {
         bool lost = false;
     };
     uint32_t member = 0;
-    bool step = false;
+    uint8_t cls = Class_Pair;
     uint32_t parameters = 0;   // union of contributing parameter bits
     size_t frames = 0;         // frames of the event in which the member is outlying or lost
     size_t lost_frames = 0;    // of which the pair was lost
     size_t peak = 0;           // frame of its most extreme contributing z-score (first lost frame if none)
     float peak_z = 0;
-    int peak_parameter = -1;   // 0-5 within the class
-    size_t parameter_peak[6] = {};
-    float parameter_peak_z[6] = {};
+    int peak_parameter = -1;   // index within the class
+    size_t parameter_peak[MAX_CLASS_PARAMETERS] = {};
+    float parameter_peak_z[MAX_CLASS_PARAMETERS] = {};
     std::vector<Sample> samples; // Frame-sorted contributions belonging to this event, excluding bridged gaps.
 };
 
@@ -191,6 +288,8 @@ const EventMember::Sample* event_member_sample(const EventMember& member, size_t
 struct OutlierEvent {
     size_t parent = SIZE_MAX;  // Index in the returned event list, SIZE_MAX for a top-level event.
     float burst_sigma = 0;    // Child start threshold; zero for a top-level event.
+    bool residual = false;    // Child detected against the parent's background (residual z), not raw z.
+    bool truncated_begin = false, truncated_end = false;
     size_t begin = 0, end = 0, peak = 0, peak_count = 0;
     float severity = 0;        // peak |z|
     float score = 0;           // sum over (frame, member) of the largest contributing |z|; lost samples count lost_weight
@@ -204,7 +303,7 @@ struct OutlierEvent {
 
 struct EventContribution {
     uint32_t member = 0;
-    bool step = false;
+    uint8_t cls = Class_Pair;
     uint32_t parameters = 0;
     bool lost = false;
 };
@@ -214,10 +313,15 @@ struct EventContribution {
 std::vector<EventContribution> event_contributions(const std::vector<OutlierEvent>& events, size_t frame,
                                                   size_t inspected_event = SIZE_MAX);
 
-// Stable colour slots in input order; inclusive overlapping intervals never share a slot.
+constexpr size_t EVENT_COLOR_COUNT = 6;
+// Chronological palette cycling; inclusive overlaps never share a slot. Higher scores get first
+// choice, so overflow slots beyond EVENT_COLOR_COUNT belong to weaker simultaneous events.
 std::vector<size_t> event_color_slots(const std::vector<OutlierEvent>& events);
 
 struct EventOptions {
+    std::vector<double> times; // Optional strictly increasing timestamps, one per frame.
+    double min_duration = 0, max_gap_duration = 0; // Same unit as times.
+    size_t first_frame = 0, last_frame = SIZE_MAX; // Inclusive detection range.
     size_t min_frames = 1;   // drop events with fewer outlying frames
     size_t max_gap = 0;      // bridge up to this many consecutive frames without outliers
     int neighbourhood = 2;   // join members at most this many base pairs apart along the helix; < 0: whole structure
@@ -225,10 +329,41 @@ struct EventOptions {
     float burst_sigma = 0;   // >0 enables a second, higher-threshold level of localized child events.
     float burst_hysteresis = 0.5f;
     int burst_neighbourhood = 2; // Local reach for children when the parent uses Whole structure.
+    // Background mode (with burst_sigma > 0, residual_sigma > 0 and member_z): children are detected on residual
+    // z = z - median signed z, per frame and parameter, of all valid members of the same class in the parent's
+    // base-pair region (needs at least background_min_members). A global shift cancels; a local burst stands out.
+    float residual_sigma = 0;
+    size_t background_min_members = 5;
+    std::function<float(size_t frame, int cls, uint32_t member, int parameter)> member_z; // NaN when invalid
 };
 
+struct StateSwitch {
+    Metric metric = Phase;
+    uint32_t member = 0;
+    size_t begin = 0, end = 0;
+    int from = -1, to = -1;
+    float angular_change = 0; // shortest signed difference between source/destination run circular means
+    size_t source_begin = 0, source_end = 0;
+    // Clipped means the run touches a detection boundary; its full residence is unknown.
+    bool source_clipped = false, destination_clipped = false;
+    bool destination_at_trajectory_end = false;
+    size_t intervening_samples() const { return begin > source_end ? begin-source_end-1 : 0; }
+};
+// Both source and destination runs must meet min_duration (or min_frames without timestamps).
+// Short excursions are ignored; missing values reset the source. No transitions inferred at range boundaries.
+bool detect_state_switches(std::vector<StateSwitch>* out, const std::vector<float>& values,
+                           size_t members, Metric metric, const EventOptions& options);
+const char* csv_state_switch_header();
+std::string csv_state_switch_row(const std::string& run, const std::string& label, const StateSwitch& change,
+                                 double begin, double end, const std::string& time_unit, double min_residence,
+                                 double source_begin, double source_end);
+
+// Resolve inclusive physical-time bounds to sampled frame bounds. Reports invalid/empty ranges.
+bool event_time_range(EventOptions* options, double begin, double end);
+
 // Groups outlying (frame, member) samples into events. Two samples join when they are at most
-// max_gap + 1 frames apart and at most 'neighbourhood' base pairs apart along the helix: pair i
+// max_gap + 1 frames apart (or within max_gap_duration of quiet time when times are supplied)
+// and at most 'neighbourhood' base pairs apart along the helix: pair i
 // and pair j are |i - j| apart when steps link them, a step sits half-way between its two pairs,
 // and members of different duplexes never join. An event needs at least one strong (start
 // threshold) or lost sample; weak samples only extend events (hysteresis). Events are ordered by
@@ -240,7 +375,7 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
 // Short rule-based description from the dominant parameter and its sign, e.g. "Unwinding",
 // "Opening (breathing / flip)"; "Pair loss" leads when a pair broke.
 std::string event_kind(const OutlierEvent& event);
-// Index (0-11) of the parameter with the largest summed |z|, -1 when none.
+// Index (Metric) of the parameter with the largest summed |z|, -1 when none.
 int event_dominant_metric(const OutlierEvent& event);
 
 // Probability that a member with 'parameters' independent Gaussian parameters has at least one
@@ -258,6 +393,9 @@ struct CsvEventRow {
     bool contributing = false;
     size_t parent_event = 0; // One-based parent ID, zero for a top-level event.
     float burst_sigma = 0;
+    bool residual = false;
+    bool truncated_begin = false, truncated_end = false;
+    double min_duration = 0, max_gap_duration = 0, detection_begin = 0, detection_end = 0;
 };
 const char* csv_event_header();
 std::string csv_event_row(const CsvEventRow& row);
@@ -332,8 +470,9 @@ uint16_t evaluate_pair_contacts(uint8_t* count, const PairChemistry& pair,
 
 struct FrameAnalysis {
     std::vector<BasePairFrame> pair_frames;
-    std::vector<Values> pair_values, step_values;
+    std::vector<Values> pair_values, step_values, nucleotide_values; // nucleotide member 2p + side
     std::vector<uint16_t> pair_quality, step_quality;
+    std::vector<NucleotideQuality> nucleotide_quality;
     std::vector<uint8_t> contacts;
 };
 bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
@@ -354,11 +493,12 @@ bool publish_series(md_attributes_t* table, const std::string& run, const char* 
                      const void* data, size_t bytes, md_unit_t unit);
 
 // The six step values use consecutive pair midpoint frames.
-bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b);
+bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, BasePairFrame* midpoint = nullptr);
 
 const char* metric_name(Metric metric);
 const char* metric_path(Metric metric);
 bool metric_is_step(Metric metric);
 bool metric_is_angular(Metric metric);
+bool metric_uses_degrees(Metric metric);
 
 } // namespace lavery

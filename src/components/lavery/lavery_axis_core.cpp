@@ -123,6 +123,40 @@ bool compute_distributions(DistributionComparison* out, const std::vector<float>
     return true;
 }
 
+bool compute_event_distribution(EventDistribution* out, const std::vector<float>& values,
+                                size_t member_count, size_t member, size_t begin, size_t end,
+                                const DistributionComparison& reference) {
+    if (!out || !member_count || member >= member_count || values.size() % member_count ||
+        begin > end || end >= values.size() / member_count ||
+        (!reference.centers.empty() && (!std::isfinite(reference.bin_width) || reference.bin_width <= 0))) {
+        MD_LOG_ERROR("Lavery: invalid event distribution dimensions");
+        return false;
+    }
+    *out = {};
+    out->density.assign(reference.centers.size(), 0);
+    const double lo = reference.centers.empty() ? 0 : reference.centers.front() - reference.bin_width * 0.5;
+    for (size_t f = begin; f <= end; ++f) {
+        const double v = values[f * member_count + member];
+        if (!std::isfinite(v)) { ++out->missing; continue; }
+        if (reference.centers.empty()) {
+            MD_LOG_ERROR("Lavery: finite event sample without reference distribution bins");
+            return false;
+        }
+        out->samples.push_back(v);
+        const size_t bin = std::min(reference.centers.size() - 1,
+            (size_t)std::max(0.0, (v - lo) / reference.bin_width));
+        ++out->density[bin];
+    }
+    if (out->samples.empty()) return true;
+    std::sort(out->samples.begin(), out->samples.end());
+    const size_t n = out->samples.size();
+    out->minimum = out->samples.front();
+    out->maximum = out->samples.back();
+    out->median = n % 2 ? out->samples[n / 2] : (out->samples[n / 2 - 1] + out->samples[n / 2]) * 0.5;
+    for (auto& density : out->density) density /= n * reference.bin_width;
+    return true;
+}
+
 std::string csv_axis(const std::string& run, double frame, const AxisPath& axis) {
     if (axis.points.size() != axis.tangents.size() || axis.offsets.empty() ||
         axis.offsets.front() != 0 || axis.offsets.back() != axis.points.size() ||

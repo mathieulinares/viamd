@@ -27,6 +27,7 @@
 #include <imgui_notify.h>
 #include <implot.h>
 #include <implot_internal.h>
+#include <cmath>
 
 mat3_t mat3_PCA(const vec4_t* xyzw, size_t count) {
     vec3_t acc = vec3_zero();
@@ -2017,7 +2018,25 @@ struct WorkspacePending {
     vec4_t box_color;
 };
 
+void reset_measurement_style(ApplicationState* app) {
+    app->script.point_color = {1,0,0,0.8f};
+    app->script.line_color = {0,0,0,0.6f};
+    app->script.triangle_color = {0.55f,0.55f,1.0f,0.5f};
+    app->script.line_width = 1.0f;
+}
+
+void draw_measurement_style_controls(ApplicationState* app) {
+    ImGui::TextWrapped("Shared with VIAMD script measurements (distance, angle and dihedral).");
+    ImGui::SliderFloat("Line thickness", &app->script.line_width, 1, 6, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SliderFloat("Line opacity", &app->script.line_color.w, 0, 1, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SliderFloat("Plane opacity", &app->script.triangle_color.w, 0, 1, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::ColorEdit4("Point colour", app->script.point_color.elem);
+    ImGui::ColorEdit3("Line colour", app->script.line_color.elem);
+    ImGui::ColorEdit3("Plane colour", app->script.triangle_color.elem);
+}
+
 static void workspace_reset(ApplicationState* data) {
+    reset_measurement_style(data);
     remove_all_selections(data);
     remove_all_representations(data);
     data->editor.SetText("");
@@ -2300,6 +2319,21 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     str_t str;
                     viamd::extract_str(str, arg);
                     data->editor.SetText(std::string(str.ptr, str.len));
+                } else if (str_eq(ident, STR_LIT("MeasurementLineWidth"))) {
+                    float width = data->script.line_width;
+                    if (!viamd::extract_flt(width, arg) || !std::isfinite(width) || width < 1 || width > 6)
+                        MD_LOG_ERROR("Workspace: measurement line width must be finite and between 1 and 6");
+                    else data->script.line_width = width;
+                } else if (str_eq(ident, STR_LIT("MeasurementPointColor")) ||
+                           str_eq(ident, STR_LIT("MeasurementLineColor")) ||
+                           str_eq(ident, STR_LIT("MeasurementPlaneColor"))) {
+                    vec4_t color = {};
+                    bool valid = viamd::extract_vec4(color, arg);
+                    for (float c : color.elem) valid &= std::isfinite(c) && c >= 0 && c <= 1;
+                    if (!valid) MD_LOG_ERROR("Workspace: measurement colours must be finite and between 0 and 1");
+                    else if (str_eq(ident, STR_LIT("MeasurementPointColor"))) data->script.point_color = color;
+                    else if (str_eq(ident, STR_LIT("MeasurementLineColor"))) data->script.line_color = color;
+                    else data->script.triangle_color = color;
                 }
             }
         } else if (str_eq(section, STR_LIT("Selection"))) {
@@ -2644,6 +2678,10 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         std::string text = app_state->editor.GetText();
         viamd::write_section_header(state, STR_LIT("Script"));
         viamd::write_str(state, STR_LIT("Text"), str_t{text.c_str(), text.size()});
+        viamd::write_flt(state, STR_LIT("MeasurementLineWidth"), app_state->script.line_width);
+        viamd::write_vec4(state, STR_LIT("MeasurementPointColor"), app_state->script.point_color);
+        viamd::write_vec4(state, STR_LIT("MeasurementLineColor"), app_state->script.line_color);
+        viamd::write_vec4(state, STR_LIT("MeasurementPlaneColor"), app_state->script.triangle_color);
     }
 
     for (size_t i = 0; i < md_array_size(app_state->selection.stored_selections); ++i) {
