@@ -77,7 +77,7 @@ The Lavery core regressions also cover rejection of broken fixed
 partners, stale-frame clearing, adjoining-step invalidation, exclusion from
 statistics, periodic pairing, geometric quality flags, missing/unsupported fit diagnostics,
 multi-parameter contributor masks and strict sigma thresholds, consecutive event
-grouping and peak tracking, and the CSV record's 23-column shape, escaping,
+grouping and peak tracking, and the parameter/event CSV records' 27/41-column shapes, escaping,
 units, baselines, validity and outlier flags. Run without launching the GUI:
 
 ```
@@ -93,6 +93,69 @@ run-relative script compilation **and evaluation**, publication/replacement and
 cleanup. Task-system regressions cover cooperative interruption inside a single
 callback and a queued callback interrupted before execution. No GUI launch is
 needed for these checks.
+
+Pooled-reference regressions cover persistent local anomalies, separate helices,
+singleton pairs, pair/step/nucleotide grouping, baseline intervals, missing
+samples, circular and within-state references, unchanged own-history behavior,
+full-span anomalous regions, and exported reference-scope metadata.
+
+Display-summary regressions exercise 500,000 frames, strided series,
+single-frame positive/negative peaks, missing-data breaks, exact samples on
+zoom, refined range boundaries, signed heatmap peak selection, and empty/invalid
+inputs. They assert bounded output size and report construction/query timings;
+they are not an end-to-end GUI FPS benchmark.
+Maximum-shown-duration tests cover elapsed physical time, ps/ns scaling,
+inclusive frame fallback, exact thresholds, singleton spans, bridged gaps,
+independent children under hidden parents, Unlimited and invalid input rejection.
+
+Categorical-state regressions cover complete directional-contact evidence,
+conservative WC/A-T/U Hoogsteen orientation, ambiguous versus unpaired versus
+unavailable, hydrogen-free annotations, missing hydrogen coordinates, reversible
+pair separation, raw-run preservation, exact residence thresholds, unavailable
+source resets and restricted ranges. Categorical display summaries exercise
+500000 frames and retain one-frame state changes and missing-data mixtures.
+
+```
+build/bin/viamd_test --filter='lavery_core.display_summary*'
+```
+
+### Local trajectory validation
+
+The opt-in production-pipeline test accepts a matching GRO structure and XTC
+trajectory. For TPR inputs, extract the structure with `gmx editconf -f input.tpr
+-o input.gro`; do not change the atom selection relative to the XTC.
+
+```
+VIAMD_LAVERY_VALIDATION_GRO=/path/input.gro \
+VIAMD_LAVERY_VALIDATION_XTC=/path/input.xtc \
+build/bin/viamd_test --filter=lavery_core.optional_local_trajectory_measurement_validation
+```
+
+This processes every frame, prints per-pair rejection reasons, cross-checks
+native dihedrals and phosphate distances, and tests both statistical baselines,
+first-quarter reference intervals, and middle-half event/state-switch search
+intervals. Duration sweeps scale with the median sampling interval. Timings
+separate frame analysis from statistics; the test's peak memory includes its
+reference arrays and event sensitivity sweeps, not just application analysis.
+It also reports the strongest pooled-helix Rise anomaly and its fraction of
+finite samples above 2.5 sigma for both statistical methods.
+
+For a small sampled XTC, set `VIAMD_LAVERY_VALIDATION_EXPORT` to an existing
+directory to export unwrapped PDB snapshots and `viamd.csv`. Each helix has a
+`pairing_N.txt` selection file; `members.csv` maps global pair/step indices to
+components. The legacy `pairing.txt` selects the first helix only. Curves+ skips
+protein residues when numbering its input, so remove proteins and remap the
+component selections to the resulting nucleotide order before running it.
+Independent comparisons must also account for Curves+'s helix-direction sign
+normalization in strongly distorted structures. Its groove and sugar-pucker
+definitions are not identical to the production measurements.
+
+Snapshot export also writes `pairing-states.csv` (raw frame/pair chemistry and
+canonical contact counts) and checks invariance under periodic unwrapping.
+Alternatively set `VIAMD_LAVERY_VALIDATION_PAIRING=/path/pairing.csv` to export
+only those state records without writing PDBs, useful for full event windows.
+Chemistry labels require explicit donor hydrogens; heavy-atom-only fixtures
+retain their original numerical geometry but are annotated Unavailable.
 
 `src/components/lavery/tests/test_lavery_core.cpp` checks all 12 intra-pair and
 step metrics against the numerical oracle in its `data/` folder. The oracle was

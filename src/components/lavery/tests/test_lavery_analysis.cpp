@@ -67,6 +67,10 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     ASSERT_GT(pairs.size(), (size_t)0);
     const auto steps = gather_steps(sys, bases, pairs.data(), pairs.size());
     const auto chains = helix_chains(pairs.size(), steps);
+    printf("Local topology: %zu bases, %zu helix chains\n", bases.size(), chains.size());
+    for (size_t c = 0; c < chains.size(); ++c) {
+        printf("Helix %zu: %zu pairs\n", c+1, chains[c].size());
+    }
     const char* curves_dir = std::getenv("VIAMD_LAVERY_VALIDATION_CURVES");
     std::array<std::vector<float>, Metric_Count> reference;
     std::array<std::vector<bool>, Metric_Count> reference_seen;
@@ -111,16 +115,44 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     if (snapshot_dir) {
         ASSERT_TRUE(std::filesystem::is_directory(snapshot_dir));
         // Explicit pair ordering avoids redetecting a different duplex in the reference tool.
-        ASSERT_EQ(chains.size(), (size_t)1);
-        ASSERT_EQ(chains[0].size(), pairs.size());
+        ASSERT_GT(chains.size(), (size_t)0);
     }
     std::ofstream exported_values;
+    std::ofstream exported_pairing;
+    const char* pairing_path = std::getenv("VIAMD_LAVERY_VALIDATION_PAIRING");
+    if (pairing_path || snapshot_dir) {
+        exported_pairing.open(pairing_path ? std::filesystem::path(pairing_path) : std::filesystem::path(snapshot_dir)/"pairing-states.csv");
+        ASSERT_TRUE(exported_pairing.good());
+        exported_pairing << "frame,pair,component_a,component_b,state,canonical_contacts\n";
+    }
     if (snapshot_dir) {
         exported_values.open(std::filesystem::path(snapshot_dir)/"viamd.csv");
         ASSERT_TRUE(exported_values.good());
         exported_values << "frame,class,member,metric,value\n";
         std::ofstream pairing(std::filesystem::path(snapshot_dir)/"pairing.txt");
         ASSERT_TRUE(pairing.good());
+        for (size_t c = 0; c < chains.size(); ++c) {
+            std::ofstream chain_pairing(std::filesystem::path(snapshot_dir)/("pairing_"+std::to_string(c)+".txt"));
+            ASSERT_TRUE(chain_pairing.good());
+            chain_pairing << "2 1 -1 0 0\n";
+            for (int side = 0; side < 2; ++side) {
+                for (uint32_t p : chains[c]) {
+                    chain_pairing << bases[side ? pairs[p].b : pairs[p].a].component+1 << ' ';
+                }
+                chain_pairing << '\n';
+            }
+            ASSERT_TRUE(chain_pairing.good());
+        }
+        std::ofstream topology(std::filesystem::path(snapshot_dir)/"members.csv");
+        ASSERT_TRUE(topology.good());
+        topology << "class,member,a,b\n";
+        for (size_t p = 0; p < pairs.size(); ++p) {
+            topology << "0," << p << ',' << bases[pairs[p].a].component+1 << ',' << bases[pairs[p].b].component+1 << '\n';
+        }
+        for (size_t s = 0; s < steps.size(); ++s) {
+            topology << "1," << s << ',' << steps[s].a << ',' << steps[s].b << '\n';
+        }
+        ASSERT_TRUE(topology.good());
         pairing << "2 1 -1 0 0\n";
         for (int side = 0; side < 2; ++side) {
             for (uint32_t p : chains[0]) {
@@ -145,6 +177,11 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         FrameAnalysis result;
         const auto analysis_begin = std::chrono::steady_clock::now();
         ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
+        ASSERT_EQ(result.pairing_states.size(), pairs.size());
+        if (exported_pairing.is_open()) for (size_t p = 0; p < pairs.size(); ++p)
+            exported_pairing << f << ',' << p+1 << ',' << bases[pairs[p].a].component+1 << ','
+                << bases[pairs[p].b].component+1 << ',' << pairing_state_name(result.pairing_states[p]) << ','
+                << (unsigned)result.contacts[p] << '\n';
         ASSERT_EQ(result.nucleotide_quality.size(), result.nucleotide_values.size());
         for (size_t n = 0; n < result.nucleotide_values.size(); ++n) {
             for (int id = Alpha; id <= (int)EpsilonZeta; ++id) {
@@ -211,6 +248,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             whole.unitcell = {};
             FrameAnalysis unwrapped;
             ASSERT_TRUE(analyze_frame(&unwrapped, sys, whole, bases, pairs, steps, validator));
+            for (size_t p = 0; p < pairs.size(); ++p) EXPECT_EQ(unwrapped.pairing_states[p], result.pairing_states[p]);
             for (int id = 0; id < (int)Metric_Count; ++id) {
                 const auto cls = metric_class((Metric)id);
                 const auto& rows = cls == Class_Pair ? unwrapped.pair_values :
@@ -329,6 +367,16 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             EXPECT_GE(time_data[change.end]-time_data[change.begin], state_options.min_duration);
             EXPECT_LE(std::fabs(change.angular_change), 180.0f);
         }
+        auto restricted_options = state_options;
+        restricted_options.first_frame = frames/4;
+        restricted_options.last_frame = frames-1-frames/4;
+        std::vector<StateSwitch> restricted_changes;
+        ASSERT_TRUE(detect_state_switches(&restricted_changes, values[id], 2*pairs.size(), (Metric)id, restricted_options));
+        for (const auto& change : restricted_changes) {
+            EXPECT_GE(change.source_begin, restricted_options.first_frame);
+            EXPECT_LE(change.end, restricted_options.last_frame);
+            EXPECT_GE(time_data[change.end]-time_data[change.begin], restricted_options.min_duration);
+        }
         size_t outliers = 0;
         for (size_t f = 0; f < frames; ++f) for (size_t m = 0; m < 2*pairs.size(); ++m) {
             const float v = values[id][f*2*pairs.size()+m];
@@ -344,6 +392,10 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         ASSERT_TRUE(exported_values.good());
         printf("Reference export: %zu PDB snapshots, explicit pairing and viamd.csv in %s\n", frames, snapshot_dir);
     }
+    if (exported_pairing.is_open()) {
+        exported_pairing.close();
+        ASSERT_TRUE(exported_pairing.good());
+    }
     for (int id = (int)Alpha; id <= (int)EpsilonZeta; ++id) {
         const auto metric = (Metric)id;
         if (!metric_state_count(metric)) continue;
@@ -357,7 +409,8 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             printf(" %s=%zu", metric_state_name(metric, s), occupancy[s]);
         }
         printf("\n");
-        for (double residence : {10.0, 25.0, 50.0, 100.0}) {
+        for (double scale : {0.5, 1.0, 2.0, 5.0}) {
+            const double residence = scale*state_options.min_duration;
             auto options = state_options;
             options.min_duration = residence;
             std::vector<StateSwitch> changes;
@@ -374,7 +427,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                 for (size_t f = change.source_begin; f <= change.source_end; ++f) {
                     EXPECT_EQ(metric_state(metric, values[id][f*members[Class_Nucleotide]+change.member]), change.from);
                 }
-                if (residence == 50.0) {
+                if (scale == 1.0) {
                     printf("Switch candidate %s bp %u%c: %s -> %s, %.0f-%.0f ps, change %.2f deg\n",
                         metric_name(metric), change.member/2+1, change.member%2 ? 'b' : 'a',
                         metric_state_name(metric, change.from), metric_state_name(metric, change.to),
@@ -394,7 +447,58 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     printf("Pair quality: %zu/%zu flagged samples\n",
         (size_t)std::count_if(pair_quality.begin(), pair_quality.end(), [](uint16_t q) { return q != Quality_Good; }),
         pair_quality.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        size_t valid = 0;
+        std::array<size_t, 16> reasons = {};
+        for (size_t f = 0; f < frames; ++f) {
+            const uint16_t q = pair_quality[f*pairs.size()+p];
+            valid += q == Quality_Good;
+            for (size_t bit = 0; bit < reasons.size(); ++bit) reasons[bit] += (q & (1u << bit)) != 0;
+        }
+        printf("Pair %zu (components %u/%u): %zu/%zu good", p+1,
+            bases[pairs[p].a].component+1, bases[pairs[p].b].component+1, valid, frames);
+        for (size_t bit = 0; bit < reasons.size(); ++bit) {
+            if (reasons[bit]) printf("; %s=%zu", quality_description((uint16_t)(1u << bit)), reasons[bit]);
+        }
+        printf("\n");
+    }
     for (int baseline = 0; baseline < Baseline_Count; ++baseline) {
+        if (!steps.empty()) {
+            MetricStatistics pooled_rise;
+            const auto groups = helix_member_groups(pairs.size(), steps, Class_Step);
+            ASSERT_TRUE(compute_statistics(&pooled_rise, values[Rise], steps.size(), false, (Baseline)baseline,
+                -1, 0, SIZE_MAX, groups));
+            size_t strongest = 0;
+            double peak_mean_z = -1;
+            size_t above = 0, own_above = 0, available = 0;
+            std::vector<float> own_values(frames);
+            for (size_t m = 0; m < steps.size(); ++m) {
+                double sum = 0;
+                size_t finite = 0;
+                for (size_t f = 0; f < frames; ++f) {
+                    const float v = values[Rise][f * steps.size() + m];
+                    if (!std::isfinite(v)) continue;
+                    sum += pooled_rise.members[m].zscore(v);
+                    ++finite;
+                }
+                if (finite && std::fabs(sum / finite) > peak_mean_z) {
+                    strongest = m;
+                    peak_mean_z = std::fabs(sum / finite);
+                }
+            }
+            for (size_t f = 0; f < frames; ++f) {
+                const float v = values[Rise][f * steps.size() + strongest];
+                own_values[f] = v;
+                available += std::isfinite(v);
+                above += pooled_rise.members[strongest].is_outlier(v, 2.5f);
+            }
+            MetricStatistics own_rise;
+            ASSERT_TRUE(compute_statistics(&own_rise, own_values, 1, false, (Baseline)baseline));
+            for (float v : own_values) own_above += own_rise.members[0].is_outlier(v, 2.5f);
+            printf("Pooled Rise %s: strongest step %zu (pairs %u-%u), |mean z| %.3f; %zu/%zu finite samples above 2.5 sigma (own history %zu/%zu)\n",
+                baseline_name((Baseline)baseline), strongest+1, steps[strongest].a+1, steps[strongest].b+1,
+                peak_mean_z, above, available, own_above, available);
+        }
         const auto stats_begin = std::chrono::steady_clock::now();
         std::array<MetricStatistics, Metric_Count> stats;
         std::array<DistributionComparison, Metric_Count> distributions;
@@ -404,6 +508,16 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             const size_t count = members[metric_class(metric)];
             ASSERT_TRUE(compute_statistics(&stats[id], values[id], count, metric_is_angular(metric), (Baseline)baseline,
                 metric_state_count(metric) ? id : -1));
+            const size_t reference_end = std::max<size_t>(1, frames/4);
+            MetricStatistics restricted;
+            ASSERT_TRUE(compute_statistics(&restricted, values[id], count, metric_is_angular(metric), (Baseline)baseline,
+                metric_state_count(metric) ? id : -1, 0, reference_end));
+            EXPECT_EQ(restricted.heatmap.size(), values[id].size());
+            for (size_t m = 0; m < count; ++m) {
+                size_t finite = 0;
+                for (size_t f = 0; f < reference_end; ++f) finite += std::isfinite(values[id][f*count+m]);
+                EXPECT_EQ(restricted.members[m].count, finite);
+            }
             auto& distribution = distributions[id];
             ASSERT_TRUE(compute_distributions(&distribution, values[id], count));
             size_t finite = 0;
@@ -460,7 +574,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                     if (!samples[f].empty()) ++active_frames;
                 }
                 const double prepare_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-prepare_begin).count();
-                for (double duration : {10.0, 50.0}) for (bool background : {false, true}) {
+                for (double duration : {state_options.min_duration, 5*state_options.min_duration}) for (bool background : {false, true}) {
                     auto options = state_options;
                     options.min_duration = duration;
                     options.lost_weight = sigma;
@@ -504,6 +618,17 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                         baseline_name((Baseline)baseline), scope_name[scope], sigma, sigma-0.5f, duration,
                         background ? "background" : "stronger", parents, events.size()-parents, covered, frames,
                         active_frames, prepare_ms, detect_ms);
+                    options.first_frame = frames/4;
+                    options.last_frame = frames-1-frames/4;
+                    const auto restricted_events = detect_events(samples, pairs.size(), steps, options);
+                    for (const auto& event : restricted_events) {
+                        EXPECT_GE(event.begin, options.first_frame);
+                        EXPECT_LE(event.end, options.last_frame);
+                        for (const auto& member : event.members) for (const auto& sample : member.samples) {
+                            EXPECT_GE(sample.frame, options.first_frame);
+                            EXPECT_LE(sample.frame, options.last_frame);
+                        }
+                    }
                 }
             }
         }
@@ -706,12 +831,14 @@ UTEST(lavery_core, production_frame_analysis_checks_chemistry_and_recovers_after
     EXPECT_EQ(std::count(result.step_quality.begin(), result.step_quality.end(), (uint16_t)Quality_Good), 144);
     EXPECT_EQ(with_hydrogens, pairs.size());
     const size_t p = 50;
+    EXPECT_EQ(result.pairing_states[p], Pairing_WatsonCrick);
     const auto original = result.pair_values[p];
     const auto range = md_component_atom_range(&sys.component, bases[pairs[p].b].component);
     std::vector<vec3_t> saved(state.xyz + range.beg, state.xyz + range.end);
     for (size_t i = range.beg; i < range.end; ++i) state.xyz[i] = vec3_add(state.xyz[i], {12, 0, 0});
     ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
     EXPECT_TRUE(result.pair_quality[p] & Quality_NoPairContacts);
+    EXPECT_EQ(result.pairing_states[p], Pairing_Unpaired);
     EXPECT_TRUE(std::isnan(result.pair_values[p].metric[Buckle]));
     EXPECT_EQ(vec3_length(result.pair_frames[p].z), 0);
     for (size_t s = 0; s < steps.size(); ++s) {
@@ -723,6 +850,15 @@ UTEST(lavery_core, production_frame_analysis_checks_chemistry_and_recovers_after
     ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
     EXPECT_EQ(result.pair_quality[p], (uint16_t)Quality_Good);
     EXPECT_NEAR(result.pair_values[p].metric[Buckle], original.metric[Buckle], 1.0e-5f);
+    EXPECT_EQ(result.pairing_states[p], Pairing_WatsonCrick);
+    const auto& contact = validator.chemistry()[p].contacts[0];
+    ASSERT_GT(contact.hydrogens.size(), (size_t)0);
+    const uint32_t h = contact.hydrogens[0];
+    const vec3_t saved_h = state.xyz[h];
+    state.xyz[h].x = NAN;
+    ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
+    EXPECT_EQ(result.pairing_states[p], Pairing_Unavailable);
+    state.xyz[h] = saved_h;
     md_arena_allocator_destroy(alloc);
 }
 
@@ -746,6 +882,7 @@ UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_f
     ASSERT_TRUE(validator.initialize(sys, bases, pairs));
     FrameAnalysis result;
     ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
+    for (auto pairing : result.pairing_states) EXPECT_EQ(pairing, Pairing_Unavailable);
     for (const auto& base : bases) {
         ASSERT_LT(base.component, (uint32_t)28);
         const auto pucker = curves_fourier_pucker(base, state);

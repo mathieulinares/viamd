@@ -17,7 +17,29 @@ geometry is invalid. Quality flags explain why a value is missing or suspicious.
 
 ### Baselines and z-scores
 
-Each member and parameter is compared with its own trajectory baseline:
+**Compare against**, above Tolerance, selects the reference for every z-score:
+
+| Reference | Meaning |
+|---|---|
+| **Own pair/step over time** (default) | Each location is compared with its own history; detects temporal deviations. Nucleotide parameters use that nucleotide's history. |
+| **All pairs/steps over time (same helix)** | Pool the same parameter across all locations in one helix over the baseline time range, including the selected location. Nucleotide parameters pool nucleotides. Detects persistent local differences as well as excursions. |
+
+For example, a step with Rise consistently at 7 Angstrom can stand out against
+the other steps near 5 Angstrom even though it never changes over time.
+Significance still depends on the pooled spread and number of members; there
+is no guarantee that every elevated value exceeds the chosen tolerance.
+Helices are never mixed; isolated pairs form their own reference groups.
+Only finite samples contribute, weighted equally per sample, not per location.
+The baseline interval applies to both modes. This is not a same-frame comparison.
+
+The heatmap, count plot, viewport, outlier list and detected spans all use the
+selected reference. Labels distinguish Temporal from Pooled-helix z-scores.
+The results tab is **Anomalous regions** in pooled mode: a region lasting the
+whole trajectory is not evidence that a transition occurred during recording.
+Sequence differences, end effects and short helices require interpretation.
+State-switch detection remains independent of this choice.
+
+For either reference:
 
 ```
 z = (value - center) / scale
@@ -44,8 +66,14 @@ treated as circular quantities:
 - Unwrapping only changes values that are at least 180° from the reference.
   Ordinary data is therefore processed exactly as before.
 
-Changing the baseline method or reference interval recomputes statistics on
+Changing the reference scope, baseline method or reference interval recomputes statistics on
 edit release; the geometric parameters are not recalculated.
+In pooled mode the Distribution plot overlays **Pooled helix reference**, using
+the selected helix and baseline interval (and current state for state-conditioned
+parameters), alongside the selected member's full-trajectory density and current
+value. Reference sample counts refer to the pool, not the selected member.
+Circular reference fitting and within-state baselines apply in both modes.
+`ReferenceScope` is saved in the workspace; older workspaces default to own history.
 
 ### Baseline range versus detection range
 
@@ -168,8 +196,9 @@ phosphates even when the step itself is flagged by quality checks.
 
 **Within-state baselines.** Phase (North [270°, 90°) / South [90°, 270°)),
 Epsilon − Zeta (BI / BII), Chi (anti / syn: syn between 270° and 90°), Alpha
-and Gamma (g+ [0°,120°) / t / g−) have discrete states. Each member has a separate
-center/scale for each state; a sample's z-score uses its current state's
+and Gamma (g+ [0°,120°) / t / g−) have discrete states. Each reference population
+(own history or pooled helix) has a separate center/scale for each state;
+a sample's z-score uses its current state's
 reference. A switch does not acquire an enormous z merely because the dominant
 state is tightly clustered. Singleton/constant states have zero z, not a
 borrowed reference from another state. Tooltips and the inspector show the
@@ -177,7 +206,8 @@ current state and the dominant state's fraction of baseline samples. The heatmap
 uses the same baselines. The inspector reference and parameter CSV center/scale
 also use the current state; the total reference count includes every state
 represented inside the baseline range. Occupancy is a sample fraction, not
-elapsed-time weighting for irregular sampling.
+elapsed-time weighting for irregular sampling. In pooled mode these fractions
+describe the helix reference, not the selected nucleotide's own occupancy.
 
 ### Residence-qualified state switches
 
@@ -200,7 +230,80 @@ The separate state-switch CSV includes state names, frames/times, angular change
 residence and the minimum used. Standard state boundaries are heuristic:
 validate residence thresholds and transitions scientifically.
 
-#### Timing context and incomplete residences
+### Member-by-time state history
+
+The **State history** tab shows raw categorical states with time on X and one
+member per row. Choose **BI / BII**, **anti / syn**, **Sugar pucker (North /
+South)**, **Alpha rotamers**, **Gamma rotamers**, or **Pairing chemistry**.
+Nucleotide states use nucleotide rows; pairing chemistry uses fixed-pair rows.
+The legend identifies every colour, including grey unavailable samples.
+Hover reads the exact member, frame and raw state. Click selects that
+member/parameter and jumps to that time; drag pans and the wheel zooms.
+
+Residence thresholds filter transition tables, not these raw measurements.
+The view is independent of the outlier-parameter mask, reference distribution
+and event detection range. At low zoom, any display bin containing more than
+one category is white, including valid/missing mixtures. No state is averaged,
+replaced by a majority vote or hidden by sampling. Zoom to resolve mixed bins.
+Categorical summaries bound drawing by the visible pixels and member rows;
+the underlying scientific series remains full resolution.
+
+### Pairing chemistry (separate from pair-loss validity)
+
+The **Pairing states** tab shows the selected fixed pair's categorical timeline,
+current state, residence-qualified transitions and **Export pairing CSV**.
+It annotates chemistry without changing pair quality, excluded measurements,
+outlier events, baselines or the existing canonical pair-loss gate.
+
+| State | Conservative evidence required |
+|---|---|
+| Watson-Crick | Both A-T/U contacts (A N6 to T/U O4; T/U N3 to A N1), or all three G-C contacts (G N1 to C N3; G N2 to C O2; C N4 to G O6); both glycosidic torsions anti; compatible base geometry |
+| Hoogsteen (A-T/U) | A N6 to T/U O4 and T/U N3 to A N7; adenine syn and pyrimidine anti; compatible base geometry |
+| Other / ambiguous | Finite, supported evidence, but neither full contact/orientation definition; includes partial contacts and uncertain orientations |
+| Unpaired | Disrupted ring separation, alignment or plane offset, with no candidate canonical or A-T/U Hoogsteen contacts |
+| Unavailable | Unsupported chemistry, missing contact atoms/donor hydrogens, nonfinite evidence or unavailable base/glycosidic geometry |
+
+Contacts are **directional explicit-hydrogen bonds**, using the existing GROMACS
+preset: donor-acceptor distance at most 3.5 Angstrom, H-D-A angle at donor at most
+30 degrees. Duplicate donor hydrogens do not double-count a contact. A complete
+set of donor hydrogens is required; hydrogen-free data does not silently acquire
+a chemistry label from heavy-atom proximity. Existing heavy-atom pair-quality
+proxies remain available and unchanged.
+
+The classifier uses conservative disjoint chi windows: anti [-180, -60] degrees
+and adenine syn [0, 120] degrees, independently of the coarser anti/syn plot bins.
+Compatible base geometry uses the existing pair ring-separation, normal-alignment
+and plane-offset limits, not canonical-contact quality. **G-C Hoogsteen
+(including protonation) and other noncanonical chemistries are not identified**;
+such structures may appear Other, not Hoogsteen. These are evidence-based
+annotations, not a comprehensive base-pair taxonomy or binding-energy model.
+
+Both source and destination must meet **Pairing min residence** (default 200 ps,
+or 3 samples without physical timestamps). Short runs are skipped, not
+relabelled. Unavailable resets the source; intervening samples are explicitly
+reported. Pairing transitions use the whole run, independently of nucleotide
+state-switch/Event parameters settings. Click a transition to select the pair
+at destination onset. First/last observed residences can be truncated by the
+trajectory boundaries; they are not inferred full lifetimes.
+
+The CSV exports **all raw runs** of the selected pair, including unavailable and
+short runs, with columns
+`run,pair,label,state,begin_frame,end_frame,begin_time,end_time,time_unit,`
+`residence,min_residence,qualifies`.
+Pair numbers are one-based; frames are zero-based and inclusive. Physical
+residence is endpoint time difference; frame fallback is inclusive sample count.
+`qualifies` indicates a non-unavailable run meeting the residence minimum, not
+whether that run forms a transition with a known source.
+The published U8 attribute `lavery/bp/pairing_state` uses codes 0 unavailable,
+1 Watson-Crick, 2 A-T/U Hoogsteen, 3 Other, 4 Unpaired.
+
+An important distinction: the canonical quality gate accepts one surviving
+explicit canonical bond. Its shared A N6 to T O4 bond can therefore keep a
+reinserted Hoogsteen pair **Good**. Pairing chemistry requires the full
+state-specific contact/orientation evidence and can label that same frame
+Hoogsteen without changing the existing numerical analysis.
+
+### Nucleotide state-switch timing context and incomplete residences
 
 Rows distinguish **adjacent runs** from **separated runs**. Adjacent means that
 the last source sample immediately precedes the first destination sample, not
@@ -275,7 +378,7 @@ sections.
   Baseline range, Detection range) are always visible. Collapsed sections:
   *Event parameters* (the 2x6 grid; the header names the subset),
   *Advanced detection* (baseline, neighbourhood or whole structure,
-  hierarchy and burst extra, hysteresis, pair loss, bridge gaps, Time in ns,
+  hierarchy and burst extra, hysteresis, bridge gaps, Time in ns,
   count any selected parameter) and *Export & tools*
   (parameter CSV, **Export events CSV**, Recompute analysis).
   The **Visual feedback...** popup provides **Event regions** and
@@ -303,6 +406,32 @@ sections.
   frame changes (playback, an event click, a jump) and leaves the visible
   range, the timeline, count plot and heatmap pan to recentre it, keeping
   your zoom; panning while paused is not overridden.
+
+### Long trajectories
+
+Timeline and count plots use cached, multiresolution display summaries rather
+than submitting every frame on every redraw. Visible buckets retain their
+first/last samples, finite minimum/maximum and a missing-data break, in time
+order. Single-frame peaks are not averaged away. Zooming in restores individual
+samples; axis fitting uses the whole-series summary, not just the current view.
+Subpixel missing/finite alternations are simplified within a display bucket.
+
+The heatmap submits at most approximately one column per horizontal pixel.
+At coarse zoom each cell shows the **signed z-score with greatest absolute
+magnitude** in that frame interval, not its average. Entirely missing intervals
+remain missing; mixed intervals show the finite peak. Hover and scrubbing still
+resolve the original frame and value. Zoom in to distinguish opposite-sign
+excursions or missing samples inside the same coarse cell.
+
+Event and state-switch tables draw only visible rows, including expanded event
+members. The event footprint is also cached at display resolution. Changing the
+plotted parameter updates the count plot without rerunning event detection when
+the detection settings are unchanged.
+
+These are display optimizations only: all frames still contribute to statistics,
+distributions, detection and CSV exports. Display indexes are built lazily and
+cached. First use, changing reference/detection settings, and initial distribution
+construction can still take time on large trajectories.
 
 ## 3. Outlier events
 
@@ -337,16 +466,23 @@ step) in one frame. A sample takes part when one of the following holds:
   |z| ≥ tolerance − **Hysteresis** (the continue threshold, never below 0.5);
 - it is *strong*: at least one parameter has |z| ≥ tolerance (the start
   threshold);
-- it is *lost*: with **Pair loss** on, a base pair that has a baseline loses
+- it is *lost*: with **Pair loss** on, a base pair that has its own finite baseline sample loses
   its pairing in this frame. Its quality flags show separation, alignment,
   out-of-plane offset or missing H-bonds, and nothing else. Lost samples count
   as strong even when no intra-base-pair parameter is selected.
 
 **Event parameters** selects the parameters, independently of the class shown in the
-plots (default: all 12). The 2x6 grid (Intra column, Inter
-column) picks any subset; a column header toggles the whole class and shows a
+plots. **Pair loss** is located in the Intra column, below the six geometric
+parameters, and is enabled by default. It is independent of the column's
+parameter toggle and **Use plotted parameters**. Disabling it removes broken
+pairs as event contributors; their invalid parameters remain excluded.
+Pair loss requires a finite baseline sample for that particular pair in either
+reference mode; a neighbouring pair cannot supply its pairing history.
+
+The parameter grid (Intra, Inter and Nucleotide columns) picks any subset;
+a column header toggles the whole class and shows a
 mixed state when only part of it is selected. The collapsed section header
-names the subset (or "N of 12"). **Use plotted parameters** copies
+names the subset (or the selected parameter count). **Use plotted parameters** copies
 the class and parameter(s) of the count plot. With nothing selected, only pair
 losses (if on) form events. The CSV `scope` column is `all`, `intra`, `inter`,
 or the chosen names joined by `+` (for example `Roll+Twist`).
@@ -410,6 +546,27 @@ time; its tooltip gives the contributing frame count. Without timestamps it
 shows the inclusive frame span. One sample remains one contributing sample,
 even though its elapsed time is zero. Sorting uses elapsed time when available,
 otherwise the inclusive frame span.
+
+**Max shown duration**, above the table, is an optional viewing filter.
+`0` / **Unlimited** is the default. It keeps spans whose duration is **at most**
+the limit, including bridged gaps, using ps/ns or inclusive frame span when
+physical time is unavailable. It does not cap, split, truncate or delete detected
+events. Each sub-event is tested independently: a short child remains visible
+even when its long parent is hidden. A shown/total count includes parent and
+child rows, not expanded member rows.
+
+The filter combines with the text/region filter and **Active now**. Keyboard
+navigation, playback following and **Add all shown events** respect all three.
+Existing inspection is retained if its row is hidden; a message explains this.
+Counts, heatmaps, event bands, viewport feedback and state switches are not
+filtered. This keeps scientific detection separate from table presentation;
+it is not a performance shortcut for full-trajectory analysis.
+
+**Export events CSV** still exports every detected event. **Export shown events
+CSV** respects the table filters at the current frame, preserving original event
+and parent IDs. A filtered export may reference a hidden parent without exporting
+that parent's rows. The limit is stored in the workspace separately for physical
+time and frame fallback; older workspaces remain Unlimited.
 
 For each event, the following are recorded:
 
@@ -598,6 +755,7 @@ frame and a triangle at the peak. Bridged gaps appear empty.
 | **Timeline... > Add all shown events** | Add every shown event in table order, until the timeline's limit of 64 periods |
 | **Timeline... > Remove added events** | Remove the periods added from Lavery events |
 | **Active now** | Show only events whose span contains the current frame |
+| **Follow playback** | Scroll to the most local active sub-event, or an active parent, when the followed event changes; enabled by default |
 
 The event that contains the current frame is highlighted. Event numbers (#N)
 are chronological and match the `event` column of the events CSV, whatever the
@@ -610,7 +768,23 @@ row is selected. This remains until playback resumes or the frame changes,
 then automatic all-active-event feedback returns. Detection-setting changes
 or recomputation also clear inspection; changing the plotted class alone does
 not. Hover previews cannot add other events during inspection. No persistent
-focus mode, pin controls, or viewport status box is used.
+focus mode or pin controls are used. A **Selected** label identifies the event
+and, for a sub-event, its parent. The **Viewport** radio buttons switch between
+the selected event, its parent (when present), and **All active** at the current
+frame. Switching scope preserves the selected table row and its inspector and
+distribution data, so returning to the sub-event takes one click. Clicking a
+different event resets the viewport scope to that event.
+
+Playback following respects table filters and sorting. It prefers sub-events,
+then smaller base-pair regions, then higher scores; all active rows remain
+highlighted. Disable **Follow playback** to browse without automatic scrolling.
+During playback, Lavery hides neutral preview markers and selected-parameter
+measurement geometry, labels and hidden cues. Active-event regions and genuine
+outlier/pair-loss markers remain visible.
+Starting playback also clears the selected parameter's viewport inspection,
+without changing the plot selection. Pausing does not restore the old grey
+measurement overlay; select a member or parameter again, or hover it, to inspect
+it in the viewport.
 
 Timeline periods are ordinary VIAMD periods: they can be renamed, recoloured
 and used to restrict distributions, and they are saved with the workspace.
@@ -771,7 +945,7 @@ is independent. Contour-only mode uses no surrounding proxy spheres or interior 
 
 The **Visual feedback...** button replaces the sidebar Display section with a
 compact popup containing **Event regions** and **Measurements** tabs. Event
-region styles are **Contour** (default), **Glow**, **Both**, and **Off**.
+region styles are **Contour**, **Glow** (default), **Both**, and **Off**.
 Glow restores the original three base-centred translucent sphere layers, using
 the same palette and child-priority ownership as contours. **Glow strength**
 ranges from 0 to 1, defaults to 0.5, and scales the original layer alphas
@@ -782,7 +956,9 @@ region context, not precise contribution markers or native measurements.
 affects the small contribution markers only.
 
 `EventVisualStyle` (0 contour, 1 glow, 2 both, 3 off) and `GlowStrength`
-are stored in the Lavery workspace section. Older workspaces use contour/0.5.
+are stored in the Lavery workspace section. Workspaces without these settings
+use glow/0.5; explicitly saved styles and strengths are preserved.
+`EventsFollowPlayback` stores the table-follow toggle and defaults to enabled.
 Event geometry/strength/style changes invalidate the relevant rendering;
 contour thickness changes only presentation, not the mask or scene history.
 
@@ -853,7 +1029,7 @@ One row per frame, member and parameter of the current class. `class` is
 ```
 run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,
 quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,
-member_outlier,selected_mask,baseline,baseline_begin,baseline_end
+member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope
 ```
 
 The `baseline` column is `mean_sd` or `median_mad`. The `mean` and `sd` columns
@@ -863,7 +1039,8 @@ coordinates in `time_unit` (or `frame`); invalid intervals export `nan`.
 These are interval endpoints, not a claim that every member/state has valid data
 throughout. `valid` still describes the measured value: a finite value can have
 `nan` reference statistics/z-score if its state is absent from the baseline.
-There are 26 columns.
+`reference_scope` is `own_history` or `helix_history`, identifying the population
+used for the reference statistics. There are 27 columns.
 
 ### Events CSV (Export events CSV)
 
@@ -875,7 +1052,7 @@ event_peak_sigma,event_score,event_type,first_pair,last_pair,scope,baseline,sigm
 end_sigma,neighbourhood,class,member,label,member_outlier_frames,member_lost_frames,
 parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,
 parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,
-detection_begin,detection_end,burst_mode,baseline_begin,baseline_end
+detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_scope
 ```
 
 | Column | Meaning |
@@ -894,13 +1071,14 @@ detection_begin,detection_end,burst_mode,baseline_begin,baseline_end
 | min_duration, max_gap_duration | Detection minimum and quiet-gap limit, in `time_unit`; in frame fallback the minimum is contributing frames and the gap is quiet frames |
 | detection_begin, detection_end | Requested inclusive detection bounds in `time_unit`, or trajectory endpoints when unrestricted |
 | baseline_begin, baseline_end | First/last included baseline sample coordinates in `time_unit`, independent of detection bounds |
+| reference_scope | `own_history` or `helix_history`; pooled spans are anomalous regions, not necessarily transitions |
 
-The events CSV has 40 columns. Time-valued settings are converted from internal
+The events CSV has 41 columns. Time-valued settings are converted from internal
 ps to the exported trajectory `time_unit`; fallback exports use `frame`.
 For a period-based search, `detection_begin` / `detection_end` are the resolved
 first/last sample coordinates, not unused custom-entry bounds. Baseline columns
 likewise describe the resolved reference samples. Event-to-timeline annotations
-also include the selected period names.
+also include the selected period names and reference scope.
 `sigma` and `end_sigma` describe that row's
 event (the higher thresholds for children), and child `neighbourhood` is
 always local, even under a Whole structure parent. Lost-pair score weight
@@ -923,6 +1101,9 @@ application log.
 | MeasurementText | bool, viewport value text only | 0 |
 | StateMinTimePs | float, independent minimum source/destination residence; -1 follows event minimum | -1 |
 | StateMinFrames | int, residence samples in frame fallback | 3 |
+| PairingMinTimePs | float, nonnegative pairing source/destination residence | 200 |
+| PairingMinFrames | int, positive pairing residence samples in frame fallback | 3 |
+| StateHistoryKind | int, BI/BII, chi, pucker, alpha, gamma, pairing (0-5) | 0 |
 | OutlierSigma | float | - |
 | Metric, Member | int | - |
 | Baseline | 0 = Mean/SD, 1 = Median/MAD | 0 |
@@ -951,6 +1132,8 @@ application log.
 | EventBurstMode | int, 0 Stronger / 1 Stand out from background | 0 |
 | EventResidualSigma | float (sigma), 0.5-6 | 2 |
 | EventsActiveOnly | bool, events table "Active now" filter | 0 |
+| EventsMaxShownTimePs | finite nonnegative float, maximum shown event duration in ps; 0 is Unlimited | 0 |
+| EventsMaxShownFrames | nonnegative int, maximum shown inclusive frame span without physical time; 0 is Unlimited | 0 |
 | LayoutSidebar | float, sidebar width / window width, 0.12-0.5 | 0.24 |
 | LayoutEvents | float, events height / right-area height, 0.1-0.8 | 0.34 |
 | LayoutOverview | float, overview width / bottom width, 0.2-0.8 | 0.52 |
@@ -989,15 +1172,26 @@ non-finite layout values are clamped or reset.
   or the temporarily inspected event, adds paused hover previews when not
   inspecting, and draws the signed overlay.
 - **Count plot**: event bands, and the dashed chance line drawn on the plot's
-  draw list.
+  draw list, both using visible plot coordinates; the count/chance series use
+  cached display summaries.
+- **Display summaries**: `PlotSummary` stores original sample indices in
+  hierarchical 16-sample buckets, merging four buckets per level. Each bucket
+  retains endpoints, extrema and a missing sample. Visible-range queries refine
+  partial boundary buckets; sufficiently close zoom returns every original
+  index. Raw parameter arrays and scientific results are unchanged.
 - **Caching**: event counts are cached by a hash of the inputs; the overlay
   render key hashes the marker fields explicitly. Event types and lowercase
   filter text are cached per event after detection, so filtering and sorting
   do not rebuild strings every frame. While any widget is active (e.g. a
   slider being dragged), changed settings set a pending flag and the previous
   result is kept; detection runs once on release. Detection is synchronous: a
-  100k-frame synthetic benchmark takes about 0.1–0.2 s per run in Release, so a
-  worker thread is not used.
+  100k-frame synthetic benchmark takes about 0.1–0.2 s per run in Release.
+  Larger all-parameter searches can still block on edit release; these display
+  optimizations do not move scientific recomputation to a worker thread.
+- **Pooled reference densities**: cached per conformational state, helix and
+  statistics revision. Event selection and comparison pins do not invalidate
+  the pooled reference; revisiting a cached state during playback does not
+  rescan the baseline trajectory.
 - **Background sub-events**: `EventOptions::residual_sigma` and `member_z`
   (a callback returning the z-score of any member/frame/parameter, NaN when
   invalid). The per-parent background median is computed lazily per frame and

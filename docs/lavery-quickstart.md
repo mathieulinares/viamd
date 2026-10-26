@@ -13,6 +13,23 @@ It then flags frames where a pair, step or nucleotide deviates from its own
 trajectory baseline, and detects residence-qualified state switches separately.
 For the full reference, see [lavery.md](./lavery.md).
 
+## Watch states change along the trajectory
+
+Open **State history** in the results tabs. Choose BI/BII, anti/syn, sugar
+pucker, Alpha/Gamma rotamers or Pairing chemistry. Each row is a member,
+time runs horizontally, and colour is the raw state. Hover for exact values;
+click to select the member and jump to that time. White means multiple states
+fall in a display bin: zoom in. Grey means unavailable, not physically unpaired.
+Minimum residence filters transition tables without repainting this history.
+
+**Pairing states** adds a selected-pair timeline and transition table
+(default residence 200 ps), with CSV export of all raw runs. It distinguishes
+Watson-Crick, A-T/U Hoogsteen, Other, Unpaired and Unavailable using explicit
+directional H bonds and compatible orientations. G-C Hoogsteen is not identified;
+hydrogen-free data remains Unavailable for this annotation. The existing
+pair-loss detector and numerical validity are unchanged: a Hoogsteen pair can
+still have Good quality because one shared canonical bond survives.
+
 ## Five-step workflow
 
 1. Load a nucleic-acid structure or trajectory and open **Lavery** from the

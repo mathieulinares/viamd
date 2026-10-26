@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <md_gro.h>
 #include <md_system.h>
@@ -15,6 +16,270 @@
 #include <core/md_unit.h>
 #include "data/lavery_curves_reference.h"
 using namespace lavery;
+
+UTEST(lavery_core, pairing_states_require_complete_directional_evidence_and_orientation) {
+    PairingEvidence ev;
+    ev.complete = true;
+    ev.expected = 2;
+    ev.purine_side = 1;
+    ev.canonical = 2;
+    EXPECT_EQ(classify_pairing(ev, -110, -95, 0), Pairing_WatsonCrick);
+    EXPECT_EQ(classify_pairing(ev, 250, 265, 0), Pairing_WatsonCrick);
+    EXPECT_EQ(classify_pairing(ev, 180, -95, 0), Pairing_WatsonCrick);
+    ev.canonical = 1;
+    ev.hoogsteen = 2;
+    EXPECT_EQ(classify_pairing(ev, -110, 77, 0), Pairing_Hoogsteen);
+    EXPECT_EQ(classify_pairing(ev, -110, -95, 0), Pairing_Other);
+    EXPECT_EQ(classify_pairing(ev, -110, 125, 0), Pairing_Other);
+    ev.purine_side = 0;
+    EXPECT_EQ(classify_pairing(ev, 77, -110, 0), Pairing_Hoogsteen);
+    ev.hoogsteen = 1;
+    EXPECT_EQ(classify_pairing(ev, 77, -110, 0), Pairing_Other);
+    ev.canonical = ev.hoogsteen = 0;
+    EXPECT_EQ(classify_pairing(ev, 77, -110, Quality_Separation), Pairing_Unpaired);
+    EXPECT_EQ(classify_pairing(ev, 77, -110, 0), Pairing_Other);
+    EXPECT_EQ(classify_pairing(ev, NAN, -110, Quality_Separation), Pairing_Unavailable);
+    EXPECT_EQ(classify_pairing(ev, 77, -110, Quality_MissingAtoms), Pairing_Unavailable);
+    ev.complete = false;
+    EXPECT_EQ(classify_pairing(ev, 77, -110, Quality_Separation), Pairing_Unavailable);
+    ev.complete = true;
+    ev.expected = 3;
+    ev.purine_side = -1;
+    ev.canonical = 3;
+    EXPECT_EQ(classify_pairing(ev, -110, -140, 0), Pairing_WatsonCrick);
+    EXPECT_EQ(classify_pairing(ev, 77, -140, 0), Pairing_Other);
+    ev.canonical = 2;
+    EXPECT_EQ(classify_pairing(ev, -110, -140, 0), Pairing_Other);
+}
+
+UTEST(lavery_core, pairing_csv_preserves_raw_runs_units_and_exact_residence_thresholds) {
+    const PairingRun span = {10, 12, Pairing_Hoogsteen};
+    EXPECT_EQ(std::count(csv_pairing_header(), csv_pairing_header()+strlen(csv_pairing_header()), ','), 11);
+    const auto row = csv_pairing_run("run,\"dna\"", "pair,\"15\"", 14, span, 100, 140, "ps", 40, true);
+    EXPECT_TRUE(row.find("\"run,\"\"dna\"\"\",15,\"pair,\"\"15\"\"\",\"Hoogsteen (A-T/U)\",10,12,100,140,\"ps\",40,40,1\n") != std::string::npos);
+    EXPECT_TRUE(csv_pairing_run("", "", 0, span, 10, 12, "frame", 3, false).ends_with(",3,3,1\n"));
+    EXPECT_TRUE(csv_pairing_run("", "", 0, span, 100, 140, "ps", 40.001, true).ends_with(",40,40.001,0\n"));
+    const PairingRun missing = {0, 2, Pairing_Unavailable};
+    EXPECT_TRUE(csv_pairing_run("", "", 0, missing, 0, 40, "ps", 0, true).ends_with(",40,0,0\n"));
+}
+
+UTEST(lavery_core, pairing_residence_filters_transitions_without_repainting_raw_states) {
+    const std::vector<PairingState> states = {Pairing_WatsonCrick, Pairing_WatsonCrick,
+        Pairing_Other, Pairing_Unpaired, Pairing_Unpaired, Pairing_Unpaired,
+        Pairing_Hoogsteen, Pairing_Hoogsteen, Pairing_Unavailable, Pairing_WatsonCrick, Pairing_WatsonCrick};
+    std::vector<PairingRun> runs;
+    ASSERT_TRUE(pairing_runs(&runs, states, 1, 0));
+    ASSERT_EQ(runs.size(), (size_t)6);
+    std::vector<PairingTransition> changes;
+    EventOptions opts;
+    opts.min_frames = 2;
+    ASSERT_TRUE(pairing_transitions(&changes, runs, opts));
+    ASSERT_EQ(changes.size(), (size_t)2);
+    EXPECT_EQ(changes[0].source.state, Pairing_WatsonCrick);
+    EXPECT_EQ(changes[0].destination.state, Pairing_Unpaired);
+    EXPECT_EQ(changes[0].destination.begin, (size_t)3);
+    EXPECT_EQ(changes[1].destination.state, Pairing_Hoogsteen);
+    EXPECT_EQ(runs[1].state, Pairing_Other);
+    opts.times = {0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200};
+    opts.min_duration = 20;
+    ASSERT_TRUE(pairing_transitions(&changes, runs, opts));
+    EXPECT_EQ(changes.size(), (size_t)2);
+    opts.min_duration = 20.001;
+    ASSERT_TRUE(pairing_transitions(&changes, runs, opts));
+    EXPECT_EQ(changes.size(), (size_t)0);
+    opts.min_duration = 0;
+    opts.first_frame = 3;
+    opts.last_frame = 7;
+    ASSERT_TRUE(pairing_transitions(&changes, runs, opts));
+    ASSERT_EQ(changes.size(), (size_t)1);
+    EXPECT_EQ(changes[0].source.state, Pairing_Unpaired);
+    opts.times[1] = 0;
+    EXPECT_FALSE(pairing_transitions(&changes, runs, opts));
+    EXPECT_FALSE(pairing_runs(&runs, states, 2, 0));
+    EXPECT_FALSE(pairing_runs(&runs, states, 1, 1));
+}
+
+UTEST(lavery_core, categorical_summary_retains_all_states_at_half_million_frames) {
+    std::vector<uint8_t> data(500000, 1);
+    data[123457] = 2;
+    data[200000] = 0;
+    data[300001] = 3;
+    StateSummary summary;
+    ASSERT_TRUE(summary.build(data));
+    EXPECT_EQ(summary.mask(0, data.size()), 15u);
+    EXPECT_EQ(summary.mask(123456, 123459), 6u);
+    EXPECT_EQ(summary.mask(123457, 123458), 4u);
+    EXPECT_EQ(summary.mask(0, 123457), 2u);
+    EXPECT_EQ(summary.mask(200000, 200001), 1u);
+    for (size_t first = 123400; first < 123500; ++first) for (size_t end = first; end < 123500; ++end) {
+        uint32_t mask = 0;
+        for (size_t f = first; f < end; ++f) mask |= 1u << data[f];
+        EXPECT_EQ(summary.mask(first, end), mask);
+    }
+    for (size_t i = 0; i < 500; ++i) {
+        const size_t first = i*997;
+        const size_t end = std::min(data.size(), first+3999);
+        uint32_t mask = 0;
+        for (size_t f = first; f < end; ++f) mask |= 1u << data[f];
+        EXPECT_EQ(summary.mask(first,end),mask);
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    uint32_t combined = 0;
+    for (size_t row = 0; row < 40; ++row) for (size_t bin = 0; bin < 1000; ++bin)
+        combined |= summary.mask(bin*500,(bin+1)*500);
+    EXPECT_EQ(combined,15u);
+    printf("Categorical display: 40 x 500000 samples, 1000 bins/row, %.3f ms queries (not GUI FPS)\n",
+        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count());
+    EXPECT_FALSE(summary.build({32}));
+    EXPECT_TRUE(summary.build({}));
+    EXPECT_EQ(summary.mask(0, 0), 0u);
+}
+
+UTEST(lavery_core, maximum_shown_duration_uses_elapsed_time_and_inclusive_frame_span) {
+    const float times[] = {100, 101, 104, 110, 111};
+    EXPECT_TRUE(event_within_duration(0, 4, times, 5, 0));
+    EXPECT_TRUE(event_within_duration(0, 4, nullptr, 5, 0));
+    EXPECT_TRUE(event_within_duration(1, 3, times, 5, 9));
+    EXPECT_FALSE(event_within_duration(1, 3, times, 5, 8.999));
+    EXPECT_TRUE(event_within_duration(1, 3, nullptr, 5, 3));
+    EXPECT_FALSE(event_within_duration(1, 3, nullptr, 5, 2));
+    EXPECT_TRUE(event_within_duration(3, 3, times, 5, 0.001));
+    EXPECT_TRUE(event_within_duration(3, 3, nullptr, 5, 1));
+    EXPECT_FALSE(event_within_duration(3, 3, nullptr, 5, 0.5));
+    const float ns[] = {0.100f, 0.101f, 0.104f, 0.110f, 0.111f};
+    EXPECT_TRUE(event_within_duration(1, 3, ns, 5, 0.00901));
+    EXPECT_FALSE(event_within_duration(1, 3, ns, 5, 0.00899));
+}
+
+UTEST(lavery_core, maximum_shown_duration_does_not_remove_children_or_mutate_detection) {
+    OutlierEvent parent, child;
+    parent.begin = 0;
+    parent.end = 499999;
+    child.begin = 200000;
+    child.end = 200002;
+    child.parent = 0;
+    child.outlier_frames = 2; // A gap still counts toward displayed span.
+    const std::vector<OutlierEvent> events = {parent, child};
+    std::vector<size_t> shown;
+    for (size_t i = 0; i < events.size(); ++i)
+        if (event_within_duration(events[i].begin, events[i].end, nullptr, 500000, 3)) shown.push_back(i);
+    ASSERT_EQ(shown.size(), (size_t)1);
+    EXPECT_EQ(shown[0], (size_t)1);
+    EXPECT_FALSE(event_within_duration(child.begin, child.end, nullptr, 500000, 2));
+    EXPECT_EQ(events[1].parent, (size_t)0);
+    EXPECT_EQ(events[0].end, (size_t)499999);
+    EXPECT_EQ(events[1].outlier_frames, (size_t)2);
+    for (const auto& e : events) EXPECT_TRUE(event_within_duration(e.begin, e.end, nullptr, 500000, 0));
+}
+
+UTEST(lavery_core, maximum_shown_duration_rejects_invalid_limits_and_spans) {
+    const float times[] = {1, 0, NAN};
+    EXPECT_FALSE(event_within_duration(0, 1, nullptr, 3, -1));
+    EXPECT_FALSE(event_within_duration(0, 1, nullptr, 3, NAN));
+    EXPECT_FALSE(event_within_duration(0, 1, nullptr, 3, INFINITY));
+    EXPECT_FALSE(event_within_duration(2, 1, nullptr, 3, 0));
+    EXPECT_FALSE(event_within_duration(0, 3, nullptr, 3, 0));
+    EXPECT_FALSE(event_within_duration(0, 0, nullptr, 0, 0));
+    EXPECT_FALSE(event_within_duration(0, 1, times, 3, 0));
+    EXPECT_FALSE(event_within_duration(0, 2, times, 3, 0));
+}
+
+UTEST(lavery_core, display_summary_bounds_half_million_frames_without_losing_peaks_or_gaps) {
+    constexpr size_t frames = 500000, pixels = 1200;
+    std::vector<float> data(frames * 2, 99999);
+    for (size_t f = 0; f < frames; ++f) data[2*f] = std::sin((float)f * 0.01f);
+    data[2*123457] = 100;
+    data[2*400003] = -150;
+    data[2*222222] = std::numeric_limits<float>::quiet_NaN();
+    PlotSummary summary;
+    const auto build_begin = std::chrono::steady_clock::now();
+    ASSERT_TRUE(summary.build(data.data(), frames, 2));
+    const auto build_end = std::chrono::steady_clock::now();
+    const auto indices = summary.indices(0, frames, pixels);
+    ASSERT_FALSE(indices.empty());
+    EXPECT_LT(indices.size(), pixels * 20 + 256);
+    EXPECT_EQ(indices.front(), (uint32_t)0);
+    EXPECT_EQ(indices.back(), (uint32_t)frames - 1);
+    for (uint32_t f : {123457u, 400003u, 222222u})
+        EXPECT_TRUE(std::binary_search(indices.begin(), indices.end(), f));
+    for (size_t i = 1; i < indices.size(); ++i) EXPECT_LT(indices[i-1], indices[i]);
+    const auto zoom = summary.indices(123420, 123520, pixels);
+    ASSERT_EQ(zoom.size(), (size_t)100);
+    for (size_t i = 0; i < zoom.size(); ++i) EXPECT_EQ(zoom[i], (uint32_t)(123420 + i));
+    size_t points = 0;
+    const auto query_begin = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < 1000; ++i) points += summary.indices(i, frames - i, pixels).size();
+    const auto query_end = std::chrono::steady_clock::now();
+    printf("500000-frame display: %zu points at %zu pixels; build %.3f ms; mean query %.3f ms (%zu points total)\n",
+        indices.size(), pixels, std::chrono::duration<double, std::milli>(build_end-build_begin).count(),
+        std::chrono::duration<double, std::milli>(query_end-query_begin).count()/1000, points);
+}
+
+UTEST(lavery_core, display_summary_refines_boundaries_and_preserves_heatmap_peak_sign) {
+    std::vector<float> data(8197);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = (float)((int)(i * 7919 % 997) - 498);
+        if (i % 71 == 0) data[i] = std::numeric_limits<float>::quiet_NaN();
+    }
+    PlotSummary summary;
+    ASSERT_TRUE(summary.build(data.data(), data.size()));
+    for (size_t begin = 0; begin < data.size(); begin += 137) {
+        const size_t end = std::min(data.size(), begin + 1653);
+        const auto indices = summary.indices(begin, end, 1);
+        ASSERT_FALSE(indices.empty());
+        EXPECT_EQ(indices.front(), (uint32_t)begin);
+        EXPECT_EQ(indices.back(), (uint32_t)end-1);
+        float lo = INFINITY, hi = -INFINITY, peak = 0;
+        bool missing = false, sampled_missing = false;
+        for (size_t i = begin; i < end; ++i) {
+            missing |= !std::isfinite(data[i]);
+            if (std::isfinite(data[i])) {
+                lo = std::min(lo, data[i]);
+                hi = std::max(hi, data[i]);
+                peak = std::max(peak, std::fabs(data[i]));
+            }
+        }
+        float sampled_lo = INFINITY, sampled_hi = -INFINITY, sampled_peak = 0;
+        for (uint32_t i : indices) {
+            EXPECT_GE((size_t)i, begin);
+            EXPECT_LT((size_t)i, end);
+            sampled_missing |= !std::isfinite(data[i]);
+            if (std::isfinite(data[i])) {
+                sampled_lo = std::min(sampled_lo, data[i]);
+                sampled_hi = std::max(sampled_hi, data[i]);
+                if (std::fabs(data[i]) > std::fabs(sampled_peak)) sampled_peak = data[i];
+            }
+        }
+        EXPECT_EQ(sampled_lo, lo);
+        EXPECT_EQ(sampled_hi, hi);
+        EXPECT_EQ(std::fabs(sampled_peak), peak);
+        EXPECT_EQ(sampled_missing, missing);
+    }
+}
+
+UTEST(lavery_core, display_summary_handles_small_empty_missing_and_invalid_series) {
+    PlotSummary summary;
+    ASSERT_TRUE(summary.build(nullptr, 0));
+    EXPECT_TRUE(summary.indices(0, 0, 1).empty());
+    const float data[] = {NAN, 2, 2, NAN};
+    ASSERT_TRUE(summary.build(data, 4));
+    EXPECT_EQ(summary.indices(0, 4, 1).size(), (size_t)4);
+    EXPECT_TRUE(summary.indices(2, 2, 1).empty());
+    EXPECT_TRUE(summary.indices(0, 5, 1).empty());
+    EXPECT_TRUE(summary.indices(3, 2, 1).empty());
+    EXPECT_TRUE(summary.indices(0, 4, 0).empty());
+    EXPECT_FALSE(summary.build(nullptr, 4));
+    EXPECT_FALSE(summary.build(data, 4, 0));
+    EXPECT_FALSE(summary.build(data, UINT32_MAX));
+    std::vector<float> missing(1024, NAN);
+    ASSERT_TRUE(summary.build(missing.data(), missing.size()));
+    for (uint32_t i : summary.indices(0, missing.size(), 1)) EXPECT_TRUE(std::isnan(missing[i]));
+    missing.assign(1024, 3);
+    missing[511] = 90;
+    ASSERT_TRUE(summary.build(missing.data(), missing.size()));
+    const auto indices = summary.indices(0, missing.size(), 1);
+    EXPECT_TRUE(std::binary_search(indices.begin(), indices.end(), 511u));
+}
 
 UTEST(lavery_core, event_distribution_uses_full_span_shared_bins_and_independent_normalization) {
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -1394,6 +1659,120 @@ UTEST(lavery_core, empty_or_invalid_baseline_ranges_do_not_borrow_samples) {
     EXPECT_FALSE(event_time_range(&options, 5, 2, "baseline"));
 }
 
+UTEST(lavery_core, pooled_history_detects_persistent_local_rise) {
+    std::vector<float> values(12 * 20, 5.0f);
+    for (size_t f = 0; f < 20; ++f) values[f * 12 + 4] = 7.0f;
+    for (int method = 0; method < Baseline_Count; ++method) {
+        MetricStatistics own, pooled;
+        ASSERT_TRUE(compute_statistics(&own, values, 12, false, (Baseline)method));
+        ASSERT_TRUE(compute_statistics(&pooled, values, 12, false, (Baseline)method, -1, 0, SIZE_MAX,
+            std::vector<uint32_t>(12, 0)));
+        EXPECT_FALSE(own.members[4].is_outlier(7, 2.5f));
+        EXPECT_TRUE(pooled.members[4].is_outlier(7, 2.5f));
+        EXPECT_FALSE(pooled.members[0].is_outlier(5, 2.5f));
+        EXPECT_EQ(pooled.members[4].count, (size_t)240);
+        EXPECT_EQ(pooled.heatmap.size(), values.size());
+        for (size_t f = 0; f < 20; ++f) {
+            EXPECT_NEAR(pooled.heatmap[(12-1-4)*20+f], pooled.members[4].zscore(7), 1e-6);
+        }
+        std::vector<FrameOutliers> counts;
+        ASSERT_TRUE(compute_outlier_counts(&counts, values, pooled.members, 2.5f));
+        for (const auto& frame : counts) EXPECT_EQ(frame.outliers, (size_t)1);
+        std::vector<std::vector<MemberOutlier>> samples(20);
+        for (size_t f = 0; f < samples.size(); ++f) {
+            MemberOutlier sample;
+            sample.cls = Class_Step;
+            sample.member = 4;
+            sample.contributors = sample.strong = 1u << (Rise - Tilt);
+            sample.z[Rise - Tilt] = pooled.members[4].zscore(7);
+            samples[f].push_back(sample);
+        }
+        std::vector<StepIndex> steps;
+        for (uint32_t p = 0; p < 12; ++p) steps.push_back({p,p+1});
+        EventOptions options;
+        options.min_frames = 3;
+        const auto regions = detect_events(samples, 13, steps, options);
+        ASSERT_EQ(regions.size(), (size_t)1);
+        EXPECT_EQ(regions[0].begin, (size_t)0);
+        EXPECT_EQ(regions[0].end, (size_t)19);
+        EXPECT_EQ(regions[0].pair_first, (uint32_t)4);
+        EXPECT_EQ(regions[0].pair_last, (uint32_t)5);
+    }
+}
+
+UTEST(lavery_core, pooled_history_respects_helix_range_and_missing_values) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const std::vector<float> values = {999,999,999, 1,3,100, 3,nan,102, 999,999,999};
+    for (int method = 0; method < Baseline_Count; ++method) {
+        MetricStatistics pooled, expected;
+        ASSERT_TRUE(compute_statistics(&pooled, values, 3, false, (Baseline)method, -1, 1, 3, {0,0,1}));
+        ASSERT_TRUE(compute_statistics(&expected, {1,3,3}, 1, false, (Baseline)method));
+        EXPECT_EQ(pooled.members[0].count, (size_t)3);
+        EXPECT_NEAR(pooled.members[0].mean, expected.members[0].mean, 1e-8);
+        EXPECT_NEAR(pooled.members[1].sd, expected.members[0].sd, 1e-8);
+        EXPECT_NEAR(pooled.members[2].mean, 101, 1e-8);
+        EXPECT_EQ(pooled.members[2].count, (size_t)2);
+        EXPECT_TRUE(std::isnan(pooled.heatmap[4+2]));
+        EXPECT_TRUE(pooled.members[0].is_outlier(999, 2.5f));
+        ASSERT_TRUE(compute_statistics(&pooled, values, 3, false, (Baseline)method, -1, 1, 1, {0,0,1}));
+        for (const auto& stats : pooled.members) EXPECT_EQ(stats.count, (size_t)0);
+        for (float z : pooled.heatmap) EXPECT_TRUE(std::isnan(z));
+        ASSERT_TRUE(compute_statistics(&pooled, {nan,3,nan,5}, 2, false, (Baseline)method, -1, 0, SIZE_MAX, {0,0}));
+        EXPECT_EQ(pooled.members[0].count, (size_t)2);
+        EXPECT_TRUE(std::isfinite(pooled.members[0].zscore(6)));
+        EXPECT_TRUE(std::isnan(pooled.heatmap[2]));
+        ASSERT_TRUE(compute_statistics(&pooled, {nan,7,nan,7}, 2, false, (Baseline)method, -1, 0, SIZE_MAX, {0,1}));
+        EXPECT_EQ(pooled.members[0].count, (size_t)0);
+        EXPECT_TRUE(std::isnan(pooled.members[0].zscore(6)));
+        EXPECT_EQ(pooled.members[1].count, (size_t)2);
+        EXPECT_EQ(pooled.members[1].zscore(8), 0.0f);
+        ASSERT_TRUE(compute_statistics(&pooled, {7}, 1, false, (Baseline)method, -1, 0, SIZE_MAX, {0}));
+        EXPECT_EQ(pooled.members[0].count, (size_t)1);
+        EXPECT_EQ(pooled.members[0].zscore(8), 0.0f);
+    }
+    MetricStatistics invalid;
+    EXPECT_FALSE(compute_statistics(&invalid, values, 3, false, Baseline_MeanSD, -1, 0, SIZE_MAX, {0,0}));
+    EXPECT_FALSE(compute_statistics(&invalid, values, 3, false, Baseline_MeanSD, -1, 0, SIZE_MAX, {0,0,3}));
+}
+
+UTEST(lavery_core, pooled_history_preserves_circular_and_state_references) {
+    for (int method = 0; method < Baseline_Count; ++method) {
+        MetricStatistics circular, state;
+        ASSERT_TRUE(compute_statistics(&circular, {179,-179,178,-178}, 2, true, (Baseline)method, -1,
+            0, SIZE_MAX, {0,0}));
+        EXPECT_LT(std::fabs(circular.members[0].deviation(180)), 2.0);
+        EXPECT_LT(circular.members[0].sd, 3.0);
+        ASSERT_TRUE(compute_statistics(&state, {10,170,20,160,200,190}, 2, true, (Baseline)method, Phase,
+            0, 2, {0,0}));
+        EXPECT_EQ(state.members[0].reference(10).count, (size_t)2);
+        EXPECT_EQ(state.members[1].reference(170).count, (size_t)2);
+        EXPECT_NEAR(state.members[0].reference(10).mean, 15, 1e-6);
+        EXPECT_NEAR(state.members[1].reference(170).mean, 165, 1e-6);
+    }
+}
+
+UTEST(lavery_core, pooled_groups_follow_helix_topology_for_every_class) {
+    const std::vector<StepIndex> steps = {{0,1},{1,2},{4,5}};
+    const auto pairs = helix_member_groups(6, steps, Class_Pair);
+    ASSERT_EQ(pairs.size(), (size_t)6);
+    EXPECT_EQ(pairs[0], pairs[2]);
+    EXPECT_NE(pairs[0], pairs[4]);
+    EXPECT_NE(pairs[3], pairs[4]);
+    EXPECT_NE(pairs[3], pairs[0]);
+    const auto step = helix_member_groups(6, steps, Class_Step);
+    ASSERT_EQ(step.size(), (size_t)3);
+    EXPECT_EQ(step[0], step[1]);
+    EXPECT_NE(step[1], step[2]);
+    EXPECT_LT(step[2], (uint32_t)step.size());
+    const auto nt = helix_member_groups(6, steps, Class_Nucleotide);
+    ASSERT_EQ(nt.size(), (size_t)12);
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        EXPECT_EQ(nt[2*p], pairs[p]);
+        EXPECT_EQ(nt[2*p+1], pairs[p]);
+    }
+    EXPECT_TRUE(helix_member_groups(0, {}, Class_Pair).empty());
+}
+
 UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     CsvEventRow row;
     row.run = "run1";
@@ -1427,13 +1806,13 @@ UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     row.baseline_end = 25;
     const std::string text = csv_event_row(row);
     EXPECT_STREQ(text.c_str(),
-        "\"run1\",2,4,9,40,90,\"ps\",6,4.5,12.25,\"Unwinding\",7,9,\"all\",\"median_mad\",2.5,2,2,step,7,\"7-8: \"\"x\"\"\",3,1,step/twist,deg,1,6,-4.5,21.5,0,0,0,0,0,0,0,0,,5,25\n");
+        "\"run1\",2,4,9,40,90,\"ps\",6,4.5,12.25,\"Unwinding\",7,9,\"all\",\"median_mad\",2.5,2,2,step,7,\"7-8: \"\"x\"\"\",3,1,step/twist,deg,1,6,-4.5,21.5,0,0,0,0,0,0,0,0,,5,25,own_history\n");
     size_t header = 1, fields = 1;
     for (const char* p = csv_event_header(); *p; ++p) if (*p == ',') ++header;
     row.label = "plain";
     for (char c : csv_event_row(row)) if (c == ',') ++fields;
     EXPECT_EQ(header, fields);
-    EXPECT_EQ(header, (size_t)40);
+    EXPECT_EQ(header, (size_t)41);
     row.parent_event = 1;
     row.burst_sigma = 3.5f;
     row.truncated_begin = true;
@@ -1442,9 +1821,11 @@ UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     row.detection_begin = 10;
     row.detection_end = 100;
     const auto nested = csv_event_row(row);
-    EXPECT_TRUE(nested.find(",1,3.5,1,0,20,5,10,100,stronger,5,25\n") != std::string::npos);
+    EXPECT_TRUE(nested.find(",1,3.5,1,0,20,5,10,100,stronger,5,25,own_history\n") != std::string::npos);
     row.residual = true;
-    EXPECT_TRUE(csv_event_row(row).find(",100,background,5,25\n") != std::string::npos);
+    EXPECT_TRUE(csv_event_row(row).find(",100,background,5,25,own_history\n") != std::string::npos);
+    row.reference_scope = Reference_HelixHistory;
+    EXPECT_TRUE(csv_event_row(row).find(",helix_history\n") != std::string::npos);
 }
 
 UTEST(lavery_core, csv_fields_preserve_quotes_commas_and_newlines) {
@@ -1474,10 +1855,12 @@ UTEST(lavery_core, csv_sample_has_reproducible_values_quality_baseline_and_flags
     sample.baseline_begin = 10;
     sample.baseline_end = 40;
     const auto row = csv_sample(sample);
-    EXPECT_STREQ(row.c_str(), "\"run1\",3,60,\"ps\",bp,2,\"pair2\",\"S1:DA2 / S2:DT9\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,2,1,1,1,16,mean_sd,10,40\n");
+    EXPECT_STREQ(row.c_str(), "\"run1\",3,60,\"ps\",bp,2,\"pair2\",\"S1:DA2 / S2:DT9\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,2,1,1,1,16,mean_sd,10,40,own_history\n");
     size_t columns = 1;
     for (const char* p = csv_header(); *p; ++p) if (*p == ',') ++columns;
-    EXPECT_EQ(columns, (size_t)26);
+    EXPECT_EQ(columns, (size_t)27);
+    sample.reference_scope = Reference_HelixHistory;
+    EXPECT_TRUE(csv_sample(sample).find(",helix_history\n") != std::string::npos);
     sample.value = std::numeric_limits<float>::quiet_NaN();
     sample.quality = Quality_NonfiniteCoordinates | Quality_InvalidBase;
     const auto missing = csv_sample(sample);

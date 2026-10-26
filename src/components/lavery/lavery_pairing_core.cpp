@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 namespace lavery {
@@ -26,6 +27,11 @@ std::vector<uint64_t> bond_keys(const md_hbond_set_t& bonds) {
     return keys;
 }
 
+bool contact_present(const PairContact& contact, const std::vector<uint64_t>& keys) {
+    return contact.explicit_hydrogen &&
+        std::binary_search(keys.begin(), keys.end(), contact_key(contact.donor, contact.acceptor));
+}
+
 uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_system_state_t& state,
                            const std::vector<uint64_t>& keys) {
     *count = 0;
@@ -33,8 +39,7 @@ uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_s
     for (const auto& contact : pair.contacts) {
         bool present = false;
         if (pair.uses_hydrogens) {
-            present = contact.explicit_hydrogen &&
-                std::binary_search(keys.begin(), keys.end(), contact_key(contact.donor, contact.acceptor));
+            present = contact_present(contact, keys);
         } else if (contact.donor < state.num_atoms && contact.acceptor < state.num_atoms) {
             vec3_t delta = vec3_sub(md_state_coord(&state, contact.donor), md_state_coord(&state, contact.acceptor));
             md_util_min_image_vec3(&delta, 1, &state.unitcell);
@@ -47,6 +52,109 @@ uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_s
 }
 
 } // namespace
+
+const char* pairing_state_name(PairingState state) {
+    switch (state) {
+    case Pairing_WatsonCrick: return "Watson-Crick";
+    case Pairing_Hoogsteen: return "Hoogsteen (A-T/U)";
+    case Pairing_Other: return "Other / ambiguous";
+    case Pairing_Unpaired: return "Unpaired";
+    default: return "Unavailable";
+    }
+}
+
+PairingState classify_pairing(const PairingEvidence& ev, float chi_a, float chi_b, uint16_t geometry) {
+    constexpr uint16_t unavailable = Quality_InvalidBase | Quality_UnsupportedBase | Quality_NonfiniteCoordinates |
+        Quality_DegenerateBase | Quality_MissingAtoms;
+    if (!ev.complete || !ev.expected || !std::isfinite(chi_a) || !std::isfinite(chi_b) || (geometry & unavailable))
+        return Pairing_Unavailable;
+    const bool compatible = !(geometry & (Quality_Separation | Quality_Alignment | Quality_PlaneOffset));
+    // Conservative, disjoint orientation windows; do not reuse the coarse anti/syn state bins.
+    const auto wrap = [](float chi) { return chi-360.0*std::floor((chi+180.0)/360.0); };
+    const auto anti = [&](float chi) { const auto a = wrap(chi); return a >= -180 && a <= -60; };
+    const auto syn = [&](float chi) { const auto a = wrap(chi); return a >= 0 && a <= 120; };
+    const bool wc = compatible && ev.canonical == ev.expected && anti(chi_a) && anti(chi_b);
+    const bool hg = compatible && ev.purine_side >= 0 && ev.hoogsteen == 2 &&
+        syn(ev.purine_side == 0 ? chi_a : chi_b) && anti(ev.purine_side == 0 ? chi_b : chi_a);
+    if (wc && !hg) return Pairing_WatsonCrick;
+    if (hg && !wc) return Pairing_Hoogsteen;
+    if (!compatible && !ev.canonical && !ev.hoogsteen) return Pairing_Unpaired;
+    return Pairing_Other;
+}
+
+bool pairing_runs(std::vector<PairingRun>* runs, const std::vector<PairingState>& states, size_t members, size_t member) {
+    if (!runs || !members || member >= members || states.size() % members) {
+        MD_LOG_ERROR("Lavery: invalid pairing-state series");
+        return false;
+    }
+    runs->clear();
+    const size_t frames = states.size() / members;
+    for (size_t f = 0; f < frames; ++f) {
+        const auto state = states[f*members+member];
+        if (state >= Pairing_Count) {
+            runs->clear();
+            MD_LOG_ERROR("Lavery: invalid pairing-state code");
+            return false;
+        }
+        if (runs->empty() || runs->back().state != state) runs->push_back({f, f, state});
+        else runs->back().end = f;
+    }
+    return true;
+}
+
+bool pairing_transitions(std::vector<PairingTransition>* out, const std::vector<PairingRun>& runs, const EventOptions& options) {
+    if (!out || !std::isfinite(options.min_duration) || options.min_duration < 0) {
+        MD_LOG_ERROR("Lavery: invalid pairing-state residence");
+        return false;
+    }
+    out->clear();
+    const auto& times = options.times;
+    for (size_t f = 0; f < times.size(); ++f) if (!std::isfinite(times[f]) || (f && times[f] <= times[f-1])) {
+        MD_LOG_ERROR("Lavery: pairing-state timestamps must be finite and strictly increasing");
+        return false;
+    }
+    bool has_source = false;
+    PairingRun source;
+    size_t expected = 0;
+    for (const auto& run : runs) {
+        if (run.begin != expected || run.end < run.begin || run.state >= Pairing_Count ||
+            (!times.empty() && run.end >= times.size())) {
+            MD_LOG_ERROR("Lavery: invalid pairing-state run");
+            return false;
+        }
+        expected = run.end+1;
+        if (run.end < options.first_frame || run.begin > options.last_frame) continue;
+        PairingRun clipped = {std::max(run.begin, options.first_frame), std::min(run.end, options.last_frame), run.state};
+        if (clipped.state == Pairing_Unavailable) { has_source = false; continue; }
+        const bool qualified = times.empty() ? clipped.end-clipped.begin+1 >= std::max(size_t(1), options.min_frames) :
+            times[clipped.end]-times[clipped.begin] >= options.min_duration;
+        if (!qualified) continue;
+        if (has_source && source.state != clipped.state) out->push_back({source, clipped});
+        source = clipped;
+        has_source = true;
+    }
+    if ((!times.empty() && expected != times.size()) || (!runs.empty() && options.first_frame > std::min(options.last_frame, expected-1))) {
+        MD_LOG_ERROR("Lavery: pairing-state range or timestamp count does not match series");
+        out->clear();
+        return false;
+    }
+    return true;
+}
+
+const char* csv_pairing_header() {
+    return "run,pair,label,state,begin_frame,end_frame,begin_time,end_time,time_unit,residence,min_residence,qualifies\n";
+}
+
+std::string csv_pairing_run(const std::string& run, const std::string& label, size_t pair, const PairingRun& span,
+                            double begin, double end, const std::string& unit, double minimum, bool physical_time) {
+    const double duration = physical_time ? end-begin : (double)(span.end-span.begin+1);
+    char row[256];
+    snprintf(row, sizeof(row), ",%zu,%zu,%.9g,%.9g,", span.begin, span.end, begin, end);
+    std::string output = csv_quote(run)+","+std::to_string(pair+1)+","+csv_quote(label)+","+
+        csv_quote(pairing_state_name(span.state))+row+csv_quote(unit);
+    snprintf(row, sizeof(row), ",%.9g,%.9g,%d\n", duration, minimum, span.state != Pairing_Unavailable && duration >= minimum);
+    return output+row;
+}
 
 PairingValidator::~PairingValidator() {
     md_hbond_query_free(&query_);
@@ -78,21 +186,25 @@ bool PairingValidator::initialize(const md_system_t& sys, const std::vector<Base
         const BaseTopology* a = &bases[pairs[p].a];
         const BaseTopology* b = &bases[pairs[p].b];
         if (a->reference > b->reference) std::swap(a, b);
-        auto add = [&](const BaseTopology& d, const char* dn, const BaseTopology& ac, const char* an) {
+        auto add = [&](std::vector<PairContact>& contacts, const BaseTopology& d, const char* dn, const BaseTopology& ac, const char* an) {
             const int32_t donor = atom(d, dn), acceptor = atom(ac, an);
             if (donor < 0 || acceptor < 0) return;
-            pairs_[p].contacts.push_back({(uint32_t)donor, (uint32_t)acceptor, false});
+            contacts.push_back({(uint32_t)donor, (uint32_t)acceptor, false});
             md_bitmask_set_bit(&donors, (uint32_t)donor);
             md_bitmask_set_bit(&acceptors, (uint32_t)acceptor);
         };
+        auto& chemistry = pairs_[p];
         if (a->reference == 0 && b->reference == 3) {
-            add(*a, "N6", *b, "O4");
-            add(*b, "N3", *a, "N1");
+            add(chemistry.contacts, *a, "N6", *b, "O4");
+            add(chemistry.contacts, *b, "N3", *a, "N1");
+            add(chemistry.hoogsteen_contacts, *a, "N6", *b, "O4");
+            add(chemistry.hoogsteen_contacts, *b, "N3", *a, "N7");
+            chemistry.purine_side = a == &bases[pairs[p].a] ? 0 : 1;
         } else if (a->reference == 1 && b->reference == 2) {
             pairs_[p].expected_contacts = 3;
-            add(*a, "N1", *b, "N3");
-            add(*a, "N2", *b, "O2");
-            add(*b, "N4", *a, "O6");
+            add(chemistry.contacts, *a, "N1", *b, "N3");
+            add(chemistry.contacts, *a, "N2", *b, "O2");
+            add(chemistry.contacts, *b, "N4", *a, "O6");
         }
     }
     const md_hbond_params_t params = md_hbond_params_preset(MD_HBOND_PRESET_GROMACS);
@@ -106,13 +218,13 @@ bool PairingValidator::initialize(const md_system_t& sys, const std::vector<Base
         return false;
     }
     for (auto& pair : pairs_) {
-        for (auto& contact : pair.contacts) {
+        for (auto* contacts : {&pair.contacts, &pair.hoogsteen_contacts}) for (auto& contact : *contacts) {
             for (size_t d = 0; d < query_.num_donors; ++d) {
                 if (query_.donor_d[d] == contact.donor) {
                     contact.explicit_hydrogen = true;
-                    pair.uses_hydrogens = true;
-                    break;
+                    contact.hydrogens.push_back(query_.donor_h[d]);
                 }
+                for (const auto& contact : pair.contacts) pair.uses_hydrogens |= contact.explicit_hydrogen;
             }
         }
     }
@@ -121,7 +233,7 @@ bool PairingValidator::initialize(const md_system_t& sys, const std::vector<Base
 }
 
 bool PairingValidator::evaluate(std::vector<uint16_t>& quality, std::vector<uint8_t>& contacts,
-                                const md_system_state_t& state) const {
+                                const md_system_state_t& state, std::vector<PairingEvidence>* evidence) const {
     if (!initialized_) {
         MD_LOG_ERROR("Lavery: hydrogen-bond query is not initialized");
         return false;
@@ -136,6 +248,34 @@ bool PairingValidator::evaluate(std::vector<uint16_t>& quality, std::vector<uint
     quality.resize(pairs_.size());
     contacts.resize(pairs_.size());
     for (size_t p = 0; p < pairs_.size(); ++p) quality[p] = evaluate_contacts(&contacts[p], pairs_[p], state, keys);
+    if (evidence) {
+        evidence->assign(pairs_.size(), {});
+        for (size_t p = 0; p < pairs_.size(); ++p) {
+            const auto& pair = pairs_[p];
+            auto& ev = (*evidence)[p];
+            ev.expected = (uint8_t)pair.expected_contacts;
+            ev.purine_side = pair.purine_side;
+            ev.complete = pair.contacts.size() == pair.expected_contacts &&
+                (pair.purine_side < 0 || pair.hoogsteen_contacts.size() == 2);
+            for (const auto* list : {&pair.contacts, &pair.hoogsteen_contacts}) for (const auto& contact : *list) {
+                bool finite = contact.donor < state.num_atoms && contact.acceptor < state.num_atoms;
+                if (finite) for (uint32_t atom : {contact.donor, contact.acceptor}) {
+                    const auto v = md_state_coord(&state, atom);
+                    finite &= std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+                }
+                for (uint32_t atom : contact.hydrogens) {
+                    if (atom >= state.num_atoms) { finite = false; break; }
+                    const auto v = md_state_coord(&state, atom);
+                    finite &= std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+                }
+                ev.complete &= contact.explicit_hydrogen && finite;
+                if (contact_present(contact, keys)) {
+                    if (list == &pair.contacts) ++ev.canonical;
+                    else ++ev.hoogsteen;
+                }
+            }
+        }
+    }
     md_hbond_set_free(&bonds);
     return true;
 }
@@ -163,7 +303,8 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
     out->step_values.assign(steps.size(), missing);
     out->pair_frames.resize(pairs.size());
     out->step_quality.assign(steps.size(), Quality_AdjacentPair);
-    if (!validator.evaluate(out->pair_quality, out->contacts, state)) return false;
+    std::vector<PairingEvidence> evidence;
+    if (!validator.evaluate(out->pair_quality, out->contacts, state, &evidence)) return false;
     std::vector<BaseFrame> frames;
     std::vector<uint16_t> base_quality;
     if (!extract_base_frames(frames, sys, state, bases, &base_quality)) return false;
@@ -222,6 +363,14 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
             compute_nucleotide(&out->nucleotide_values[2 * p + side], atoms, &state.unitcell,
                 &out->nucleotide_quality[2 * p + side], present);
         }
+    }
+    out->pairing_states.resize(pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto pair = pairs[p];
+        const uint16_t geometry = pair_quality(frames[pair.a], frames[pair.b], &state.unitcell) |
+            base_quality[pair.a] | base_quality[pair.b];
+        out->pairing_states[p] = classify_pairing(evidence[p], out->nucleotide_values[2*p].metric[Chi],
+            out->nucleotide_values[2*p+1].metric[Chi], geometry);
     }
     // Groove widths from phosphorus positions along each helix; strand I is the strand of the first pair's base a.
     std::vector<int64_t> step_from(pairs.size(), -1);

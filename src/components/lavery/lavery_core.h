@@ -163,6 +163,36 @@ enum Baseline : int {
     Baseline_Count,
 };
 const char* baseline_name(Baseline baseline);
+enum ReferenceScope : int {
+    Reference_OwnHistory,
+    Reference_HelixHistory,
+    Reference_Count,
+};
+const char* reference_scope_name(ReferenceScope scope);
+
+// Display-only index: preserves endpoints, extrema and a missing-data break per bucket.
+// Queries refine boundary buckets and return original sample indices in chronological order.
+class PlotSummary {
+public:
+    bool build(const float* values, size_t count, size_t stride = 1);
+    std::vector<uint32_t> indices(size_t first, size_t end, size_t pixels) const;
+    size_t size() const { return count_; }
+private:
+    using Bucket = std::array<uint32_t, 5>;
+    std::vector<std::vector<Bucket>> levels_;
+    size_t count_ = 0;
+};
+
+// Categorical display index. Bit 0 is unavailable; other bits are state+1.
+// Range masks preserve every state, including single-frame excursions.
+class StateSummary {
+public:
+    bool build(const std::vector<uint8_t>& codes);
+    uint32_t mask(size_t first, size_t end) const;
+private:
+    std::vector<uint8_t> codes_;
+    std::vector<std::vector<uint32_t>> levels_;
+};
 
 // 'mean' and 'sd' are the baseline's center and scale (mean/SD or median/scaled MAD).
 // Angular baselines measure deviations on the circle, wrapped to [-180, 180) degrees.
@@ -197,9 +227,12 @@ struct MetricStatistics {
 // separately by residence time, not by distance from the dominant state's center.
 // Baseline frames are [first_frame, end_frame); heatmaps still cover every input frame.
 // An empty interval or absent state has no reference (NaN z-scores), never a borrowed baseline.
+// Nonempty member_groups pools baseline samples within each group (including the selected member),
+// preserving the original matrix/heatmap layout and state-conditioned angular treatment.
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
                         bool angular = false, Baseline baseline = Baseline_MeanSD, int state_metric = -1,
-                        size_t first_frame = 0, size_t end_frame = SIZE_MAX);
+                        size_t first_frame = 0, size_t end_frame = SIZE_MAX,
+                        const std::vector<uint32_t>& member_groups = {});
 
 // Conformational states of bimodal nucleotide parameters; 0 states for other metrics.
 int metric_state_count(Metric metric);
@@ -223,6 +256,8 @@ void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p
                    const md_unitcell_t* cell = nullptr);
 // Pair chains linked by steps (step.a -> step.b), each in helix order.
 std::vector<std::vector<uint32_t>> helix_chains(size_t pair_count, const std::vector<StepIndex>& steps);
+// One helix ID per pair, step or nucleotide; pooled references never mix helices.
+std::vector<uint32_t> helix_member_groups(size_t pair_count, const std::vector<StepIndex>& steps, int cls);
 // Zero-based phosphate indices on strands I and II, in helix order.
 struct GroovePhosphates {
     std::array<std::array<uint32_t, 2>, 2> indices = {};
@@ -287,6 +322,10 @@ struct EventMember {
 };
 
 const EventMember::Sample* event_member_sample(const EventMember& member, size_t frame);
+
+// Display filter only. Zero is unlimited; physical duration is last minus first time,
+// frame fallback is inclusive span. Children are evaluated independently of parents.
+bool event_within_duration(size_t begin, size_t end, const float* times, size_t frames, double maximum);
 
 struct OutlierEvent {
     size_t parent = SIZE_MAX;  // Index in the returned event list, SIZE_MAX for a top-level event.
@@ -400,6 +439,7 @@ struct CsvEventRow {
     bool truncated_begin = false, truncated_end = false;
     double min_duration = 0, max_gap_duration = 0, detection_begin = 0, detection_end = 0;
     double baseline_begin = 0, baseline_end = 0;
+    ReferenceScope reference_scope = Reference_OwnHistory;
 };
 const char* csv_event_header();
 std::string csv_event_row(const CsvEventRow& row);
@@ -417,6 +457,7 @@ struct CsvSample {
     uint32_t selected_mask = 0;
     bool member_outlier = false;
     Baseline baseline_method = Baseline_MeanSD;
+    ReferenceScope reference_scope = Reference_OwnHistory;
     double baseline_begin = 0, baseline_end = 0;
 };
 
@@ -444,13 +485,40 @@ bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t*
 struct PairContact {
     uint32_t donor = 0, acceptor = 0;
     bool explicit_hydrogen = false;
+    std::vector<uint32_t> hydrogens;
 };
 
 struct PairChemistry {
     std::vector<PairContact> contacts;
     bool uses_hydrogens = false;
     size_t expected_contacts = 2;
+    std::vector<PairContact> hoogsteen_contacts;
+    int purine_side = -1; // A-T/U only; G-C Hoogsteen/protonation is not classified.
 };
+
+enum PairingState : uint8_t {
+    Pairing_Unavailable, Pairing_WatsonCrick, Pairing_Hoogsteen, Pairing_Other, Pairing_Unpaired,
+    Pairing_Count,
+};
+const char* pairing_state_name(PairingState state);
+struct PairingEvidence {
+    uint8_t canonical = 0, hoogsteen = 0, expected = 0;
+    int purine_side = -1;
+    bool complete = false; // All required donor hydrogens and finite contact atoms.
+};
+PairingState classify_pairing(const PairingEvidence& evidence, float chi_a, float chi_b, uint16_t geometry);
+struct PairingRun {
+    size_t begin = 0, end = 0;
+    PairingState state = Pairing_Unavailable;
+};
+struct PairingTransition {
+    PairingRun source, destination;
+};
+bool pairing_runs(std::vector<PairingRun>* runs, const std::vector<PairingState>& states, size_t members, size_t member);
+bool pairing_transitions(std::vector<PairingTransition>* out, const std::vector<PairingRun>& runs, const EventOptions& options);
+const char* csv_pairing_header();
+std::string csv_pairing_run(const std::string& run, const std::string& label, size_t pair, const PairingRun& span,
+                            double begin, double end, const std::string& unit, double minimum, bool physical_time);
 
 class PairingValidator {
 public:
@@ -460,7 +528,7 @@ public:
     PairingValidator& operator=(const PairingValidator&) = delete;
     bool initialize(const md_system_t& sys, const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs);
     bool evaluate(std::vector<uint16_t>& quality, std::vector<uint8_t>& contacts,
-                  const md_system_state_t& state) const;
+                  const md_system_state_t& state, std::vector<PairingEvidence>* evidence = nullptr) const;
     const std::vector<PairChemistry>& chemistry() const { return pairs_; }
 private:
     md_hbond_query_t query_ = {};
@@ -479,6 +547,7 @@ struct FrameAnalysis {
     std::vector<uint16_t> pair_quality, step_quality;
     std::vector<NucleotideQuality> nucleotide_quality;
     std::vector<uint8_t> contacts;
+    std::vector<PairingState> pairing_states;
 };
 bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
                     const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,

@@ -224,6 +224,14 @@ const char* baseline_name(Baseline baseline) {
     }
 }
 
+const char* reference_scope_name(ReferenceScope scope) {
+    switch (scope) {
+    case Reference_OwnHistory: return "Own pair/step over time";
+    case Reference_HelixHistory: return "All pairs/steps over time (same helix)";
+    default: return "Unknown";
+    }
+}
+
 static double median_of(std::vector<double>& v) {
     const size_t mid = v.size() / 2;
     std::nth_element(v.begin(), v.begin() + mid, v.end());
@@ -232,10 +240,81 @@ static double median_of(std::vector<double>& v) {
     return m;
 }
 
+bool PlotSummary::build(const float* values, size_t count, size_t stride) {
+    *this = {};
+    if ((!values && count) || !stride || count >= UINT32_MAX) {
+        MD_LOG_ERROR("Lavery: invalid display series dimensions");
+        return false;
+    }
+    count_ = count;
+    if (count < 16) return true;
+    auto empty = []() { return Bucket{UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX}; };
+    auto add = [&](Bucket& b, uint32_t i) {
+        if (i == UINT32_MAX) return;
+        if (b[0] == UINT32_MAX || i < b[0]) b[0] = i;
+        if (b[1] == UINT32_MAX || i > b[1]) b[1] = i;
+        const float v = values[(size_t)i * stride];
+        if (!std::isfinite(v)) {
+            if (b[4] == UINT32_MAX || i < b[4]) b[4] = i;
+        } else {
+            if (b[2] == UINT32_MAX || v < values[(size_t)b[2] * stride]) b[2] = i;
+            if (b[3] == UINT32_MAX || v > values[(size_t)b[3] * stride]) b[3] = i;
+        }
+    };
+    levels_.emplace_back((count + 15) / 16, empty());
+    for (size_t i = 0; i < count; ++i) add(levels_[0][i / 16], (uint32_t)i);
+    while (levels_.back().size() > 1) {
+        const size_t previous = levels_.size() - 1;
+        const size_t n = (levels_[previous].size() + 3) / 4;
+        levels_.emplace_back(n, empty());
+        for (size_t i = 0; i < levels_[previous].size(); ++i)
+            for (uint32_t index : levels_[previous][i]) add(levels_.back()[i / 4], index);
+    }
+    return true;
+}
+
+std::vector<uint32_t> PlotSummary::indices(size_t first, size_t end, size_t pixels) const {
+    std::vector<uint32_t> result;
+    if (first > end || end > count_ || !pixels) {
+        MD_LOG_ERROR("Lavery: invalid display series query");
+        return result;
+    }
+    if (first == end) return result;
+    size_t level = 0, block = 16;
+    if (levels_.empty() || (end - first) / pixels < block) {
+        for (size_t i = first; i < end; ++i) result.push_back((uint32_t)i);
+        return result;
+    }
+    while (level + 1 < levels_.size() && block * 4 <= (end - first) / pixels) {
+        ++level;
+        block *= 4;
+    }
+    auto visit = [&](auto&& self, size_t l, size_t b, size_t width) -> void {
+        const size_t begin = b * width, finish = std::min(count_, begin + width);
+        if (finish <= first || begin >= end) return;
+        if (begin >= first && finish <= end) {
+            auto indices = levels_[l][b];
+            std::sort(indices.begin(), indices.end());
+            for (size_t i = 0; i < indices.size(); ++i)
+                if (indices[i] != UINT32_MAX && (!i || indices[i] != indices[i-1])) result.push_back(indices[i]);
+        } else if (l) {
+            for (size_t child = b * 4; child < (b + 1) * 4 && child < levels_[l-1].size(); ++child)
+                self(self, l-1, child, width / 4);
+        } else {
+            for (size_t i = std::max(first, begin); i < std::min(end, finish); ++i) result.push_back((uint32_t)i);
+        }
+    };
+    for (size_t b = first / block; b <= (end - 1) / block; ++b) visit(visit, level, b, block);
+    return result;
+}
+
 bool compute_statistics(MetricStatistics* out, const std::vector<float>& values, size_t member_count,
-                        bool angular, Baseline baseline, int state_metric, size_t first_frame, size_t end_frame) {
+                        bool angular, Baseline baseline, int state_metric, size_t first_frame, size_t end_frame,
+                        const std::vector<uint32_t>& member_groups) {
     if (!out || (member_count == 0 ? !values.empty() : values.size() % member_count != 0) ||
-        baseline < 0 || baseline >= Baseline_Count || state_metric >= (int)Metric_Count) {
+        baseline < 0 || baseline >= Baseline_Count || state_metric >= (int)Metric_Count ||
+        (!member_groups.empty() && (member_groups.size() != member_count ||
+            *std::max_element(member_groups.begin(), member_groups.end()) >= member_count))) {
         MD_LOG_ERROR("Lavery: invalid metric matrix dimensions for statistics");
         return false;
     }
@@ -249,6 +328,27 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
         return false;
     }
     out->heatmap.resize(values.size(), std::numeric_limits<float>::quiet_NaN());
+    if (!member_groups.empty()) {
+        const size_t groups = *std::max_element(member_groups.begin(), member_groups.end()) + 1;
+        std::vector<std::vector<size_t>> indices(groups);
+        for (size_t m = 0; m < member_count; ++m) indices[member_groups[m]].push_back(m);
+        for (const auto& group : indices) {
+            if (group.empty()) continue;
+            std::vector<float> pooled;
+            pooled.reserve((end_frame - first_frame) * group.size());
+            for (size_t f = first_frame; f < end_frame; ++f)
+                for (size_t m : group) pooled.push_back(values[f * member_count + m]);
+            MetricStatistics reference;
+            if (!compute_statistics(&reference, pooled, 1, angular, baseline, state_metric)) return false;
+            for (size_t m : group) {
+                out->members[m] = reference.members[0];
+                for (size_t f = 0; f < frames; ++f)
+                    out->heatmap[(member_count - 1 - m) * frames + f] =
+                        out->members[m].zscore(values[f * member_count + m]);
+            }
+        }
+        return true;
+    }
     std::vector<double> samples;
     samples.reserve(frames);
     const Metric state_kind = (Metric)std::max(0, state_metric);
@@ -330,6 +430,45 @@ std::string csv_quote(const std::string& text) {
     std::string out = "\"";
     for (char c : text) { out += c; if (c == '"') out += '"'; }
     return out + '"';
+}
+
+bool StateSummary::build(const std::vector<uint8_t>& codes) {
+    codes_.clear();
+    levels_.clear();
+    for (uint8_t c : codes) if (c >= 32) {
+        MD_LOG_ERROR("Lavery: categorical display code must be below 32");
+        return false;
+    }
+    codes_ = codes;
+    if (codes.empty()) return true;
+    levels_.emplace_back((codes.size()+31)/32, 0);
+    for (size_t f = 0; f < codes.size(); ++f) levels_[0][f/32] |= 1u << codes[f];
+    while (levels_.back().size() > 1) {
+        const size_t n = levels_.back().size();
+        std::vector<uint32_t> next((n+3)/4, 0);
+        for (size_t i = 0; i < n; ++i) next[i/4] |= levels_.back()[i];
+        levels_.push_back(std::move(next));
+    }
+    return true;
+}
+
+uint32_t StateSummary::mask(size_t first, size_t end) const {
+    if (first > end || end > codes_.size()) {
+        MD_LOG_ERROR("Lavery: invalid categorical display range");
+        return 0;
+    }
+    uint32_t result = 0;
+    while (first < end) {
+        if (first%32 || end-first < 32) { result |= 1u << codes_[first++]; continue; }
+        size_t level = 0, width = 32;
+        while (level+1 < levels_.size() && first%(width*4) == 0 && end-first >= width*4) {
+            width *= 4;
+            ++level;
+        }
+        result |= levels_[level][first/width];
+        first += width;
+    }
+    return result;
 }
 
 bool detect_state_switches(std::vector<StateSwitch>* out, const std::vector<float>& values,
@@ -418,7 +557,7 @@ std::string csv_state_switch_row(const std::string& run, const std::string& labe
 }
 
 const char* csv_header() {
-    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline,baseline_begin,baseline_end\n";
+    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope\n";
 }
 
 std::string csv_sample(const CsvSample& s) {
@@ -440,12 +579,13 @@ std::string csv_sample(const CsvSample& s) {
     }
     row += csv_quote(reason.empty() ? "Good" : reason);
     const auto ref = s.baseline.reference(s.value);
-    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s,%.17g,%.17g\n",
+    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s,%.17g,%.17g,%s\n",
         ref.count ? ref.mean : std::numeric_limits<double>::quiet_NaN(),
         ref.count ? ref.sd : std::numeric_limits<double>::quiet_NaN(),
         s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric - class_first_metric(metric_class(s.metric))))) ? 1 : 0,
         s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask,
-        s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd", s.baseline_begin, s.baseline_end);
+        s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd", s.baseline_begin, s.baseline_end,
+        s.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
     row += buf;
     return row;
 }
@@ -490,6 +630,15 @@ std::vector<size_t> event_color_slots(const std::vector<OutlierEvent>& events) {
         assigned.push_back(i);
     }
     return slots;
+}
+
+bool event_within_duration(size_t begin, size_t end, const float* times, size_t frames, double maximum) {
+    if (!std::isfinite(maximum) || maximum < 0 || begin > end || end >= frames ||
+        (times && (!std::isfinite(times[begin]) || !std::isfinite(times[end]) || times[end] < times[begin]))) {
+        MD_LOG_ERROR("Lavery: invalid maximum-duration filter or event span");
+        return false;
+    }
+    return maximum == 0 || (times ? (double)times[end] - times[begin] : (double)(end - begin + 1)) <= maximum;
 }
 
 std::vector<EventContribution> event_contributions(const std::vector<OutlierEvent>& events, size_t frame, size_t inspected_event) {
@@ -936,7 +1085,7 @@ const char* csv_event_header() {
     return "run,event,begin_frame,end_frame,begin_time,end_time,time_unit,event_peak_frame,event_peak_sigma,event_score,event_type,"
            "first_pair,last_pair,scope,baseline,sigma,end_sigma,neighbourhood,"
            "class,member,label,member_outlier_frames,member_lost_frames,parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,"
-           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode,baseline_begin,baseline_end\n";
+           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_scope\n";
 }
 
 std::string csv_event_row(const CsvEventRow& r) {
@@ -954,11 +1103,12 @@ std::string csv_event_row(const CsvEventRow& r) {
     snprintf(buf, sizeof(buf), ",%.9g,%.9g,%d,%s,%zu,", r.sigma, r.end_sigma, r.neighbourhood, class_csv_name(metric_class(r.metric)), r.member);
     row += buf;
     row += csv_quote(r.label);
-    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g\n", r.member_frames, r.member_lost, metric_path(r.metric),
+    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g,%s\n", r.member_frames, r.member_lost, metric_path(r.metric),
         metric_uses_degrees(r.metric) ? "deg" : "Angstrom", r.contributing ? 1 : 0, r.parameter_peak, r.parameter_z, r.value,
         r.parent_event, r.burst_sigma, r.truncated_begin ? 1 : 0, r.truncated_end ? 1 : 0,
         r.min_duration, r.max_gap_duration, r.detection_begin, r.detection_end,
-        !r.parent_event ? "" : r.residual ? "background" : "stronger", r.baseline_begin, r.baseline_end);
+        !r.parent_event ? "" : r.residual ? "background" : "stronger", r.baseline_begin, r.baseline_end,
+        r.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
     row += buf;
     return row;
 }
@@ -1498,6 +1648,36 @@ std::vector<std::vector<uint32_t>> helix_chains(size_t pair_count, const std::ve
         chains.push_back(std::move(chain));
     }
     return chains;
+}
+
+std::vector<uint32_t> helix_member_groups(size_t pair_count, const std::vector<StepIndex>& steps, int cls) {
+    if (cls < 0 || cls >= Class_Count || std::any_of(steps.begin(), steps.end(),
+            [&](const StepIndex& step) { return step.a >= pair_count || step.b >= pair_count; })) {
+        MD_LOG_ERROR("Lavery: invalid topology for pooled reference groups");
+        return {};
+    }
+    std::vector<uint32_t> pairs(pair_count, UINT32_MAX);
+    uint32_t group = 0;
+    for (const auto& chain : helix_chains(pair_count, steps)) {
+        for (uint32_t p : chain) pairs[p] = group;
+        ++group;
+    }
+    for (auto& p : pairs) if (p == UINT32_MAX) p = group++;
+    if (cls == Class_Pair) return pairs;
+    std::vector<uint32_t> members;
+    if (cls == Class_Nucleotide) {
+        for (uint32_t p : pairs) { members.push_back(p); members.push_back(p); }
+    } else {
+        // Compact IDs: a chain with only one pair has no step.
+        std::vector<uint32_t> step_groups(group, UINT32_MAX);
+        uint32_t next = 0;
+        for (const auto& step : steps) {
+            auto& id = step_groups[pairs[step.a]];
+            if (id == UINT32_MAX) id = next++;
+            members.push_back(id);
+        }
+    }
+    return members;
 }
 
 } // namespace lavery
