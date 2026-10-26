@@ -77,7 +77,7 @@ The Lavery core regressions also cover rejection of broken fixed
 partners, stale-frame clearing, adjoining-step invalidation, exclusion from
 statistics, periodic pairing, geometric quality flags, missing/unsupported fit diagnostics,
 multi-parameter contributor masks and strict sigma thresholds, consecutive event
-grouping and peak tracking, and the parameter/event CSV records' 27/41-column shapes, escaping,
+grouping and peak tracking, and the parameter/event CSV records' 28/42-column shapes, escaping,
 units, baselines, validity and outlier flags. Run without launching the GUI:
 
 ```
@@ -107,6 +107,17 @@ they are not an end-to-end GUI FPS benchmark.
 Maximum-shown-duration tests cover elapsed physical time, ps/ns scaling,
 inclusive frame fallback, exact thresholds, singleton spans, bridged gaps,
 independent children under hidden parents, Unlimited and invalid input rejection.
+
+`test_lavery_reference.cpp` covers old/new raw CSV import, quoted fields, duplicate
+samples, stage-summary missing/state/reference denominators and signed/RMS z,
+bulk cross-class parameter/member selection and deduplication,
+disruption reason text versus unchanged conservative chemistry classification,
+malformed records, unit/class rejection, member identities and ambiguous
+mapping, external mean/MAD/circular/state-conditioned references, missing-state
+exclusion, pooled deduplication, exact RMS ranking, ties, time separation, invalid
+features, zero-scale rejection, and native XTC/GRO roundtrip. Coordinate export
+checks atom count, first-frame GRO coordinates, chronological original times,
+triclinic boxes, score rank preservation and refusal to overwrite outputs.
 
 Categorical-state regressions cover complete directional-contact evidence,
 conservative WC/A-T/U Hoogsteen orientation, ambiguous versus unpaired versus
@@ -156,6 +167,29 @@ Alternatively set `VIAMD_LAVERY_VALIDATION_PAIRING=/path/pairing.csv` to export
 only those state records without writing PDBs, useful for full event windows.
 Chemistry labels require explicit donor hydrogens; heavy-atom-only fixtures
 retain their original numerical geometry but are annotated Unavailable.
+
+For an end-to-end real-data external-reference/export check, also set
+`VIAMD_LAVERY_VALIDATION_REFERENCE=/new/path/reference.csv`. The opt-in test
+exports all parameter classes, reimports/matches them and compares Mean/SD and
+Median/MAD statistics and every heatmap sample with the original full-precision
+calculation, including circular and within-state references. Optional
+`VIAMD_LAVERY_VALIDATION_REFERENCE_RANGE_PS=0,1995` restricts the reference to
+inclusive physical-time bounds while comparisons still cover the full run. Set
+`VIAMD_LAVERY_VALIDATION_REPRESENTATIVES=/new/path/frames.xtc` to also rank and
+export five real frames with a 100 ps separation (if enough qualify), combining
+central-pair Opening, central-step Rise/Twist and both central-pair nucleotide
+Chi features. The output is reloaded and every exported atom coordinate and
+timestamp is checked against its original frame.
+For a localized or per-hold comparison, override the one-based feature list
+with `VIAMD_LAVERY_VALIDATION_FEATURES=step/twist:3,step/rise:3` and restrict
+candidate frames using `VIAMD_LAVERY_VALIDATION_SEARCH_RANGE_PS=8000,10000`.
+The reference range remains independent. The mapping CSV records the exact
+features, reference and search bounds, and every selected frame is round-tripped.
+The test does not overwrite existing XTC/GRO/CSV outputs.
+`VIAMD_LAVERY_VALIDATION_SAMPLES=/path/samples.csv` additionally exports all raw
+parameters with production per-parameter quality flags. The independent
+`VIAMD_LAVERY_VALIDATION_EVIDENCE=/path/evidence.csv` exports pair quality and
+canonical contact counts per frame, without producing thousands of PDBs.
 
 `src/components/lavery/tests/test_lavery_core.cpp` checks all 12 intra-pair and
 step metrics against the numerical oracle in its `data/` folder. The oracle was

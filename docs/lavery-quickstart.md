@@ -9,26 +9,78 @@ nucleic-acid trajectories:
 - ten **nucleotide** parameters: backbone torsions Alpha–Zeta, Chi, sugar
   pucker phase and amplitude, and Epsilon − Zeta (BI/BII).
 
-It then flags frames where a pair, step or nucleotide deviates from its own
-trajectory baseline, and detects residence-qualified state switches separately.
+It then flags frames where a pair, step or nucleotide deviates from its chosen
+trajectory or imported control baseline, and detects residence-qualified state switches separately.
 For the full reference, see [lavery.md](./lavery.md).
 
 ## Watch states change along the trajectory
 
-Open **State history** in the results tabs. Choose BI/BII, anti/syn, sugar
+Open **State history > View: History** in the results tabs. Choose BI/BII, anti/syn, sugar
 pucker, Alpha/Gamma rotamers or Pairing chemistry. Each row is a member,
 time runs horizontally, and colour is the raw state. Hover for exact values;
 click to select the member and jump to that time. White means multiple states
 fall in a display bin: zoom in. Grey means unavailable, not physically unpaired.
 Minimum residence filters transition tables without repainting this history.
 
-**Pairing states** adds a selected-pair timeline and transition table
-(default residence 200 ps), with CSV export of all raw runs. It distinguishes
+Use **Fit view** in History, or double-click either State history or the numerical heatmap to fit the full
+trajectory/member extent, even when the display is currently zoomed in.
+Under **State history > View: Compare stages**, compare named timeline periods:
+choose chemistry/state occupancies or the plotted parameter's mean/RMS z,
+and all/internal/terminal/selected members. Counts distinguish missing samples
+and samples with a usable reference. Overlapping periods include shared samples;
+percentages are sample occupancies, not statistically independent observations.
+
+**State switches > Switch type: Pairing chemistry** adds the selected-pair
+transition table (default residence 200 ps), with CSV export of all raw runs.
+The selected pair is highlighted in the all-member History plot; there is no
+duplicate compact timeline. The annotation distinguishes
 Watson-Crick, A-T/U Hoogsteen, Other, Unpaired and Unavailable using explicit
 directional H bonds and compatible orientations. G-C Hoogsteen is not identified;
 hydrogen-free data remains Unavailable for this annotation. The existing
 pair-loss detector and numerical validity are unchanged: a Hoogsteen pair can
 still have Good quality because one shared canonical bond survives.
+
+## Control references and representative frames
+
+Results tabs are ordered **Outliers > State switches > State history > Export**.
+Nucleotide and chemistry transitions share State switches; raw histories share
+State history. History and Compare stages occupy separate views, as do
+Representative frames and Analysis tables under Export.
+The inspector's **Evidence...** button opens the former Pairing & coverage table
+in a resizable dialog. It reports the plotted
+class/parameter, not necessarily the state category currently displayed.
+
+### Compare against a control simulation
+
+On the control, select **Current trajectory** and the desired **Baseline
+range**, then **Export > Analysis tables > Export reference CSV (all classes)**. Open the modified
+simulation, choose **Reference source: External CSV**, and import that file.
+Check **Reference mapping**; unresolved members require explicit correspondence,
+not numerical-index matching. Old plotted-class parameter exports also work,
+but cannot provide parameters/classes they did not contain.
+
+Mean/SD or Median/MAD and per-member/pooled comparison still apply. The density
+overlay shows the imported reference. Missing reference data is reported, never
+replaced with the active trajectory. Save the workspace and keep its reference
+CSV available.
+
+### Extract the most baseline-like frames
+
+In **Export > Representative frames**, use **All intra**, **All inter**, **All nucleotide**
+or **All classes** for bulk additions. For specific components/members across
+classes, expand **Choose parameter components and members**, choose parameters
+and members in each column, then **Add chosen features**. You can still add
+plotted parameters. Additions combine without duplicates; Clear features resets
+the ranking list. Each feature has equal weight, so larger selections give a
+class more total influence.
+Choose N, minimum temporal separation and whole-run or Detection-range search.
+**Rank closest frames** previews actual frames ordered by RMS reference z.
+All features need valid values and nonzero reference scale in every candidate.
+Click to inspect; **Export XTC + GRO + CSV...** writes a chronological trajectory,
+matching first-frame structure and original-frame/time/score/rank mapping.
+Choose a new basename: existing outputs are not overwritten.
+These are the most reference-centred frames, not necessarily the most populated
+structures of the current simulation.
 
 ## Five-step workflow
 
@@ -52,7 +104,7 @@ still have Good quality because one shared canonical bond survives.
 4. Read the events table. Each one-line row is one local distortion: outliers that
    are close in time and along the helix, so separate kinks are listed
    separately. Rows are sorted by **Score**; each shows its time span, base-pair
-   region, a **Type** such as Unwinding, Kink (roll) or Pair loss, and duration.
+   region, a **Type** such as Unwinding, Kink (roll) or Pairing disruption, and duration.
    **Active now** keeps only events spanning the current frame. The **filter**
    box keeps events matching a type or parameter word (`roll`, `unwinding`,
    `loss`) and/or base pairs (`7`, `5-9`); space-separated terms must all match.
@@ -159,7 +211,7 @@ still have Good quality because one shared canonical bond survives.
      Shift/Ctrl selection gestures keep their native meaning.
    - The GUI is one non-dockable window: settings left, events above the plots.
      Rarely used settings sit in collapsed sections (**Event parameters**,
-     **Advanced detection**, **Export & tools**) or the compact **Visual
+     **Advanced detection**, **Tools**) or the compact **Visual
      feedback...** popup; help text is in
      tooltips (hover labels or `(?)`).
 
@@ -236,7 +288,7 @@ definitions and are not a numerical identity check.
   unavailable and excluded from analysis. Missing terminal torsions are normal.
 - **Distorted but calculable geometry:** warnings only; finite values stay in
   statistics and event detection so real deformation is not hidden.
-- **Pairing & coverage** shows quality for the selected parameter. Hover a
+- **Inspector > Evidence...** shows quality for the selected parameter. Hover a
   viewport marker to see parameter-specific reasons; parameter CSV exports
   preserve the same flags and reasons.
 - The inspector and hover details distinguish **Unavailable - excluded from
@@ -285,7 +337,7 @@ boundary flags. Detection thresholds and qualification rules are unchanged.
 | Burst extra | Stronger mode: child start = tolerance + this (default +1 sigma); children retain the same hysteresis and duration/gap filters |
 | Residual | Background mode: child start = \|z − parent background\| (default 2 sigma); needs at least 5 valid members in the parent region |
 | Hysteresis | Events start at the tolerance and continue down to tolerance minus this (default 0.5 sigma) |
-| Pair loss | A broken base pair counts as outlying instead of ending the event (default on) |
+| Pairing disruption | Original pairing geometry/canonical contacts fail; counts as outlying (default on), not necessarily chemistry Unpaired |
 | Min duration | Minimum elapsed first-to-last contribution time, including bridged gaps; zero retains spikes |
 | Bridge gaps | Maximum quiet-gap time; adjacent samples always connect (subject to spatial grouping) |
 | Time in ns | Switch duration, gap and range inputs between ps and ns without changing their physical values |
@@ -318,7 +370,7 @@ Angular parameters such as Twist and Opening wrap correctly at +/-180°.
 
 ## State switches, separately from outlier events
 
-Use **State switches** beside **Outlier events** for North/South, BI/BII,
+Use **State switches > Switch type: Nucleotide conformations** beside **Outliers** for North/South, BI/BII,
 anti/syn and Alpha/Gamma rotamer changes. Both the source and destination
 must meet **Min residence** (ps/ns, or frames without physical timestamps).
 The initial residence is the event minimum duration; it can be adjusted
@@ -329,11 +381,13 @@ Rows show the state transition, destination residence and shortest signed
 angular change between the source/destination run circular means, **not a
 sigma severity score**. Click to isolate the nucleotide, update all plots,
 and overlay the destination-run distribution. Play/change frame restores
-automatic event feedback. **Export & tools > Export state switches CSV**
+automatic event feedback. **Export > Analysis tables > Export state switches CSV**
 saves the transitions separately from sigma outlier events.
 
-The **Event parameters** mask and **Detection range** apply to both lists;
+The **Event parameters** mask and **Detection range** apply to outliers and nucleotide switches;
 sigma, hierarchy and gap bridging apply only to outlier events.
+Pairing chemistry switches use the selected pair over the whole run and their
+own residence setting, independent of that mask/range.
 
 ## What's left to do
 

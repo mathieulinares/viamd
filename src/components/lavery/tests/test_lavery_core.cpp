@@ -1394,8 +1394,8 @@ UTEST(lavery_core, lost_pairs_join_events_and_name_them) {
     EXPECT_EQ(events[0].members[1].lost_frames, (size_t)0);
     EXPECT_EQ(events[0].members[0].lost_frames, (size_t)2);
     EXPECT_EQ(events[0].members[0].frames, (size_t)3);
-    EXPECT_TRUE(event_kind(events[0]) == "Pair loss + Opening (breathing / flip)");
-    EXPECT_TRUE(event_kind(events[1]) == "Pair loss");
+    EXPECT_TRUE(event_kind(events[0]) == "Pairing disruption + Opening (breathing / flip)");
+    EXPECT_TRUE(event_kind(events[1]) == "Pairing disruption");
     EXPECT_EQ(events[1].peak, (size_t)4);
     EXPECT_EQ(events[1].members[0].peak_parameter, -1);
     std::vector<std::vector<MemberOutlier>> bad(1);
@@ -1806,13 +1806,13 @@ UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     row.baseline_end = 25;
     const std::string text = csv_event_row(row);
     EXPECT_STREQ(text.c_str(),
-        "\"run1\",2,4,9,40,90,\"ps\",6,4.5,12.25,\"Unwinding\",7,9,\"all\",\"median_mad\",2.5,2,2,step,7,\"7-8: \"\"x\"\"\",3,1,step/twist,deg,1,6,-4.5,21.5,0,0,0,0,0,0,0,0,,5,25,own_history\n");
+        "\"run1\",2,4,9,40,90,\"ps\",6,4.5,12.25,\"Unwinding\",7,9,\"all\",\"median_mad\",2.5,2,2,step,7,\"7-8: \"\"x\"\"\",3,1,step/twist,deg,1,6,-4.5,21.5,0,0,0,0,0,0,0,0,,5,25,own_history,\"current_trajectory\"\n");
     size_t header = 1, fields = 1;
     for (const char* p = csv_event_header(); *p; ++p) if (*p == ',') ++header;
     row.label = "plain";
     for (char c : csv_event_row(row)) if (c == ',') ++fields;
     EXPECT_EQ(header, fields);
-    EXPECT_EQ(header, (size_t)41);
+    EXPECT_EQ(header, (size_t)42);
     row.parent_event = 1;
     row.burst_sigma = 3.5f;
     row.truncated_begin = true;
@@ -1821,11 +1821,11 @@ UTEST(lavery_core, event_csv_rows_identify_member_and_parameter) {
     row.detection_begin = 10;
     row.detection_end = 100;
     const auto nested = csv_event_row(row);
-    EXPECT_TRUE(nested.find(",1,3.5,1,0,20,5,10,100,stronger,5,25,own_history\n") != std::string::npos);
+    EXPECT_TRUE(nested.find(",1,3.5,1,0,20,5,10,100,stronger,5,25,own_history,\"current_trajectory\"\n") != std::string::npos);
     row.residual = true;
-    EXPECT_TRUE(csv_event_row(row).find(",100,background,5,25,own_history\n") != std::string::npos);
+    EXPECT_TRUE(csv_event_row(row).find(",100,background,5,25,own_history,\"current_trajectory\"\n") != std::string::npos);
     row.reference_scope = Reference_HelixHistory;
-    EXPECT_TRUE(csv_event_row(row).find(",helix_history\n") != std::string::npos);
+    EXPECT_TRUE(csv_event_row(row).find(",helix_history,\"current_trajectory\"\n") != std::string::npos);
 }
 
 UTEST(lavery_core, csv_fields_preserve_quotes_commas_and_newlines) {
@@ -1855,12 +1855,12 @@ UTEST(lavery_core, csv_sample_has_reproducible_values_quality_baseline_and_flags
     sample.baseline_begin = 10;
     sample.baseline_end = 40;
     const auto row = csv_sample(sample);
-    EXPECT_STREQ(row.c_str(), "\"run1\",3,60,\"ps\",bp,2,\"pair2\",\"S1:DA2 / S2:DT9\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,2,1,1,1,16,mean_sd,10,40,own_history\n");
+    EXPECT_STREQ(row.c_str(), "\"run1\",3,60,\"ps\",bp,2,\"pair2\",\"S1:DA2 / S2:DT9\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,2,1,1,1,16,mean_sd,10,40,own_history,\"current_trajectory\"\n");
     size_t columns = 1;
     for (const char* p = csv_header(); *p; ++p) if (*p == ',') ++columns;
-    EXPECT_EQ(columns, (size_t)27);
+    EXPECT_EQ(columns, (size_t)28);
     sample.reference_scope = Reference_HelixHistory;
-    EXPECT_TRUE(csv_sample(sample).find(",helix_history\n") != std::string::npos);
+    EXPECT_TRUE(csv_sample(sample).find(",helix_history,\"current_trajectory\"\n") != std::string::npos);
     sample.value = std::numeric_limits<float>::quiet_NaN();
     sample.quality = Quality_NonfiniteCoordinates | Quality_InvalidBase;
     const auto missing = csv_sample(sample);

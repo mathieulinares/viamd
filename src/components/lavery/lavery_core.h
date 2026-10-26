@@ -234,6 +234,43 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
                         size_t first_frame = 0, size_t end_frame = SIZE_MAX,
                         const std::vector<uint32_t>& member_groups = {});
 
+struct ReferenceMember {
+    std::string label, identity;
+    std::array<std::vector<float>, Metric_Count> values;
+};
+struct ExternalReference {
+    std::string path, run, fingerprint;
+    std::array<std::vector<ReferenceMember>, Class_Count> members;
+    size_t records = 0;
+};
+using ReferenceMapping = std::array<std::vector<int>, Class_Count>;
+std::string reference_identity(int cls, const std::string& label, const std::string& pair_a, const std::string& pair_b);
+bool load_external_reference(ExternalReference* out, const std::string& path, std::string* error);
+std::vector<int> match_reference_members(const std::vector<ReferenceMember>& source, const std::vector<std::string>& identities);
+bool external_statistics(MetricStatistics* out, const ExternalReference& source, const std::vector<int>& mapping,
+                         const std::vector<float>& current, Metric metric, Baseline baseline,
+                         const std::vector<uint32_t>& groups = {});
+std::vector<float> external_samples(const ExternalReference& source, Metric metric, const std::vector<int>& mapping,
+                                    size_t member, const std::vector<uint32_t>& groups = {});
+struct FrameCandidate { size_t frame = 0; double score = 0; };
+struct FrameFeature { Metric metric = Buckle; size_t member = 0; };
+struct PeriodSummary {
+    size_t valid = 0, missing = 0, referenced = 0;
+    std::array<size_t,5> states = {};
+    double z_sum = 0, z_square_sum = 0;
+    void add(float value, float z, int state = -1);
+    double mean_z() const;
+    double rms_z() const;
+};
+bool add_frame_features(std::vector<FrameFeature>* features, int cls, uint32_t parameter_mask,
+                        const std::vector<size_t>& members);
+bool representative_frames(std::vector<FrameCandidate>* out, const std::array<std::vector<float>, Metric_Count>& values,
+    const std::array<MetricStatistics, Metric_Count>& statistics, const std::array<size_t, Metric_Count>& columns,
+    const std::vector<FrameFeature>& features, size_t first, size_t end, size_t count, double separation,
+    const std::vector<double>& times, std::string* error);
+bool export_representative_frames(const md_system_t& sys, const std::string& run, const std::string& xtc_path,
+    const std::vector<FrameCandidate>& frames, const std::string& provenance, std::string* error);
+
 // Conformational states of bimodal nucleotide parameters; 0 states for other metrics.
 int metric_state_count(Metric metric);
 int metric_state(Metric metric, float value); // -1 when not a state metric or not finite
@@ -415,8 +452,9 @@ std::vector<OutlierEvent> detect_events(const std::vector<std::vector<MemberOutl
                                         const std::vector<StepIndex>& steps, const EventOptions& options = {});
 
 // Short rule-based description from the dominant parameter and its sign, e.g. "Unwinding",
-// "Opening (breathing / flip)"; "Pair loss" leads when a pair broke.
+// "Opening (breathing / flip)"; "Pairing disruption" leads for disrupted original pairing.
 std::string event_kind(const OutlierEvent& event);
+std::string pairing_disruption_reasons(uint16_t quality);
 // Index (Metric) of the parameter with the largest summed |z|, -1 when none.
 int event_dominant_metric(const OutlierEvent& event);
 
@@ -440,6 +478,7 @@ struct CsvEventRow {
     double min_duration = 0, max_gap_duration = 0, detection_begin = 0, detection_end = 0;
     double baseline_begin = 0, baseline_end = 0;
     ReferenceScope reference_scope = Reference_OwnHistory;
+    std::string reference_source = "current_trajectory";
 };
 const char* csv_event_header();
 std::string csv_event_row(const CsvEventRow& row);
@@ -458,6 +497,7 @@ struct CsvSample {
     bool member_outlier = false;
     Baseline baseline_method = Baseline_MeanSD;
     ReferenceScope reference_scope = Reference_OwnHistory;
+    std::string reference_source = "current_trajectory";
     double baseline_begin = 0, baseline_end = 0;
 };
 

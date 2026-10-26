@@ -557,7 +557,7 @@ std::string csv_state_switch_row(const std::string& run, const std::string& labe
 }
 
 const char* csv_header() {
-    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope\n";
+    return "run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope,reference_source\n";
 }
 
 std::string csv_sample(const CsvSample& s) {
@@ -579,14 +579,14 @@ std::string csv_sample(const CsvSample& s) {
     }
     row += csv_quote(reason.empty() ? "Good" : reason);
     const auto ref = s.baseline.reference(s.value);
-    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s,%.17g,%.17g,%s\n",
+    snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s,%.17g,%.17g,%s,",
         ref.count ? ref.mean : std::numeric_limits<double>::quiet_NaN(),
         ref.count ? ref.sd : std::numeric_limits<double>::quiet_NaN(),
         s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric - class_first_metric(metric_class(s.metric))))) ? 1 : 0,
         s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask,
         s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd", s.baseline_begin, s.baseline_end,
         s.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
-    row += buf;
+    row += std::string(buf)+csv_quote(s.reference_source)+"\n";
     return row;
 }
 
@@ -1047,6 +1047,16 @@ int event_dominant_metric(const OutlierEvent& event) {
     return best;
 }
 
+std::string pairing_disruption_reasons(uint16_t quality) {
+    std::string reasons;
+    for (uint16_t flag : {Quality_Separation,Quality_Alignment,Quality_PlaneOffset,Quality_NoPairContacts}) {
+        if (!(quality & flag)) continue;
+        if (!reasons.empty()) reasons += "; ";
+        reasons += quality_description(flag);
+    }
+    return reasons;
+}
+
 std::string event_kind(const OutlierEvent& event) {
     const int m = event_dominant_metric(event);
     const bool positive = m >= 0 && event.metric_signed[m] >= 0;
@@ -1071,7 +1081,7 @@ std::string event_kind(const OutlierEvent& event) {
     case Chi: kind = "Chi fluctuation"; break;
     default: break;
     }
-    if (event.lost_samples) return *kind ? std::string("Pair loss + ") + kind : std::string("Pair loss");
+    if (event.lost_samples) return *kind ? std::string("Pairing disruption + ") + kind : std::string("Pairing disruption");
     return kind;
 }
 
@@ -1085,7 +1095,7 @@ const char* csv_event_header() {
     return "run,event,begin_frame,end_frame,begin_time,end_time,time_unit,event_peak_frame,event_peak_sigma,event_score,event_type,"
            "first_pair,last_pair,scope,baseline,sigma,end_sigma,neighbourhood,"
            "class,member,label,member_outlier_frames,member_lost_frames,parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,"
-           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_scope\n";
+           "parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_scope,reference_source\n";
 }
 
 std::string csv_event_row(const CsvEventRow& r) {
@@ -1103,13 +1113,13 @@ std::string csv_event_row(const CsvEventRow& r) {
     snprintf(buf, sizeof(buf), ",%.9g,%.9g,%d,%s,%zu,", r.sigma, r.end_sigma, r.neighbourhood, class_csv_name(metric_class(r.metric)), r.member);
     row += buf;
     row += csv_quote(r.label);
-    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g,%s\n", r.member_frames, r.member_lost, metric_path(r.metric),
+    snprintf(buf, sizeof(buf), ",%zu,%zu,%s,%s,%d,%zu,%.9g,%.9g,%zu,%.9g,%d,%d,%.17g,%.17g,%.17g,%.17g,%s,%.17g,%.17g,%s,", r.member_frames, r.member_lost, metric_path(r.metric),
         metric_uses_degrees(r.metric) ? "deg" : "Angstrom", r.contributing ? 1 : 0, r.parameter_peak, r.parameter_z, r.value,
         r.parent_event, r.burst_sigma, r.truncated_begin ? 1 : 0, r.truncated_end ? 1 : 0,
         r.min_duration, r.max_gap_duration, r.detection_begin, r.detection_end,
         !r.parent_event ? "" : r.residual ? "background" : "stronger", r.baseline_begin, r.baseline_end,
         r.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
-    row += buf;
+    row += std::string(buf)+csv_quote(r.reference_source)+"\n";
     return row;
 }
 

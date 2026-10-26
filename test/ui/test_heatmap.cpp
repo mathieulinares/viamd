@@ -1,5 +1,6 @@
 #include <imgui.h>
 #include <implot.h>
+#include <implot_internal.h>
 #include <utest.h>
 
 #include <limits>
@@ -71,6 +72,47 @@ UTEST_F(heatmap, nucleosome_sized_sparse_matrix_does_not_crash) {
     values.back() = 1;
     render_heatmap(values, 147, 2501, ImPlotHeatmapFlags_None, nullptr);
     EXPECT_EQ(render_heatmap(values, 147, 2501, ImPlotHeatmapFlags_None, nullptr), 12);
+}
+
+static ImPlotRect render_full_extent_fit(bool zoom, bool fit) {
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0,0));
+    ImGui::SetNextWindowSize(ImVec2(900,700));
+    ImGui::Begin("Full extent fit",nullptr,ImGuiWindowFlags_NoSavedSettings);
+    if (fit) ImPlot::SetNextAxesToFit();
+    ImPlotRect limits;
+    if (ImPlot::BeginPlot("Visible heatmap",ImVec2(800,600),ImPlotFlags_NoLegend)) {
+        ImPlot::SetupAxesLimits(zoom ? 40 : -.5,zoom ? 60 : 99.5,
+            zoom ? 2 : -.5,zoom ? 4 : 9.5,zoom ? ImPlotCond_Always : ImPlotCond_Once);
+        ImPlot::SetupAxisLimitsConstraints(ImAxis_X1,-.5,99.5);
+        ImPlot::SetupAxisLimitsConstraints(ImAxis_Y1,-.5,9.5);
+        limits=ImPlot::GetPlotLimits();
+        if (ImPlot::FitThisFrame()) {
+            ImPlot::FitPoint(ImPlotPoint(-.5,-.5));
+            ImPlot::FitPoint(ImPlotPoint(99.5,9.5));
+        }
+        // Only a zoomed-in subset is rendered, as in the production display summary.
+        const float data[]={0,1};
+        ImPlot::PlotHeatmap("subset",data,1,2,-2,2,nullptr,ImPlotPoint(40,2),ImPlotPoint(60,4));
+        limits=ImPlot::GetPlotLimits();
+        ImPlot::EndPlot();
+    }
+    ImGui::End();
+    ImGui::Render();
+    return limits;
+}
+
+UTEST_F(heatmap, fitting_visible_subset_restores_full_trajectory_and_member_extent) {
+    render_full_extent_fit(true,false);
+    const auto zoomed=render_full_extent_fit(true,false);
+    EXPECT_NEAR(zoomed.X.Min,40,1e-8);
+    EXPECT_NEAR(zoomed.X.Max,60,1e-8);
+    render_full_extent_fit(false,true);
+    const auto fitted=render_full_extent_fit(false,false);
+    EXPECT_NEAR(fitted.X.Min,-.5,1e-8);
+    EXPECT_NEAR(fitted.X.Max,99.5,1e-8);
+    EXPECT_NEAR(fitted.Y.Min,-.5,1e-8);
+    EXPECT_NEAR(fitted.Y.Max,9.5,1e-8);
 }
 
 UTEST_MAIN();

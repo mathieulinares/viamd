@@ -17,6 +17,62 @@ geometry is invalid. Quality flags explain why a value is missing or suspicious.
 
 ### Baselines and z-scores
 
+**Reference source** chooses **Current trajectory** (default) or **External CSV**.
+With External CSV, **Import reference CSV...** loads a Lavery **parameter** CSV
+from another simulation, for example an unintercalated control. Its valid raw
+`value` samples define the baseline; stored means, SDs and z-scores are ignored.
+Frame counts and timestamps need not match the active trajectory. Mean/SD,
+Median/MAD, circular wrapping and within-state baselines retain their usual
+definitions. The current trajectory is never mixed into an external reference.
+
+Use **Export reference CSV (all classes)** on the control to export all pair,
+step and nucleotide parameters over its **Baseline range**. Select Current
+trajectory first. The existing **Export parameter CSV** still exports every
+frame of the plotted class; those files (including older exports without
+`reference_source`) can also be imported, but absent classes/parameters have no
+reference. Event CSVs, snapshot-oracle CSVs and arbitrary wide tables are not
+parameter-reference files. Import currently accepts one run per file and
+rejects malformed records, duplicate samples, invalid valid-flags, nonfinite
+values marked valid, unknown parameters/classes and incompatible units.
+Distances must be `Angstrom`, angles `deg`.
+
+**Reference mapping** previews correspondences and sample/parameter counts.
+Automatic matching uses strand/residue identities and **ordered** pair
+partners, not the numerical member index. Nucleotides also retain their parent
+pair identity; steps retain both ordered pairs. Pair reversal is not silently
+normalized because it can reverse signed components. If strand assignment,
+residue numbering or topology differs, choose correspondences explicitly;
+ambiguous/unmatched identities are never guessed. Each reference member maps
+to at most one current member within its class. Manual correspondence is not
+a sequence alignment or a sign/convention conversion: verify compatible
+biological partners, pair orientation and measurement definitions.
+
+In External CSV mode, **Own pair/step over time** means the corresponding
+mapped member's imported history. **All pairs/steps over time** pools imported
+members mapped to the current helix, weighted by finite samples and counting
+each source once. An unmatched target never borrows a neighbor's reference.
+No current baseline range is applied: the full imported sample population is
+used, and the current-trajectory Baseline range control is disabled. Export a
+restricted control reference first if a smaller reference interval is needed.
+The inspector overlays a yellow external-reference density (current state for
+state-conditioned parameters) alongside the current simulation's distribution.
+
+Missing mappings, parameters, reference states or a failed/missing file mean
+**No reference**, not a fallback to the active simulation. A zero reference
+scale is not calibrated evidence of an outlier. Pair-loss gating still
+requires that the mapped individual pair has a finite Buckle reference;
+pooled neighbors cannot establish its pairing history. Pairing-state and
+nucleotide state-switch classifications remain independent of the baseline.
+
+The external path and explicit member mapping are saved in the workspace.
+A record-content fingerprint detects a changed CSV on reload; the reference
+is unavailable until **Reload reference (accept changed file)** is chosen.
+This fingerprint is an integrity/change indicator, not a cryptographic hash.
+Parameter/event exports append `reference_source`, containing the source path,
+fingerprint and mapped source labels (or `current_trajectory`). External
+baseline start/end fields are NaN: current timestamps do not describe the
+independent simulation. Keep the CSV alongside the workspace for portability.
+
 **Compare against**, above Tolerance, selects the reference for every z-score:
 
 | Reference | Meaning |
@@ -169,7 +225,7 @@ Distortion is **warning-only**, not an exclusion criterion:
 These broad warning thresholds are heuristic, not a calibrated force-field
 validation. Finite warning-bearing measurements remain in all analysis and
 event detection: unusual deformation may be the signal of interest.
-The selected parameter's quality appears in Pairing & coverage and plot
+The selected parameter's quality appears in **Inspector > Evidence...** and plot
 tooltips. Viewport tooltips name each affected parameter and its reasons.
 Parameter CSV rows carry the individual parameter's flags and explanations;
 warnings do not change the `valid` column to zero.
@@ -232,13 +288,15 @@ validate residence thresholds and transitions scientifically.
 
 ### Member-by-time state history
 
-The **State history** tab shows raw categorical states with time on X and one
+The **State history > View: History** view shows raw categorical states with time on X and one
 member per row. Choose **BI / BII**, **anti / syn**, **Sugar pucker (North /
 South)**, **Alpha rotamers**, **Gamma rotamers**, or **Pairing chemistry**.
 Nucleotide states use nucleotide rows; pairing chemistry uses fixed-pair rows.
 The legend identifies every colour, including grey unavailable samples.
 Hover reads the exact member, frame and raw state. Click selects that
 member/parameter and jumps to that time; drag pans and the wheel zooms.
+**Fit view** restores the full time/member extent. Explanations and interaction
+help are available from the legend's **(?)** tooltip.
 
 Residence thresholds filter transition tables, not these raw measurements.
 The view is independent of the outlier-parameter mask, reference distribution
@@ -250,8 +308,12 @@ the underlying scientific series remains full resolution.
 
 ### Pairing chemistry (separate from pair-loss validity)
 
-The **Pairing states** tab shows the selected fixed pair's categorical timeline,
-current state, residence-qualified transitions and **Export pairing CSV**.
+**State switches > Switch type: Pairing chemistry** shows the selected fixed
+pair's current chemistry, residence-qualified transitions and **Export pairing
+CSV**. The raw all-pair view is in **State history > View: History > States:
+Pairing chemistry**; the selected pair is highlighted there instead of repeating
+it in a separate compact timeline. Raw-run CSV export is
+also available under **Export > Analysis tables > Pairing-state runs CSV**.
 It annotates chemistry without changing pair quality, excluded measurements,
 outlier events, baselines or the existing canonical pair-loss gate.
 
@@ -371,6 +433,9 @@ in the workspace (see [Workspace keys](#workspace-keys)).
 To keep the window light, help text lives in tooltips: hover a label, a
 section header or a `(?)` marker. Rarely changed settings sit in collapsed
 sections.
+The inspector reserves one status line for sample quality. Hover it for the
+individual validity/warning reasons; changing quality during playback does
+not insert/remove reason paragraphs above the timeline and distribution.
 
 - **Settings** (left sidebar):
   *Selection* (class, parameter, member, frame; valid-member counts in the
@@ -379,13 +444,41 @@ sections.
   *Event parameters* (the 2x6 grid; the header names the subset),
   *Advanced detection* (baseline, neighbourhood or whole structure,
   hierarchy and burst extra, hysteresis, bridge gaps, Time in ns,
-  count any selected parameter) and *Export & tools*
-  (parameter CSV, **Export events CSV**, Recompute analysis).
+  count any selected parameter) and *Tools* (Recompute analysis).
+  CSV exports are in the **Export** results tab.
   The **Visual feedback...** popup provides **Event regions** and
   **Measurements** tabs for region style, contour/glow strength, native
   measurement styling, labels, axis, heatmap and layout reset.
-- **Events & quality** (top): the outlier events table (described below) and
-  per-member pairing quality and coverage.
+- **Results** (top), ordered **Outliers**, **State switches**, **State history**,
+  **Export**:
+  - **Outliers** retains event inspection and pooled-reference anomalous regions.
+  - **State switches** selects Nucleotide conformations or Pairing chemistry.
+    Nucleotide switches retain Event parameters/Detection range; pairing
+    transitions retain selected-pair, whole-run scope and separate residence.
+  - **State history** has a **View** selector: **History** retains raw all-member
+    state views; **Compare stages** summarizes each named timeline period with inclusive
+    bounds (overlap samples appear in each overlapping period). Choose pairing
+    chemistry, nucleotide states or the plotted parameter, and all/internal/
+    terminal/selected members. Terminal pairs are the two ends of each fixed
+    helix; a step is terminal if either adjacent pair is terminal.
+    Valid/missing sample counts accompany state percentages. Percentages use
+    available samples, not frame counts or independent-observation estimates.
+    Plotted continuous parameters show signed mean z and RMS z against the
+    active fixed reference; missing/zero-scale reference samples are excluded
+    only from z summaries and counted via Referenced. State-conditioned
+    parameters show their state occupancies. Changing periods, reference or
+    selection recomputes the cached summary; no new baseline is fit per stage.
+    Only one view occupies the results area at a time; the stage table no longer
+    shrinks the history plot. The duplicate selected-pair mini-timeline is removed.
+    **Inspector > Evidence...** opens a resizable **Validity & contact evidence**
+    dialog with selected-member reasons and the all-member coverage table for the
+    plotted class/parameter; evidence is not a chemistry label. The fixed-height
+    quality status and reason tooltips remain visible without opening the dialog.
+  - **Export** has a **View** selector for **Representative frames** (feature
+    selection, ranking and XTC/GRO/CSV) or **Analysis tables** (parameter/reference
+    CSV, all/shown events, nucleotide switches, displayed axis and selected-pair
+    raw runs), rather than stacked expanding sections.
+  Pairing states and Pairing & coverage no longer occupy separate top-level tabs.
 - **Overview** (bottom left): a single summary line (current-frame outliers /
   valid members, with coverage, chance totals and controls in its tooltip, and
   a "near chance" warning when the trajectory total is below twice the chance
@@ -393,6 +486,8 @@ sections.
   outlier count per frame, with events shaded
   as bands (matching the event contour colours) and a dashed line
   at the count expected by chance (see [Chance level](#chance-level)).
+  Double-clicking the heatmap fits the complete trajectory and member range,
+  matching State history; fitting does not stop at the rendered zoomed-in slice.
   Hovering lists the events at that frame. Below it, the heatmap (Reset view,
   Go to selection) shows every member against frame, with outliers marked.
 - **Inspector** (bottom right): the **Timeline** and **Distribution** of the selected
@@ -466,18 +561,30 @@ step) in one frame. A sample takes part when one of the following holds:
   |z| ≥ tolerance − **Hysteresis** (the continue threshold, never below 0.5);
 - it is *strong*: at least one parameter has |z| ≥ tolerance (the start
   threshold);
-- it is *lost*: with **Pair loss** on, a base pair that has its own finite baseline sample loses
-  its pairing in this frame. Its quality flags show separation, alignment,
-  out-of-plane offset or missing H-bonds, and nothing else. Lost samples count
+- it is *disrupted* (internally `lost`): with **Pairing disruption** on, a base pair that has its own finite baseline sample
+  fails the original pairing geometry/contact criteria in this frame. Its quality flags show separation, alignment,
+  out-of-plane offset or missing canonical contacts, and nothing else. Disrupted samples count
   as strong even when no intra-base-pair parameter is selected.
 
 **Event parameters** selects the parameters, independently of the class shown in the
-plots. **Pair loss** is located in the Intra column, below the six geometric
+plots. **Pairing disruption** is located in the Intra column, below the six geometric
 parameters, and is enabled by default. It is independent of the column's
 parameter toggle and **Use plotted parameters**. Disabling it removes broken
 pairs as event contributors; their invalid parameters remain excluded.
-Pair loss requires a finite baseline sample for that particular pair in either
+Pairing disruption requires a finite baseline sample for that particular pair in either
 reference mode; a neighbouring pair cannot supply its pairing history.
+
+**Pairing disruption is not chemistry Unpaired.** Close bases with no canonical
+contacts, or distorted bases retaining candidate contacts, can be chemically
+Other / ambiguous. Chemistry Unpaired requires disrupted geometry **and** no
+canonical/Hoogsteen candidate contacts, with complete explicit-H evidence;
+insufficient evidence is Unavailable. Event spans merge members over time and
+may bridge gaps, whereas State history retains raw per-member states (white
+display bins contain mixtures). Expanded disrupted members show geometry/contact
+reasons and chemistry at the **current inspected frame**, which can be a quiet
+gap; hover the chemistry label for the explicit disruption reasons. This is not
+a state label for the entire event. Detection thresholds,
+chemistry assignments, workspace `EventPairLoss` and CSV `lost` fields are unchanged.
 
 The parameter grid (Intra, Inter and Nucleotide columns) picks any subset;
 a column header toggles the whole class and shows a
@@ -676,8 +783,8 @@ between the two labels where there are two:
 | Beta | Beta crankshaft |
 | Chi | Chi fluctuation |
 
-When the event contains a lost pair, the type starts with **Pair loss**, for
-example "Pair loss + Opening (breathing / flip)", or just "Pair loss" when
+When the event contains a disrupted pair, the type starts with **Pairing disruption**, for
+example "Pairing disruption + Opening (breathing / flip)", or just "Pairing disruption" when
 no parameter is outlying.
 
 The rules are deliberately simple. Treat the type as a hint for reading the
@@ -709,9 +816,10 @@ of its base pair; a step covers both of its pairs. Each member row shows, on one
 
 - one coloured button per outlying parameter (in the Type column), labelled
   with its name and peak z. Crimson means positive, cyan negative. A grey
-  **Pair lost** button appears when the pair broke;
+  **Pairing disruption** button appears for disrupted original pairing, followed
+  by the chemistry state at the current frame (hover it for disruption reasons);
 - the number of outlying frames inside the event (`fr`), and how many of them
-  the pair was lost;
+  the pair was disrupted;
 - the peak frame and its z-score, and the parameter that produced the peak.
 
 Members are sorted by peak |z|. Members that were only lost come last.
@@ -1021,6 +1129,70 @@ All other active contributors stay compact rather than acquiring a label cloud.
 
 ## 5. CSV exports
 
+### Baseline-centred representative frames
+
+**Export > Representative frames** ranks actual trajectory frames by
+`sqrt(mean(z_i^2))` against the **active reference**, either current or imported.
+**All intra**, **All inter**, **All nucleotide** and **All classes** add every
+parameter/member combination in those classes directly. For finer control,
+expand **Choose parameter components and members**: each class has a mixed-state
+all-parameter checkbox, individual parameter checkboxes and a member list with
+Select all/Clear. Choose components and members across classes, then **Add chosen
+features**. Select all choices/Clear choices edit the pending selection only;
+Clear features removes the actual ranking list. All additions preserve existing
+features without duplicates. Per-class feature counts show the final weighting;
+larger classes contribute more total weight under equal-feature weighting.
+Use **Add plotted parameters** to add the current member and selected plotted
+parameter mask. **Add all members of plotted class** instead adds those
+parameters for every member of that class. Add features from other classes by
+changing the plotted selection and adding again. The explicit feature list
+can be inspected/edited; duplicate metric/member features are not added.
+Each feature is weighted equally; this is a diagonal RMS-z distance, not a
+covariance-aware Mahalanobis distance.
+
+Choose **Number of frames**, **Minimum separation** (ps/ns or frame fallback)
+and optionally **Search Detection range / timeline period**. Otherwise search
+the whole run. Every candidate must have a finite value and a nonempty,
+nonzero-scale reference for **every** feature, in its current conformational
+state when applicable. Missing values cannot improve a score, and different
+frames are never compared on different feature subsets.
+
+Ranking uses all original samples, not display summaries. Exact score ties
+prefer the earliest original frame. Greedily select the best remaining
+candidate sufficiently far from all previously selected frames; equality at
+the separation threshold qualifies. This may yield fewer than requested
+frames, reported as selected/requested. It is not a globally optimal
+time-spacing or clustering algorithm. Changing statistics, mappings, ranges,
+features or ranking controls invalidates the preview until reranked.
+
+The preview lists rank, original frame, current time and score; click a row to
+inspect the first selected feature at that frame. **Export XTC + GRO + CSV...**
+writes all current-system atoms in **chronological** order, original physical
+timestamps and XTC step fields set to original frame indices. The companion
+GRO is the first exported frame. Coordinates/boxes convert Angstrom to nm;
+XTC precision is 0.001 nm and GRO coordinates have five decimal places in nm.
+Periodic boxes (including triclinic terms) are preserved. Export does not
+unwrap/recenter molecules, subset atoms or alter the source trajectory.
+
+The accompanying CSV contains
+`output_frame,original_frame,time_ps,score,rank,reference`;
+all frame indices are zero-based, rank is one-based. Reference provenance
+includes path/fingerprint, method/scope, features/mapping, search interval and
+separation. Current-reference provenance also includes baseline frame bounds.
+The exported order differs from score order; the rank column preserves it.
+The exporter refuses existing outputs, invalid coordinates, indistinguishable
+XTC float timestamps, unsupported GRO names or missing physical F64 run times.
+On a write failure it reports the error and removes partial new outputs where
+possible. Select a new `.xtc` basename rather than overwriting previous files.
+
+**Interpretation:** closest to the reference centre is not necessarily most
+representative of the current simulation. With an unintercalated reference,
+it finds the most control-like intercalated frames. For state-conditioned
+features it can select central examples from multiple states represented in
+the reference; this is not a request for its dominant state. Multimodal
+distribution centres can be weakly populated: medoids, clustering and
+state-balanced representatives are not implemented.
+
 ### Parameter CSV (Export CSV)
 
 One row per frame, member and parameter of the current class. `class` is
@@ -1029,7 +1201,7 @@ One row per frame, member and parameter of the current class. `class` is
 ```
 run,frame,time,time_unit,class,member,label,pair_a,pair_b,parameter,unit,value,valid,
 quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_outlier,
-member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope
+member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope,reference_source
 ```
 
 The `baseline` column is `mean_sd` or `median_mad`. The `mean` and `sd` columns
@@ -1040,7 +1212,8 @@ These are interval endpoints, not a claim that every member/state has valid data
 throughout. `valid` still describes the measured value: a finite value can have
 `nan` reference statistics/z-score if its state is absent from the baseline.
 `reference_scope` is `own_history` or `helix_history`, identifying the population
-used for the reference statistics. There are 27 columns.
+used for the reference statistics. `reference_source` records the source and
+mapped members as described above. There are 28 columns.
 
 ### Events CSV (Export events CSV)
 
@@ -1052,7 +1225,7 @@ event_peak_sigma,event_score,event_type,first_pair,last_pair,scope,baseline,sigm
 end_sigma,neighbourhood,class,member,label,member_outlier_frames,member_lost_frames,
 parameter,unit,contributing,parameter_peak_frame,parameter_peak_zscore,parameter_peak_value,
 parent_event,burst_sigma,truncated_begin,truncated_end,min_duration,max_gap_duration,
-detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_scope
+detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_scope,reference_source
 ```
 
 | Column | Meaning |
@@ -1063,7 +1236,7 @@ detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_s
 | sigma, end_sigma | Start and continue thresholds (hysteresis) |
 | neighbourhood | Neighbourhood in base pairs; −1 means Whole structure |
 | member_outlier_frames | Frames in which the member was outlying or lost |
-| member_lost_frames | Frames in which the pair was lost |
+| member_lost_frames | Frames with original-pairing disruption (legacy column name; not necessarily chemistry Unpaired) |
 | parent_event | One-based parent event ID, or 0 for a top-level event |
 | burst_sigma | Child start threshold (residual threshold in background mode), or 0 for a top-level event |
 | burst_mode | `stronger` or `background` for children; empty for top-level events |
@@ -1073,7 +1246,7 @@ detection_begin,detection_end,burst_mode,baseline_begin,baseline_end,reference_s
 | baseline_begin, baseline_end | First/last included baseline sample coordinates in `time_unit`, independent of detection bounds |
 | reference_scope | `own_history` or `helix_history`; pooled spans are anomalous regions, not necessarily transitions |
 
-The events CSV has 41 columns. Time-valued settings are converted from internal
+The events CSV has 42 columns. Time-valued settings are converted from internal
 ps to the exported trajectory `time_unit`; fallback exports use `frame`.
 For a period-based search, `detection_begin` / `detection_end` are the resolved
 first/last sample coordinates, not unused custom-entry bounds. Baseline columns
@@ -1093,6 +1266,13 @@ Fields are RFC 4180-quoted when needed. Write failures are reported in the
 application log.
 
 ## 6. Workspace keys (`[Lavery]` section)
+
+External-reference keys: `ReferenceSource` (0 current, 1 external),
+`ExternalReferencePath`, `ExternalReferenceFingerprint`, and
+`ExternalReferenceMapping` (multiline class/current-label/source-label records).
+Old workspaces default to the current trajectory. A missing or changed file
+does not silently reset that source. Frame-ranking previews are transient and
+must be rebuilt after loading/recomputing a trajectory.
 
 | Key | Type | Default |
 |---|---|---|

@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include "data/lavery_rna_curves_reference.h"
 
 using namespace lavery;
@@ -168,7 +169,43 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     md_script_vis_init(&vis, md_get_heap_allocator());
     size_t torsion_checks = 0, groove_checks = 0, distance_checks = 0;
     std::array<std::vector<float>, Metric_Count> values;
+    std::array<std::vector<uint16_t>, Metric_Count> sample_quality;
     const std::array<size_t, Class_Count> members = {pairs.size(), steps.size(), 2*pairs.size()};
+    auto base_label=[&](size_t b) {
+        const auto& base=bases[b];
+        const str_t name=md_component_name(&sys.component,base.component);
+        return "S"+std::to_string(base.strand+1)+":"+std::string(name.ptr,name.len)+
+            std::to_string(md_system_component_seq_id(&sys,base.component));
+    };
+    auto pair_label=[&](size_t p) {
+        return std::to_string(p+1)+": "+base_label(pairs[p].a)+" / "+base_label(pairs[p].b);
+    };
+    auto member_sample=[&](int cls,size_t m,size_t f) {
+        CsvSample sample;
+        sample.run="local_validation";
+        sample.frame=f; sample.time=((const double*)times->data)[f]; sample.time_unit="ps";
+        sample.member=m+1;
+        sample.pair_a=pair_label(cls==Class_Step ? steps[m].a : cls==Class_Nucleotide ? m/2 : m);
+        if (cls==Class_Step) {
+            sample.pair_b=pair_label(steps[m].b);
+            sample.label=std::to_string(steps[m].a+1)+"-"+std::to_string(steps[m].b+1)+": "+sample.pair_a+" -> "+sample.pair_b;
+        } else if (cls==Class_Nucleotide) {
+            sample.label=base_label(m%2 ? pairs[m/2].b : pairs[m/2].a)+" (bp "+std::to_string(m/2+1)+")";
+        } else sample.label=sample.pair_a;
+        return sample;
+    };
+    std::ofstream sample_file;
+    if (const char* path=std::getenv("VIAMD_LAVERY_VALIDATION_SAMPLES")) {
+        sample_file.open(path);
+        ASSERT_TRUE(sample_file.good());
+        sample_file << csv_header();
+    }
+    std::ofstream evidence_file;
+    if (const char* path=std::getenv("VIAMD_LAVERY_VALIDATION_EVIDENCE")) {
+        evidence_file.open(path);
+        ASSERT_TRUE(evidence_file.good());
+        evidence_file << "frame,pair,quality,canonical_contacts\n";
+    }
     std::vector<uint16_t> pair_quality;
     std::array<std::array<size_t, 4>, 10> nucleotide_quality_counts = {};
     double analysis_ms = 0;
@@ -178,6 +215,8 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         const auto analysis_begin = std::chrono::steady_clock::now();
         ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
         ASSERT_EQ(result.pairing_states.size(), pairs.size());
+        if (evidence_file.is_open()) for (size_t p=0; p<pairs.size(); ++p)
+            evidence_file << f << ',' << p+1 << ',' << result.pair_quality[p] << ',' << (unsigned)result.contacts[p] << '\n';
         if (exported_pairing.is_open()) for (size_t p = 0; p < pairs.size(); ++p)
             exported_pairing << f << ',' << p+1 << ',' << bases[pairs[p].a].component+1 << ','
                 << bases[pairs[p].b].component+1 << ',' << pairing_state_name(result.pairing_states[p]) << ','
@@ -203,7 +242,19 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             const auto& rows = cls == Class_Pair ? result.pair_values :
                                cls == Class_Step ? result.step_values : result.nucleotide_values;
             ASSERT_EQ(rows.size(), members[cls]);
-            for (const auto& row : rows) values[id].push_back(row.metric[id]);
+            for (size_t m=0; m<rows.size(); ++m) {
+                values[id].push_back(rows[m].metric[id]);
+                sample_quality[id].push_back(cls==Class_Nucleotide ? result.nucleotide_quality[m][id-Alpha] :
+                    cls==Class_Step ? result.step_quality[m] : result.pair_quality[m]);
+            }
+            if (sample_file.is_open()) for (size_t m=0; m<rows.size(); ++m) {
+                auto sample=member_sample(cls,m,f);
+                sample.metric=(Metric)id;
+                sample.value=rows[m].metric[id];
+                sample.quality=cls==Class_Nucleotide ? result.nucleotide_quality[m][id-Alpha] :
+                    cls==Class_Step ? result.step_quality[m] : result.pair_quality[m];
+                sample_file << csv_sample(sample);
+            }
             if (curves_dir && id != MinorGroove && id != MajorGroove) {
                 for (size_t m = 0; m < rows.size(); ++m) {
                     float actual = rows[m].metric[id];
@@ -332,6 +383,144 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     }
     EXPECT_GT(torsion_checks, (size_t)0);
     EXPECT_GT(groove_checks, (size_t)0);
+    if (sample_file.is_open()) { sample_file.close(); ASSERT_TRUE(sample_file.good()); }
+    if (evidence_file.is_open()) { evidence_file.close(); ASSERT_TRUE(evidence_file.good()); }
+    if (const char* reference_path=std::getenv("VIAMD_LAVERY_VALIDATION_REFERENCE")) {
+        size_t reference_first=0,reference_end=frames;
+        if (const char* range=std::getenv("VIAMD_LAVERY_VALIDATION_REFERENCE_RANGE_PS")) {
+            double begin,end;
+            char extra;
+            ASSERT_EQ(sscanf(range,"%lf,%lf%c",&begin,&end,&extra),2);
+            EventOptions range_options;
+            const auto* t=(const double*)times->data;
+            range_options.times.assign(t,t+frames);
+            ASSERT_TRUE(event_time_range(&range_options,begin,end,"validation reference"));
+            reference_first=range_options.first_frame;
+            reference_end=range_options.last_frame+1;
+        }
+        std::ofstream reference_file(reference_path);
+        ASSERT_TRUE(reference_file.good());
+        reference_file << csv_header();
+        ReferenceMapping mapping;
+        std::array<std::vector<std::string>,Class_Count> identities;
+        for (int cls=0; cls<Class_Count; ++cls) for (size_t m=0; m<members[cls]; ++m) {
+            auto sample=member_sample(cls,m,0);
+            identities[cls].push_back(reference_identity(cls,sample.label,sample.pair_a,sample.pair_b));
+            for (size_t f=reference_first; f<reference_end; ++f) for (int k=0; k<class_parameter_count(cls); ++k) {
+                const int id=class_first_metric(cls)+k;
+                sample.frame=f; sample.time=((const double*)times->data)[f];
+                sample.metric=(Metric)id; sample.value=values[id][f*members[cls]+m];
+                sample.quality=sample_quality[id][f*members[cls]+m];
+                reference_file << csv_sample(sample);
+            }
+        }
+        reference_file.close();
+        ASSERT_TRUE(reference_file.good());
+        ExternalReference imported;
+        std::string error;
+        ASSERT_TRUE(load_external_reference(&imported,reference_path,&error));
+        for (int cls=0; cls<Class_Count; ++cls) {
+            mapping[cls]=match_reference_members(imported.members[cls],identities[cls]);
+            for (int r : mapping[cls]) EXPECT_GE(r,0);
+        }
+        std::array<MetricStatistics,Metric_Count> ranking_stats;
+        std::array<size_t,Metric_Count> ranking_columns={};
+        for (int id=0; id<(int)Metric_Count; ++id) {
+            const int cls=metric_class((Metric)id);
+            ranking_columns[id]=members[cls];
+            for (Baseline baseline : {Baseline_MeanSD,Baseline_MedianMAD}) {
+                MetricStatistics expected,actual;
+                ASSERT_TRUE(compute_statistics(&expected,values[id],members[cls],metric_is_angular((Metric)id),baseline,
+                    metric_state_count((Metric)id) ? id : -1,reference_first,reference_end));
+                ASSERT_TRUE(external_statistics(&actual,imported,mapping[cls],values[id],(Metric)id,baseline));
+                for (size_t m=0; m<members[cls]; ++m) {
+                    EXPECT_EQ(actual.members[m].count,expected.members[m].count);
+                    if (expected.members[m].count) {
+                        EXPECT_NEAR(actual.members[m].mean,expected.members[m].mean,.000001);
+                        EXPECT_NEAR(actual.members[m].sd,expected.members[m].sd,.000001);
+                    }
+                }
+                for (size_t i=0; i<actual.heatmap.size(); ++i) {
+                    if (std::isnan(expected.heatmap[i])) EXPECT_TRUE(std::isnan(actual.heatmap[i]));
+                    else EXPECT_NEAR(actual.heatmap[i],expected.heatmap[i],.00001);
+                }
+                if (baseline==Baseline_MeanSD) ranking_stats[id]=std::move(actual);
+            }
+        }
+        if (const char* output=std::getenv("VIAMD_LAVERY_VALIDATION_REPRESENTATIVES")) {
+            std::vector<FrameCandidate> candidates;
+            const double* time_data=(const double*)times->data;
+            const std::vector<double> physical_times(time_data,time_data+frames);
+            const size_t central=pairs.size()/2;
+            std::vector<FrameFeature> features={{Opening,central},{Rise,steps.size()/2},{Twist,steps.size()/2},{Chi,2*central},{Chi,2*central+1}};
+            if (const char* selected=std::getenv("VIAMD_LAVERY_VALIDATION_FEATURES")) {
+                features.clear();
+                std::istringstream input(selected);
+                std::string feature;
+                while (std::getline(input,feature,',')) {
+                    const size_t split=feature.find(':');
+                    ASSERT_NE(split,std::string::npos);
+                    size_t member=0;
+                    char extra;
+                    ASSERT_EQ(sscanf(feature.c_str()+split+1,"%zu%c",&member,&extra),1);
+                    ASSERT_GT(member,(size_t)0);
+                    int id=-1;
+                    for (int k=0; k<(int)Metric_Count; ++k) if (feature.substr(0,split)==metric_path((Metric)k)) id=k;
+                    ASSERT_GE(id,0);
+                    ASSERT_LT(member-1,ranking_columns[id]);
+                    features.push_back({(Metric)id,member-1});
+                }
+                ASSERT_FALSE(features.empty());
+            }
+            size_t search_first=0,search_end=frames;
+            if (const char* range=std::getenv("VIAMD_LAVERY_VALIDATION_SEARCH_RANGE_PS")) {
+                double begin,end;
+                char extra;
+                ASSERT_EQ(sscanf(range,"%lf,%lf%c",&begin,&end,&extra),2);
+                EventOptions options;
+                options.times=physical_times;
+                ASSERT_TRUE(event_time_range(&options,begin,end,"validation representative search"));
+                search_first=options.first_frame;
+                search_end=options.last_frame+1;
+            }
+            ASSERT_TRUE(representative_frames(&candidates,values,ranking_stats,ranking_columns,features,
+                search_first,search_end,5,100,physical_times,&error));
+            ASSERT_GT(candidates.size(),(size_t)0);
+            std::string provenance=imported.path+"; fingerprint="+imported.fingerprint+
+                "; baseline_frames="+std::to_string(reference_first)+".."+std::to_string(reference_end-1)+
+                "; MeanSD own history; RMS(z); search_frames="+std::to_string(search_first)+".."+std::to_string(search_end-1)+
+                "; separation=100 ps; features=";
+            for (const auto& f : features) provenance+=std::string(metric_path(f.metric))+":"+std::to_string(f.member+1)+" ";
+            ASSERT_TRUE(export_representative_frames(sys,"run/check",output,candidates,provenance,&error));
+            md_system_t restored={.alloc=alloc};
+            md_system_state_t restored_state={.alloc=alloc};
+            auto gro_path=std::filesystem::path(output);
+            gro_path.replace_extension(".gro");
+            ASSERT_TRUE(md_gro_system_init_from_file(&restored,&restored_state,str_from_cstr(gro_path.string().c_str())));
+            ASSERT_EQ(restored.atom.count,sys.atom.count);
+            ASSERT_TRUE(md_xtc_system_publish_run(&restored,str_from_cstr(output),STR_LIT("run/restored"),MD_RUN_FLAG_DISABLE_CACHE_WRITE));
+            const auto* restored_times=md_attributes_find(&restored.attributes,STR_LIT("run/restored/time"));
+            ASSERT_TRUE(restored_times && restored_times->data);
+            ASSERT_EQ(restored_times->format.shape[0],candidates.size());
+            const str_t export_paths[]={STR_LIT("atom/position"),STR_LIT("unitcell")};
+            auto* restored_extract=md_system_extract_begin(&restored,STR_LIT("run/restored"),export_paths,2,alloc);
+            ASSERT_TRUE(restored_extract!=nullptr);
+            std::sort(candidates.begin(),candidates.end(),[](const auto& a,const auto& b) { return a.frame<b.frame; });
+            for (size_t n=0; n<candidates.size(); ++n) {
+                const size_t original=candidates[n].frame;
+                EXPECT_EQ(((const double*)restored_times->data)[n],(double)(float)physical_times[original]);
+                ASSERT_TRUE(md_system_extract_frame(extract,original,&state));
+                ASSERT_TRUE(md_system_extract_frame(restored_extract,n,&restored_state));
+                for (size_t a=0; a<sys.atom.count; ++a) {
+                    EXPECT_NEAR(restored_state.xyz[a].x,state.xyz[a].x,.011);
+                    EXPECT_NEAR(restored_state.xyz[a].y,state.xyz[a].y,.011);
+                    EXPECT_NEAR(restored_state.xyz[a].z,state.xyz[a].z,.011);
+                }
+            }
+            md_system_extract_end(restored_extract);
+            printf("External reference: %zu records; %zu ranked/exported real frames\n",imported.records,candidates.size());
+        }
+    }
     if (curves_dir) for (int id = 0; id < (int)Metric_Count; ++id) {
         if (id == MinorGroove || id == MajorGroove) continue;
         EXPECT_GT(reference_checks[id], (size_t)0);
