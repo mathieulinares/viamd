@@ -81,9 +81,16 @@ target_link_libraries(viamd_test PRIVATE mdlib enkiTS)
 
 add_test(NAME viamd_test COMMAND viamd_test)
 
-add_executable(viamd_plot_test ui/test_heatmap.cpp)
+add_executable(viamd_plot_test ui/test_heatmap.cpp
+    ../src/timeline_periods_ui.cpp
+    ../src/timeline_periods.cpp
+    ../src/serialization_utils.cpp
+    ../src/imgui_widgets.cpp)
 target_compile_features(viamd_plot_test PRIVATE cxx_std_20)
-target_compile_definitions(viamd_plot_test PRIVATE UTEST_USE_OLD_QPC)
-target_include_directories(viamd_plot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../ext/mdlib/unittest)
-target_link_libraries(viamd_plot_test PRIVATE implot imgui)
+target_compile_definitions(viamd_plot_test PRIVATE UTEST_USE_OLD_QPC ${VIAMD_DEFINES} ${MD_DEFINES})
+target_compile_options(viamd_plot_test PRIVATE ${VIAMD_FLAGS} $<$<CONFIG:Debug>:${VIAMD_FLAGS_DEB}> $<$<CONFIG:Release>:${VIAMD_FLAGS_REL}>)
+target_include_directories(viamd_plot_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ext/mdlib/unittest
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(viamd_plot_test PRIVATE implot imgui mdlib)
 add_test(NAME viamd_plot_test COMMAND viamd_plot_test)

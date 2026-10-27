@@ -24,6 +24,7 @@
 #include <imgui_internal.h>
 #include <implot.h>
 #include <implot_internal.h>
+#include "lavery_plot.h"
 
 #include <algorithm>
 #include <array>
@@ -84,7 +85,8 @@ struct Lavery : viamd::EventHandler {
     bool show_window = false;
     bool show_heatmap = true;
     bool sync_viewport = true;
-    float outlier_sigma = 2.5f;
+    bool detection_enabled = true;
+    float outlier_sigma = 3.0f;
     int metric = (int)Twist;
     int member = 0;
     bool highlight_owned = false;
@@ -94,6 +96,7 @@ struct Lavery : viamd::EventHandler {
     bool signed_overlay = true;
     bool overlay_halo = true;
     bool measurement_text = false;
+    bool measurement_feedback = true;
     float contour_thickness = 1.5f;
     enum EventVisualStyle { EventVisual_Contour, EventVisual_Glow, EventVisual_Both, EventVisual_Off, EventVisual_Count };
     int event_visual_style = EventVisual_Glow;
@@ -114,13 +117,33 @@ struct Lavery : viamd::EventHandler {
     std::string external_path, external_error, saved_external_mapping, saved_reference_fingerprint;
     bool external_load_pending = false;
     uint64_t external_revision = 1;
+    struct WorkflowInterval {
+        int kind = 0; // whole trajectory, named period, custom interval
+        uint32_t period = 0;
+        double begin_ps = 0, end_ps = 0;
+        int first = 0, last = 0;
+    };
+    struct WorkflowReference {
+        int source = 0; // own history, pooled helix, external CSV
+        int method = Baseline_MeanSD;
+        bool external_pooled = false;
+        WorkflowInterval interval;
+        ExternalReference external;
+        ReferenceMapping mapping;
+        uint64_t revision = 1;
+        std::string error;
+    };
+    WorkflowReference sequence_reference_setup = [] { WorkflowReference r; r.source=1; return r; }();
+    WorkflowReference export_reference_setup, ranking_reference_setup;
+    WorkflowInterval representative_interval;
     int representative_count = 10;
     float representative_separation = 100;
+    float representative_coverage = 100;
+    FrameRankingDiagnostics representative_diagnostics;
     bool representative_all_members = false;
     std::array<uint32_t,Class_Count> representative_masks = {
         class_all_parameters(Class_Pair),class_all_parameters(Class_Step),class_all_parameters(Class_Nucleotide)};
     std::array<std::vector<uint8_t>,Class_Count> representative_members;
-    bool representative_detection_range = false;
     std::vector<FrameFeature> representative_features;
     std::vector<FrameCandidate> representative_candidates;
     std::string representative_error, representative_provenance;
@@ -143,7 +166,7 @@ struct Lavery : viamd::EventHandler {
     // (bits 0-5 intra-base pair, 6-13 inter-base pair incl. grooves, 14-23 nucleotide).
     uint32_t event_parameters = kEventAllParameters;
     int event_min_frames = 3;
-    float event_min_time_ps = -1, event_gap_time_ps = -1;
+    float event_min_time_ps = 200, event_gap_time_ps = -1;
     bool event_range_enabled = false;
     bool event_range_period = false;
     uint32_t event_period_id = 0;
@@ -259,7 +282,7 @@ struct Lavery : viamd::EventHandler {
     uint64_t comparison_key = 0;
     std::array<SampleComparison, Metric_Count> dashboard_comparisons;
     int comparison_class = Class_Pair;
-    int comparison_style = 0;
+    int comparison_style = 2;
     float comparison_line_width = 1.5f, comparison_opacity = .35f;
     struct ComparisonCSV { ExternalReference data; };
     std::vector<ComparisonCSV> comparison_csvs;
@@ -267,7 +290,7 @@ struct Lavery : viamd::EventHandler {
     uint64_t comparison_csv_revision = 0;
     struct ComparisonOverlay {
         char name[128] = "Whole trajectory";
-        int source = 0; // whole, current frame, period, CSV, detection reference
+        int source = 0; // whole trajectory, current frame, period, independent CSV
         uint32_t period = 0;
         size_t csv = 0;
         int bp_first = 1, bp_last = INT_MAX, pair_type = 0, nucleotide = 0;
@@ -276,11 +299,76 @@ struct Lavery : viamd::EventHandler {
     };
     std::vector<ComparisonOverlay> comparison_overlays = {ComparisonOverlay{}};
     int comparison_edit = -1;
-    bool comparison_export_requested = false;
-    std::vector<std::string> comparison_labels, comparison_notes;
-    int export_view = 0;
+    std::vector<std::string> comparison_labels, comparison_warnings;
+    int profile_class = Class_Step;
+    std::array<int, Class_Count> profile_parameters = {0, Roll-Tilt, Chi-Alpha};
+    bool profile_use_period = false, profile_spread = true, profile_current = false, profile_reference = true;
+    bool profile_primary_visible = true;
+    uint32_t profile_period = 0;
+    uint64_t profile_key = 0;
+    std::vector<MemberStatistics> profile_statistics, profile_reference_statistics;
+    enum ProfileView { Profile_Parameters, Profile_Bending, Profile_Twist, Profile_Stacking, Profile_Grooves, Profile_Occupancy };
+    int profile_view = Profile_Parameters, profile_occupancy_kind = 0;
+    float profile_bend_threshold = 20;
+    bool profile_fixed_occupancy_scale = false;
+    struct StructuralPanel {
+        std::string name, unit;
+        Metric metric = Roll;
+        bool angular = false, occupancy = false, derived = false;
+        int state = -1;
+        std::vector<float> samples;
+        std::vector<MemberStatistics> summary, reference;
+    };
+    struct ProfileSeries {
+        ComparisonOverlay recipe;
+        WorkflowInterval interval;
+        int partner = 0;
+        bool spread = false;
+        uint64_t key = 0;
+        size_t first = 0, end = 0;
+        std::string error;
+        std::vector<StructuralPanel> panels;
+    };
+    std::vector<ProfileSeries> profile_series;
+    int profile_series_edit = -1;
+    uint64_t profile_series_revision = 1;
+    uint64_t structural_profile_key = 0;
+    std::vector<StructuralPanel> structural_panels;
+    double structural_x_min = .5, structural_x_max = 1.5;
+    struct SequenceLandmark {
+        int cls = Class_Pair;
+        size_t member = 0;
+        double position = 1;
+        char name[128] = {};
+        ImVec4 color = ImVec4(1,.35f,.65f,1);
+        bool visible = true;
+        std::string identity, source;
+    };
+    std::vector<SequenceLandmark> sequence_landmarks;
+    float landmark_min_occupancy = 50;
+    struct ExportDataset {
+        ComparisonOverlay recipe;
+        WorkflowInterval interval;
+        int partner = 0;
+        bool csv = false;
+    };
+    struct DataExport {
+        int kind = 0, event_table = 0, partner = 0;
+        uint32_t parameters = (1u<<Roll)|(1u<<Tilt)|(1u<<Rise);
+        uint32_t profiles = 0;
+        bool all_positions = true, reference = false, prepare_reference = false;
+        int bp_first = 1, bp_last = 1;
+        float bend_threshold = 20;
+        WorkflowInterval interval;
+        std::array<std::vector<ExportDataset>,2> datasets = {
+            std::vector<ExportDataset>{ExportDataset{}},std::vector<ExportDataset>{ExportDataset{}}};
+    } data_export;
+    int export_dataset_edit = -1;
+    std::string data_export_error;
+    size_t export_pair = 0;
     int state_history_cached_kind = -1;
     std::vector<StateSummary> state_history_summaries;
+    std::array<ImPlotRange,6> state_history_time_views = {};
     std::vector<uint8_t> pair_uses_hydrogens;
     std::unique_ptr<PairingValidator> display_validator;
     std::vector<BaseFrame> display_bases;
@@ -294,7 +382,7 @@ struct Lavery : viamd::EventHandler {
     std::vector<OutlierEvent> outlier_events;
     std::vector<StateSwitch> state_switches;
     size_t inspected_switch = SIZE_MAX;
-    float state_min_time_ps = -1;
+    float state_min_time_ps = 200;
     int state_min_frames = 3;
     bool reset_heatmap_view = true;
     bool focus_heatmap_selection = false;
@@ -367,6 +455,7 @@ struct Lavery : viamd::EventHandler {
         reset_heatmap_view = true;
         focus_heatmap_selection = false;
         heatmap_limits = {};
+        state_history_time_views = {};
         heatmap_frame = -1.0;
         heatmap_pressed = heatmap_dragged = false;
         heatmap_member_count = 0;
@@ -384,12 +473,27 @@ struct Lavery : viamd::EventHandler {
         pair_quality_flags.clear();
         pair_has_baseline.clear();
         for (auto& mapping : external_mapping) mapping.clear();
+        for (auto* setup : {&sequence_reference_setup,&export_reference_setup,&ranking_reference_setup}) {
+            for (auto& mapping : setup->mapping) mapping.clear();
+            setup->error.clear();
+            ++setup->revision;
+        }
         representative_candidates.clear();
         representative_features.clear();
         for (auto& selected : representative_members) selected.clear();
         representative_key = 0;
+        representative_diagnostics={};
+        profile_series_edit=export_dataset_edit=-1;
         period_summary_key = 0;
         comparison_key = 0;
+        profile_key = 0;
+        data_export_error.clear();
+        profile_statistics.clear();
+        profile_reference_statistics.clear();
+        structural_profile_key = 0;
+        structural_panels.clear();
+        for (auto& series : profile_series) { series.panels.clear(); series.key=0; series.error.clear(); }
+        sequence_landmarks.clear();
         period_summary_rows.clear();
         pair_contacts.clear();
         pairing_states.clear();
@@ -505,10 +609,10 @@ struct Lavery : viamd::EventHandler {
                 if (app && show_window && computed && calculation_ok.load()) draw_signed_overlay();
                 break;
             case viamd::EventType_ViamdDrawSceneLabels:
-                if (overlay_active() && signed_overlay && measurement_text) draw_measurement_labels();
+                if (overlay_active() && measurement_feedback && measurement_text) draw_measurement_labels();
                 break;
             case viamd::EventType_ViamdRepresentationContours:
-                if (overlay_active() && signed_overlay && !event_context_bases.empty() &&
+                if (overlay_active() && (signed_overlay || measurement_feedback) && !event_context_bases.empty() &&
                     (event_visual_style == EventVisual_Contour || event_visual_style == EventVisual_Both))
                     representation_contours((RepresentationContours*)e.payload);
                 break;
@@ -517,7 +621,7 @@ struct Lavery : viamd::EventHandler {
                 const bool active = show_window && computed && calculation_ok.load();
                 key->key = md_hash64(&active, sizeof(active), key->key);
                 if (active) {
-                    for (const bool flag : {show_axis, signed_overlay, overlay_halo, sync_viewport, aggregate_outliers}) {
+                    for (const bool flag : {detection_enabled, measurement_feedback, show_axis, signed_overlay, overlay_halo, sync_viewport, aggregate_outliers}) {
                         key->key = md_hash64(&flag, sizeof(flag), key->key);
                     }
                     for (const auto& marker : markers) {
@@ -545,7 +649,7 @@ struct Lavery : viamd::EventHandler {
             }
             case viamd::EventType_ViamdPickingRangeReserve: {
                 picking_range = {};
-                if (overlay_active() && signed_overlay) {
+                if (overlay_active() && (signed_overlay || measurement_feedback)) {
                     picking_range_reserve(&picking_range, (PickingSpace*)e.payload, PickingDomain_Lavery, picking_count());
                 }
                 break;
@@ -582,7 +686,7 @@ struct Lavery : viamd::EventHandler {
                     uint32_t index = 0;
                     bool target = event->hit.domain == PickingDomain_Lavery &&
                         decode_pick(event->hit.local_idx, &cls, &index, &parameter);
-                    if (!target && signed_overlay) {
+                    if (!target && (signed_overlay || measurement_feedback)) {
                         const int32_t base = picked_base(event->hit);
                         if (base >= 0 && base_pair[base] >= 0 &&
                             std::binary_search(event_context_bases.begin(), event_context_bases.end(), (uint32_t)base)) {
@@ -611,9 +715,11 @@ struct Lavery : viamd::EventHandler {
                 viamd::write_bool(state, STR_LIT("SyncViewport"), sync_viewport);
                 viamd::write_bool(state, STR_LIT("CompareAll"), compare_all);
                 viamd::write_bool(state, STR_LIT("ShowAxis"), show_axis);
+                viamd::write_bool(state, STR_LIT("DetectionEnabled"), detection_enabled);
                 viamd::write_bool(state, STR_LIT("SignedOverlay"), signed_overlay);
                 viamd::write_bool(state, STR_LIT("OverlayHalo"), overlay_halo);
                 viamd::write_bool(state, STR_LIT("MeasurementText"), measurement_text);
+                viamd::write_bool(state, STR_LIT("MeasurementFeedback"), measurement_feedback);
                 viamd::write_flt(state, STR_LIT("ContourThickness"), contour_thickness);
                 viamd::write_int(state, STR_LIT("EventVisualStyle"), event_visual_style);
                 viamd::write_flt(state, STR_LIT("GlowStrength"), glow_strength);
@@ -680,25 +786,33 @@ struct Lavery : viamd::EventHandler {
             case viamd::EventType_ViamdDeserializeBegin:
                 show_heatmap = true;
                 sync_viewport = true;
-                outlier_sigma = 2.5f;
+                detection_enabled = true;
+                outlier_sigma = 3.0f;
                 metric = (int)Twist;
                 member = 0;
                 compare_all = false;
                 show_axis = signed_overlay = overlay_halo = true;
                 measurement_text = false;
+                measurement_feedback = true;
                 contour_thickness = 1.5f;
                 event_visual_style = EventVisual_Glow;
                 glow_strength = 0.5f;
-                state_min_time_ps = -1;
+                state_min_time_ps = 200;
                 state_min_frames = 3;
                 pairing_min_time_ps = 200;
                 pairing_min_frames = 3;
                 state_history_kind = 0;
                 state_history_nucleotide_kind = 0;
                 state_history_tabs_initialized = false;
-                export_view = 0;
+                data_export = {};
+                data_export_error.clear();
+                export_pair = 0;
                 comparison_class=Class_Pair;
-                comparison_style=0; comparison_line_width=1.5f; comparison_opacity=.35f;
+                comparison_style=2; comparison_line_width=1.5f; comparison_opacity=.35f;
+                sequence_reference_setup={}; sequence_reference_setup.source=1;
+                profile_series.clear(); ++profile_series_revision;
+                export_reference_setup={}; ranking_reference_setup={};
+                representative_interval={};
                 comparison_csvs.clear(); comparison_error.clear(); ++comparison_csv_revision;
                 comparison_overlays={ComparisonOverlay{}}; comparison_edit=-1;
                 comparison_key=0;
@@ -727,7 +841,8 @@ struct Lavery : viamd::EventHandler {
                 baseline_range_first = baseline_range_last = 0;
                 event_parameters = kEventAllParameters;
                 event_min_frames = 3;
-                event_min_time_ps = event_gap_time_ps = -1;
+                event_min_time_ps = 200;
+                event_gap_time_ps = -1;
                 event_range_enabled = false;
                 event_range_period = false;
                 event_period_id = 0;
@@ -761,9 +876,11 @@ struct Lavery : viamd::EventHandler {
                     else if (str_eq(key, STR_LIT("SyncViewport"))) viamd::extract_bool(sync_viewport, arg);
                     else if (str_eq(key, STR_LIT("CompareAll"))) viamd::extract_bool(compare_all, arg);
                     else if (str_eq(key, STR_LIT("ShowAxis"))) viamd::extract_bool(show_axis, arg);
+                    else if (str_eq(key, STR_LIT("DetectionEnabled"))) viamd::extract_bool(detection_enabled, arg);
                     else if (str_eq(key, STR_LIT("SignedOverlay"))) viamd::extract_bool(signed_overlay, arg);
                     else if (str_eq(key, STR_LIT("OverlayHalo"))) viamd::extract_bool(overlay_halo, arg);
                     else if (str_eq(key, STR_LIT("MeasurementText"))) viamd::extract_bool(measurement_text, arg);
+                    else if (str_eq(key, STR_LIT("MeasurementFeedback"))) viamd::extract_bool(measurement_feedback, arg);
                     else if (str_eq(key, STR_LIT("ContourThickness"))) {
                         float thickness = contour_thickness;
                         if (!viamd::extract_flt(thickness, arg) || !std::isfinite(thickness) || thickness < 1.0f || thickness > 4.0f)
@@ -1351,7 +1468,8 @@ struct Lavery : viamd::EventHandler {
         int count = (int)columns[metric];
         if (count > 0) member = std::clamp(member, 0, count - 1);
         const ImPlotInputMap input = ImPlot::GetInputMap();
-        if (ImGui::GetIO().KeyCtrl) ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
+        if (ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift || timeline_periods_dragging())
+            ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
         if (frame_count) update_counts(count, frame_count);
         if (ImGui::BeginChild("Analysis workspace", ImVec2(0,0))) {
             if (frame_count) draw_workspace(frame_count);
@@ -1366,7 +1484,8 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         build_markers(current_frame());
-        if (sync_viewport || markers_explicit || inspected_event != SIZE_MAX || inspected_switch != SIZE_MAX) update_outlier_highlight();
+        if ((sync_viewport || markers_explicit || inspected_event != SIZE_MAX || inspected_switch != SIZE_MAX) &&
+            ((detection_enabled && signed_overlay) || measurement_feedback)) update_outlier_highlight();
         else clear_highlight();
     }
 
@@ -1430,20 +1549,28 @@ struct Lavery : viamd::EventHandler {
         const int group=metric_cls();
         const int offset=class_first_metric(group);
         if (columns[metric] && run_num_frames(app)) draw_evidence((int)columns[metric]);
-        ImGui::SeparatorText("Detection");
+        if (ImGui::CollapsingHeader("Detection",ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Checkbox("Enable outlier detection",&detection_enabled)) {
+            counts_key=event_data_key=0;
+            inspected_event=SIZE_MAX;
+            markers.clear();
+            event_context_bases.clear();
+            event_context_groups.clear();
+            detail_metric=-1;
+            clear_highlight();
+        }
         draw_external_reference();
         ImGui::Combo("Compare against", &reference_scope,
-            "Own pair/step over time\0All pairs/steps over time (same helix)\0");
+            "Own history\0Pooled helix\0");
         ImGui::SetItemTooltip("Own history: temporal deviations at this location.\n"
             "All: pooled distribution of the same parameter across this helix and the baseline time range,\n"
             "including this location. Nucleotide parameters pool nucleotides, not pairs or steps.\n"
             "Persistent distortions can stand out; sequence differences and terminal effects can also be normal.\n"
             "State-conditioned parameters still compare within the current conformational state.");
-        ImGui::TextWrapped("%s", reference_source ? "External reference: compares this simulation with imported control samples." : reference_scope == Reference_HelixHistory
-            ? "Pooled reference: detects persistent local differences."
-            : "Own history: detects temporal deviations.");
+        ImGui::BeginDisabled(!detection_enabled);
         ImGui::SliderFloat("Tolerance", &outlier_sigma, 1.5f, 4.0f, "%.1f sigma");
         ImGui::SetItemTooltip("Outliers and regions start above the tolerance, using the selected reference distribution.");
+        ImGui::EndDisabled();
         draw_event_time_settings();
 
         const std::string parameters = event_parameters_label();
@@ -1458,6 +1585,7 @@ struct Lavery : viamd::EventHandler {
             ImGui::Combo("Baseline", &baseline, "Mean / SD\0Median / MAD\0");
             ImGui::SetItemTooltip("Center and scale of the selected reference distribution.\nMean / SD: classic; large excursions inflate their own SD.\n"
                 "Median / MAD: robust; scale is 1.4826 x MAD (SD if MAD is 0).\nAngular parameters are measured on the circle (wrap at +/-180 deg).");
+            ImGui::BeginDisabled(!detection_enabled);
             draw_event_advanced();
             ImGui::Checkbox("Count any selected parameter", &aggregate_outliers);
             ImGui::SetItemTooltip("Count plot, heatmap and 3D: a member is outlying when any chosen parameter of its class is.\n"
@@ -1476,15 +1604,20 @@ struct Lavery : viamd::EventHandler {
                 }
                 if (!(selected_parameters & class_all_parameters(group))) ImGui::TextDisabled("Select at least one parameter.");
             }
+            ImGui::EndDisabled();
         }
 
+        }
         if (ImGui::CollapsingHeader("Visual feedback")) {
             ImGui::PushItemWidth(ImGui::GetFontSize()*12);
+            ImGui::Checkbox("Selection / measurement feedback",&measurement_feedback);
+            ImGui::SetItemTooltip("Selected geometry, hover previews and state-switch inspection work independently of outlier detection. Neutral colours when detection is off.");
+            ImGui::Checkbox("Highlight selected / contributing atoms",&sync_viewport);
             if (ImGui::BeginTabBar("##visual_tabs")) {
                 if (ImGui::BeginTabItem("Event regions")) {
-                    ImGui::Checkbox("Highlight event contributions", &sync_viewport);
+                    ImGui::BeginDisabled(!detection_enabled);
                     ImGui::Checkbox("Signed outlier overlay", &signed_overlay);
-                    ImGui::SetItemTooltip("Master switch for event regions, signed markers and measurement geometry.");
+                    ImGui::SetItemTooltip("Outlier-specific regions and signed colouring only. Does not disable selected measurement geometry.");
                     ImGui::Combo("Region style", &event_visual_style, "Contour\0Glow\0Both\0Off\0");
                     ImGui::SetItemTooltip("Event/state context only. Off leaves current-contribution markers and measurements available.");
                     if (event_visual_style == EventVisual_Contour || event_visual_style == EventVisual_Both) {
@@ -1495,6 +1628,7 @@ struct Lavery : viamd::EventHandler {
                         ImGui::SliderFloat("Glow strength", &glow_strength, 0, 1, "%.2f", ImGuiSliderFlags_AlwaysClamp);
                     ImGui::Checkbox("Soft marker halos", &overlay_halo);
                     ImGui::SetItemTooltip("Small signed-contribution markers only, independent of region style.");
+                    ImGui::EndDisabled();
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Measurements")) {
@@ -1507,12 +1641,17 @@ struct Lavery : viamd::EventHandler {
             }
             ImGui::Separator();
             ImGui::Checkbox("Smoothed midpoint axis", &show_axis);
+            ImGui::BeginDisabled(!show_axis);
+            if (ImGui::Button("Export centreline coordinates...")) export_axis();
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Advanced geometry: CSV coordinates of the smoothed 3D base-pair midpoint line at the displayed pose. Not a sequence plot axis.");
             if (ImGui::Button("Reset visual defaults")) {
                 event_visual_style = EventVisual_Glow;
                 contour_thickness = 1.5f;
                 glow_strength = 0.5f;
                 signed_overlay = sync_viewport = overlay_halo = show_heatmap = show_axis = true;
                 measurement_text = false;
+                measurement_feedback = true;
                 reset_measurement_style(app);
             }
             ImGui::SetItemTooltip("Also restores shared VIAMD measurement colours, opacity and line width. Does not change detection or selection.");
@@ -1527,32 +1666,468 @@ struct Lavery : viamd::EventHandler {
         ImGui::PopItemWidth();
     }
 
+    struct ExportInterval { size_t first, end; std::string name; };
+
+    std::string workflow_interval_name(const WorkflowInterval& interval) const {
+        if (interval.kind==1) {
+            const auto* period=timeline_periods_find(&app->timeline.periods,interval.period);
+            return period ? period->name : "Missing period";
+        }
+        return interval.kind==2 ? "Custom interval" : "Whole trajectory";
+    }
+
+    bool export_intervals(std::vector<ExportInterval>& intervals, size_t frames) {
+        intervals.clear();
+        size_t first=0,end=0;
+        if (!workflow_range(data_export.interval,frames,first,end,data_export_error)) return false;
+        intervals.push_back({first,end,workflow_interval_name(data_export.interval)});
+        return true;
+    }
+
+    bool export_member(int cls, size_t m) const {
+        return sequence_export_member(cls,m,steps,data_export.all_positions ? 1 : data_export.bp_first,
+            data_export.all_positions ? SIZE_MAX : (size_t)data_export.bp_last,data_export.partner);
+    }
+
+    bool comparison_samples(std::vector<float>& samples, Metric id, const ComparisonMemberFilter& filter,
+        size_t first, size_t end, const ExternalReference* source, size_t* unknown=nullptr, int partner=0) const {
+        samples.clear();
+        const int cls=metric_class(id);
+        const size_t count=class_members(cls);
+        if (source) {
+            for (const auto& member : source->members[cls]) {
+                bool missing=false;
+                if (comparison_member_matches(filter,cls,member.label,member.pair_a,member.pair_b,&missing)) {
+                    if (partner && cls==Class_Nucleotide) {
+                        // External labels do not establish current-trajectory partner identity.
+                        MD_LOG_ERROR("Lavery: imported CSV distributions require Both nucleotide partners; CSV labels do not establish partner identity");
+                        return false;
+                    }
+                    const auto& v=member.values[id];
+                    samples.insert(samples.end(),v.begin(),v.end());
+                } else if (missing && unknown) ++*unknown;
+            }
+        } else if (count) {
+            if (end*count>values[id].size()) {
+                MD_LOG_ERROR("Lavery: incomplete comparison parameter data");
+                return false;
+            }
+            for (size_t m=0;m<count;++m) {
+                if (partner && cls==Class_Nucleotide && (int)(m%2)!=partner-1) continue;
+                const size_t a=cls==Class_Step ? steps[m].a : cls==Class_Nucleotide ? m/2 : m;
+                const std::string b=cls==Class_Step ? pair_labels[steps[m].b] : "";
+                bool missing=false;
+                if (comparison_member_matches(filter,cls,class_labels(cls)[m],pair_labels[a],b,&missing)) {
+                    for (size_t f=first;f<end;++f) samples.push_back(values[id][f*count+m]);
+                } else if (missing && unknown) ++*unknown;
+            }
+        }
+        return true;
+    }
+
+    void export_data(size_t frames) {
+        data_export_error.clear();
+        if (data_export.kind==0) {
+            export_csv(frames);
+            return;
+        }
+        size_t reference_first=0,reference_end=0;
+        if ((data_export.reference || (data_export.kind==1 && (data_export.profiles&2))) &&
+            !workflow_reference_range(export_reference_setup,frames,reference_first,reference_end,data_export_error)) {
+            MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str());
+            return;
+        }
+        std::string output=data_export.kind==1 ? std::string("view,")+csv_sequence_profile_header() : csv_comparison_header();
+        const auto append_profile=[&](StructuralPanel& panel, const ExportInterval& interval,
+            const ExportDataset& dataset, const char* view) {
+            const int cls=metric_class(panel.metric);
+            const bool has_reference=!panel.reference.empty();
+            ComparisonMemberFilter filter;
+            filter.bp_first=dataset.recipe.bp_first;
+            filter.bp_last=dataset.recipe.bp_last==INT_MAX ? SIZE_MAX : (size_t)dataset.recipe.bp_last;
+            filter.pair_type=dataset.recipe.pair_type;
+            filter.nucleotide=cls==Class_Nucleotide && dataset.recipe.nucleotide ? " ATGCU"[dataset.recipe.nucleotide] : 0;
+            size_t excluded=0;
+            std::vector<uint8_t> included;
+            if (!filter_sequence_profile(&panel.summary,cls,steps,pair_labels,class_labels(cls),filter,dataset.partner,&excluded,&included)) {
+                data_export_error="Invalid profile dataset filters or member metadata.";
+                return;
+            }
+            const std::string note=interval.name+"; no current-frame snapshot"+
+                "; time="+workflow_interval_name(dataset.interval)+
+                "; BP="+std::to_string(filter.bp_first)+"-"+(filter.bp_last==SIZE_MAX ? "last" : std::to_string(filter.bp_last))+
+                "; pair_type="+std::to_string(filter.pair_type)+"; nucleotide="+
+                (filter.nucleotide ? std::string(1,filter.nucleotide) : "all")+"; partner="+std::to_string(dataset.partner)+
+                "; excluded_missing_metadata="+std::to_string(excluded)+
+                (panel.occupancy ? "; occupancy denominator=available raw samples" : "")+
+                (!strcmp(view,"Bending / Kinks") ? "; candidate_bend_ge_deg="+std::to_string(data_export.bend_threshold) : "");
+            for (size_t m=0;m<panel.summary.size();++m) {
+                std::string provenance=has_reference ? workflow_member_provenance(export_reference_setup,cls,m,frames) : "";
+                if (has_reference && panel.derived && !panel.occupancy)
+                    provenance+="; reference fields are raw Twist; plotted difference centre=0 deg";
+                output+=csv_quote(view)+","+csv_sequence_profile_row(run,panel.metric,m,class_labels(cls)[m],
+                    profile_position(cls,m),note,interval.first,interval.end,panel.summary[m],SIZE_MAX,NAN,
+                    provenance,has_reference ? &panel.reference[m] : nullptr,panel.name,panel.unit,included[m]!=0);
+            }
+        };
+        if (data_export.kind==1) {
+            for (const auto& dataset : data_export.datasets[0]) {
+                size_t first=0,end=0;
+                if (!workflow_range(dataset.interval,frames,first,end,data_export_error)) break;
+                const ExportInterval interval={first,end,dataset.recipe.name};
+                for (int id=0;id<(int)Metric_Count && data_export_error.empty();++id) if (data_export.parameters&(1u<<id)) {
+                    StructuralPanel panel;
+                    panel.metric=(Metric)id;
+                    if (!sequence_statistics(&panel.summary,values[id],columns[id],metric_is_angular(panel.metric),interval.first,interval.end) ||
+                        (data_export.reference && !sequence_reference(panel.metric,&panel.reference,export_reference_setup))) {
+                        data_export_error="Could not calculate selected profile/reference.";
+                        break;
+                    }
+                    append_profile(panel,interval,dataset,"Parameters");
+                }
+                for (int group=0;group<10 && data_export_error.empty();++group) if (data_export.profiles&(1u<<group)) {
+                    const int view=group<4 ? Profile_Bending+group : Profile_Occupancy;
+                    std::vector<StructuralPanel> panels;
+                    if (!build_structural_profiles(panels,interval.first,interval.end,view,std::max(0,group-4),
+                        data_export.bend_threshold,data_export.reference,export_reference_setup)) {
+                        data_export_error="Could not calculate selected structural profile.";
+                        break;
+                    }
+                    const char* names[]={"Bending / Kinks","Twist / Unwinding","Stacking geometry","Groove geometry","State occupancy"};
+                    for (auto& panel : panels) {
+                        if (group==1 && !panel.derived) continue;
+                        append_profile(panel,interval,dataset,names[view-Profile_Bending]);
+                    }
+                }
+                if (!data_export_error.empty()) break;
+            }
+        } else {
+            {
+                ComparisonMemberFilter filter;
+                for (int id=0;id<(int)Metric_Count && data_export_error.empty();++id) if (data_export.parameters&(1u<<id)) {
+                    std::vector<std::vector<float>> samples;
+                    std::vector<std::string> names,notes;
+                    std::vector<bool> known;
+                    const auto add=[&](const std::string& name, size_t first, size_t end, const ExternalReference* csv,
+                        const ComparisonMemberFilter& selection, int partner) {
+                        samples.emplace_back();
+                        size_t unknown=0;
+                        if (!comparison_samples(samples.back(),(Metric)id,selection,first,end,csv,&unknown,partner)) {
+                            data_export_error="Could not read dataset samples. Imported nucleotide datasets require Both partners.";
+                            return false;
+                        }
+                        names.push_back(name);
+                        std::string note=csv ? csv->path : name+"; frames="+std::to_string(first)+"-"+std::to_string(end-1);
+                        note+="; BP="+std::to_string(selection.bp_first)+"-"+(selection.bp_last==SIZE_MAX ? "last" : std::to_string(selection.bp_last))+
+                            "; pair_type="+std::to_string(selection.pair_type)+"; nucleotide="+
+                            (selection.nucleotide ? std::string(1,selection.nucleotide) : "all")+
+                            "; partner="+std::to_string(partner)+"; excluded_missing_metadata="+std::to_string(unknown);
+                        notes.push_back(note); known.push_back(!csv);
+                        return true;
+                    };
+                    bool ok=true;
+                    for (const auto& dataset : data_export.datasets[1]) {
+                        const auto& series=dataset.recipe;
+                        ComparisonMemberFilter selection;
+                        selection.bp_first=series.bp_first;
+                        selection.bp_last=series.bp_last==INT_MAX ? SIZE_MAX : (size_t)series.bp_last;
+                        selection.pair_type=series.pair_type;
+                        selection.nucleotide=metric_class((Metric)id)==Class_Nucleotide && series.nucleotide ? " ATGCU"[series.nucleotide] : 0;
+                        size_t first=0,end=frames;
+                        const ExternalReference* csv=nullptr;
+                        if (dataset.csv) {
+                            if (series.csv>=comparison_csvs.size()) { ok=false; break; }
+                            csv=&comparison_csvs[series.csv].data;
+                        } else if (!workflow_range(dataset.interval,frames,first,end,data_export_error)) { ok=false; break; }
+                        if (!add(series.name,first,end,csv,selection,dataset.partner)) { ok=false; break; }
+                        if (!csv) notes.back()+="; time="+workflow_interval_name(dataset.interval);
+                    }
+                    if (ok && data_export.reference) {
+                        ok&=add("Reference",reference_first,reference_end,
+                            export_reference_setup.source==2 ? &export_reference_setup.external : nullptr,filter,0);
+                    }
+                    SampleComparison comparison;
+                    if (!ok || samples.empty() || !compare_samples(&comparison,samples,metric_is_angular((Metric)id),32)) {
+                        if (data_export_error.empty()) data_export_error="Could not calculate selected distribution datasets.";
+                        break;
+                    }
+                    for (size_t g=0;g<samples.size();++g)
+                        output+=csv_comparison_group(run,(Metric)id,names[g],notes[g],comparison,g,known[g]);
+                }
+            }
+        }
+        if (!data_export_error.empty()) {
+            MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str());
+            return;
+        }
+        const std::string header=data_export.kind==1 ? std::string("view,")+csv_sequence_profile_header() : csv_comparison_header();
+        if (output==header) {
+            data_export_error="No positions match the selected measurements and sequence range.";
+            MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str());
+            return;
+        }
+        char path[4096]={};
+        if (!application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,STR_LIT("csv"))) return;
+        md_file_t file={};
+        if (!md_file_open(&file,str_from_cstr(path),MD_FILE_WRITE|MD_FILE_CREATE|MD_FILE_TRUNCATE)) {
+            data_export_error="Could not open export file.";
+        } else {
+            bool ok=md_file_write(file,output.data(),output.size())==output.size();
+            if (!md_file_close(&file)) ok=false;
+            if (!ok) data_export_error="CSV write failed; output may be incomplete.";
+        }
+        if (!data_export_error.empty()) MD_LOG_ERROR("Lavery export: %s (%s)",data_export_error.c_str(),path);
+        else MD_LOG_INFO("Lavery: exported explicitly selected data to '%s'",path);
+    }
+
+    bool begin_series_popup(const char* label) {
+        ImGui::SetNextWindowPos(ImGui::GetMousePos(),ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(ImGui::GetFontSize()*24,0),
+            ImVec2(ImGui::GetFontSize()*40,ImGui::GetMainViewport()->WorkSize.y*.85f));
+        return ImGui::BeginPopup(label);
+    }
+
+    bool draw_export_datasets(size_t frames, bool distributions) {
+        auto& datasets=data_export.datasets[distributions ? 1 : 0];
+        ImGui::SeparatorText("Datasets");
+        if (ImGui::Button("Add filtered series")) {
+            ExportDataset dataset;
+            snprintf(dataset.recipe.name,sizeof(dataset.recipe.name),"Filtered series %zu",datasets.size()+1);
+            datasets.push_back(std::move(dataset));
+            export_dataset_edit=(int)datasets.size()-1;
+        }
+        bool valid=!datasets.empty();
+        for (size_t s=0;s<datasets.size();) {
+            auto& dataset=datasets[s];
+            auto& recipe=dataset.recipe;
+            ImGui::PushID((int)s);
+            const auto* period=dataset.interval.kind==1 ?
+                timeline_periods_find(&app->timeline.periods,dataset.interval.period) : nullptr;
+            const char* source=dataset.csv ? "Imported CSV" : dataset.interval.kind==0 ? "Whole trajectory" :
+                dataset.interval.kind==1 ? (period ? period->name : "MISSING period") : "Custom interval";
+            const bool edit=ImGui::SmallButton("Edit");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(recipe.name);
+            ImGui::SetItemTooltip("%s | BP %d-%s | %s | %s | %s",
+                source,recipe.bp_first,recipe.bp_last==INT_MAX ? "last" : std::to_string(recipe.bp_last).c_str(),
+                recipe.pair_type==0 ? "All pair types" : recipe.pair_type==1 ? "AT / AU" : recipe.pair_type==2 ? "GC" : "Other pairs",
+                recipe.nucleotide ? (std::string("Base ")+" ATGCU"[recipe.nucleotide]).c_str() : "All bases",
+                dataset.partner==0 ? "Both partners" : dataset.partner==1 ? "Partner 1" : "Partner 2");
+            bool remove=false,duplicate=false;
+            if (edit || export_dataset_edit==(int)s) {
+                ImGui::OpenPopup("Series settings");
+                export_dataset_edit=-1;
+            }
+            if (begin_series_popup("Series settings")) {
+                ImGui::InputText("Name",recipe.name,sizeof(recipe.name));
+                if (distributions) {
+                    int source_kind=dataset.csv ? 1 : 0;
+                    if (ImGui::Combo("Source",&source_kind,"Current trajectory\0Imported CSV\0")) dataset.csv=source_kind==1;
+                }
+                if (dataset.csv) {
+                    if (ImGui::Button("Import CSV...")) {
+                        char path[4096]={};
+                        if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+                            ComparisonCSV csv;
+                            if (load_external_reference(&csv.data,path,&data_export_error)) {
+                                comparison_csvs.push_back(std::move(csv));
+                                recipe.csv=comparison_csvs.size()-1;
+                                data_export_error.clear();
+                            } else MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str());
+                        }
+                    }
+                    if (ImGui::BeginCombo("CSV",recipe.csv<comparison_csvs.size() ?
+                        comparison_csvs[recipe.csv].data.path.c_str() : "Import a CSV first")) {
+                        for (size_t c=0;c<comparison_csvs.size();++c)
+                            if (ImGui::Selectable(comparison_csvs[c].data.path.c_str(),recipe.csv==c)) recipe.csv=c;
+                        ImGui::EndCombo();
+                    }
+                } else draw_workflow_interval("Time",dataset.interval,frames);
+                draw_series_filters(recipe,&dataset.partner,-1);
+                if (dataset.csv) ImGui::TextWrapped("CSV filters use its own numbering and labels. Nucleotide datasets require Both partners; sequence identity is not inferred from array order.");
+                if (ImGui::Button("Done")) ImGui::CloseCurrentPopup();
+                ImGui::SameLine(); duplicate=ImGui::Button("Duplicate");
+                ImGui::SameLine(); remove=ImGui::SmallButton("Remove");
+                if (remove || duplicate) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+            if (dataset.csv) {
+                if (recipe.csv>=comparison_csvs.size()) { valid=false; ImGui::TextWrapped("Import or choose a CSV for this dataset."); }
+                const bool nucleotides=(data_export.parameters&(class_all_parameters(Class_Nucleotide)<<class_first_metric(Class_Nucleotide)))!=0;
+                if (nucleotides && dataset.partner) { valid=false; ImGui::TextWrapped("Choose Both partners for imported nucleotide datasets."); }
+            } else {
+                size_t first=0,end=0;
+                std::string error;
+                if (!workflow_range(dataset.interval,frames,first,end,error)) {
+                    valid=false; ImGui::TextWrapped("%s",error.c_str());
+                }
+            }
+            ImGui::PopID();
+            if (duplicate) {
+                ExportDataset copy=dataset;
+                const std::string name=std::string(recipe.name)+" (copy)";
+                snprintf(copy.recipe.name,sizeof(copy.recipe.name),"%s",name.c_str());
+                datasets.push_back(std::move(copy));
+                export_dataset_edit=(int)datasets.size()-1;
+            }
+            if (remove) datasets.erase(datasets.begin()+s);
+            else ++s;
+        }
+        if (datasets.empty()) ImGui::TextWrapped("Add a filtered series to save.");
+        return valid && !datasets.empty();
+    }
+
     void draw_analysis_exports(size_t frame_count) {
-        const float wide = -FLT_MIN;
-        if (ImGui::Button("Export parameter CSV", ImVec2(wide, 0))) export_csv(frame_count);
-        ImGui::BeginDisabled(reference_source!=0);
-        if (ImGui::Button("Export reference CSV (all classes)",ImVec2(wide,0))) export_csv(frame_count,true);
+        auto& setup=data_export;
+        const char* kinds[]={"Measurements","Sequence profiles","Distributions","Events & transitions"};
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*22);
+        if (ImGui::Combo("Save",&setup.kind,kinds,4)) {
+            export_dataset_edit=-1;
+            setup.reference=false;
+            setup.prepare_reference=false;
+            data_export_error.clear();
+        }
+        const char* descriptions[]={"Actual parameter values at each selected frame and position.",
+            "Mean / population SD or occupancy at each sequence position.",
+            "Shared histogram bins and independently normalized densities for each dataset.",
+            "Results already calculated by detection and state analysis."};
+        ImGui::TextWrapped("%s",descriptions[setup.kind]);
+        if (setup.kind==0) {
+            if (!setup.prepare_reference && ImGui::Button("Prepare a reference CSV...")) {
+                setup.prepare_reference=true;
+                setup.parameters=kEventAllParameters;
+                setup.all_positions=true; setup.partner=0; setup.interval={}; setup.reference=false;
+                data_export_error.clear();
+            }
+            if (setup.prepare_reference) {
+                ImGui::TextWrapped("Save measurements to use later as a reference.");
+                if (ImGui::SmallButton("Back to measurements")) setup.prepare_reference=false;
+            }
+        }
+        if (setup.kind<3) {
+            const bool twist_required=setup.kind==1 && (setup.profiles&2);
+            if (twist_required) {
+                ImGui::TextWrapped("Reference required for the selected Twist difference. Ordinary Twist is available under Parameters without a reference.");
+                draw_workflow_reference("Reference",export_reference_setup,frame_count,setup.kind==0);
+            }
+            if (!setup.prepare_reference && ImGui::TreeNode("Add reference comparison")) {
+                ImGui::Checkbox(setup.kind==0 ? "Include reference statistics / z-scores / sigma flags" :
+                    setup.kind==1 ? "Include reference mean / SD" : "Add reference dataset",&setup.reference);
+                ImGui::SetItemTooltip("%s",setup.kind==0 ?
+                    "Extra comparison columns use this reference. Sigma flags use the detection tolerance and enabled toggle." :
+                    setup.kind==1 ? "Adds raw reference mean / SD and provenance." : "Adds reference samples as another histogram dataset.");
+                if (setup.reference) {
+                    if (!twist_required) draw_workflow_reference("Reference",export_reference_setup,frame_count,setup.kind==0);
+                }
+                ImGui::TreePop();
+            } else if (setup.reference) {
+                ImGui::TextDisabled("Reference comparison enabled");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Remove comparison")) setup.reference=false;
+            }
+        }
+        const char* derived[]={"Bend angle / Rise / bend occupancy","Twist difference from reference",
+            "Stacking: Rise / Slide / Shift","Grooves: minor / major","BI / BII occupancy","anti / syn occupancy",
+            "Sugar pucker occupancy","Alpha occupancy","Gamma occupancy","Pairing occupancy"};
+        if (setup.kind<3) {
+            std::string chosen;
+            for (int id=0;id<(int)Metric_Count;++id) if (setup.parameters&(1u<<id)) {
+                if (!chosen.empty()) chosen+=", ";
+                chosen+=metric_name((Metric)id);
+            }
+            const size_t parameter_count=std::bitset<Metric_Count>(setup.parameters).count();
+            const bool show_parameters=ImGui::TreeNode("Choose parameters","Parameters (%zu selected)",parameter_count);
+            ImGui::SetItemTooltip("%s",chosen.empty() ? "None selected" : chosen.c_str());
+            if (show_parameters) {
+                if (ImGui::Button("Select all")) setup.parameters=kEventAllParameters;
+                ImGui::SameLine();
+                if (ImGui::Button("Clear")) setup.parameters=0;
+                if (ImGui::BeginTable("Export measurements",3)) {
+                    for (int cls=0;cls<Class_Count;++cls) {
+                        ImGui::TableNextColumn();
+                        ImGui::SeparatorText(class_name(cls));
+                        for (int k=0;k<class_parameter_count(cls);++k) {
+                            const int id=class_first_metric(cls)+k;
+                            bool checked=(setup.parameters&(1u<<id))!=0;
+                            if (ImGui::Checkbox(metric_name((Metric)id),&checked))
+                                setup.parameters=checked ? setup.parameters|(1u<<id) : setup.parameters&~(1u<<id);
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::TreePop();
+            }
+            if (setup.kind==1) {
+                if (ImGui::TreeNode("Choose structural / occupancy quantities","Structural / occupancy quantities (%zu selected)",
+                    std::bitset<10>(setup.profiles).count())) {
+                    for (int i=0;i<10;++i) {
+                        bool checked=(setup.profiles&(1u<<i))!=0;
+                        if (ImGui::Checkbox(derived[i],&checked))
+                            setup.profiles=checked ? setup.profiles|(1u<<i) : setup.profiles&~(1u<<i);
+                    }
+                    ImGui::TreePop();
+                }
+                if (setup.profiles&1u) {
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize()*8);
+                    if (ImGui::InputFloat("Bend threshold (deg)",&setup.bend_threshold))
+                        setup.bend_threshold=std::clamp(setup.bend_threshold,1.0f,180.0f);
+                }
+            }
+        } else {
+            ImGui::Combo("Table",&setup.event_table,"Outlier events\0Nucleotide switches\0Pairing-state runs\0");
+            if (setup.event_table==2 && !pairs.empty()) {
+                export_pair=std::min(export_pair,pairs.size()-1);
+                if (ImGui::BeginCombo("Pair",pair_labels[export_pair].c_str())) {
+                    for (size_t p=0;p<pairs.size();++p)
+                        if (ImGui::Selectable(pair_labels[p].c_str(),export_pair==p)) export_pair=p;
+                    ImGui::EndCombo();
+                }
+            }
+        }
+        bool valid=setup.kind==3 || setup.parameters || (setup.kind==1 && setup.profiles);
+        if (setup.kind==0) {
+            const std::string position_summary=setup.all_positions ? "All" :
+                "BP "+std::to_string(setup.bp_first)+"-"+std::to_string(setup.bp_last);
+            if (ImGui::TreeNode("Change positions","Positions (%s; %s)",position_summary.c_str(),
+                setup.partner==0 ? "both partners" : setup.partner==1 ? "partner 1" : "partner 2")) {
+                ImGui::Checkbox("All sequence positions",&setup.all_positions);
+                if (!setup.all_positions) draw_transition_bp_range(setup.bp_first,setup.bp_last);
+                ImGui::Combo("Nucleotide partners",&setup.partner,"Both\0Partner 1\0Partner 2\0");
+                ImGui::TreePop();
+            }
+            draw_workflow_interval("Time",setup.interval,frame_count);
+            size_t first=0,end=0;
+            std::string error;
+            if (!workflow_range(setup.interval,frame_count,first,end,error)) {
+                valid=false; ImGui::TextWrapped("%s",error.c_str());
+            }
+            if (setup.prepare_reference && (setup.parameters!=kEventAllParameters || !setup.all_positions || setup.partner))
+                ImGui::TextWrapped("Only the exported measurements will be available for reference comparisons.");
+        } else if (setup.kind<3) {
+            valid&=draw_export_datasets(frame_count,setup.kind==2);
+        } else {
+            ImGui::TextWrapped("Saves all calculated rows, not just displayed rows.");
+            ImGui::SetItemTooltip("Uses the detection reference and analysis/residence settings. Pairing-state runs include unavailable and short runs.");
+            if (setup.event_table==0 && !detection_enabled) {
+                valid=false; ImGui::TextWrapped("Enable outlier detection to export outlier events.");
+            }
+            if (setup.event_table==2 && pairs.empty()) valid=false;
+        }
+        ImGui::Separator();
+        if (setup.kind<3 && !setup.parameters && !(setup.kind==1 && setup.profiles))
+            ImGui::TextWrapped("Choose at least one parameter or quantity to save.");
+        if (!data_export_error.empty()) ImGui::TextWrapped("Export: %s",data_export_error.c_str());
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button(setup.prepare_reference && setup.kind==0 ? "Save reference CSV..." : "Save CSV...",ImVec2(ImGui::GetFontSize()*14,0))) {
+            if (setup.kind<3) export_data(frame_count);
+            else if (setup.event_table==0) export_events_csv(frame_count,false);
+            else if (setup.event_table==1) export_state_switches_csv(false);
+            else if (pairing_runs(&pairing_history,pairing_states,pairs.size(),export_pair)) {
+                pairing_cached_member=export_pair;
+                export_pairing_csv(export_pair,timeline_times(frame_count));
+            } else MD_LOG_ERROR("Lavery: could not calculate pairing runs for export");
+        }
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("All pair, step and nucleotide raw samples in the current Baseline range.\n"
-            "Select Current trajectory as reference source first. Existing parameter export remains the plotted class, full trajectory.");
-        if (ImGui::Button("Export events CSV", ImVec2(wide, 0))) export_events_csv(frame_count);
-        ImGui::SetItemTooltip("Export all detected events, including those hidden by table filters.");
-        if (ImGui::Button("Export shown events CSV", ImVec2(wide, 0))) export_events_csv(frame_count, true);
-        ImGui::SetItemTooltip("Respect maximum shown duration, text/region filter and Active now.\n"
-            "Event and parent IDs are preserved; a hidden parent may not have an exported row.");
-        if (ImGui::Button("Export all nucleotide switches CSV", ImVec2(wide, 0))) export_state_switches_csv();
-        ImGui::SetItemTooltip("All detected nucleotide switches; display filters and table sorting do not change this export.");
-        if (ImGui::Button("Export shown nucleotide switches CSV", ImVec2(wide, 0))) export_state_switches_csv(true);
-        ImGui::SetItemTooltip("Use the nucleotide Conformation, BP range, destination State and Search filters. Original detection order.");
-        if (ImGui::Button("Export Compare distributions CSV", ImVec2(wide, 0))) {
-            comparison_export_requested=true;
-        }
-        ImGui::SetItemTooltip("Open Compare to export its current class and visible distributions, including filters, bins and statistics.");
-        if (ImGui::Button("Export displayed axis CSV", ImVec2(wide, 0))) export_axis();
-        if (ImGui::CollapsingHeader("Pairing-state runs CSV")) {
-            ImGui::TextWrapped("Export all raw runs of the selected pair, including unavailable and short runs. Residence only annotates qualification.");
-            draw_pairing_states(frame_count,PairingView_Export);
-        }
     }
 
     std::string event_parameters_label() const {
@@ -1781,6 +2356,7 @@ struct Lavery : viamd::EventHandler {
     void draw_event_time_settings() {
         const size_t frame_count = run_num_frames(app);
         const float* times = timeline_times(frame_count);
+        ImGui::BeginDisabled(!detection_enabled);
         if (times) {
             initialize_event_times(times, frame_count);
             const float scale = event_time_ns ? 1000.0f : 1.0f;
@@ -1790,7 +2366,7 @@ struct Lavery : viamd::EventHandler {
             };
             input_time(event_time_ns ? "Min duration (ns)" : "Min duration (ps)", event_min_time_ps);
             ImGui::SetItemTooltip("Elapsed time from first to last contributing sample, including bridged gaps.\n"
-                "0 retains single-frame spikes. Initial value: two median sampling intervals.");
+                "0 retains single-frame spikes. Default: 200 ps; independent of state-switch residence.");
         } else if (!md_unit_base_equal(app->timeline.time_unit, md_unit_second())) {
             if (ImGui::InputInt("Min frames", &event_min_frames)) event_min_frames = std::clamp(event_min_frames, 1, 100000);
             ImGui::SetItemTooltip("No time metadata: frame-based detection.\n"
@@ -1799,6 +2375,7 @@ struct Lavery : viamd::EventHandler {
         } else {
             ImGui::TextWrapped("Physical timestamps do not match the trajectory. Event detection is unavailable.");
         }
+        ImGui::EndDisabled();
         if (frame_count && (times || !md_unit_base_equal(app->timeline.time_unit, md_unit_second()))) {
             ImGui::BeginDisabled(reference_source!=0);
             draw_analysis_range("Baseline range", baseline_range_enabled, baseline_range_period, baseline_period_id,
@@ -2154,6 +2731,7 @@ struct Lavery : viamd::EventHandler {
 
     void refresh_event_inspection() {
         if (!app) return;
+        if (!detection_enabled) inspected_event=SIZE_MAX;
         if (app->animation.mode == PlaybackMode::Playing) {
             selected_detail_active = false;
             detail_metric = -1;
@@ -2193,6 +2771,7 @@ struct Lavery : viamd::EventHandler {
 
     bool overlay_active() const {
         return app && show_window && computed && !calculating && calculation_ok.load() &&
+            visual_feedback_enabled(detection_enabled,signed_overlay,measurement_feedback) &&
             !pairs.empty() && statistics[0].members.size() == pairs.size();
     }
 
@@ -2670,7 +3249,7 @@ struct Lavery : viamd::EventHandler {
     void draw_time_cursor(const float* times, size_t frame_count, float thickness=2) const {
         const double x = cursor_x(times, frame_count);
         ImPlot::SetNextLineStyle(ImVec4(1, 0.8f, 0, 1), thickness);
-        ImPlot::PlotInfLines("Current frame", &x, 1);
+        ImPlot::PlotInfLines(times ? "Current time" : "Current frame", &x, 1);
     }
 
     std::vector<uint32_t> visible_plot_indices(const PlotSummary& summary, const float* times) const {
@@ -2697,6 +3276,7 @@ struct Lavery : viamd::EventHandler {
         initialize_event_times(timeline_times(frame_count), frame_count);
         const uint32_t mask = outlier_parameter_mask();
         uint64_t key = md_hash64(&outlier_sigma, sizeof(outlier_sigma), 0x1A7E);
+        key = md_hash64(&detection_enabled, sizeof(detection_enabled), key);
         key = md_hash64(&statistics_key, sizeof(statistics_key), key);
         key = md_hash64(&statistics_baseline, sizeof(statistics_baseline), key);
         key = md_hash64(&event_parameters, sizeof(event_parameters), key);
@@ -2740,7 +3320,7 @@ struct Lavery : viamd::EventHandler {
         counts_pending = false;
         if (key == counts_key && outlier_counts.size() == frame_count) return;
         // While a slider or field is being edited, keep the previous result and recompute on release.
-        if (ImGui::IsAnyItemActive() && outlier_counts.size() == frame_count) {
+        if (detection_enabled && ImGui::IsAnyItemActive() && outlier_counts.size() == frame_count) {
             counts_pending = true;
             return;
         }
@@ -2753,7 +3333,7 @@ struct Lavery : viamd::EventHandler {
         const double chance = chance_outlier_probability(outlier_sigma, std::max(1, (int)std::bitset<32>(mask).count()));
         outlier_counts.assign(frame_count, {});
         expected_counts.assign(frame_count, 0.0f);
-        std::vector<std::vector<MemberOutlier>> frame_outliers(rebuild_events ? frame_count : 0);
+        std::vector<std::vector<MemberOutlier>> frame_outliers(rebuild_events && detection_enabled ? frame_count : 0);
         float z[MAX_CLASS_PARAMETERS];
         auto record = [&](size_t f, int cls, size_t m, uint32_t member_mask) {
             uint32_t strong = 0;
@@ -2768,7 +3348,7 @@ struct Lavery : viamd::EventHandler {
             std::copy(z, z + class_parameter_count(cls), outlier.z);
             frame_outliers[f].push_back(outlier);
         };
-        for (size_t f = 0; f < frame_count; ++f) {
+        for (size_t f = 0; detection_enabled && f < frame_count; ++f) {
             for (int m = 0; m < count; ++m) {
                 const auto result = assess_member(f, view_cls, (size_t)m, mask);
                 if (result.valid) ++outlier_counts[f].valid;
@@ -2820,10 +3400,10 @@ struct Lavery : viamd::EventHandler {
             options.times.resize(frame_count);
             for (size_t f = 0; f < frame_count; ++f) options.times[f] = times[f] * scale;
             options.min_frames = 1;
-            options.min_duration = event_min_time_ps;
-            options.max_gap_duration = event_gap_time_ps;
-            valid_options = std::isfinite(event_min_time_ps) && event_min_time_ps >= 0 &&
-                std::isfinite(event_gap_time_ps) && event_gap_time_ps >= 0;
+            options.min_duration = detection_enabled ? event_min_time_ps : 0;
+            options.max_gap_duration = detection_enabled ? event_gap_time_ps : 0;
+            valid_options = !detection_enabled || (std::isfinite(event_min_time_ps) && event_min_time_ps >= 0 &&
+                std::isfinite(event_gap_time_ps) && event_gap_time_ps >= 0);
             for (size_t f = 0; f < frame_count; ++f) {
                 valid_options &= std::isfinite(options.times[f]) && (!f || options.times[f] > options.times[f - 1]);
             }
@@ -2846,7 +3426,8 @@ struct Lavery : viamd::EventHandler {
         if (valid_options) {
             detection_first_frame = options.first_frame;
             detection_last_frame = std::min(frame_count - 1, options.last_frame);
-            outlier_events = detect_events(frame_outliers, pairs.size(), steps, options);
+            outlier_events.clear();
+            if (detection_enabled) outlier_events = detect_events(frame_outliers, pairs.size(), steps, options);
             state_switches.clear();
             inspected_switch = SIZE_MAX;
             EventOptions state_options = options;
@@ -3135,14 +3716,14 @@ struct Lavery : viamd::EventHandler {
         ImGui::SetItemTooltip("Both source and destination must remain in one state for this long.\n"
             "Short excursions are ignored; missing samples reset the source.\n"
             "Uses Event parameters and Detection range, not sigma or gap bridging.\n"
-            "Export all detected transitions under Export > Analysis tables.");
+            "Export transitions under Export > Data > Events & state switches.");
         transition_search[0].Draw("Search",ImGui::GetFontSize()*12);
         std::vector<size_t> shown;
         for (size_t i=0; i<state_switches.size(); ++i) {
             const auto& change=state_switches[i];
             if (nucleotide_switch_shown(change)) shown.push_back(i);
         }
-        ImGui::TextDisabled("%zu shown / %zu detected; angular change and residence, not sigma severity",shown.size(),state_switches.size());
+        ImGui::TextDisabled("%zu shown / %zu detected",shown.size(),state_switches.size());
         ImGui::SetItemTooltip("Time and residence use the trajectory's time unit, or frames without physical timestamps.\n"
             "Angular change, clipping and source/destination spans appear below the table on selection.");
         if (transition_family && !(event_parameters & (1u<<families[transition_family])))
@@ -3195,15 +3776,11 @@ struct Lavery : viamd::EventHandler {
                 }
                 if (ImGui::IsItemHovered()) {
                     preview.push_back({Class_Nucleotide, change.member, 1u << (change.metric - Alpha)});
-                    ImGui::BeginTooltip();
-                    draw_switch_context(change, times, frame_count);
-                    ImGui::EndTooltip();
                 }
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(metric_name(change.metric));
                 ImGui::TableNextColumn();
                 ImGui::Text("%s -> %s", metric_state_name(change.metric, change.from), metric_state_name(change.metric, change.to));
-                ImGui::TextDisabled("%s", change.intervening_samples() ? "separated runs" : "adjacent runs");
                 ImGui::TableNextColumn();
                 if (times) ImGui::Text("%.3f", times[change.begin]); else ImGui::Text("%zu", change.begin);
                 ImGui::TableNextColumn();
@@ -3224,7 +3801,7 @@ struct Lavery : viamd::EventHandler {
                     metric_state_name(change.metric,change.to),change.angular_change);
                 draw_transition_navigation(Class_Nucleotide,change.member,change.metric-Alpha,change.source_begin,change.begin);
                 draw_switch_context(change,times,frame_count);
-            } else ImGui::TextDisabled("Select a transition for source/destination context.");
+            } else ImGui::TextDisabled("Click a transition for source/destination details. Hover only highlights its structure.");
         }
         ImGui::EndChild();
     }
@@ -3259,7 +3836,11 @@ struct Lavery : viamd::EventHandler {
     }
 
     void draw_representatives(size_t frame_count) {
-        ImGui::TextWrapped("Closest to reference centre, not necessarily the most populated conformation. Score = RMS reference z over the explicit feature list. All features must be valid with nonzero reference scale.");
+        draw_workflow_reference("Reference",ranking_reference_setup,frame_count,true);
+        ImGui::TextUnformatted("Frames closest to the reference centre");
+        ImGui::SetItemTooltip("Not necessarily the most populated conformation. Score is RMS reference z over available selected features.\n"
+            "Required feature coverage controls eligibility; each usable feature needs a nonzero reference scale.");
+        ImGui::SeparatorText("Features");
         const char* bulk_labels[]={"All intra","All inter","All nucleotide"};
         auto add_class=[&](int cls,uint32_t mask,bool all_members) {
             std::vector<size_t> selected;
@@ -3267,9 +3848,11 @@ struct Lavery : viamd::EventHandler {
                 if (all_members || representative_members[cls][m]) selected.push_back(m);
             add_frame_features(&representative_features,cls,mask,selected);
         };
-        for (int cls=0; cls<Class_Count; ++cls) {
+        for (int cls=0; cls<Class_Count; ++cls)
             if (representative_members[cls].size()!=class_members(cls))
                 representative_members[cls].assign(class_members(cls),1);
+        if (ImGui::TreeNode("Feature shortcuts")) {
+        for (int cls=0; cls<Class_Count; ++cls) {
             if (cls) ImGui::SameLine();
             if (ImGui::Button(bulk_labels[cls])) add_class(cls,class_all_parameters(cls),true);
         }
@@ -3277,8 +3860,19 @@ struct Lavery : viamd::EventHandler {
         if (ImGui::Button("All classes"))
             for (int cls=0; cls<Class_Count; ++cls) add_class(cls,class_all_parameters(cls),true);
         ImGui::SetItemTooltip("Add every parameter for every member across all classes. Existing features are retained without duplicates.");
+        ImGui::Checkbox("Add all members of plotted class",&representative_all_members);
+        if (ImGui::Button("Add plotted parameters")) {
+            const uint32_t mask = outlier_parameter_mask();
+            const int cls = metric_cls();
+            const size_t first = representative_all_members ? 0 : (size_t)member;
+            const size_t end = representative_all_members ? class_members(cls) : first+1;
+            std::vector<size_t> selected;
+            for (size_t m=first; m<end; ++m) selected.push_back(m);
+            add_frame_features(&representative_features,cls,mask,selected);
+        }
+        ImGui::TreePop();
+        }
         if (ImGui::TreeNode("Choose parameter components and members")) {
-            ImGui::TextWrapped("Choose any combination across classes, then Add chosen features. Choices do not replace the existing feature list.");
             if (ImGui::BeginTable("##representative_selection",Class_Count,ImGuiTableFlags_SizingStretchSame)) {
                 for (int cls=0; cls<Class_Count; ++cls) {
                     ImGui::TableNextColumn();
@@ -3331,21 +3925,17 @@ struct Lavery : viamd::EventHandler {
             ImGui::SameLine();
             if (ImGui::Button("Add chosen features"))
                 for (int cls=0; cls<Class_Count; ++cls) add_class(cls,representative_masks[cls],false);
+            ImGui::SetItemTooltip("Add these choices without replacing existing features.");
             ImGui::TreePop();
         }
-        ImGui::Checkbox("Add all members of plotted class",&representative_all_members);
-        if (ImGui::Button("Add plotted parameters")) {
-            const uint32_t mask = outlier_parameter_mask();
-            const int cls = metric_cls();
-            const size_t first = representative_all_members ? 0 : (size_t)member;
-            const size_t end = representative_all_members ? class_members(cls) : first+1;
-            std::vector<size_t> selected;
-            for (size_t m=first; m<end; ++m) selected.push_back(m);
-            add_frame_features(&representative_features,cls,mask,selected);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Clear features")) representative_features.clear();
-        if (ImGui::TreeNode("Selected features")) {
+        if (ImGui::TreeNode("Selected features","Selected features (%zu)",representative_features.size())) {
+            if (ImGui::Button("Clear features")) representative_features.clear();
+            ImGui::TextDisabled("Each feature has equal weight; larger selections carry more total weight.");
+            for (int cls=0; cls<Class_Count; ++cls) {
+                const size_t count=std::count_if(representative_features.begin(),representative_features.end(),
+                    [&](const FrameFeature& f) { return metric_class(f.metric)==cls; });
+                ImGui::TextDisabled("%s: %zu",class_name(cls),count);
+            }
             for (size_t i = 0; i < representative_features.size();) {
                 const auto f = representative_features[i];
                 ImGui::PushID((int)i);
@@ -3358,66 +3948,106 @@ struct Lavery : viamd::EventHandler {
             }
             ImGui::TreePop();
         }
-        ImGui::Text("%zu equally weighted features",representative_features.size());
-        for (int cls=0; cls<Class_Count; ++cls) {
-            const size_t count=std::count_if(representative_features.begin(),representative_features.end(),
-                [&](const FrameFeature& f) { return metric_class(f.metric)==cls; });
-            ImGui::TextDisabled("%s: %zu features",class_name(cls),count);
-        }
-        ImGui::TextWrapped("Classes with more selected features carry more total weight. Every feature is required; broad selections can leave no comparable frames.");
+        ImGui::SeparatorText("Extraction");
         if (ImGui::InputInt("Number of frames",&representative_count)) representative_count=std::clamp(representative_count,1,10000);
+        ImGui::SliderFloat("Required feature coverage",&representative_coverage,1,100,"%.0f %%",ImGuiSliderFlags_AlwaysClamp);
+        if (representative_coverage<100)
+            ImGui::TextWrapped("Relaxed comparison: RMS z uses only available features. Frames may use different feature subsets and are not directly equivalent. Coverage and omitted features are recorded per frame.");
         const float* times = timeline_times(frame_count);
         float sep = representative_separation*(times && event_time_ns ? .001f : 1);
-        if (ImGui::InputFloat(times ? (event_time_ns ? "Minimum separation (ns)" : "Minimum separation (ps)") : "Minimum separation (frames)",&sep)) {
+        if (ImGui::DragFloat(times ? (event_time_ns ? "Minimum separation (ns)" : "Minimum separation (ps)") : "Minimum separation (frames)",&sep,
+            times && event_time_ns ? .001f : 1.0f,0,FLT_MAX,"%.3f",ImGuiSliderFlags_AlwaysClamp)) {
             if (std::isfinite(sep) && sep>=0) representative_separation=sep*(times && event_time_ns ? 1000 : 1);
             else MD_LOG_ERROR("Lavery: frame separation must be finite and nonnegative");
         }
-        ImGui::Checkbox("Search Detection range / timeline period",&representative_detection_range);
-        ImGui::SetItemTooltip("Unchecked searches the whole trajectory. Checked uses the Detection range, including a selected timeline period.");
-        const size_t first = representative_detection_range ? detection_first_frame : 0;
-        const size_t end = representative_detection_range ? detection_last_frame+1 : frame_count;
-        uint64_t key = md_hash64(&representative_count,sizeof(representative_count),statistics_key);
+        draw_workflow_interval("Extraction interval",representative_interval,frame_count);
+        size_t first=0,end=0;
+        std::string scope_error;
+        const bool valid_scope=workflow_range(representative_interval,frame_count,first,end,scope_error);
+        if (!valid_scope) ImGui::TextWrapped("Extraction interval: %s",scope_error.c_str());
+        ImGui::TextWrapped("%s",ranking_reference_setup.source==0 ?
+            "Own history: finds frames typical of each selected position, including persistent local kinks." :
+            ranking_reference_setup.source==1 || ranking_reference_setup.external_pooled ?
+            "Pooled reference: favours similarity to the broader helix population, not each position's usual behaviour." :
+            "External reference: favours similarity to explicitly mapped reference members.");
+        uint64_t key = md_hash64(&representative_count,sizeof(representative_count),workflow_reference_key(ranking_reference_setup,frame_count));
         key = md_hash64(&representative_separation,sizeof(representative_separation),key);
+        key = md_hash64(&representative_coverage,sizeof(representative_coverage),key);
         key = md_hash64(&first,sizeof(first),key);
         key = md_hash64(&end,sizeof(end),key);
+        key = md_hash64(&valid_scope,sizeof(valid_scope),key);
+        key = md_hash64(&representative_interval.period,sizeof(representative_interval.period),key);
+        if (representative_interval.kind==1)
+            if (const auto* period=timeline_periods_find(&app->timeline.periods,representative_interval.period))
+                key=md_hash64(period->name,strlen(period->name),key);
         for (const auto& f : representative_features) {
             key = md_hash64(&f.metric,sizeof(f.metric),key);
             key = md_hash64(&f.member,sizeof(f.member),key);
         }
-        if (ImGui::Button("Rank closest frames")) {
+        ImGui::SeparatorText("Results");
+        if (representative_key!=key) {
             representative_error.clear();
+            representative_diagnostics={};
+            representative_key=key;
             std::vector<double> physical_times;
             if (times) {
                 const double scale = md_unit_scale(app->timeline.time_unit)/md_unit_scale(md_unit_picosecond());
                 physical_times.resize(frame_count);
                 for (size_t f = 0; f < frame_count; ++f) physical_times[f]=times[f]*scale;
             }
-            if (representative_detection_range && !event_detection_error.empty()) {
-                representative_error=event_detection_error;
-                MD_LOG_ERROR("Lavery: cannot rank invalid detection range: %s",representative_error.c_str());
-                representative_candidates.clear();
-            } else if (representative_frames(&representative_candidates,values,statistics,columns,representative_features,
-                first,end,(size_t)representative_count,representative_separation,physical_times,&representative_error)) {
+            representative_candidates.clear();
+            std::array<MetricStatistics,Metric_Count> ranking_statistics;
+            bool reference_ok=valid_scope && !representative_features.empty();
+            if (!valid_scope) representative_error=scope_error;
+            else if (representative_features.empty()) representative_error="Choose at least one ranking feature.";
+            std::array<bool,Metric_Count> needed={};
+            for (const auto& feature : representative_features) needed[feature.metric]=true;
+            for (int id=0;id<(int)Metric_Count && reference_ok;++id) if (needed[id]) {
+                reference_ok=workflow_statistics(ranking_reference_setup,(Metric)id,&ranking_statistics[id],false);
+                if (!reference_ok) representative_error=ranking_reference_setup.error;
+            }
+            if (!reference_ok) {
+                MD_LOG_ERROR("Lavery: cannot rank frames: %s",representative_error.c_str());
+            } else if (representative_frames(&representative_candidates,values,ranking_statistics,columns,representative_features,
+                first,end,(size_t)representative_count,representative_separation,physical_times,&representative_error,
+                representative_coverage/100.0,&representative_diagnostics)) {
                 representative_key=key;
-                representative_provenance = "Reference="+(reference_source ? external_path : std::string("current_trajectory"))+
-                    "; method="+baseline_name((Baseline)statistics_baseline)+"; scope="+reference_scope_name((ReferenceScope)statistics_reference_scope)+
+                representative_provenance = "Reference="+workflow_reference_description(ranking_reference_setup,frame_count)+
+                    "; method="+baseline_name((Baseline)ranking_reference_setup.method)+
                     "; score=RMS(z); separation="+std::to_string(representative_separation)+(times ? " ps" : " frames")+
+                    "; required_feature_coverage="+std::to_string(representative_coverage)+"%; missing_features=omitted_not_zero"+
                     "; search_frames="+std::to_string(first)+".."+std::to_string(end-1);
-                if (reference_source) representative_provenance += "; reference_fingerprint="+external_reference.fingerprint;
-                if (!reference_source) representative_provenance += "; baseline_frames="+std::to_string(statistics_first_frame)+".."+std::to_string(statistics_end_frame ? statistics_end_frame-1 : 0);
+                if (times) {
+                    char unit[32]={}; md_unit_print(unit,sizeof(unit),app->timeline.time_unit);
+                    representative_provenance+="; search_time="+std::to_string(times[first])+".."+std::to_string(times[end-1])+" "+unit;
+                }
+                if (representative_interval.kind==1)
+                    if (const auto* period=timeline_periods_find(&app->timeline.periods,representative_interval.period))
+                        representative_provenance+="; extraction_period="+std::string(period->name);
                 for (const auto& f : representative_features) {
                     const int cls=metric_class(f.metric);
                     representative_provenance += "; "+class_labels(cls)[f.member]+"/"+metric_path(f.metric);
-                    if (reference_source) {
-                        const int r=external_mapping[cls][f.member];
-                        representative_provenance += " <- "+(r<0 ? std::string("unmatched") : external_reference.members[cls][r].label);
-                    }
+                    representative_provenance += " <- "+workflow_member_provenance(ranking_reference_setup,cls,f.member,frame_count);
                 }
             }
         }
+        ImGui::TextWrapped("Interval: %zu frames | Strictly comparable: %zu | At chosen coverage: %zu | Selected after separation: %zu / %d",
+            valid_scope ? end-first : 0,representative_diagnostics.strict,representative_diagnostics.comparable,
+            representative_candidates.size(),representative_count);
+        if (ImGui::TreeNode("Blocking features / reasons")) {
+            for (size_t i=0;i<representative_diagnostics.missing_values.size();++i) {
+                const size_t missing=representative_diagnostics.missing_values[i];
+                const size_t reference=representative_diagnostics.missing_references[i];
+                const size_t scale=representative_diagnostics.invalid_scales[i];
+                if (!missing && !reference && !scale) continue;
+                const auto& feature=representative_features[i];
+                ImGui::TextWrapped("%s / %s: missing values %zu; missing reference/state %zu; invalid or zero scale %zu",
+                    class_labels(metric_class(feature.metric))[feature.member].c_str(),metric_name(feature.metric),missing,reference,scale);
+            }
+            ImGui::TreePop();
+        }
         if (!representative_error.empty()) ImGui::TextWrapped("%s",representative_error.c_str());
         const bool fresh = representative_key==key && !representative_candidates.empty();
-        if (!representative_candidates.empty() && !fresh) ImGui::TextWrapped("Settings changed: rank again before inspecting/exporting.");
         ImGui::BeginDisabled(!fresh);
         if (ImGui::Button("Export XTC + GRO + CSV...")) {
             char path[4096] = {};
@@ -3427,9 +4057,10 @@ struct Lavery : viamd::EventHandler {
             }
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("%zu/%d selected. Export writes all system atoms, chronological order and original times; CSV preserves score rank. Existing outputs are never overwritten.",representative_candidates.size(),representative_count);
-        if (ImGui::BeginTable("##representative_frames",4,ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg)) {
-            for (const char* title : {"Rank","Frame","Time","RMS z"}) ImGui::TableSetupColumn(title);
+        ImGui::SetItemTooltip("All system atoms, chronological order and original times. CSV preserves score rank and feature coverage.\n"
+            "Existing outputs are never overwritten.");
+        if (ImGui::BeginTable("##representative_frames",5,ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg)) {
+            for (const char* title : {"Rank","Frame","Time","RMS z","Coverage"}) ImGui::TableSetupColumn(title);
             ImGui::TableHeadersRow();
             ImGuiListClipper clipper;
             clipper.Begin((int)representative_candidates.size());
@@ -3448,13 +4079,61 @@ struct Lavery : viamd::EventHandler {
                 ImGui::TableNextColumn(); ImGui::Text("%zu",candidate.frame);
                 ImGui::TableNextColumn(); if (times) ImGui::Text("%.6g",times[candidate.frame]); else ImGui::TextUnformatted("-");
                 ImGui::TableNextColumn(); ImGui::Text("%.6g",candidate.score);
+                ImGui::TableNextColumn(); ImGui::Text("%zu / %zu",candidate.used_features,candidate.total_features);
+                if (!candidate.omitted_features.empty()) ImGui::SetItemTooltip("Omitted: %s",candidate.omitted_features.c_str());
                 ImGui::PopID();
             }
             ImGui::EndTable();
         }
     }
 
+    bool heatmap_time_available(const float* times, size_t frames) const {
+        if (md_unit_base_equal(app->timeline.time_unit,md_unit_second())) {
+            bool valid=times!=nullptr;
+            if (times) for (size_t f=0;f<frames;++f)
+                valid&=std::isfinite(times[f]) && (!f || times[f]>times[f-1]);
+            if (!valid) {
+                ImGui::TextWrapped("Heatmap unavailable: physical timestamps must match the trajectory, be finite and increase strictly. They are not replaced with frame indices.");
+                return false;
+            }
+        } else ImGui::TextDisabled("No physical timestamps: using frame indices.");
+        return true;
+    }
+
+    void draw_heatmap_landmarks(int cls) const {
+        std::vector<ImVec4> labels;
+        for (const auto& marker : sequence_landmarks) if (marker.visible) {
+            double row;
+            if (sequence_heatmap_row(marker.position,cls,steps,&row))
+                plot_heatmap_landmark(row,marker.name,marker.color,labels);
+        }
+
+    }
+
+    TimelinePeriodAxis draw_heatmap_period_lane(const float* times, size_t frames, ImPlotRange& view,
+        const char* unit, bool fit=false) {
+        if (fit || view.Size()<=0)
+            view=ImPlotRange(sample_cell_edge(0,times,frames),sample_cell_edge(frames,times,frames));
+        if (ImGui::SmallButton("Periods / markers...")) ImGui::OpenPopup("Heatmap periods");
+        if (ImGui::BeginPopup("Heatmap periods")) {
+            timeline_periods_menu(&app->timeline.periods);
+            ImGui::EndPopup();
+        }
+        TimelinePeriodAxis axis;
+        axis.frame_times=times;
+        axis.num_frames=(int)frames;
+        axis.view_beg=&view.Min;
+        axis.view_end=&view.Max;
+        axis.time_unit=unit;
+        axis.view_id=ImGui::GetID("Heatmap period lane");
+        timeline_periods_lane(&app->timeline.periods,axis,&app->animation.frame);
+        if (timeline_periods_dragging()) app->animation.mode=PlaybackMode::Stopped;
+        return axis;
+    }
+
     void draw_state_history(size_t frame_count, bool fit) {
+        const float* times=timeline_times(frame_count);
+        if (!heatmap_time_available(times,frame_count)) return;
         const bool chemistry = state_history_kind == 5;
         const Metric kinds[] = {EpsilonZeta, Chi, Phase, Alpha, Gamma};
         const Metric id = chemistry ? Buckle : kinds[state_history_kind];
@@ -3495,18 +4174,21 @@ struct Lavery : viamd::EventHandler {
             "Residence filters do not repaint this view.\n"
             "Pairing disruption events are not chemistry Unpaired: disrupted geometry/contacts can be Other / ambiguous or Unavailable.\n"
             "Events may merge members and bridge quiet gaps; this view does neither.\n"
-            "Click: select member and time. Drag: pan. Wheel: zoom. Hover: exact raw sample. Double-click: fit.");
-        const float* times = timeline_times(frame_count);
-        char unit[32] = "Frame";
-        if (times) md_unit_print(unit, sizeof(unit), app->timeline.time_unit);
+            "Click: select member and time. Ctrl-click / Ctrl-drag: jump / scrub.\n"
+            "Drag: pan. Wheel: zoom. Hover: exact raw sample. Double-click: fit.");
+        char unit[64];
+        timeline_label(unit,sizeof(unit),times);
         ImGui::PushID(state_history_kind);
+        char period_unit[32]={};
+        if (times) md_unit_print(period_unit,sizeof(period_unit),app->timeline.time_unit);
+        auto& time_view=state_history_time_views[state_history_kind];
+        const auto period_axis=draw_heatmap_period_lane(times,frame_count,time_view,period_unit,fit);
         if (fit) ImPlot::SetNextAxesToFit();
         if (ImPlot::BeginPlot("##state_history", ImVec2(-1, -1), ImPlotFlags_NoLegend)) {
             ImPlot::SetupAxes(unit, chemistry ? "Pair" : "Nucleotide");
-            const double first = (times ? times[0] : 0) - (times && frame_count > 1 ? (times[1]-times[0])*.5 : .5);
-            const double last = (times ? times[frame_count-1] : (double)frame_count-1) +
-                (times && frame_count > 1 ? (times[frame_count-1]-times[frame_count-2])*.5 : .5);
-            ImPlot::SetupAxesLimits(first, std::max(first+1,last), -.5, members-.5, ImPlotCond_Once);
+            const double first=sample_cell_edge(0,times,frame_count),last=sample_cell_edge(frame_count,times,frame_count);
+            ImPlot::SetupAxesLimits(first,last,-.5,members-.5,ImPlotCond_Once);
+            ImPlot::SetupAxisLinks(ImAxis_X1,&time_view.Min,&time_view.Max);
             ImPlot::SetupAxisLimitsConstraints(ImAxis_Y1, -.5, members-.5);
             ImPlot::SetupAxisFormat(ImAxis_Y1, [](double v, char* buf, int size, void* user) {
                 const auto& self = *(const Lavery*)user;
@@ -3545,21 +4227,28 @@ struct Lavery : viamd::EventHandler {
                 }
             }
             ImPlot::PopPlotClipRect();
+            scrub_timeline("##state_history_scrub",times,frame_count);
+            timeline_periods_plot(&app->timeline.periods,period_axis,app->animation.frame);
             draw_time_cursor(times,frame_count);
+            draw_heatmap_landmarks(cls);
             if (metric_cls() == cls) {
                 const double selected = member;
                 ImPlot::PlotInfLines("Selected member", &selected, 1, ImPlotInfLinesFlags_Horizontal);
             }
-            if (ImPlot::IsPlotHovered()) {
+            if (ImPlot::IsPlotHovered() && !timeline_periods_dragging()) {
                 const auto pos = ImPlot::GetPlotMousePos();
                 const int m = (int)std::floor(pos.y+.5);
                 if (m >= 0 && m < (int)members && pos.x >= first && pos.x <= last) {
                     const size_t f = nearest_frame(pos.x,times,frame_count);
                     const uint8_t s = code(f,m);
-                    ImGui::SetTooltip("%s\nFrame %zu: %s",labels[m].c_str(),f,
-                        chemistry ? pairing_state_name((PairingState)s) : s ? metric_state_name(id,s-1) : "Unavailable");
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(labels[m].c_str());
+                    if (times) ImGui::Text("%s: %.6g",unit,times[f]);
+                    else ImGui::Text("Frame %zu (no timestamps)",f);
+                    ImGui::TextUnformatted(chemistry ? pairing_state_name((PairingState)s) : s ? metric_state_name(id,s-1) : "Unavailable");
+                    ImGui::EndTooltip();
                     preview.push_back({(uint8_t)cls,(uint32_t)m,chemistry ? class_all_parameters(cls) : (1u<<(id-Alpha))});
-                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
                         inspected_event = inspected_switch = SIZE_MAX;
                         select_target(cls,(uint32_t)m,chemistry ? Buckle : id-Alpha,f);
                     }
@@ -3594,27 +4283,16 @@ struct Lavery : viamd::EventHandler {
         else MD_LOG_INFO("Lavery: exported pairing states to '%s'", path);
     }
 
-    enum PairingView { PairingView_Transitions, PairingView_Export };
-
-    void draw_pairing_states(size_t frame_count, PairingView view=PairingView_Transitions) {
-        const bool export_only=view==PairingView_Export;
+    void draw_pairing_states(size_t frame_count) {
         if (pairs.empty() || pairing_states.size() != frame_count*pairs.size()) return;
         size_t p = metric_cls() == Class_Step ? ((size_t)member<steps.size() ? steps[member].a : 0) :
             metric_cls() == Class_Nucleotide ? (size_t)member/2 : (size_t)member;
-        if (export_only && ImGui::BeginCombo("Pair (raw export)", pair_labels[p].c_str())) {
-            for (size_t i = 0; i < pairs.size(); ++i) if (ImGui::Selectable(pair_labels[i].c_str(), i == p)) {
-                p = i;
-                inspected_event = inspected_switch = SIZE_MAX;
-                select_target(Class_Pair, p, Buckle, app->animation.frame);
-            }
-            ImGui::EndCombo();
-        }
         if (p != pairing_cached_member) {
             if (!pairing_runs(&pairing_history, pairing_states, pairs.size(), p)) return;
             pairing_cached_member = p;
         }
         const float* times = timeline_times(frame_count);
-        if (!export_only) {
+        {
             draw_transition_bp_range(pairing_bp_first,pairing_bp_last);
             ImGui::SetNextItemWidth(ImGui::GetFontSize()*12);
             if (ImGui::BeginCombo("State",pairing_to<0 ? "Any" : pairing_state_name((PairingState)pairing_to))) {
@@ -3641,10 +4319,6 @@ struct Lavery : viamd::EventHandler {
         }
         ImGui::SetItemTooltip("Both source and destination must qualify. Short runs are skipped, not relabelled.\n"
             "Unavailable resets the source. Uses the whole run, independent of Event parameters and Detection range.");
-        if (export_only) {
-            if (ImGui::Button("Export pairing CSV")) export_pairing_csv(p,times);
-            return;
-        }
         {
             uint64_t key = md_hash64(&pairing_min_time_ps, sizeof(pairing_min_time_ps), 0xC4E1);
             key = md_hash64(&pairing_min_frames, sizeof(pairing_min_frames), key);
@@ -3691,7 +4365,7 @@ struct Lavery : viamd::EventHandler {
         ImGui::SetItemTooltip("Whole-run explicit-H chemistry; independent of Event parameters and Detection range.\n"
             "WC: A-T/U or G-C. Hoogsteen: A-T/U only. Unavailable resets the source.\n"
             "Time and residence use the trajectory's time unit, or frames without physical timestamps.\n"
-            "Export selected-pair raw runs under Export > Analysis tables.");
+            "Export raw runs under Export > Data > Events & state switches.");
         if (ImGui::BeginTable("##pairing_changes", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
             ImGuiTableFlags_Sortable | ImGuiTableFlags_SortMulti,
             ImVec2(0,transition_table_height()))) {
@@ -3740,10 +4414,6 @@ struct Lavery : viamd::EventHandler {
                 }
                 if (ImGui::IsItemHovered()) {
                     preview.push_back({Class_Pair, (uint32_t)row.pair, class_all_parameters(Class_Pair)});
-                    ImGui::BeginTooltip();
-                    draw_run_span("Source",change.source.begin,change.source.end,times,true);
-                    draw_run_span("Destination",dest.begin,dest.end,times,true);
-                    ImGui::EndTooltip();
                 }
                 ImGui::TableNextColumn();
                 if (times) ImGui::Text("%.3f", times[dest.begin]); else ImGui::Text("%zu", dest.begin);
@@ -3767,7 +4437,7 @@ struct Lavery : viamd::EventHandler {
                     change.destination.begin-change.source.end-1);
                 if (!change.source.begin) ImGui::TextDisabled("Source already present at trajectory start; onset unknown.");
                 if (change.destination.end==frame_count-1) ImGui::TextDisabled("Ongoing at trajectory end; residence is a lower bound.");
-            } else ImGui::TextDisabled("Select a transition for source/destination context.");
+            } else ImGui::TextDisabled("Click a transition for source/destination details. Hover only highlights its structure.");
         }
         ImGui::EndChild();
     }
@@ -3866,9 +4536,63 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
+    bool draw_series_filters(ComparisonOverlay& overlay, int* partner, int cls) {
+        bool edited=false;
+        if (ImGui::InputInt("BP from",&overlay.bp_first)) {
+            overlay.bp_first=std::max(1,overlay.bp_first);
+            overlay.bp_last=std::max(overlay.bp_first,overlay.bp_last); edited=true;
+        }
+        bool all=overlay.bp_last==INT_MAX;
+        if (ImGui::Checkbox("Through last BP",&all)) { overlay.bp_last=all ? INT_MAX : overlay.bp_first; edited=true; }
+        if (!all && ImGui::InputInt("BP to",&overlay.bp_last)) {
+            overlay.bp_last=std::max(overlay.bp_first,overlay.bp_last); edited=true;
+        }
+        edited|=ImGui::Combo("Pair type",&overlay.pair_type,"All\0AT / AU\0GC\0Other canonical-base combination\0");
+        if (cls==Class_Step) ImGui::SetItemTooltip("Both step endpoints must match.");
+        if (cls==Class_Nucleotide || cls<0)
+            edited|=ImGui::Combo("Nucleotide",&overlay.nucleotide,"All\0A\0T\0G\0C\0U\0");
+        if (partner) edited|=ImGui::Combo("Nucleotide partners",partner,"Both\0Partner 1\0Partner 2\0");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        ImGui::SetItemTooltip("Filters apply only to this series and leave sequence positions unchanged.\n"
+            "Both step endpoints must match. Nucleotide and partner filters apply only to nucleotide measurements.");
+        return edited;
+    }
+
+    bool draw_distribution_recipe(ComparisonOverlay& overlay, bool allow_live, int cls) {
+        bool edited=ImGui::InputText("Name",overlay.name,sizeof(overlay.name));
+        edited|=ImGui::ColorEdit4("Colour",&overlay.color.x,ImGuiColorEditFlags_NoInputs);
+        const char* sources[]={"Whole trajectory","Current frame (live)","Named period","Imported CSV"};
+        if (ImGui::BeginCombo("Source",sources[overlay.source])) {
+            for (int s=0;s<4;++s) if (s!=1 || allow_live)
+                if (ImGui::Selectable(sources[s],overlay.source==s)) { overlay.source=s; edited=true; }
+            ImGui::EndCombo();
+        }
+        if (overlay.source==2) {
+            const auto* period=timeline_periods_find(&app->timeline.periods,overlay.period);
+            if (ImGui::BeginCombo("Period",period ? period->name : "Choose period")) {
+                for (int p=0;p<app->timeline.periods.count;++p) {
+                    const auto& candidate=app->timeline.periods.items[p];
+                    if (ImGui::Selectable(candidate.name,overlay.period==candidate.id)) { overlay.period=candidate.id; edited=true; }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        if (overlay.source==3 && ImGui::BeginCombo("CSV",overlay.csv<comparison_csvs.size() ?
+            comparison_csvs[overlay.csv].data.path.c_str() : "Import a CSV first")) {
+            for (size_t c=0;c<comparison_csvs.size();++c) if (ImGui::Selectable(comparison_csvs[c].data.path.c_str(),overlay.csv==c)) {
+                overlay.csv=c; edited=true;
+            }
+            ImGui::EndCombo();
+        }
+        edited|=draw_series_filters(overlay,nullptr,cls);
+        return edited;
+    }
+
     void draw_comparison(size_t frame_count) {
         ImGui::SetNextItemWidth(ImGui::GetFontSize()*16);
         ImGui::Combo("Class",&comparison_class,"Intra-base pair\0Inter-base pair\0Nucleotide\0");
+        if (ImGui::TreeNode("Appearance")) {
         ImGui::SetNextItemWidth(ImGui::GetFontSize()*9);
         ImGui::Combo("Style",&comparison_style,"Bars\0Lines\0Filled area\0");
         ImGui::SameLine();
@@ -3879,11 +4603,13 @@ struct Lavery : viamd::EventHandler {
             ImGui::SetNextItemWidth(ImGui::GetFontSize()*7);
             ImGui::SliderFloat("Opacity",&comparison_opacity,0,1,"%.2f",ImGuiSliderFlags_AlwaysClamp);
         }
+        ImGui::TreePop();
+        }
         const int cls=comparison_class;
         const int first_metric=class_first_metric(cls);
         const int parameters=class_parameter_count(cls);
         const size_t count=class_members(cls);
-        if (ImGui::Button("Add distribution")) {
+        if (ImGui::Button("Add filtered series")) {
             ComparisonOverlay overlay;
             snprintf(overlay.name,sizeof(overlay.name),"Distribution %zu",comparison_overlays.size()+1);
             overlay.color=ImPlot::GetColormapColor((int)comparison_overlays.size());
@@ -3911,47 +4637,28 @@ struct Lavery : viamd::EventHandler {
         }
         ImGui::SetItemTooltip("Add an independent comparison dataset. Does not change the detection reference.\n"
             "All imported members are pooled; residue mapping and matching frame times are not required.");
-        if (ImGui::BeginPopup("Distribution settings")) {
+        bool edit_series=false;
+        if (ImGui::TreeNodeEx("Series",ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (size_t s=0;s<comparison_overlays.size();++s) {
+                auto& series=comparison_overlays[s];
+                ImGui::PushID((int)s);
+                bool edit=false;
+                if (draw_series_row(series.name,&series.visible,series.color,&edit)) ++comparison_csv_revision;
+                if (edit) { comparison_edit=(int)s; edit_series=true; }
+                ImGui::SetItemTooltip("%s | BP %d-%s | %s%s",
+                    series.source==0 ? "Whole trajectory" : series.source==1 ? "Live frame" : series.source==2 ? "Period" : "CSV",
+                    series.bp_first,series.bp_last==INT_MAX ? "last" : std::to_string(series.bp_last).c_str(),
+                    series.pair_type==0 ? "All pair types" : series.pair_type==1 ? "AT / AU" : series.pair_type==2 ? "GC" : "Other pairs",
+                    series.nucleotide && cls==Class_Nucleotide ? (std::string(" | Base ")+" ATGCU"[series.nucleotide]).c_str() : "");
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        if (edit_series) ImGui::OpenPopup("Distribution settings");
+        if (begin_series_popup("Distribution settings")) {
             if (comparison_edit>=0 && (size_t)comparison_edit<comparison_overlays.size()) {
                 auto& overlay=comparison_overlays[comparison_edit];
-                bool edited=ImGui::InputText("Name",overlay.name,sizeof(overlay.name));
-                edited|=ImGui::ColorEdit4("Colour",&overlay.color.x,ImGuiColorEditFlags_NoInputs);
-                edited|=ImGui::Combo("Source",&overlay.source,"Whole trajectory\0Current frame (live)\0Named period\0Imported CSV\0Detection reference CSV\0");
-                if (overlay.source==2) {
-                    const auto* period=timeline_periods_find(&app->timeline.periods,overlay.period);
-                    if (ImGui::BeginCombo("Period",period ? period->name : "Choose period")) {
-                        for (int p=0;p<app->timeline.periods.count;++p) {
-                            const auto& candidate=app->timeline.periods.items[p];
-                            if (ImGui::Selectable(candidate.name,overlay.period==candidate.id)) {
-                                overlay.period=candidate.id; edited=true;
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                }
-                if (overlay.source==3 && ImGui::BeginCombo("CSV",overlay.csv<comparison_csvs.size() ?
-                    comparison_csvs[overlay.csv].data.path.c_str() : "Import a CSV first")) {
-                    for (size_t c=0;c<comparison_csvs.size();++c) if (ImGui::Selectable(comparison_csvs[c].data.path.c_str(),overlay.csv==c)) {
-                        overlay.csv=c; edited=true;
-                    }
-                    ImGui::EndCombo();
-                }
-                if (ImGui::InputInt("BP from",&overlay.bp_first)) {
-                    overlay.bp_first=std::max(1,overlay.bp_first);
-                    overlay.bp_last=std::max(overlay.bp_first,overlay.bp_last); edited=true;
-                }
-                bool all=overlay.bp_last==INT_MAX;
-                if (ImGui::Checkbox("Through last BP",&all)) {
-                    overlay.bp_last=all ? INT_MAX : overlay.bp_first; edited=true;
-                }
-                if (!all && ImGui::InputInt("BP to",&overlay.bp_last)) {
-                    overlay.bp_last=std::max(overlay.bp_first,overlay.bp_last); edited=true;
-                }
-                edited|=ImGui::Combo("Pair type",&overlay.pair_type,"All\0AT / AU\0GC\0Other canonical-base combination\0");
-                if (cls==Class_Step) ImGui::TextDisabled("Both step endpoints must match BP range and pair type.");
-                if (cls==Class_Nucleotide)
-                    edited|=ImGui::Combo("Nucleotide",&overlay.nucleotide,"All\0A\0T\0G\0C\0U\0");
-                ImGui::TextDisabled("Filters apply only to this distribution.");
+                bool edited=draw_distribution_recipe(overlay,true,cls);
                 if (edited) ++comparison_csv_revision;
                 if (ImGui::Button("Done")) ImGui::CloseCurrentPopup();
                 ImGui::SameLine();
@@ -3974,7 +4681,7 @@ struct Lavery : viamd::EventHandler {
             ImGui::EndPopup();
         }
         if (!comparison_error.empty()) ImGui::TextWrapped("CSV error: %s",comparison_error.c_str());
-        uint64_t key=md_hash64(&cls,sizeof(cls),external_revision);
+        uint64_t key=md_hash64(&cls,sizeof(cls),0xD157);
         key=md_hash64(&comparison_csv_revision,sizeof(comparison_csv_revision),key);
         key=md_hash64(&frame_count,sizeof(frame_count),key);
         key=md_hash64(&count,sizeof(count),key);
@@ -3989,31 +4696,22 @@ struct Lavery : viamd::EventHandler {
         }
         const bool changed=key!=comparison_key;
         if (changed) {
-            comparison_labels.clear(); comparison_notes.clear();
+            comparison_labels.clear(); comparison_warnings.clear();
             std::vector<std::pair<int,int>> ranges;
             std::vector<const ExternalReference*> sources;
             for (const auto& overlay : comparison_overlays) {
                 comparison_labels.push_back(overlay.name);
                 const ExternalReference* source=nullptr;
                 std::pair<int,int> range={0,(int)frame_count-1};
-                std::string note="Whole trajectory";
-                if (overlay.source==1) { range={(int)current,(int)current}; note="Current frame "+std::to_string(current); }
+                if (overlay.source==1) range={(int)current,(int)current};
                 if (overlay.source==2) {
                     range=period_frames(overlay.period,frame_count);
-                    const auto* p=timeline_periods_find(&app->timeline.periods,overlay.period);
-                    note=p ? p->name : "Missing period";
                 }
                 if (overlay.source>=3) {
                     range={-1,-1};
-                    source=overlay.source==4 ? &external_reference :
-                        overlay.csv<comparison_csvs.size() ? &comparison_csvs[overlay.csv].data : nullptr;
-                    note=source && source->records ? source->path : "No CSV loaded";
+                    source=overlay.csv<comparison_csvs.size() ? &comparison_csvs[overlay.csv].data : nullptr;
                 }
-                note+=" | BP "+std::to_string(overlay.bp_first)+"-"+(overlay.bp_last==INT_MAX ? "last" : std::to_string(overlay.bp_last));
-                const char* types[]={"all pairs","AT/AU","GC","other canonical-base pairs"};
-                note+=" | "; note+=types[overlay.pair_type];
-                if (cls==Class_Nucleotide && overlay.nucleotide) { note+=" | nucleotide "; note+=" ATGCU"[overlay.nucleotide]; }
-                ranges.push_back(range); sources.push_back(source); comparison_notes.push_back(note);
+                ranges.push_back(range); sources.push_back(source);
             }
             for (int k=0;k<parameters;++k) {
                 const Metric id=(Metric)(first_metric+k);
@@ -4028,35 +4726,15 @@ struct Lavery : viamd::EventHandler {
                     filter.nucleotide=cls==Class_Nucleotide ? " ATGCU"[overlay.nucleotide] : 0;
                     if (!overlay.nucleotide) filter.nucleotide=0;
                     size_t unknown=0;
-                    if (sources[g]) {
-                        for (const auto& source : sources[g]->members[cls]) {
-                            bool missing=false;
-                            if (comparison_member_matches(filter,cls,source.label,source.pair_a,source.pair_b,&missing)) {
-                                const auto& v=source.values[id];
-                                samples[g].insert(samples[g].end(),v.begin(),v.end());
-                            } else if (missing) ++unknown;
-                        }
-                    } else {
-                        const auto [first,last]=ranges[g];
-                        if (first>=0 && last>=first && count) {
-                            const auto& v=values[id];
-                            const size_t end=((size_t)last+1)*count;
-                            if (end>v.size()) {
-                                MD_LOG_ERROR("Lavery: incomplete comparison parameter data");
-                                ImGui::TextUnformatted("Incomplete parameter data. Recompute analysis.");
-                                return;
-                            }
-                            for (size_t m=0;m<count;++m) {
-                                const size_t a=cls==Class_Step ? steps[m].a : cls==Class_Nucleotide ? m/2 : m;
-                                const std::string b=cls==Class_Step ? pair_labels[steps[m].b] : "";
-                                bool missing=false;
-                                if (comparison_member_matches(filter,cls,class_labels(cls)[m],pair_labels[a],b,&missing)) {
-                                    for (int f=first;f<=last;++f) samples[g].push_back(v[(size_t)f*count+m]);
-                                } else if (missing) ++unknown;
-                            }
-                        }
+                    const auto [first,last]=ranges[g];
+                    if ((sources[g] || (first>=0 && last>=first)) &&
+                        !comparison_samples(samples[g],id,filter,first<0 ? 0 : (size_t)first,
+                            last<0 ? 0 : (size_t)last+1,sources[g],&unknown)) {
+                        ImGui::TextUnformatted("Incomplete parameter data. Recompute analysis.");
+                        return;
                     }
-                    if (k==0 && unknown) comparison_notes[g]+=" | "+std::to_string(unknown)+" members excluded: missing filter metadata";
+                    if (k==0 && unknown) comparison_warnings.push_back(std::string(overlay.name)+": "+
+                        std::to_string(unknown)+" members excluded: missing filter metadata.");
                 }
                 if (!samples.empty() && !compare_samples(&dashboard_comparisons[id],samples,metric_is_angular(id),32)) {
                     ImGui::TextUnformatted("Could not calculate comparison. See the application log.");
@@ -4066,32 +4744,18 @@ struct Lavery : viamd::EventHandler {
             comparison_key=key;
         }
         if (comparison_labels.empty()) {
-            comparison_export_requested=false;
             ImGui::TextDisabled("Add a distribution or import a CSV dataset before plotting or exporting.");
             return;
         }
-        if (comparison_export_requested) {
-            comparison_export_requested=false;
-            char path[4096]={};
-            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,STR_LIT("csv"))) {
-                md_file_t file={};
-                if (!md_file_open(&file,str_from_cstr(path),MD_FILE_WRITE|MD_FILE_CREATE|MD_FILE_TRUNCATE)) {
-                    MD_LOG_ERROR("Lavery: could not open comparison CSV '%s'",path);
-                } else {
-                    std::string output=csv_comparison_header();
-                    for (int k=0;k<parameters;++k) for (size_t g=0;g<comparison_overlays.size();++g)
-                        if (comparison_overlays[g].visible)
-                            output+=csv_comparison_group(run,(Metric)(first_metric+k),comparison_labels[g],comparison_notes[g],
-                                dashboard_comparisons[first_metric+k],g,comparison_overlays[g].source<3);
-                    bool ok=md_file_write(file,output.data(),output.size())==output.size();
-                    if (!md_file_close(&file)) ok=false;
-                    if (!ok) MD_LOG_ERROR("Lavery: comparison CSV write failed; '%s' may be incomplete",path);
-                    else MD_LOG_INFO("Lavery: exported Compare distributions to '%s'",path);
-                }
-            }
+        for (size_t g=0;g<comparison_overlays.size();++g) if (comparison_overlays[g].visible) {
+            bool any=false;
+            for (int k=0;k<parameters;++k) any|=dashboard_comparisons[first_metric+k].histogram.valid[g]>0;
+            if (!any) ImGui::TextWrapped("%s: no matching samples.",comparison_overlays[g].name);
         }
-        ImGui::TextDisabled("Independent distributions | 32 shared bins | independently normalized");
-        ImGui::SetItemTooltip("Each finite member-frame sample has equal weight; this is not a distribution of member averages.\n"
+        for (const auto& warning : comparison_warnings) ImGui::TextWrapped("%s",warning.c_str());
+        ImGui::TextDisabled("Distribution method (?)");
+        ImGui::SetItemTooltip("32 shared bins, independently normalized. Each series owns its source and filters.\n"
+            "Each finite member-frame sample has equal weight; this is not a distribution of member averages.\n"
             "Overlapping periods share samples; samples are correlated, not independent observations.\n"
             "CSV datasets pool their own members without mapping; ensure compatible parameter conventions.\n"
             "Angular distributions share a circular origin per parameter; equivalent angles may differ by 360 degrees.");
@@ -4100,9 +4764,7 @@ struct Lavery : viamd::EventHandler {
         const int grid_columns=width>ImGui::GetFontSize()*65 ? 3 : width>ImGui::GetFontSize()*38 ? 2 : 1;
         const int rows=(parameters+grid_columns-1)/grid_columns;
         const float available=ImGui::GetContentRegionAvail().y;
-        const float legend_height=std::min(available*.3f,
-            ImGui::GetFrameHeightWithSpacing()*(comparison_overlays.size()+1));
-        const float grid_height=std::max(1.0f,available-legend_height-ImGui::GetStyle().ItemSpacing.y);
+        const float grid_height=std::max(1.0f,available);
         const float height=std::max(180.0f,grid_height/rows-ImGui::GetStyle().CellPadding.y*2);
         if (ImGui::BeginChild("Distribution dashboard",ImVec2(0,grid_height))) {
             if (ImGui::BeginTable("Parameter grid",grid_columns,ImGuiTableFlags_SizingStretchSame)) {
@@ -4141,7 +4803,6 @@ struct Lavery : viamd::EventHandler {
                             for (size_t g=0;g<comparison_labels.size();++g) {
                                 if (!comparison_overlays[g].visible) continue;
                                 ImGui::TextColored(comparison_overlays[g].color,"%s",comparison_labels[g].c_str());
-                                ImGui::TextUnformatted(comparison_notes[g].c_str());
                                 ImGui::Text("Valid: %zu",h.valid[g]);
                                 if (h.valid[g]) ImGui::Text("Mean: %.3f | SD: %.3f",result.summaries[g].mean,result.summaries[g].sd);
                                 else ImGui::TextUnformatted("No finite samples / parameter absent.");
@@ -4158,36 +4819,1153 @@ struct Lavery : viamd::EventHandler {
             }
         }
         ImGui::EndChild();
-        bool edit_requested=false;
-        if (ImGui::BeginChild("Shared distribution legend",ImVec2(0,0))) {
-            ImGui::TextDisabled("Distributions  |  tick to show/hide; Edit changes only that overlay");
-            for (size_t g=0;g<comparison_overlays.size();++g) {
-                auto& overlay=comparison_overlays[g];
-                ImGui::PushID((int)g);
-                if (ImGui::Checkbox("##visible",&overlay.visible)) ++comparison_csv_revision;
+    }
+
+    double profile_position(int cls, size_t index) const {
+        return cls==Class_Step ? ((double)steps[index].a+steps[index].b)*.5+1 :
+            cls==Class_Nucleotide ? (double)(index/2)+1 : (double)index+1;
+    }
+
+    void add_sequence_landmark(int cls, size_t index, const std::string& source) {
+        const double position=profile_position(cls,index);
+        for (auto& marker : sequence_landmarks) if (marker.position==position) {
+            marker.visible=true;
+            return;
+        }
+        SequenceLandmark marker;
+        marker.cls=cls; marker.member=index; marker.position=position;
+        marker.identity=class_labels(cls)[index]; marker.source=source;
+        if (cls==Class_Step) snprintf(marker.name,sizeof(marker.name),"Step %u-%u",steps[index].a+1,steps[index].b+1);
+        else snprintf(marker.name,sizeof(marker.name),"BP %.0f",position);
+        marker.color=ImPlot::GetColormapColor((int)sequence_landmarks.size()+2);
+        sequence_landmarks.push_back(std::move(marker));
+    }
+
+    void draw_sequence_landmark_controls(bool candidates=false, const std::string& source={}) {
+        if (!ImGui::TreeNode("Sequence landmarks","Landmarks (%zu)",sequence_landmarks.size())) return;
+        const int cls=metric_cls();
+        ImGui::BeginDisabled(member<0 || (size_t)member>=class_members(cls));
+        if (ImGui::Button("Mark selected position")) add_sequence_landmark(cls,(size_t)member,"Manual selection");
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Sequence landmarks keep their exact BP/step position across views and periods.\n"
+            "Shift-click a profile to mark. Step markers remain between their endpoint BPs.\nSession-only; cleared when analysis is reset.");
+        if (candidates) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize()*6);
+            ImGui::SliderFloat("Minimum occupancy",&landmark_min_occupancy,0,100,"%.1f %%",ImGuiSliderFlags_AlwaysClamp);
+            ImGui::SameLine();
+            if (ImGui::Button("Mark candidates (snapshot)")) {
+                const auto& occupancy=structural_panels.back().summary;
+                const std::string note=source+"; bend >= "+std::to_string(profile_bend_threshold)+
+                    " deg; occupancy >= "+std::to_string(landmark_min_occupancy)+"%; snapshot";
+                for (size_t m=0;m<occupancy.size();++m)
+                    if (occupancy[m].count && occupancy[m].mean>0 && occupancy[m].mean>=landmark_min_occupancy)
+                        add_sequence_landmark(Class_Step,m,note);
+            }
+            ImGui::SetItemTooltip("Add positions meeting this occupancy cutoff with at least one qualifying frame.\n"
+                "Existing marks are kept. Changing threshold, period or view never moves/removes this snapshot.");
+        }
+        {
+            ImGui::BeginChild("Landmark list",ImVec2(0,std::min(180.0f,ImGui::GetFrameHeightWithSpacing()*
+                (float)std::max((size_t)1,sequence_landmarks.size()))));
+            for (size_t i=0;i<sequence_landmarks.size();) {
+                ImGui::PushID((int)i);
+                auto& marker=sequence_landmarks[i];
+                ImGui::Checkbox("##visible",&marker.visible); ImGui::SameLine();
+                ImGui::ColorEdit4("##colour",&marker.color.x,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel);
+                ImGui::SameLine(); ImGui::SetNextItemWidth(ImGui::GetFontSize()*10);
+                ImGui::InputText("##name",marker.name,sizeof(marker.name));
+                ImGui::SetItemTooltip("%s\n%s",marker.identity.c_str(),marker.source.c_str());
                 ImGui::SameLine();
-                ImGui::ColorButton("##colour",overlay.color,ImGuiColorEditFlags_NoTooltip,ImVec2(ImGui::GetFrameHeight(),ImGui::GetFrameHeight()));
+                if (ImGui::SmallButton("Select")) {
+                    inspected_event=inspected_switch=inspected_pairing_change=SIZE_MAX;
+                    select_target(marker.cls,(uint32_t)marker.member,-1,current_frame());
+                }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Edit")) { comparison_edit=(int)g; edit_requested=true; }
-                ImGui::SameLine();
-                ImGui::TextUnformatted(overlay.name);
-                ImGui::SetItemTooltip("%s",comparison_notes[g].c_str());
-                if (overlay.visible) {
-                    bool any=false;
-                    for (int k=0;k<parameters;++k) any|=dashboard_comparisons[first_metric+k].histogram.valid[g]>0;
-                    if (!any) { ImGui::SameLine(); ImGui::TextDisabled("(no matching samples)"); }
+                const bool remove=ImGui::SmallButton("Remove");
+                ImGui::PopID();
+                if (remove) sequence_landmarks.erase(sequence_landmarks.begin()+i);
+                else ++i;
+            }
+            ImGui::EndChild();
+            ImGui::TreePop();
+        }
+    }
+
+    bool draw_sequence_landmarks(int cls, const std::vector<MemberStatistics>& summary,
+        const std::vector<float>& samples, const char* quantity, const char* unit, bool angular, bool labels=true) {
+        const SequenceLandmark* hovered=nullptr;
+        double distance=INFINITY;
+        std::vector<ImVec4> label_rects;
+        for (const auto& marker : sequence_landmarks) if (marker.visible &&
+            plot_sequence_landmark(marker.position,marker.name,marker.color,labels ? &label_rects : nullptr)) {
+            const double d=std::fabs(ImPlot::PlotToPixels(marker.position,0).x-ImGui::GetMousePos().x);
+            if (d<distance) { hovered=&marker; distance=d; }
+        }
+        if (!hovered) return false;
+        ImGui::BeginTooltip();
+        ImGui::Text("%s: %s",hovered->name,hovered->identity.c_str());
+        ImGui::TextWrapped("%s",hovered->source.c_str());
+        ImGui::TextUnformatted(quantity);
+        // A step landmark remains a boundary: show adjacent real samples, never interpolate a value.
+        double nearest=INFINITY;
+        for (size_t m=0;m<summary.size();++m)
+            nearest=std::min(nearest,std::fabs(profile_position(cls,m)-hovered->position));
+        for (size_t m=0;m<summary.size();++m) {
+            if (std::fabs(std::fabs(profile_position(cls,m)-hovered->position)-nearest)>1e-6) continue;
+            const auto& s=summary[m];
+            ImGui::Separator();
+            ImGui::TextUnformatted(class_labels(cls)[m].c_str());
+            if (s.count) ImGui::Text("Mean %.3f; SD %.3f %s; n %zu",angular ? wrap_degrees(s.mean) : s.mean,s.sd,unit,s.count);
+            else ImGui::TextUnformatted("No available samples.");
+            ImGui::Text("Current: %.3f %s",samples[current_frame()*summary.size()+m],unit);
+        }
+        if (nearest>1e-6) ImGui::TextUnformatted("Neighbouring sampled positions shown; no interpolation.");
+        ImGui::EndTooltip();
+        preview.push_back({(uint8_t)hovered->cls,(uint32_t)hovered->member,
+            class_all_parameters(hovered->cls)});
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)) {
+            inspected_event=inspected_switch=inspected_pairing_change=SIZE_MAX;
+            select_target(hovered->cls,(uint32_t)hovered->member,-1,current_frame());
+        }
+        return true;
+    }
+
+    bool workflow_range(const WorkflowInterval& interval, size_t frames, size_t& first, size_t& end,
+        std::string& error) const {
+        first=0; end=frames;
+        if (!frames) { error="No trajectory samples."; return false; }
+        if (interval.kind==1) {
+            const auto range=period_frames(interval.period,frames);
+            if (range.first<0 || range.second<range.first) {
+                error="Choose an existing period containing trajectory samples."; return false;
+            }
+            first=(size_t)range.first; end=(size_t)range.second+1;
+        } else if (interval.kind==2) {
+            if (const float* times=timeline_times(frames)) {
+                EventOptions range;
+                const double scale=md_unit_scale(app->timeline.time_unit)/md_unit_scale(md_unit_picosecond());
+                for (size_t f=0;f<frames;++f) range.times.push_back(times[f]*scale);
+                if (!event_time_range(&range,interval.begin_ps,interval.end_ps)) {
+                    error="Custom time interval must be finite, ordered and contain trajectory samples."; return false;
+                }
+                first=range.first_frame; end=range.last_frame+1;
+            } else {
+                if (interval.first<0 || interval.last<interval.first || (size_t)interval.last>=frames) {
+                    error="Custom frame interval must be ordered and inside the trajectory."; return false;
+                }
+                first=(size_t)interval.first; end=(size_t)interval.last+1;
+            }
+        }
+        return true;
+    }
+
+    bool draw_workflow_interval(const char* label, WorkflowInterval& interval, size_t frames) {
+        ImGui::PushID(label);
+        bool changed=ImGui::Combo(label,&interval.kind,"Whole trajectory\0Named period\0Custom interval\0");
+        if (interval.kind==1) {
+            const auto* period=timeline_periods_find(&app->timeline.periods,interval.period);
+            if (ImGui::BeginCombo("Period",period ? period->name : "Choose period")) {
+                for (int p=0;p<app->timeline.periods.count;++p) {
+                    const auto& candidate=app->timeline.periods.items[p];
+                    if (ImGui::Selectable(candidate.name,interval.period==candidate.id)) {
+                        interval.period=candidate.id; changed=true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        } else if (interval.kind==2) {
+            if (timeline_times(frames)) {
+                changed|=ImGui::InputDouble("From (ps)",&interval.begin_ps,0,0,"%.6g");
+                changed|=ImGui::InputDouble("To (ps), inclusive",&interval.end_ps,0,0,"%.6g");
+            } else {
+                changed|=ImGui::InputInt("First frame",&interval.first);
+                changed|=ImGui::InputInt("Last frame, inclusive",&interval.last);
+            }
+        }
+        ImGui::PopID();
+        return changed;
+    }
+
+    void match_workflow_reference(WorkflowReference& setup) {
+        for (int cls=0;cls<Class_Count;++cls) {
+            std::vector<std::string> identities;
+            for (size_t m=0;m<class_members(cls);++m) {
+                const auto& a=pair_labels[cls==Class_Step ? steps[m].a : cls==Class_Nucleotide ? m/2 : m];
+                const std::string b=cls==Class_Step ? pair_labels[steps[m].b] : "";
+                identities.push_back(reference_identity(cls,class_labels(cls)[m],a,b));
+            }
+            setup.mapping[cls]=match_reference_members(setup.external.members[cls],identities);
+        }
+        ++setup.revision;
+    }
+
+    bool workflow_reference_range(const WorkflowReference& setup, size_t frames, size_t& first, size_t& end,
+        std::string& error) const {
+        if (setup.source==2) {
+            first=0; end=frames;
+            if (!setup.external.records) { error="Import an external reference CSV for this workflow."; return false; }
+            return true;
+        }
+        return workflow_range(setup.interval,frames,first,end,error);
+    }
+
+    uint64_t workflow_reference_key(const WorkflowReference& setup, size_t frames) const {
+        uint64_t key=md_hash64(&setup.revision,sizeof(setup.revision),0x10CA1);
+        size_t first=0,end=0;
+        std::string error;
+        const bool valid=workflow_reference_range(setup,frames,first,end,error);
+        key=md_hash64(&valid,sizeof(valid),key);
+        key=md_hash64(&first,sizeof(first),key);
+        key=md_hash64(&end,sizeof(end),key);
+        if (setup.source!=2 && setup.interval.kind==1)
+            if (const auto* period=timeline_periods_find(&app->timeline.periods,setup.interval.period))
+                key=md_hash64(period->name,strlen(period->name),key);
+        return key;
+    }
+
+    std::string workflow_reference_description(const WorkflowReference& setup, size_t frames) const {
+        std::string text=setup.source==0 ? "Own history" : setup.source==1 ? "Pooled helix" :
+            "External reference: "+setup.external.path+(setup.external_pooled ? " (pooled helix)" : " (mapped own history)");
+        if (setup.source==2) text+="; fingerprint="+setup.external.fingerprint;
+        else {
+            size_t first=0,end=0;
+            std::string error;
+            if (!workflow_reference_range(setup,frames,first,end,error)) return text+"; "+error;
+            text+=setup.interval.kind==0 ? "; Whole trajectory" : setup.interval.kind==1 ? "; Named period" : "; Custom interval";
+            text+="; baseline_frames="+std::to_string(first)+".."+std::to_string(end-1);
+            if (const float* times=timeline_times(frames)) {
+                char unit[32]={}; md_unit_print(unit,sizeof(unit),app->timeline.time_unit);
+                text+="; baseline_time="+std::to_string(times[first])+".."+std::to_string(times[end-1])+" "+unit;
+            }
+            if (setup.interval.kind==1) {
+                if (const auto* period=timeline_periods_find(&app->timeline.periods,setup.interval.period))
+                    text+="; period="+std::string(period->name);
+            }
+        }
+        return text;
+    }
+
+    std::string workflow_member_provenance(const WorkflowReference& setup, int cls, size_t member, size_t frames) const {
+        std::string text=workflow_reference_description(setup,frames);
+        if (setup.source==2) {
+            text+="; mapped_source_members=";
+            const auto groups=setup.external_pooled ? helix_member_groups(pairs.size(),steps,cls) : std::vector<uint32_t>{};
+            for (size_t m=0;m<setup.mapping[cls].size();++m) {
+                if (groups.empty() ? m!=member : groups[m]!=groups[member]) continue;
+                const int r=setup.mapping[cls][m];
+                if (r>=0) text+="["+setup.external.members[cls][r].label+"]";
+            }
+        }
+        return text;
+    }
+
+    bool draw_workflow_reference(const char* label, WorkflowReference& setup, size_t frames, bool ranking=false) {
+        ImGui::PushID(label);
+        bool changed=false;
+        if (setup.source==2 && setup.external.records && setup.mapping[Class_Pair].size()!=pairs.size())
+            match_workflow_reference(setup);
+        ImGui::SeparatorText(label);
+        {
+            changed|=ImGui::Combo("Compare against",&setup.source,"Own history\0Pooled helix\0External reference\0");
+            if (setup.source==2) {
+                changed|=ImGui::Checkbox("Pool mapped members within each helix",&setup.external_pooled);
+                if (ImGui::Button("Import reference CSV...")) {
+                    char path[4096]={};
+                    if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+                        if (load_external_reference(&setup.external,path,&setup.error)) match_workflow_reference(setup);
+                        changed=true;
+                    }
+                }
+                if (setup.external.records && ImGui::TreeNode("Reference mapping")) {
+                    ImGui::TextWrapped("Ordered identities, not row numbers. Choose unmatched correspondences explicitly; orientation and conventions must agree.");
+                    if (ImGui::Button("Match identities again")) { match_workflow_reference(setup); changed=true; }
+                    for (int cls=0;cls<Class_Count;++cls) if (ImGui::TreeNode(class_name(cls))) {
+                        for (size_t m=0;m<setup.mapping[cls].size();++m) {
+                            ImGui::PushID((int)m);
+                            int& r=setup.mapping[cls][m];
+                            const auto& sources=setup.external.members[cls];
+                            if (ImGui::BeginCombo(class_labels(cls)[m].c_str(),r<0 ? "Unmatched" : sources[r].label.c_str())) {
+                                if (ImGui::Selectable("Unmatched",r<0)) { r=-1; changed=true; }
+                                for (size_t s=0;s<sources.size();++s) if (ImGui::Selectable(sources[s].label.c_str(),r==(int)s)) {
+                                    if (r!=(int)s && std::find(setup.mapping[cls].begin(),setup.mapping[cls].end(),(int)s)!=setup.mapping[cls].end()) {
+                                        setup.error="Reference member already mapped; unmap its other target first.";
+                                        MD_LOG_ERROR("Lavery: %s",setup.error.c_str());
+                                    } else { r=(int)s; changed=true; setup.error.clear(); }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::TreePop();
+                    }
+                    ImGui::TreePop();
+                }
+            } else changed|=draw_workflow_interval("Reference interval",setup.interval,frames);
+            if (ranking) changed|=ImGui::Combo("Centre / spread",&setup.method,"Mean / SD\0Median / MAD\0");
+            else ImGui::SetItemTooltip("Reference summaries use raw mean / population SD, without state conditioning.");
+        }
+        if (setup.source==2 && setup.external.records) ImGui::TextWrapped("%s",setup.external.path.c_str());
+        if (!setup.error.empty()) ImGui::TextWrapped("Reference: %s",setup.error.c_str());
+        if (changed) ++setup.revision;
+        ImGui::PopID();
+        return changed;
+    }
+
+    bool workflow_statistics(WorkflowReference& setup, Metric id, MetricStatistics* out, bool raw) {
+        setup.error.clear();
+        if (setup.source==2 && setup.external.records && setup.mapping[Class_Pair].size()!=pairs.size())
+            match_workflow_reference(setup);
+        size_t first=0,end=0;
+        if (!workflow_reference_range(setup,run_num_frames(app),first,end,setup.error)) {
+            MD_LOG_ERROR("Lavery: %s",setup.error.c_str()); return false;
+        }
+        const int cls=metric_class(id);
+        const auto groups=setup.source==1 || (setup.source==2 && setup.external_pooled) ?
+            helix_member_groups(pairs.size(),steps,cls) : std::vector<uint32_t>{};
+        const bool ok=workflow_reference_statistics(out,values[id],columns[id],id,first,end,(Baseline)setup.method,raw,groups,
+            setup.source==2 ? &setup.external : nullptr,setup.mapping[cls]);
+        if (!ok) setup.error="Could not calculate the selected workflow reference.";
+        return ok;
+    }
+
+    bool sequence_reference(Metric id, std::vector<MemberStatistics>* out, WorkflowReference& setup) {
+        MetricStatistics result;
+        if (!workflow_statistics(setup,id,&result,true)) return false;
+        *out=std::move(result.members);
+        return true;
+    }
+
+    void draw_profile_key(bool states=false) const {
+        if (states) {
+            const ImVec4 colors[]={ImVec4(.275f,.667f,.863f,1),ImVec4(.706f,.392f,.902f,1),
+                ImVec4(.902f,.686f,.255f,1),ImVec4(.863f,.314f,.314f,1)};
+            for (size_t s=0;s<structural_panels.size();++s) {
+                if (s) ImGui::SameLine();
+                ImGui::TextColored(colors[s%4],"%s",structural_panels[s].name.c_str());
+            }
+        } else {
+            ImGui::TextDisabled("Circle: mean");
+            if (profile_current) { ImGui::SameLine(); ImGui::TextDisabled("| Diamond: current frame"); }
+            if (profile_reference && (profile_view==Profile_Parameters || profile_view==Profile_Twist ||
+                profile_view==Profile_Stacking || profile_view==Profile_Grooves)) {
+                ImGui::SameLine(); ImGui::TextDisabled("| Square: reference");
+            }
+            if (profile_class==Class_Nucleotide && profile_view==Profile_Parameters) {
+                ImGui::TextColored(ImVec4(.25f,.7f,1,1),"Partner 1");
+                ImGui::SameLine(); ImGui::TextColored(ImVec4(1,.55f,.25f,1),"Partner 2");
+            }
+        }
+    }
+
+    size_t profile_lane_count() const {
+        return std::max(size_t(1),size_t(profile_primary_visible)+
+            (size_t)std::count_if(profile_series.begin(),profile_series.end(),[](const auto& s) { return s.recipe.visible; }));
+    }
+
+    bool draw_profile_series_controls(size_t frames) {
+        bool changed=false;
+        if (ImGui::Button("Add filtered series")) {
+            ProfileSeries series;
+            snprintf(series.recipe.name,sizeof(series.recipe.name),"Profile %zu",profile_series.size()+2);
+            series.recipe.color=ImPlot::GetColormapColor((int)profile_series.size()+1);
+            profile_series.push_back(std::move(series));
+            profile_series_edit=(int)profile_series.size()-1;
+            changed=true;
+        }
+        ImGui::SetItemTooltip("Additional whole-trajectory or period profiles. Each keeps its own interval, filters, colour and spread; sequence coordinates never shift.");
+        if (profile_series_edit>=0) ImGui::SetNextItemOpen(true);
+        const bool show_series=ImGui::TreeNodeEx("Series",ImGuiTreeNodeFlags_DefaultOpen);
+        if (show_series) {
+        ImGui::PushID("primary");
+        const auto* primary_period=timeline_periods_find(&app->timeline.periods,profile_period);
+        bool edit_primary=false;
+        changed|=draw_series_row(profile_use_period ? (primary_period ? primary_period->name : "Missing period") : "Whole trajectory",
+            &profile_primary_visible,ImVec4(.25f,.7f,1,1),&edit_primary);
+        if (edit_primary) ImGui::OpenPopup("Primary series settings");
+        if (begin_series_popup("Primary series settings")) {
+            std::string name;
+            bool fit=false;
+            sequence_interval(frames,&name,&fit,true);
+            changed|=fit;
+            if (ImGui::Button("Done")) ImGui::CloseCurrentPopup();
+            ImGui::SameLine();
+            if (ImGui::Button("Duplicate")) {
+                ProfileSeries series;
+                series.interval.kind=profile_use_period ? 1 : 0;
+                series.interval.period=profile_period;
+                snprintf(series.recipe.name,sizeof(series.recipe.name),"%s (copy)",
+                    profile_use_period && primary_period ? primary_period->name : "Whole trajectory");
+                series.recipe.color=ImPlot::GetColormapColor((int)profile_series.size()+1);
+                profile_series.push_back(std::move(series));
+                profile_series_edit=(int)profile_series.size()-1;
+                changed=true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+        for (size_t s=0;s<profile_series.size();) {
+            ImGui::PushID((int)s);
+            auto& series=profile_series[s];
+            bool remove=false,duplicate=false;
+            bool edit=false;
+            if (show_series) changed|=draw_series_row(series.recipe.name,&series.recipe.visible,series.recipe.color,&edit);
+            if (edit || profile_series_edit==(int)s) {
+                ImGui::OpenPopup("Series settings");
+                profile_series_edit=-1;
+            }
+            if (begin_series_popup("Series settings")) {
+                changed|=ImGui::InputText("Name",series.recipe.name,sizeof(series.recipe.name));
+                changed|=ImGui::ColorEdit4("Colour",&series.recipe.color.x,ImGuiColorEditFlags_NoInputs);
+                ImGui::SetItemTooltip("Trace and bend-occupancy colour. Categorical stacks keep their state colours.");
+                changed|=draw_workflow_interval("Time",series.interval,frames);
+                changed|=draw_series_filters(series.recipe,&series.partner,-1);
+                changed|=ImGui::Checkbox("Show SD band",&series.spread);
+                if (ImGui::Button("Done")) ImGui::CloseCurrentPopup();
+                ImGui::SameLine(); duplicate=ImGui::Button("Duplicate");
+                ImGui::SameLine(); remove=ImGui::SmallButton("Remove");
+                if (remove || duplicate) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+            if (!series.error.empty()) ImGui::TextWrapped("%s: %s",series.recipe.name,series.error.c_str());
+            ImGui::PopID();
+            if (duplicate) {
+                ProfileSeries copy=series;
+                const std::string name=std::string(copy.recipe.name)+" (copy)";
+                snprintf(copy.recipe.name,sizeof(copy.recipe.name),"%s",name.c_str());
+                copy.recipe.color=ImPlot::GetColormapColor((int)profile_series.size()+1);
+                profile_series.push_back(std::move(copy)); changed=true;
+                profile_series_edit=(int)profile_series.size()-1;
+            }
+            if (remove) { profile_series.erase(profile_series.begin()+s); changed=true; }
+            else ++s;
+        }
+        ImGui::TreePop();
+        }
+        if (changed) ++profile_series_revision;
+        return changed;
+    }
+
+    bool update_profile_series(size_t frames, Metric id) {
+        for (auto& series : profile_series) {
+            if (!series.recipe.visible) continue;
+            size_t first=0,end=0;
+            std::string error;
+            if (!workflow_range(series.interval,frames,first,end,error)) {
+                series.error=error;
+                series.panels.clear(); series.key=0; continue;
+            }
+            uint64_t key=md_hash64(&profile_series_revision,sizeof(profile_series_revision),
+                workflow_reference_key(sequence_reference_setup,frames));
+            for (int v : {profile_view,profile_occupancy_kind,(int)id})
+                key=md_hash64(&v,sizeof(v),key);
+            key=md_hash64(&profile_bend_threshold,sizeof(profile_bend_threshold),key);
+            key=md_hash64(&first,sizeof(first),key); key=md_hash64(&end,sizeof(end),key);
+            if (series.key==key) continue;
+            series.error.clear();
+            series.first=first; series.end=end;
+            series.panels.clear();
+            bool ok=true;
+            if (profile_view==Profile_Parameters) {
+                series.panels.emplace_back();
+                auto& panel=series.panels.back();
+                panel.metric=id; panel.angular=metric_is_angular(id);
+                ok=sequence_statistics(&panel.summary,values[id],columns[id],panel.angular,first,end);
+            } else ok=build_structural_profiles(series.panels,first,end,profile_view,profile_occupancy_kind,
+                profile_bend_threshold,false,sequence_reference_setup);
+            if (!ok) {
+                series.error="Could not calculate profile series. Check its interval and reference.";
+                MD_LOG_ERROR("Lavery: %s",series.error.c_str());
+                series.panels.clear(); return false;
+            }
+            for (auto& panel : series.panels) {
+                const int cls=metric_class(panel.metric);
+                ComparisonMemberFilter filter;
+                filter.bp_first=series.recipe.bp_first;
+                filter.bp_last=series.recipe.bp_last==INT_MAX ? SIZE_MAX : (size_t)series.recipe.bp_last;
+                filter.pair_type=series.recipe.pair_type;
+                filter.nucleotide=cls==Class_Nucleotide && series.recipe.nucleotide ? " ATGCU"[series.recipe.nucleotide] : 0;
+                size_t excluded=0;
+                if (!filter_sequence_profile(&panel.summary,cls,steps,pair_labels,class_labels(cls),filter,series.partner,&excluded)) {
+                    series.error="Invalid sequence profile filters or member metadata.";
+                    series.panels.clear(); return false;
+                }
+                if (excluded) series.error=std::to_string(excluded)+" positions excluded: missing filter metadata.";
+                std::vector<float>().swap(panel.samples);
+                panel.reference.clear();
+            }
+            series.key=key;
+        }
+        return true;
+    }
+
+    void draw_additional_profile_series(size_t panel_index) const {
+        const size_t total=profile_lane_count();
+        size_t lane=profile_primary_visible ? 1 : 0;
+        for (size_t s=0;s<profile_series.size();++s) {
+            const auto& series=profile_series[s];
+            if (!series.recipe.visible || panel_index>=series.panels.size()) continue;
+            const auto& panel=series.panels[panel_index];
+            const int cls=metric_class(panel.metric),sides=cls==Class_Nucleotide ? 2 : 1;
+            const auto groups=helix_member_groups(pairs.size(),steps,cls);
+            for (int side=0;side<sides;++side) {
+                std::vector<double> x,y,lo,hi;
+                double previous=NAN;
+                for (size_t m=side;m<panel.summary.size();m+=sides) {
+                    const auto& summary=panel.summary[m];
+                    const double mean=summary.count ? (panel.angular ? wrap_degrees(summary.mean) : summary.mean) : NAN;
+                    const bool disconnected=m>=(size_t)sides && (groups[m]!=groups[m-sides] ||
+                        (cls==Class_Step && steps[m-sides].b!=steps[m].a));
+                    if (disconnected || (panel.angular && std::fabs(mean-previous)>180)) {
+                        x.push_back(NAN); y.push_back(NAN); lo.push_back(NAN); hi.push_back(NAN);
+                    }
+                    double position=profile_position(cls,m);
+                    if (panel.occupancy) position+=-.35+.7*(lane+.5)/total;
+                    x.push_back(position); y.push_back(mean);
+                    lo.push_back(mean-summary.sd); hi.push_back(mean+summary.sd); previous=mean;
+                }
+                const std::string label=std::string(series.recipe.name)+(sides==2 ? " / Partner "+std::to_string(side+1) : "")+
+                    (profile_view==Profile_Occupancy ? " / "+panel.name : "")+"##series"+std::to_string(s)+"side"+std::to_string(side);
+                ImVec4 color=series.recipe.color;
+                if (side) { color.x*=.75f; color.y*=.75f; color.z*=.75f; }
+                if (panel.occupancy) plot_sequence_bars(label.c_str(),x,y,.65/total,color);
+                else plot_sequence_trace(label.c_str(),x,y,series.spread ? &lo : nullptr,series.spread ? &hi : nullptr,color);
+            }
+            ++lane;
+        }
+    }
+
+    void draw_profile_series_tooltip(size_t panel_index, size_t m) const {
+        for (const auto& series : profile_series) {
+            if (!series.recipe.visible || panel_index>=series.panels.size()) continue;
+            const auto& panel=series.panels[panel_index];
+            if (m>=panel.summary.size()) continue;
+            const auto& summary=panel.summary[m];
+            ImGui::Separator();
+            ImGui::Text("%s | frames %zu-%zu",series.recipe.name,series.first,series.end-1);
+            if (!summary.count) ImGui::TextUnformatted("Filtered out or no available samples.");
+            else {
+                if (panel.occupancy) ImGui::Text("%s: %.2f %%",panel.name.c_str(),summary.mean);
+                else ImGui::Text("Mean %.3f; SD %.3f",summary.mean,summary.sd);
+                ImGui::Text("Valid %zu; missing %zu",summary.count,series.end-series.first-summary.count);
+            }
+        }
+    }
+
+    std::pair<int,int> sequence_interval(size_t frame_count, std::string* name, bool* fit, bool edit=false) {
+        int source=profile_use_period ? 1 : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*16);
+        if (edit && ImGui::Combo("Time",&source,"Whole trajectory\0Named period\0")) {
+            profile_use_period=source==1; *fit=true;
+        }
+        *name="Whole trajectory";
+        if (!profile_use_period) return {0,(int)frame_count-1};
+        const auto* period=timeline_periods_find(&app->timeline.periods,profile_period);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*12);
+        if (edit && ImGui::BeginCombo("Period",period ? period->name : "Choose period")) {
+            for (int p=0;p<app->timeline.periods.count;++p) {
+                const auto& candidate=app->timeline.periods.items[p];
+                if (ImGui::Selectable(candidate.name,profile_period==candidate.id)) {
+                    profile_period=candidate.id; *fit=true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        period=timeline_periods_find(&app->timeline.periods,profile_period);
+        *name=period ? std::string("Period: ")+period->name : "Missing period";
+        return period_frames(profile_period,frame_count);
+    }
+
+    const std::vector<float>& structural_samples(const StructuralPanel& panel) const {
+        return panel.derived ? panel.samples : values[panel.metric];
+    }
+
+    bool build_structural_profiles(size_t first, size_t end) {
+        return build_structural_profiles(structural_panels,first,end,profile_view,profile_occupancy_kind,
+            profile_bend_threshold,profile_reference,sequence_reference_setup);
+    }
+
+    bool build_structural_profiles(std::vector<StructuralPanel>& panels, size_t first, size_t end,
+        int view, int occupancy_kind, float bend_threshold, bool include_reference, WorkflowReference& reference) {
+        panels.clear();
+        const auto add=[&](Metric metric, const char* name, bool derived=false, bool occupancy=false) -> StructuralPanel& {
+            panels.emplace_back();
+            auto& panel=panels.back();
+            panel.metric=metric; panel.name=name; panel.derived=derived; panel.occupancy=occupancy;
+            panel.angular=!derived && metric_is_angular(metric);
+            panel.unit=occupancy ? "%" : metric_uses_degrees(metric) ? "deg" : "Angstrom";
+            return panel;
+        };
+        if (view==Profile_Bending) {
+            auto& bend=add(Roll,"Local bend angle",true);
+            std::vector<float> candidates;
+            if (!bend_profile_samples(&bend.samples,&candidates,values[Tilt],values[Roll],values[Twist],bend_threshold)) return false;
+            add(Rise,"Rise (stacking-distance context)");
+            auto& occupancy=add(Roll,"Bend candidate occupancy",true,true);
+            occupancy.samples=std::move(candidates);
+        } else if (view==Profile_Twist) {
+            add(Twist,"Twist");
+            auto& difference=add(Twist,"Twist minus reference mean",true);
+            difference.angular=true;
+            if (!sequence_reference(Twist,&difference.reference,reference) ||
+                !twist_difference_samples(&difference.samples,values[Twist],difference.reference)) return false;
+        } else if (view==Profile_Stacking) {
+            add(Rise,"Rise"); add(Slide,"Slide"); add(Shift,"Shift");
+        } else if (view==Profile_Grooves) {
+            add(MinorGroove,"Minor groove"); add(MajorGroove,"Major groove");
+        } else {
+            const Metric kinds[]={EpsilonZeta,Chi,Phase,Alpha,Gamma,Buckle};
+            const Metric metric=kinds[occupancy_kind];
+            const bool chemistry=occupancy_kind==5;
+            const int states=chemistry ? Pairing_Count-1 : metric_state_count(metric);
+            for (int state=0;state<states;++state) {
+                auto& panel=add(metric,chemistry ? pairing_state_name((PairingState)(state+1)) :
+                    metric_state_name(metric,state),true,true);
+                panel.state=state;
+                if (chemistry) {
+                    if (!pairing_profile_samples(&panel.samples,pairing_states,(PairingState)(state+1))) return false;
+                } else if (!state_profile_samples(&panel.samples,values[metric],metric,state)) return false;
+            }
+        }
+        for (auto& panel : panels) {
+            const size_t count=columns[panel.metric];
+            if (!count) continue;
+            if (!sequence_statistics(&panel.summary,structural_samples(panel),count,panel.angular,first,end)) return false;
+            if (include_reference && view!=Profile_Bending && !panel.derived &&
+                !sequence_reference(panel.metric,&panel.reference,reference)) return false;
+        }
+        return true;
+    }
+
+    void draw_state_occupancy_profile(int cls, size_t count, size_t first, size_t end, bool fit) {
+        const int sides=cls==Class_Nucleotide ? 2 : 1;
+        const size_t positions=count/(size_t)sides;
+        const ImU32 colors[]={IM_COL32(70,170,220,255),IM_COL32(180,100,230,255),
+            IM_COL32(230,175,65,255),IM_COL32(220,80,80,255)};
+        const std::string palette="Lavery states "+std::to_string(structural_panels.size());
+        auto colormap=ImPlot::GetColormapIndex(palette.c_str());
+        if (colormap<0) colormap=ImPlot::AddColormap(palette.c_str(),colors,(int)structural_panels.size());
+        if (fit) ImPlot::BustColorCache("State occupancy");
+        ImPlot::PushColormap(colormap);
+        draw_profile_key(true);
+        ImGui::SetItemTooltip("Stacks total 100%% of available samples. Partner 1 left, Partner 2 right.\n"
+            "Within each partner: primary series first, then additional series in list order.\n"
+            "When shown, current state is right of the primary average. Hover bars for exact percentages.");
+        if (ImPlot::BeginPlot("State occupancy",ImVec2(-1,-1),ImPlotFlags_NoLegend)) {
+            ImPlot::SetupAxes("Sequence position","%");
+            ImPlot::SetupAxisLimits(ImAxis_X1,structural_x_min,structural_x_max,fit ? ImPlotCond_Always : ImPlotCond_Once);
+            ImPlot::SetupAxisLinks(ImAxis_X1,&structural_x_min,&structural_x_max);
+            setup_sequence_ticks(structural_x_min,structural_x_max);
+            ImPlot::SetupAxisLimits(ImAxis_Y1,0,100,ImPlotCond_Always);
+            std::vector<const char*> labels;
+            for (const auto& panel : structural_panels) labels.push_back(panel.name.c_str());
+            for (int side=0;profile_primary_visible && side<sides;++side) {
+                std::vector<double> averages,current;
+                for (const auto& panel : structural_panels) {
+                    for (size_t m=side;m<count;m+=sides) {
+                        const auto& summary=panel.summary[m];
+                        averages.push_back(summary.count ? summary.mean : NAN);
+                        current.push_back(structural_samples(panel)[current_frame()*count+m]);
+                    }
+                }
+                const double full_width=sides==2 ? .36 : .72;
+                const double width=full_width/profile_lane_count();
+                const double centre=1+(sides==2 ? (side ? .2 : -.2) : 0)-full_width*.5+width*.5;
+                plot_sequence_state_bars(labels,averages,positions,profile_current ? width*.48 : width,
+                    centre-(profile_current ? width*.25 : 0));
+                if (profile_current) plot_sequence_state_bars(labels,current,positions,width*.48,centre+width*.25);
+            }
+            size_t lane=profile_primary_visible ? 1 : 0;
+            for (size_t s=0;s<profile_series.size();++s) {
+                const auto& series=profile_series[s];
+                if (!series.recipe.visible || series.panels.empty()) continue;
+                std::vector<std::string> names;
+                for (const auto& panel : series.panels) names.push_back(std::string(series.recipe.name)+" / "+panel.name+
+                    "##series"+std::to_string(s)+"state"+std::to_string(panel.state));
+                std::vector<const char*> state_labels;
+                for (const auto& name : names) state_labels.push_back(name.c_str());
+                for (int side=0;side<sides;++side) {
+                    std::vector<double> averages;
+                    for (const auto& panel : series.panels) for (size_t m=side;m<count;m+=sides)
+                        averages.push_back(panel.summary[m].count ? panel.summary[m].mean : NAN);
+                    const double full_width=sides==2 ? .36 : .72;
+                    const double width=full_width/profile_lane_count();
+                    const double centre=1+(sides==2 ? (side ? .2 : -.2) : 0)-full_width*.5+width*(lane+.5);
+                    plot_sequence_state_bars(state_labels,averages,positions,width*.9,centre);
+                }
+                ++lane;
+            }
+            const auto& panel=structural_panels.front();
+            if (metric_cls()==cls && member>=0 && (size_t)member<count) {
+                const double selected=profile_position(cls,(size_t)member);
+                ImPlot::SetNextLineStyle(ImVec4(0,0,0,1),3);
+                ImPlot::PlotInfLines("##selected",&selected,1);
+            }
+            const bool landmark_hovered=draw_sequence_landmarks(cls,panel.summary,structural_samples(panel),
+                panel.name.c_str(),"%",false,true);
+            if (ImPlot::IsPlotHovered() && !landmark_hovered) {
+                const double x=ImPlot::GetPlotMousePos().x;
+                const size_t bp=(size_t)std::clamp(std::llround(x)-1,0LL,(long long)positions-1);
+                const int side=sides==2 && x>(double)bp+1 ? 1 : 0;
+                const size_t m=bp*sides+side;
+                const auto& summary=panel.summary[m];
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(class_labels(cls)[m].c_str());
+                if (summary.count) ImGui::Text("Valid %zu; missing %zu",summary.count,end-first-summary.count);
+                else ImGui::TextUnformatted("No available samples (not zero occupancy).");
+                for (const auto& state : structural_panels) {
+                    const auto& s=state.summary[m];
+                    if (s.count) ImGui::Text("%s: %.2f %%",state.name.c_str(),s.mean);
+                    if (structural_samples(state)[current_frame()*count+m]==100)
+                        ImGui::Text("Current state: %s",state.name.c_str());
+                }
+                for (size_t p=0;p<structural_panels.size();++p) draw_profile_series_tooltip(p,m);
+                ImGui::TextUnformatted("Click to select; Shift-click to mark this position.");
+                ImGui::EndTooltip();
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)) {
+                    if (ImGui::GetIO().KeyShift) add_sequence_landmark(cls,m,"Manual: state occupancy");
+                    inspected_event=inspected_switch=inspected_pairing_change=SIZE_MAX;
+                    select_target(cls,(uint32_t)m,panel.metric-class_first_metric(cls),current_frame());
+                }
+            }
+            ImPlot::EndPlot();
+        }
+        ImPlot::PopColormap();
+    }
+
+    void draw_structural_profiles(size_t frame_count, bool fit) {
+        if (profile_view==Profile_Bending) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize()*8);
+            if (ImGui::InputFloat("Candidate bend >= (deg)",&profile_bend_threshold,1,5,"%.1f"))
+                profile_bend_threshold=std::clamp(profile_bend_threshold,1.0f,180.0f);
+            ImGui::TextDisabled("Exploratory candidates, not validated kinks.");
+            ImGui::SetItemTooltip("Exact adjacent pair-normal angle. Rise is context, not a condition.");
+        } else if (profile_view==Profile_Twist) {
+            ImGui::TextDisabled("Twist interpretation (?)");
+            ImGui::SetItemTooltip("Positive reference difference: overtwisted; negative: undertwisted. Local Twist is not supercoiling.");
+        } else if (profile_view==Profile_Stacking) {
+            ImGui::TextDisabled("Stacking geometry (?)");
+            ImGui::SetItemTooltip("Spacing and lateral displacement, not stacking energy or a stacking-contact assignment.");
+        } else if (profile_view==Profile_Occupancy) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize()*20);
+            fit|=ImGui::Combo("States",&profile_occupancy_kind,"BI / BII\0anti / syn\0Sugar pucker\0Alpha rotamers\0Gamma rotamers\0Pairing chemistry\0");
+            ImGui::SetItemTooltip("Percent of available raw states; unavailable samples excluded and counted as missing. Residence filters do not apply.");
+        }
+        fit|=draw_profile_series_controls(frame_count);
+        std::string source;
+        const auto range=sequence_interval(frame_count,&source,&fit);
+        const bool occupancy_view=profile_view==Profile_Occupancy;
+        ImGui::BeginDisabled(occupancy_view);
+        fit|=ImGui::Checkbox("Mean +/- SD",&profile_spread);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        fit|=ImGui::Checkbox("Current frame",&profile_current);
+        const bool supports_reference=profile_view==Profile_Twist || profile_view==Profile_Stacking || profile_view==Profile_Grooves;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!supports_reference);
+        fit|=ImGui::Checkbox("Reference mean",&profile_reference);
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip(supports_reference ? "Raw mean/SD from this profile's independent reference settings.\n"
+            "The Twist difference always uses this reference, even if its overlay is hidden." :
+            "Joint geometric samples or categorical pairing evidence are not retained by raw CSV references.\n"
+            "Reference overlays are available in Parameters, Twist, Stacking and Groove views.");
+        ImGui::SameLine(); fit|=ImGui::Button("Fit view");
+        if (profile_view==Profile_Bending) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Fixed 0-100%",&profile_fixed_occupancy_scale);
+        }
+        const int cls=occupancy_view ? (profile_occupancy_kind==5 ? Class_Pair : Class_Nucleotide) : Class_Step;
+        const size_t count=class_members(cls);
+        if (!count || range.first<0 || range.second<range.first) {
+            ImGui::TextWrapped(!count ? "No members in this class." : "Choose an existing period containing trajectory samples.");
+            return;
+        }
+        if (profile_view==Profile_Bending && !std::isfinite(profile_bend_threshold)) {
+            ImGui::TextWrapped("Enter a finite bend threshold between 1 and 180 degrees.");
+            return;
+        }
+        const size_t first=(size_t)range.first,end=(size_t)range.second+1;
+        uint64_t key=md_hash64(&profile_view,sizeof(profile_view),workflow_reference_key(sequence_reference_setup,frame_count));
+        key=md_hash64(&profile_occupancy_kind,sizeof(profile_occupancy_kind),key);
+        key=md_hash64(&profile_bend_threshold,sizeof(profile_bend_threshold),key);
+        key=md_hash64(&first,sizeof(first),key); key=md_hash64(&end,sizeof(end),key);
+        key=md_hash64(&profile_reference,sizeof(profile_reference),key);
+        if (key!=structural_profile_key) {
+            if (!build_structural_profiles(first,end)) {
+                ImGui::TextUnformatted("Could not calculate structural profiles. See application log.");
+                return;
+            }
+            structural_profile_key=key; fit=true;
+        }
+        if (!update_profile_series(frame_count,Roll)) return;
+        if ((supports_reference && profile_reference) || profile_view==Profile_Twist)
+            if (!sequence_reference_setup.error.empty()) ImGui::TextWrapped("Reference: %s",sequence_reference_setup.error.c_str());
+        draw_sequence_landmark_controls(profile_view==Profile_Bending,source+"; frames "+
+            std::to_string(first)+"-"+std::to_string(end-1));
+        if (!occupancy_view) draw_profile_key();
+        if (fit) { structural_x_min=.5; structural_x_max=(double)pairs.size()+.5; }
+        if (occupancy_view) {
+            draw_state_occupancy_profile(cls,count,first,end,fit);
+            return;
+        }
+        const auto groups=helix_member_groups(pairs.size(),steps,cls);
+        const float height=std::max(210.0f,ImGui::GetContentRegionAvail().y/(float)structural_panels.size()-8);
+        if (ImGui::BeginChild("Structural profiles",ImVec2(0,0))) {
+            for (size_t p=0;p<structural_panels.size();++p) {
+                const auto& panel=structural_panels[p];
+                const auto& samples=structural_samples(panel);
+                const int sides=cls==Class_Nucleotide ? 2 : 1;
+                ImGui::PushID((int)p);
+                if (fit && !panel.occupancy) ImPlot::SetNextAxisToFit(ImAxis_Y1);
+                if (ImPlot::BeginPlot(panel.name.c_str(),ImVec2(-1,height),ImPlotFlags_NoLegend)) {
+                    const bool bottom=p+1==structural_panels.size();
+                    ImPlot::SetupAxes(bottom ? "Sequence position" : nullptr,panel.unit.c_str(),
+                        bottom ? ImPlotAxisFlags_None : ImPlotAxisFlags_NoTickLabels);
+                    ImPlot::SetupAxisLimits(ImAxis_X1,structural_x_min,structural_x_max,fit ? ImPlotCond_Always : ImPlotCond_Once);
+                    ImPlot::SetupAxisLinks(ImAxis_X1,&structural_x_min,&structural_x_max);
+                    setup_sequence_ticks(structural_x_min,structural_x_max);
+                    if (panel.occupancy) {
+                        double maximum=0;
+                        if (profile_primary_visible)
+                            for (const auto& summary : panel.summary) if (summary.count) maximum=std::max(maximum,summary.mean);
+                        for (const auto& series : profile_series) if (series.recipe.visible && p<series.panels.size())
+                            for (const auto& summary : series.panels[p].summary) if (summary.count) maximum=std::max(maximum,summary.mean);
+                        if (profile_current) for (size_t m=0;m<count;++m)
+                            if (std::isfinite(samples[current_frame()*count+m]))
+                                maximum=std::max(maximum,(double)samples[current_frame()*count+m]);
+                        const double top=profile_fixed_occupancy_scale ? 100 : std::min(100.0,std::max(1.0,maximum*1.1));
+                        ImPlot::SetupAxisLimits(ImAxis_Y1,0,top,ImPlotCond_Always);
+                    }
+                    for (int side=0;side<sides;++side) {
+                        std::vector<double> x,y,lo,hi,now,rx,ref,rlo,rhi;
+                        double last_y=NAN,last_ref=NAN;
+                        for (size_t m=side;m<count;m+=sides) {
+                            const auto& s=panel.summary[m];
+                            const double mean=s.count ? (panel.angular ? wrap_degrees(s.mean) : s.mean) : NAN;
+                            const bool disconnected=m>=(size_t)sides && (groups[m]!=groups[m-sides] ||
+                                (cls==Class_Step && steps[m-sides].b!=steps[m].a));
+                            if (disconnected || (panel.angular && std::fabs(mean-last_y)>180)) {
+                                x.push_back(NAN); y.push_back(NAN); lo.push_back(NAN); hi.push_back(NAN); now.push_back(NAN);
+                            }
+                            const double position=profile_position(cls,m);
+                            x.push_back(position); y.push_back(mean); lo.push_back(mean-s.sd); hi.push_back(mean+s.sd);
+                            const double raw=samples[current_frame()*count+m];
+                            now.push_back(panel.angular ? (s.count ? mean+wrap_degrees(raw-mean) : wrap_degrees(raw)) : raw);
+                            last_y=mean;
+                            if (!panel.reference.empty() && !panel.derived) {
+                                const auto& r=panel.reference[m];
+                                const double center=r.count ? (panel.angular ? (s.count ? mean+wrap_degrees(r.mean-mean) : wrap_degrees(r.mean)) : r.mean) : NAN;
+                                if (disconnected || (panel.angular && std::fabs(center-last_ref)>180)) {
+                                    rx.push_back(NAN); ref.push_back(NAN); rlo.push_back(NAN); rhi.push_back(NAN);
+                                }
+                                rx.push_back(position); ref.push_back(center); rlo.push_back(center-r.sd); rhi.push_back(center+r.sd);
+                                last_ref=center;
+                            }
+                        }
+                        const ImVec4 color=side ? ImVec4(1,.55f,.25f,1) : ImVec4(.25f,.7f,1,1);
+                        const std::string label=sides==2 ? "Partner "+std::to_string(side+1) : panel.occupancy ? "Occupancy" : "Mean";
+                        const bool spread=profile_spread && !panel.occupancy;
+                        if (panel.occupancy && profile_primary_visible) {
+                            const double total=profile_lane_count();
+                            for (double& position : x) position+=-.35+.35/total;
+                            plot_sequence_bars(label.c_str(),x,y,.65/total,color);
+                        }
+                        else if (!panel.occupancy && profile_primary_visible)
+                            plot_sequence_trace(label.c_str(),x,y,spread ? &lo : nullptr,spread ? &hi : nullptr,color);
+                        if (profile_view==Profile_Bending && p==0 && profile_primary_visible) {
+                            std::vector<double> candidates=y;
+                            for (double& value : candidates) if (value<profile_bend_threshold) value=NAN;
+                            plot_sequence_trace("Mean bend >= threshold",x,candidates,nullptr,nullptr,
+                                ImVec4(1,.35f,.2f,1),ImPlotMarker_Diamond,true);
+                        }
+                        if (profile_current) plot_sequence_trace((label+" current").c_str(),x,now,nullptr,nullptr,color,ImPlotMarker_Diamond,true);
+                        if (!panel.reference.empty() && !panel.derived) plot_sequence_trace((label+" reference").c_str(),rx,ref,
+                            spread ? &rlo : nullptr,spread ? &rhi : nullptr,ImVec4(.65f,.85f,.55f,1),ImPlotMarker_Square);
+                    }
+                    draw_additional_profile_series(p);
+                    if (profile_view==Profile_Bending && p==0) {
+                        const double threshold=profile_bend_threshold;
+                        ImPlot::SetNextLineStyle(ImVec4(1,.4f,.3f,1),2);
+                        ImPlot::PlotInfLines("Candidate threshold",&threshold,1,ImPlotInfLinesFlags_Horizontal);
+                    }
+                    if (profile_view==Profile_Twist && panel.derived) {
+                        const double zero=0;
+                        ImPlot::PlotInfLines("Reference centre",&zero,1,ImPlotInfLinesFlags_Horizontal);
+                    }
+                    if (metric_cls()==cls && member>=0 && (size_t)member<count) {
+                        const double selected=profile_position(cls,(size_t)member);
+                        ImPlot::SetNextLineStyle(ImVec4(0,0,0,1),3);
+                        ImPlot::PlotInfLines("##selected",&selected,1);
+                    }
+                    const bool landmark_hovered=draw_sequence_landmarks(cls,panel.summary,samples,
+                        panel.name.c_str(),panel.unit.c_str(),panel.angular,p==0);
+                    if (ImPlot::IsPlotHovered() && !landmark_hovered) {
+                        size_t nearest=0;
+                        double best_x=INFINITY,best_y=INFINITY;
+                        const ImVec2 cursor=ImGui::GetMousePos();
+                        const double mouse_y=ImPlot::GetPlotMousePos().y;
+                        for (size_t m=0;m<count;++m) {
+                            const auto& s=panel.summary[m];
+                            const double center=s.count ? (panel.angular ? wrap_degrees(s.mean) : s.mean) : NAN;
+                            const double position=profile_position(cls,m);
+                            const double dx=std::fabs(ImPlot::PlotToPixels(position,mouse_y).x-cursor.x);
+                            double dy=s.count ? std::fabs(ImPlot::PlotToPixels(position,center).y-cursor.y) : INFINITY;
+                            for (const auto& series : profile_series)
+                                if (series.recipe.visible && p<series.panels.size() && series.panels[p].summary[m].count) {
+                                    double value=series.panels[p].summary[m].mean;
+                                    if (panel.angular) value=wrap_degrees(value);
+                                    dy=std::min(dy,(double)std::fabs(ImPlot::PlotToPixels(position,value).y-cursor.y));
+                                }
+                            if (profile_current && std::isfinite(samples[current_frame()*count+m])) {
+                                double v=samples[current_frame()*count+m];
+                                if (panel.angular) v=s.count ? center+wrap_degrees(v-center) : wrap_degrees(v);
+                                dy=std::min(dy,(double)std::fabs(ImPlot::PlotToPixels(position,v).y-cursor.y));
+                            }
+                            if (!panel.reference.empty() && !panel.derived && panel.reference[m].count) {
+                                double v=panel.reference[m].mean;
+                                if (panel.angular) v=s.count ? center+wrap_degrees(v-center) : wrap_degrees(v);
+                                dy=std::min(dy,(double)std::fabs(ImPlot::PlotToPixels(position,v).y-cursor.y));
+                            }
+                            if (dx<best_x-.5 || (std::fabs(dx-best_x)<=.5 && dy<best_y)) { best_x=dx; best_y=dy; nearest=m; }
+                        }
+                        const uint32_t mask=1u<<(panel.metric-class_first_metric(cls));
+                        preview.push_back({(uint8_t)cls,(uint32_t)nearest,mask});
+                        const auto& s=panel.summary[nearest];
+                        ImGui::BeginTooltip();
+                        ImGui::Text("%s / %s",class_labels(cls)[nearest].c_str(),panel.name.c_str());
+                        if (s.count) {
+                            if (panel.occupancy) ImGui::Text("Occupancy %.2f %%",s.mean);
+                            else ImGui::Text("Mean %.3f; SD %.3f",s.mean,s.sd);
+                            ImGui::Text("Valid %zu; missing %zu",s.count,end-first-s.count);
+                        } else ImGui::TextUnformatted("No available samples (not zero occupancy).");
+                        ImGui::Text("Current frame %zu: %.3f %s",current_frame(),samples[current_frame()*count+nearest],panel.unit.c_str());
+                        if (profile_view==Profile_Bending) {
+                            const size_t sample=current_frame()*count+nearest;
+                            ImGui::Text("Current Tilt %.3f; Roll %.3f; Twist %.3f deg; Rise %.3f Angstrom",
+                                values[Tilt][sample],values[Roll][sample],values[Twist][sample],values[Rise][sample]);
+                            ImGui::Text("Candidate threshold >= %.1f deg; Rise is context only.",profile_bend_threshold);
+                        }
+                        if (!panel.reference.empty() && !panel.derived) {
+                            const auto& r=panel.reference[nearest];
+                            if (r.count) ImGui::Text("Reference mean %.3f; SD %.3f; n %zu",r.mean,r.sd,r.count);
+                            else ImGui::TextUnformatted("No mapped/valid reference samples.");
+                        }
+                        if (profile_view==Profile_Twist && panel.derived && !panel.reference[nearest].count)
+                            ImGui::TextUnformatted("No mapped/valid reference: relative Twist is unavailable.");
+                        draw_profile_series_tooltip(p,nearest);
+                        ImGui::TextUnformatted("Click to select at current frame; drag to pan linked profiles.");
+                        ImGui::EndTooltip();
+                        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)) {
+                            if (ImGui::GetIO().KeyShift) add_sequence_landmark(cls,nearest,"Manual: "+panel.name);
+                            inspected_event=inspected_switch=inspected_pairing_change=SIZE_MAX;
+                            select_target(cls,(uint32_t)nearest,panel.metric-class_first_metric(cls),current_frame());
+                        }
+                    }
+                    ImPlot::EndPlot();
                 }
                 ImGui::PopID();
             }
         }
         ImGui::EndChild();
-        if (edit_requested) ImGui::OpenPopup("Distribution settings");
+    }
+
+    void draw_sequence_profile(size_t frame_count) {
+        bool reference_changed=false;
+        const bool needs_reference=profile_view==Profile_Twist ||
+            (profile_reference && profile_view!=Profile_Bending && profile_view!=Profile_Occupancy);
+        if (needs_reference) reference_changed=draw_workflow_reference("Reference",sequence_reference_setup,frame_count);
+        else if (ImGui::TreeNode("Reference settings")) {
+            reference_changed=draw_workflow_reference("Reference",sequence_reference_setup,frame_count);
+            ImGui::TreePop();
+        }
+        ImGui::SeparatorText("Profile");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*20);
+        const bool view_changed=ImGui::Combo("View",&profile_view,
+            "Parameters\0Bending / Kinks\0Twist / Unwinding\0Stacking geometry\0Groove geometry\0State occupancy\0");
+        if (profile_view!=Profile_Parameters) {
+            draw_structural_profiles(frame_count,view_changed || reference_changed);
+            return;
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*16);
+        bool fit=view_changed || reference_changed;
+        fit|=ImGui::Combo("Class",&profile_class,"Intra-base pair\0Inter-base pair\0Nucleotide\0");
+        const int cls=profile_class, offset=class_first_metric(cls);
+        int& parameter=profile_parameters[cls];
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*12);
+        if (ImGui::BeginCombo("Parameter",metric_name((Metric)(offset+parameter)))) {
+            for (int k=0;k<class_parameter_count(cls);++k)
+                if (ImGui::Selectable(metric_name((Metric)(offset+k)),parameter==k)) { parameter=k; fit=true; }
+            ImGui::EndCombo();
+        }
+        fit|=draw_profile_series_controls(frame_count);
+        const Metric id=(Metric)(offset+parameter);
+        if (!update_profile_series(frame_count,id)) return;
+        const bool angular=metric_is_angular(id);
+        const size_t count=columns[id], frame=current_frame();
+        std::string source_name;
+        const auto range=sequence_interval(frame_count,&source_name,&fit);
+        fit|=ImGui::Checkbox("Mean +/- SD",&profile_spread);
+        ImGui::SameLine();
+        fit|=ImGui::Checkbox("Current frame",&profile_current);
+        ImGui::SameLine();
+        fit|=ImGui::Checkbox("Reference mean",&profile_reference);
+        ImGui::SetItemTooltip("Raw mean and population SD from this profile's independent reference settings.\n"
+            "Uses external member mapping when applicable. No state conditioning, median/MAD or sigma threshold.");
+        ImGui::SameLine();
+        fit|=ImGui::Button("Fit view");
+        if (!count) { ImGui::TextDisabled("No members in this class."); return; }
+        if (range.first<0 || range.second<range.first) {
+            ImGui::TextWrapped("Choose an existing period containing trajectory samples. Whole trajectory is not substituted.");
+            return;
+        }
+        const size_t first=(size_t)range.first, end=(size_t)range.second+1;
+        uint64_t key=md_hash64(&id,sizeof(id),workflow_reference_key(sequence_reference_setup,frame_count));
+        key=md_hash64(&first,sizeof(first),key);
+        key=md_hash64(&end,sizeof(end),key);
+        key=md_hash64(&profile_reference,sizeof(profile_reference),key);
+        if (key!=profile_key) {
+            if (!sequence_statistics(&profile_statistics,values[id],count,angular,first,end)) {
+                ImGui::TextUnformatted("Could not calculate sequence profile. See the application log.");
+                return;
+            }
+            profile_reference_statistics.assign(count,{});
+            if (profile_reference && !sequence_reference(id,&profile_reference_statistics,sequence_reference_setup)) {
+                ImGui::TextUnformatted("Could not calculate profile reference. See the application log.");
+                return;
+            }
+            profile_key=key;
+            fit=true;
+        }
+        draw_profile_key();
+        ImGui::SetItemTooltip("Raw mean and population SD, not uncertainty of the mean.\nAngular branches break at 180-degree jumps; multimodal means may be weakly populated.");
+        if (profile_reference && !sequence_reference_setup.error.empty()) ImGui::TextWrapped("Reference: %s",sequence_reference_setup.error.c_str());
+        draw_sequence_landmark_controls();
+        const auto helices=helix_member_groups(pairs.size(),steps,cls);
+        if (fit) { structural_x_min=.5; structural_x_max=(double)pairs.size()+.5; }
+        if (fit) ImPlot::SetNextAxisToFit(ImAxis_Y1);
+        if (ImPlot::BeginPlot("Sequence profile",ImVec2(-1,std::max(180.0f,ImGui::GetContentRegionAvail().y)),ImPlotFlags_NoLegend)) {
+            ImPlot::SetupAxes("Sequence position",metric_unit(id));
+            ImPlot::SetupAxisLimits(ImAxis_X1,structural_x_min,structural_x_max,fit ? ImPlotCond_Always : ImPlotCond_Once);
+            ImPlot::SetupAxisLinks(ImAxis_X1,&structural_x_min,&structural_x_max);
+            setup_sequence_ticks(structural_x_min,structural_x_max);
+            const int sides=cls==Class_Nucleotide ? 2 : 1;
+            const ImVec4 colors[]={ImVec4(.25f,.7f,1,1),ImVec4(1,.55f,.25f,1)};
+            for (int side=0;side<sides;++side) {
+                std::vector<double> x,mean,lower,upper,current,ref_x,reference,ref_lower,ref_upper;
+                auto append=[&](size_t m,bool gap) {
+                    const auto& s=profile_statistics[m];
+                    const auto& r=profile_reference_statistics[m];
+                    const double center=s.count ? (angular ? wrap_degrees(s.mean) : s.mean) : NAN;
+                    const auto aligned=[&](double v) { return angular ? center+wrap_degrees(v-center) : v; };
+                    const double ref=r.count ? (s.count ? aligned(r.mean) : angular ? wrap_degrees(r.mean) : r.mean) : NAN;
+                    x.push_back(gap ? NAN : profile_position(cls,m));
+                    mean.push_back(gap ? NAN : center);
+                    lower.push_back(gap ? NAN : center-s.sd); upper.push_back(gap ? NAN : center+s.sd);
+                    const double raw=values[id][frame*count+m];
+                    current.push_back(gap ? NAN : s.count ? aligned(raw) : angular ? wrap_degrees(raw) : raw);
+                    if (!gap && angular && !reference.empty() && std::fabs(reference.back()-ref)>180) {
+                        ref_x.push_back(NAN); reference.push_back(NAN);
+                        ref_lower.push_back(NAN); ref_upper.push_back(NAN);
+                    }
+                    ref_x.push_back(gap ? NAN : profile_position(cls,m));
+                    reference.push_back(gap ? NAN : ref);
+                    ref_lower.push_back(gap ? NAN : ref-r.sd); ref_upper.push_back(gap ? NAN : ref+r.sd);
+                };
+                for (size_t m=side;m<count;m+=sides) {
+                    if (m>=(size_t)sides) {
+                        const size_t previous=m-sides;
+                        const bool disconnected=helices[m]!=helices[previous] ||
+                            (cls==Class_Step && steps[previous].b!=steps[m].a);
+                        // Separate positions explicitly; no invented geometry between helices or angular branches.
+                        const double a=profile_statistics[previous].mean,b=profile_statistics[m].mean;
+                        if (disconnected || (angular && std::fabs(wrap_degrees(a)-wrap_degrees(b))>180)) append(m,true);
+                    }
+                    append(m,false);
+                }
+                const std::string name=sides==2 ? "Partner "+std::to_string(side+1)+" mean" : "Mean";
+                const ImVec4 color=colors[side];
+                if (profile_primary_visible)
+                    plot_sequence_trace(name.c_str(),x,mean,profile_spread ? &lower : nullptr,profile_spread ? &upper : nullptr,color);
+                if (profile_current) {
+                    const std::string label=sides==2 ? "Partner "+std::to_string(side+1)+" current" : "Current frame";
+                    plot_sequence_trace(label.c_str(),x,current,nullptr,nullptr,color,ImPlotMarker_Diamond,true);
+                }
+                if (profile_reference) {
+                    const std::string label=sides==2 ? "Partner "+std::to_string(side+1)+" reference" : "Reference mean";
+                    const ImVec4 ref_color=side ? ImVec4(.95f,.8f,.4f,1) : ImVec4(.65f,.85f,.55f,1);
+                    plot_sequence_trace(label.c_str(),ref_x,reference,profile_spread ? &ref_lower : nullptr,
+                        profile_spread ? &ref_upper : nullptr,ref_color,ImPlotMarker_Square,false,.1f);
+                }
+            }
+            draw_additional_profile_series(0);
+            if (metric==(int)id && member>=0 && (size_t)member<count) {
+                const double selected=profile_position(cls,(size_t)member);
+                ImPlot::SetNextLineStyle(ImVec4(0,0,0,1),3);
+                ImPlot::PlotInfLines("##selected_position",&selected,1);
+            }
+            const bool landmark_hovered=draw_sequence_landmarks(cls,profile_statistics,values[id],
+                metric_name(id),metric_unit(id),angular);
+            if (ImPlot::IsPlotHovered() && !landmark_hovered) {
+                const auto mouse=ImPlot::GetPlotMousePos();
+                size_t nearest=0;
+                double best_x=INFINITY,best_y=INFINITY;
+                const ImVec2 cursor=ImGui::GetMousePos();
+                for (size_t m=0;m<count;++m) {
+                    const auto& s=profile_statistics[m];
+                    const double center=s.count ? (angular ? wrap_degrees(s.mean) : s.mean) : NAN;
+                    const double position=profile_position(cls,m);
+                    const double dx=std::fabs(ImPlot::PlotToPixels(position,mouse.y).x-cursor.x);
+                    double dy=s.count ? std::fabs(ImPlot::PlotToPixels(position,center).y-cursor.y) : INFINITY;
+                    const auto consider=[&](double value) {
+                        if (!std::isfinite(value)) return;
+                        if (angular) value=s.count ? center+wrap_degrees(value-center) : wrap_degrees(value);
+                        dy=std::min(dy,(double)std::fabs(ImPlot::PlotToPixels(position,value).y-cursor.y));
+                    };
+                    if (profile_current) consider(values[id][frame*count+m]);
+                    if (profile_reference && profile_reference_statistics[m].count) consider(profile_reference_statistics[m].mean);
+                    for (const auto& series : profile_series)
+                        if (series.recipe.visible && !series.panels.empty() && series.panels[0].summary[m].count)
+                            consider(series.panels[0].summary[m].mean);
+                    if (dx<best_x-.5 || (std::fabs(dx-best_x)<=.5 && dy<best_y)) {
+                        best_x=dx; best_y=dy; nearest=m;
+                    }
+                }
+                preview.push_back({(uint8_t)cls,(uint32_t)nearest,1u<<parameter});
+                ImGui::BeginTooltip();
+                ImGui::Text("%s / %s",class_labels(cls)[nearest].c_str(),metric_name(id));
+                const auto& s=profile_statistics[nearest];
+                if (s.count) ImGui::Text("Mean %.3f; SD %.3f %s",s.mean,s.sd,metric_unit(id));
+                else ImGui::TextUnformatted("No valid samples in this interval.");
+                ImGui::Text("Valid %zu; missing %zu",s.count,end-first-s.count);
+                ImGui::Text("Current frame %zu: %.3f %s",frame,values[id][frame*count+nearest],metric_unit(id));
+                draw_quality(parameter_quality(frame,nearest,id),std::isfinite(values[id][frame*count+nearest]));
+                if (profile_reference) {
+                    const auto& r=profile_reference_statistics[nearest];
+                    if (r.count) ImGui::Text("Reference mean %.3f; SD %.3f; n %zu",r.mean,r.sd,r.count);
+                    else ImGui::TextUnformatted("No mapped/valid reference samples.");
+                }
+                draw_profile_series_tooltip(0,nearest);
+                ImGui::TextUnformatted("Click to select at the current frame; drag to pan.");
+                ImGui::EndTooltip();
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left)) {
+                    if (ImGui::GetIO().KeyShift) add_sequence_landmark(cls,nearest,"Manual: "+std::string(metric_name(id)));
+                    inspected_event=inspected_switch=inspected_pairing_change=SIZE_MAX;
+                    select_target(cls,(uint32_t)nearest,parameter,frame);
+                }
+            }
+            ImPlot::EndPlot();
+        }
     }
 
     void draw_workspace(size_t frame_count) {
         const size_t frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame), (int64_t)0, (int64_t)frame_count - 1);
         if (!ImGui::BeginTabBar("EventsQuality")) return;
         if (ImGui::BeginTabItem("Outliers###outlier_events")) {
+            if (!detection_enabled) {
+                ImGui::TextWrapped("Outlier detection is off. Enable it under Detection in the sidebar.");
+                ImGui::EndTabItem();
+            } else {
             const ImVec2 area=ImGui::GetContentRegionAvail();
             const float spacing=ImGui::GetStyle().ItemSpacing.y;
             const float divider=std::max(4.0f,spacing);
@@ -4195,8 +5973,6 @@ struct Lavery : viamd::EventHandler {
             const float min_row=std::min(ImGui::GetFrameHeight()*4,rows_height/3);
             float table_height=std::clamp(rows_height*layout_events,min_row,rows_height-2*min_row);
             if (ImGui::BeginChild("Event table",ImVec2(0,table_height))) {
-                if (statistics_reference_scope == Reference_HelixHistory)
-                    ImGui::TextWrapped("Pooled-reference anomalous regions: persistent differences need not be transitions during this recording.");
                 draw_events(frame,frame_count);
             }
             ImGui::EndChild();
@@ -4243,11 +6019,11 @@ struct Lavery : viamd::EventHandler {
             }
             ImGui::EndChild();
             ImGui::EndTabItem();
+            }
         }
         if (ImGui::BeginTabItem("Parameter heatmap")) {
             draw_parameter_selection(false);
             const int count=(int)columns[metric];
-            ImGui::TextDisabled("%s / %s",class_name(metric_cls()),metric_name((Metric)metric));
             if (count) draw_heatmap(count,frame_count,statistics[metric].heatmap,&member);
             else ImGui::TextDisabled("No members in this class. Choose another class above.");
             ImGui::EndTabItem();
@@ -4289,18 +6065,26 @@ struct Lavery : viamd::EventHandler {
             }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Compare",nullptr,comparison_export_requested ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)) {
+        if (ImGui::BeginTabItem("Sequence profile")) {
+            draw_sequence_profile(frame_count);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Distribution###Compare")) {
             draw_comparison(frame_count);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Export")) {
-            if (ImGui::TreeNode("Parameter / member for table exports")) {
-                draw_parameter_selection(true);
-                ImGui::TreePop();
+            if (ImGui::BeginTabBar("Export workflows")) {
+                if (ImGui::BeginTabItem("Data")) {
+                    draw_analysis_exports(frame_count);
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Representative frames")) {
+                    draw_representatives(frame_count);
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
             }
-            ImGui::Combo("View", &export_view, "Representative frames\0Analysis tables\0");
-            if (export_view==0) draw_representatives(frame_count);
-            else draw_analysis_exports(frame_count);
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -4327,7 +6111,9 @@ struct Lavery : viamd::EventHandler {
             size_t valid=0;
             for (int m=0; m<count; ++m) valid+=std::isfinite(values[metric][frame*columns[metric]+m]);
             ImGui::Text("Frame %zu | %zu / %d members have data", frame, valid, count);
-            ImGui::TextDisabled("Explicit H: >=1 canonical H-bond (D-A <=3.5 A, H-D-A <=30 deg). No H: >=2 heavy contacts <=3.5 A.");
+            ImGui::TextDisabled("Contact criteria (?)");
+            ImGui::SetItemTooltip("Explicit H: >=1 canonical H-bond (D-A <=3.5 A, H-D-A <=30 deg).\n"
+                "No H: >=2 heavy contacts <=3.5 A.");
             if (metric_cls() == Class_Nucleotide)
                 ImGui::TextDisabled("Quality is for %s. Warnings retain finite values; contacts describe the parent pair.",
                     metric_name((Metric)metric));
@@ -4421,6 +6207,8 @@ struct Lavery : viamd::EventHandler {
             if (ImGui::MenuItem("Remove added events", nullptr, false, !timeline_period_ids.empty())) remove_event_periods();
             ImGui::EndPopup();
         }
+        const bool duration_filtered=times ? events_max_shown_time_ps>0 : events_max_shown_frames>0;
+        if (ImGui::TreeNode("Duration filter","Duration filter%s",duration_filtered ? " (active)" : "")) {
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
         if (times) {
             const float scale = event_time_ns ? 0.001f : 1.0f;
@@ -4446,13 +6234,13 @@ struct Lavery : viamd::EventHandler {
             events_max_shown_time_ps = 0;
             events_max_shown_frames = 0;
         }
+        ImGui::TreePop();
+        }
         if (inspected_event < outlier_events.size()) {
             const size_t selected = inspected_event;
             const size_t parent = outlier_events[selected].parent;
             if (!event_shown(selected, frame))
                 ImGui::TextDisabled("The inspected event is hidden by the table filters; inspection is retained.");
-            if (parent != SIZE_MAX) ImGui::Text("Selected: sub-event #%zu | parent #%zu", selected+1, parent+1);
-            else ImGui::Text("Selected: event #%zu", selected+1);
             ImGui::TextUnformatted("Viewport:");
             ImGui::SameLine();
             char selected_label[64];
@@ -4976,6 +6764,10 @@ struct Lavery : viamd::EventHandler {
     }
 
     void export_events_csv(size_t frames, bool shown_only = false) {
+        if (!detection_enabled) {
+            MD_LOG_ERROR("Lavery: enable outlier detection before exporting events");
+            return;
+        }
         char path[4096] = {};
         if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
         md_file_t file = {};
@@ -5077,15 +6869,41 @@ struct Lavery : viamd::EventHandler {
         focus_heatmap_selection = true;
     }
 
-    void export_csv(size_t frames,bool reference_only=false) {
-        if (reference_only && (reference_source || statistics_end_frame<=statistics_first_frame)) {
-            MD_LOG_ERROR("Lavery: select a valid current-trajectory Baseline range before exporting a reference");
+    void export_csv(size_t frames) {
+        const bool include_reference=data_export.reference;
+        std::vector<ExportInterval> intervals;
+        if (!export_intervals(intervals,frames) || intervals.empty()) {
+            if (data_export_error.empty()) data_export_error="Select a valid export interval.";
+            MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str());
             return;
+        }
+        bool any_member=false;
+        for (int cls=0;cls<Class_Count;++cls) {
+            if (!(data_export.parameters&(class_all_parameters(cls)<<class_first_metric(cls)))) continue;
+            for (size_t m=0;m<class_members(cls);++m) any_member|=export_member(cls,m);
+        }
+        if (!any_member) {
+            data_export_error="No positions match the selected parameters and sequence range.";
+            MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str());
+            return;
+        }
+        std::array<MetricStatistics,Metric_Count> export_statistics;
+        size_t reference_first=0,reference_end=0;
+        if (include_reference && !workflow_reference_range(export_reference_setup,frames,reference_first,reference_end,data_export_error)) {
+            MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str()); return;
+        }
+        for (int id=0;id<(int)Metric_Count;++id) {
+            if (!include_reference || !columns[id] || !(data_export.parameters&(1u<<id))) continue;
+            if (!workflow_statistics(export_reference_setup,(Metric)id,&export_statistics[id],false)) {
+                data_export_error=export_reference_setup.error;
+                MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str()); return;
+            }
         }
         char path[4096] = {};
         if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
         md_file_t file = {};
         if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+            data_export_error="Could not open CSV export file.";
             MD_LOG_ERROR("Lavery: could not open CSV export '%s'", path);
             return;
         }
@@ -5099,53 +6917,68 @@ struct Lavery : viamd::EventHandler {
         const float* times = timeline_times(frames);
         char unit[32] = "frame";
         if (times) md_unit_print(unit, sizeof(unit), app->timeline.time_unit);
-        const size_t first_frame=reference_only ? statistics_first_frame : 0;
-        const size_t end_frame=reference_only ? statistics_end_frame : frames;
-        for (int cls=0; cls<Class_Count; ++cls) {
-            if (!reference_only && cls!=metric_cls()) continue;
-            const bool step=cls==Class_Step;
-            const auto& labels=class_labels(cls);
-            const int offset=class_first_metric(cls);
-            const size_t count=class_members(cls);
-            std::vector<std::string> reference_sources(count);
-            for (size_t m=0; m<count; ++m) reference_sources[m]=reference_provenance(cls,m);
-            for (size_t f = first_frame; f < end_frame && ok; ++f) {
-                for (size_t m = 0; m < count && ok; ++m) {
-                    const auto assessment = reference_only ? assess_member(f,cls,m,class_all_parameters(cls)) : assess(f,m);
-                    CsvSample sample;
-                    sample.run = run;
-                    sample.frame = f;
-                    sample.time = times ? (double)times[f] : (double)f;
-                    sample.time_unit = unit;
-                    sample.member = m + 1;
-                    sample.label = labels[m];
-                    sample.pair_a = step ? pair_labels[steps[m].a] : pair_labels[cls == Class_Nucleotide ? m / 2 : m];
-                    sample.pair_b = step ? pair_labels[steps[m].b] : "";
-                    sample.sigma = outlier_sigma;
-                    sample.selected_mask = reference_only ? class_all_parameters(cls) : outlier_parameter_mask();
-                    sample.member_outlier = assessment.contributors != 0;
-                    sample.baseline_method = (Baseline)statistics_baseline;
-                    sample.reference_scope = (ReferenceScope)statistics_reference_scope;
-                    sample.reference_source = reference_sources[m];
-                    const auto bounds = baseline_bounds(times);
-                    sample.baseline_begin = bounds.first;
-                    sample.baseline_end = bounds.second;
-                    for (int k = 0; k < class_parameter_count(cls); ++k) {
-                        const int id = offset + k;
-                        sample.metric = (Metric)id;
-                        sample.quality = parameter_quality(f, m, id);
-                        sample.value = values[id][f * count + m];
-                        sample.baseline = statistics[id].members[m];
-                        buffer += csv_sample(sample);
+        for (const auto& interval : intervals) {
+            const size_t first_frame=interval.first,end_frame=interval.end;
+            for (int cls=0; cls<Class_Count; ++cls) {
+                const uint32_t mask=(data_export.parameters>>class_first_metric(cls))&class_all_parameters(cls);
+                if (!mask) continue;
+                const bool step=cls==Class_Step;
+                const auto& labels=class_labels(cls);
+                const int offset=class_first_metric(cls);
+                const size_t count=class_members(cls);
+                std::vector<std::string> reference_sources(count);
+                if (include_reference) for (size_t m=0; m<count; ++m)
+                    reference_sources[m]=workflow_member_provenance(export_reference_setup,cls,m,frames);
+                for (size_t f = first_frame; f < end_frame && ok; ++f) {
+                    for (size_t m = 0; m < count && ok; ++m) {
+                        if (!export_member(cls,m)) continue;
+                        bool outlier=false;
+                        if (include_reference && detection_enabled) for (int k=0;k<class_parameter_count(cls);++k)
+                            if ((mask&(1u<<k)) && export_statistics[offset+k].members[m].is_outlier(values[offset+k][f*count+m],outlier_sigma))
+                                outlier=true;
+                        CsvSample sample;
+                        sample.include_reference=include_reference;
+                        sample.run = run+(data_export.interval.kind ? "; interval="+interval.name : "");
+                        sample.frame = f;
+                        sample.time = times ? (double)times[f] : (double)f;
+                        sample.time_unit = unit;
+                        sample.member = m + 1;
+                        sample.label = labels[m];
+                        sample.pair_a = step ? pair_labels[steps[m].a] : pair_labels[cls == Class_Nucleotide ? m / 2 : m];
+                        sample.pair_b = step ? pair_labels[steps[m].b] : "";
+                        sample.sigma = outlier_sigma;
+                        sample.detection_enabled = detection_enabled;
+                        sample.selected_mask = mask;
+                        sample.member_outlier = outlier;
+                        sample.baseline_method = (Baseline)export_reference_setup.method;
+                        sample.reference_scope = export_reference_setup.source==1 ||
+                            (export_reference_setup.source==2 && export_reference_setup.external_pooled) ?
+                            Reference_HelixHistory : Reference_OwnHistory;
+                        sample.reference_source = reference_sources[m];
+                        sample.baseline_begin = !include_reference || export_reference_setup.source==2 ? NAN :
+                            times ? times[reference_first] : (double)reference_first;
+                        sample.baseline_end = !include_reference || export_reference_setup.source==2 ? NAN :
+                            times ? times[reference_end-1] : (double)reference_end-1;
+                        for (int k = 0; k < class_parameter_count(cls); ++k) {
+                            if (!(mask&(1u<<k))) continue;
+                            const int id = offset + k;
+                            sample.metric = (Metric)id;
+                            sample.quality = parameter_quality(f, m, id);
+                            sample.value = values[id][f * count + m];
+                            if (include_reference) sample.baseline = export_statistics[id].members[m];
+                            buffer += csv_sample(sample);
+                        }
                     }
+                    if (buffer.size() >= 65536) flush();
                 }
-                if (buffer.size() >= 65536) flush();
             }
         }
         if (ok) flush();
         if (!md_file_close(&file)) ok = false;
-        if (!ok) MD_LOG_ERROR("Lavery: CSV export failed; '%s' may be incomplete", path);
-        else MD_LOG_INFO("Lavery: exported CSV to '%s'", path);
+        if (!ok) {
+            data_export_error="CSV write failed; output may be incomplete.";
+            MD_LOG_ERROR("Lavery: CSV export failed; '%s' may be incomplete", path);
+        } else MD_LOG_INFO("Lavery: exported CSV to '%s'", path);
     }
 
     void draw_current_outliers(int count, size_t frame_count) {
@@ -5202,14 +7035,26 @@ struct Lavery : viamd::EventHandler {
     }
 
     void draw_heatmap(int count, size_t frame_count, const std::vector<float>& heatmap_data, int* selected_member) {
+        const float* times=timeline_times(frame_count);
+        if (!heatmap_time_available(times,frame_count)) return;
+        const double time_first=sample_cell_edge(0,times,frame_count),time_last=sample_cell_edge(frame_count,times,frame_count);
+        const double time_width=time_last-time_first,cursor=cursor_x(times,frame_count);
+        double minimum_time_width=1;
+        if (times && frame_count>1) {
+            minimum_time_width=(double)times[1]-times[0];
+            for (size_t f=2;f<frame_count;++f)
+                minimum_time_width=std::min(minimum_time_width,(double)times[f]-times[f-1]);
+        }
+        char time_label[64];
+        timeline_label(time_label,sizeof(time_label),times);
         auto& labels = class_labels(metric_cls());
-        if (ImGui::SmallButton("Reset view")) reset_heatmap_view = true;
+        if (ImGui::SmallButton("Fit view")) reset_heatmap_view = true;
         ImGui::SameLine();
         if (ImGui::SmallButton("Go to selection")) focus_heatmap_selection = true;
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
-        ImGui::SetItemTooltip("Heatmap of signed sigma for every member and frame.\n"
-            "Ctrl-click / Ctrl-drag: jump / scrub. Click: select member. Drag: pan. Wheel: zoom.\n"
+        ImGui::SetItemTooltip("Heatmap of signed sigma for every member over time.\n"
+            "Ctrl-click / Ctrl-drag: jump / scrub. Click: select member and time. Drag: pan. Wheel: zoom.\n"
             "Double-click: fit the full trajectory and all members.\n"
             "Red: positive deviation. Blue: negative deviation.");
         ImGui::SameLine();
@@ -5221,34 +7066,38 @@ struct Lavery : viamd::EventHandler {
         const bool child_visible = ImGui::BeginChild("##heatmap_area", ImVec2(0, std::max(150.0f, ImGui::GetContentRegionAvail().y)),
             ImGuiChildFlags_Borders,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        char period_unit[32]={};
+        if (times) md_unit_print(period_unit,sizeof(period_unit),app->timeline.time_unit);
+        const auto period_axis=draw_heatmap_period_lane(times,frame_count,heatmap_limits.X,period_unit,reset_heatmap_view);
         ImPlotColormap colormap = ImPlot::GetColormapIndex("Lavery signed z-score");
         if (colormap < 0) {
             const ImU32 colors[] = {IM_COL32(40, 215, 255, 255), IM_COL32(240, 240, 240, 255), IM_COL32(255, 65, 95, 255)};
             colormap = ImPlot::AddColormap("Lavery signed z-score", colors, 3, false);
         }
         ImPlot::PushColormap(colormap);
-        if (child_visible && ImPlot::BeginPlot("Frames × sequence", ImVec2(-1, -1), ImPlotFlags_NoLegend)) {
-            ImPlot::SetupAxes("Frame", class_name(metric_cls()));
-            ImPlot::SetupAxesLimits(-0.5, (double)frame_count - 0.5, -0.5, count - 0.5,
+        if (child_visible && ImPlot::BeginPlot("Time x sequence###parameter_heatmap", ImVec2(-1, -1), ImPlotFlags_NoLegend)) {
+            ImPlot::SetupAxes(time_label, class_name(metric_cls()));
+            ImPlot::SetupAxesLimits(time_first,time_last,-0.5,count-0.5,
                 reset_heatmap_view ? ImPlotCond_Always : ImPlotCond_Once);
+            ImPlot::SetupAxisLinks(ImAxis_X1,&heatmap_limits.X.Min,&heatmap_limits.X.Max);
             if (focus_heatmap_selection && !reset_heatmap_view &&
                 heatmap_limits.X.Size() > 0 && heatmap_limits.Y.Size() > 0) {
-                const double width = std::min(heatmap_limits.X.Size(), (double)frame_count);
+                const double width = std::min(heatmap_limits.X.Size(),time_width);
                 const double height = std::min(heatmap_limits.Y.Size(), (double)count);
-                const double xmin = std::clamp(app->animation.frame - width * 0.5, -0.5, (double)frame_count - 0.5 - width);
+                const double xmin = std::clamp(cursor-width*.5,time_first,time_last-width);
                 const double ymin = std::clamp((double)*selected_member - height * 0.5, -0.5, count - 0.5 - height);
                 ImPlot::SetupAxesLimits(xmin, xmin + width, ymin, ymin + height, ImPlotCond_Always);
             } else if (!reset_heatmap_view && heatmap_frame != app->animation.frame &&
-                heatmap_limits.X.Size() > 0 && !heatmap_limits.X.Contains(app->animation.frame)) {
-                const double width = std::min(heatmap_limits.X.Size(), (double)frame_count);
-                const double xmin = std::clamp(app->animation.frame - width * 0.5, -0.5, (double)frame_count - 0.5 - width);
+                heatmap_limits.X.Size() > 0 && !heatmap_limits.X.Contains(cursor)) {
+                const double width = std::min(heatmap_limits.X.Size(),time_width);
+                const double xmin = std::clamp(cursor-width*.5,time_first,time_last-width);
                 ImPlot::SetupAxisLimits(ImAxis_X1, xmin, xmin + width, ImPlotCond_Always);
             }
             reset_heatmap_view = false;
             focus_heatmap_selection = false;
-            ImPlot::SetupAxisLimitsConstraints(ImAxis_X1, -0.5, (double)frame_count - 0.5);
+            ImPlot::SetupAxisLimitsConstraints(ImAxis_X1,time_first,time_last);
             ImPlot::SetupAxisLimitsConstraints(ImAxis_Y1, -0.5, count - 0.5);
-            ImPlot::SetupAxisZoomConstraints(ImAxis_X1, 1, (double)frame_count);
+            ImPlot::SetupAxisZoomConstraints(ImAxis_X1,minimum_time_width,time_width);
             ImPlot::SetupAxisZoomConstraints(ImAxis_Y1, 1, count);
             ImPlot::SetupAxisFormat(ImAxis_Y1, [](double value, char* buffer, int size, void* user_data) {
                 const auto& self = *(const Lavery*)user_data;
@@ -5274,11 +7123,11 @@ struct Lavery : viamd::EventHandler {
             }
             const auto visible = ImPlot::GetPlotLimits().X;
             if (ImPlot::FitThisFrame()) {
-                ImPlot::FitPoint(ImPlotPoint(-.5,-.5));
-                ImPlot::FitPoint(ImPlotPoint((double)frame_count-.5,count-.5));
+                ImPlot::FitPoint(ImPlotPoint(time_first,-.5));
+                ImPlot::FitPoint(ImPlotPoint(time_last,count-.5));
             }
-            const size_t first = (size_t)std::clamp(std::floor(visible.Min + 0.5), 0.0, (double)frame_count - 1);
-            const size_t end = (size_t)std::clamp(std::ceil(visible.Max + 0.5), (double)first + 1, (double)frame_count);
+            const size_t first=nearest_frame(visible.Min,times,frame_count);
+            const size_t end=nearest_frame(visible.Max,times,frame_count)+1;
             const size_t pixels = (size_t)std::max(1.0f, ImPlot::GetPlotSize().x);
             const size_t bin_width = std::max((size_t)1, (end - first + pixels - 1) / pixels);
             const size_t bins = (end - first + bin_width - 1) / bin_width;
@@ -5299,18 +7148,20 @@ struct Lavery : viamd::EventHandler {
                 heatmap_end = end;
                 heatmap_bin_width = bin_width;
             }
-            ImPlot::PlotHeatmap("##lavery_heatmap", heatmap_display.data(), count, (int)bins,
-                -outlier_sigma, outlier_sigma,
-                nullptr, ImPlotPoint((double)first - 0.5, -0.5),
-                ImPlotPoint((double)(first + bins * bin_width) - 0.5, count - 0.5));
-            scrub_timeline("##heatmap_scrub", nullptr, frame_count);
-            draw_time_cursor(nullptr, frame_count, 4);
+            std::vector<double> edges;
+            for (size_t bin=0;bin<=bins;++bin)
+                edges.push_back(sample_cell_edge(std::min(end,first+bin*bin_width),times,frame_count));
+            plot_sequence_heatmap("##lavery_heatmap",heatmap_display,count,edges,-outlier_sigma,outlier_sigma);
+            scrub_timeline("##heatmap_scrub",times,frame_count);
+            timeline_periods_plot(&app->timeline.periods,period_axis,app->animation.frame);
+            draw_time_cursor(times,frame_count,4);
+            draw_heatmap_landmarks(metric_cls());
             const double selected_row = *selected_member;
             ImPlot::SetNextLineStyle(ImVec4(0,0,0,1),4);
             ImPlot::PlotInfLines("Selected member", &selected_row, 1, ImPlotInfLinesFlags_Horizontal);
-            if (ImPlot::IsPlotHovered()) {
+            if (ImPlot::IsPlotHovered() && !timeline_periods_dragging()) {
                 const ImPlotPoint pos = ImPlot::GetPlotMousePos();
-                const int frame = (int)std::floor(pos.x + 0.5);
+                const int frame = (int)nearest_frame(pos.x,times,frame_count);
                 const int col = (int)std::floor(pos.y + 0.5);
                 if (frame >= 0 && frame < (int)frame_count && col >= 0 && col < count) {
                     const float value = values[metric][(size_t)frame * count + col];
@@ -5321,25 +7172,29 @@ struct Lavery : viamd::EventHandler {
                         ImGui::TextUnformatted(pair_labels[steps[col].a].c_str());
                         ImGui::TextUnformatted(pair_labels[steps[col].b].c_str());
                     }
-                    ImGui::Text("Frame %d: %.3f %s; z = %+.2f%s", frame, value, metric_unit((Metric)metric), z,
+                    if (times) ImGui::Text("%s: %.6g",time_label,times[frame]);
+                    else ImGui::Text("Frame %d (no timestamps)",frame);
+                    ImGui::Text("%.3f %s; z = %+.2f%s",value,metric_unit((Metric)metric),z,
                         state_text((Metric)metric, (size_t)col, value).c_str());
                     draw_quality(quality_at((size_t)frame, (size_t)col), std::isfinite(value));
                     ImGui::EndTooltip();
                 }
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                heatmap_pressed = ImPlot::IsPlotHovered() && !ImGui::GetIO().KeyCtrl;
+                heatmap_pressed = ImPlot::IsPlotHovered() && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift;
                 heatmap_dragged = false;
             }
             if (heatmap_pressed && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) heatmap_dragged = true;
             if (heatmap_pressed && !heatmap_dragged && ImPlot::IsPlotHovered() &&
                 ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                 const ImPlotPoint pos = ImPlot::GetPlotMousePos();
-                const int frame = (int)std::floor(pos.x + 0.5);
+                const int frame = (int)nearest_frame(pos.x,times,frame_count);
                 const int col = (int)std::floor(pos.y + 0.5);
                 if (frame >= 0 && frame < (int)frame_count && col >= 0 && col < count) {
                     *selected_member = col;
                     selected_detail_active = true;
+                    inspected_event=inspected_switch=SIZE_MAX;
+                    select_target(metric_cls(),(uint32_t)col,metric-class_first_metric(metric_cls()),frame);
                 }
             }
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) heatmap_pressed = false;
@@ -5355,9 +7210,10 @@ struct Lavery : viamd::EventHandler {
         refresh_event_inspection();
         markers.clear();
         event_context_bases.clear();
+        event_context_groups.clear();
         if (inspected_switch != SIZE_MAX && (inspected_switch >= state_switches.size() ||
             app->animation.mode == PlaybackMode::Playing || app->animation.frame != inspection_frame)) inspected_switch = SIZE_MAX;
-        if (inspected_switch == SIZE_MAX && (sync_viewport || inspected_event != SIZE_MAX)) {
+        if (detection_enabled && signed_overlay && inspected_switch == SIZE_MAX && (sync_viewport || inspected_event != SIZE_MAX)) {
             event_context_groups.assign(bases.size(), 0);
             std::vector<size_t> owners(bases.size(), SIZE_MAX);
             for (size_t e = 0; e < outlier_events.size(); ++e) {
@@ -5390,7 +7246,7 @@ struct Lavery : viamd::EventHandler {
                     std::isfinite(result.peak_z) ? result.peak_z : 0.0f, contribution.lost});
             }
         }
-        markers_explicit = inspected_event == SIZE_MAX && !preview.empty() && app->animation.mode != PlaybackMode::Playing;
+        markers_explicit = measurement_feedback && inspected_event == SIZE_MAX && !preview.empty() && app->animation.mode != PlaybackMode::Playing;
         if (markers_explicit) {
             for (const auto& target : preview) {
                 if (target.index >= class_members(target.cls)) continue;
@@ -5398,18 +7254,18 @@ struct Lavery : viamd::EventHandler {
                     return m.cls == target.cls && m.index == target.index;
                 });
                 if (duplicate) continue;
-                const auto result = assess_member(frame, target.cls, target.index, target.mask);
+                const auto result = detection_enabled && signed_overlay ? assess_member(frame, target.cls, target.index, target.mask) : OutlierAssessment{};
                 markers.push_back({target.cls, target.index, target.mask, result.contributors,
                     std::isfinite(result.peak_z) ? result.peak_z : 0.0f});
             }
         }
         detail_metric = -1;
         if (app->animation.mode != PlaybackMode::Playing &&
-            selected_detail_active && sync_viewport && member >= 0 && (size_t)member < class_members(metric_cls())) {
+            measurement_feedback && selected_detail_active && sync_viewport && member >= 0 && (size_t)member < class_members(metric_cls())) {
             detail_target = {(uint8_t)metric_cls(), (uint32_t)member, 1u << (metric - class_first_metric(metric_cls()))};
             detail_metric = metric;
         }
-        if (app->animation.mode != PlaybackMode::Playing && !preview.empty()) {
+        if (measurement_feedback && app->animation.mode != PlaybackMode::Playing && !preview.empty()) {
             const auto& target = preview.back();
             if (target.mask && !(target.mask & (target.mask - 1))) {
                 detail_target = target;
@@ -5418,7 +7274,7 @@ struct Lavery : viamd::EventHandler {
                 detail_metric = class_first_metric(target.cls) + k;
             }
         }
-        if (app->animation.mode != PlaybackMode::Playing && preview.empty() &&
+        if (measurement_feedback && app->animation.mode != PlaybackMode::Playing && preview.empty() &&
             hovered_metric >= 0 && hovered_frame == ImGui::GetFrameCount() - 1) {
             detail_target = hovered_target;
             detail_metric = hovered_metric;
@@ -5433,7 +7289,7 @@ struct Lavery : viamd::EventHandler {
             else if (std::none_of(markers.begin(), markers.end(), [&](const Marker& m) {
                 return m.cls == target.cls && m.index == target.index;
             })) {
-                const auto result = assess_member(frame, target.cls, target.index, target.mask);
+                const auto result = detection_enabled && signed_overlay ? assess_member(frame, target.cls, target.index, target.mask) : OutlierAssessment{};
                 markers.push_back({target.cls, target.index, target.mask, result.contributors,
                     std::isfinite(result.peak_z) ? result.peak_z : 0.0f});
             }
@@ -5442,7 +7298,7 @@ struct Lavery : viamd::EventHandler {
                 detail_metric = change.metric;
                 detail_target = {Class_Nucleotide, change.member, 1u << (change.metric-Alpha)};
                 markers.clear();
-                const auto result = assess_member(frame, Class_Nucleotide, change.member, detail_target.mask);
+                const auto result = detection_enabled && signed_overlay ? assess_member(frame, Class_Nucleotide, change.member, detail_target.mask) : OutlierAssessment{};
                 markers.push_back({Class_Nucleotide, change.member, detail_target.mask, result.contributors,
                     std::isfinite(result.peak_z) ? result.peak_z : 0.0f});
                 const uint32_t base = nucleotide_base(change.member);
@@ -5544,7 +7400,7 @@ struct Lavery : viamd::EventHandler {
         const size_t frame = current_frame();
         const int offset = class_first_metric(cls);
         float z[MAX_CLASS_PARAMETERS];
-        const auto result = assess_member(frame, cls, index, mask, z);
+        const auto result = detection_enabled ? assess_member(frame, cls, index, mask, z) : OutlierAssessment{};
         static const char* titles[] = {"intra-base pair", "inter-base pair", "nucleotide"};
         tooltip_title(req, "Lavery %s" TOOLTIP_SEP "%s", titles[cls], labels[index].c_str());
         if (cls == Class_Nucleotide) {
@@ -5587,9 +7443,11 @@ struct Lavery : viamd::EventHandler {
                 }
             }
         }
-        tooltip_row(req, STR_LIT("frame"), "%zu" TOOLTIP_SEP "%.1f sigma" TOOLTIP_SEP "%s", frame, outlier_sigma,
-            baseline_name((Baseline)statistics_baseline));
-        tooltip_row(req, STR_LIT("reference"), "%s", reference_scope_name((ReferenceScope)statistics_reference_scope));
+        if (detection_enabled) {
+            tooltip_row(req, STR_LIT("frame"), "%zu" TOOLTIP_SEP "%.1f sigma" TOOLTIP_SEP "%s", frame, outlier_sigma,
+                baseline_name((Baseline)statistics_baseline));
+            tooltip_row(req, STR_LIT("reference"), "%s", reference_scope_name((ReferenceScope)statistics_reference_scope));
+        } else tooltip_row(req, STR_LIT("frame"), "%zu" TOOLTIP_SEP "outlier detection off",frame);
         for (int k = 0; k < class_parameter_count(cls); ++k) {
             const int id = offset + k;
             const float v = values[id][frame * columns[id] + index];
@@ -5609,6 +7467,11 @@ struct Lavery : viamd::EventHandler {
             const bool contributes = (event_parameters_now & (1u << k)) != 0;
             const bool outlier = (result.contributors & (1u << k)) != 0;
             const int state = metric_state((Metric)id, v);
+            if (!detection_enabled) {
+                if (state>=0) tooltip_row(req,key,"%.2f%s" TOOLTIP_SEP "%s",v,unit,metric_state_name((Metric)id,state));
+                else tooltip_row(req,key,"%.2f%s",v,unit);
+                continue;
+            }
             const auto& stats = statistics[id].members[index];
             if (!stats.reference(v).count) {
                 tooltip_row(req, key, "%.2f%s" TOOLTIP_SEP "no baseline for this sample/state", v, unit);
@@ -5745,7 +7608,8 @@ struct Lavery : viamd::EventHandler {
         display_pair_frames.clear();
         display_step_frames.clear();
         display_coordinates.clear();
-        if ((!show_axis && !signed_overlay) || !display_validator || !app->mold.state.xyz) return;
+        if ((!show_axis && !visual_feedback_enabled(detection_enabled,signed_overlay,measurement_feedback)) ||
+            !display_validator || !app->mold.state.xyz) return;
         // The displayed coordinates may be turned relative to the cell. Fit and
         // unwrap in the lattice frame, then turn the resulting geometry back.
         auto state = app->mold.state;
@@ -6010,7 +7874,7 @@ struct Lavery : viamd::EventHandler {
         const bool pickable = picking_range.domain == PickingDomain_Lavery &&
             picking_range.end - picking_range.beg == picking_count();
         const uint32_t pick = pickable ? parameter_pick_id(id, target.index) : 0xFFFFFFFFu;
-        const float z = statistics[id].members[target.index].zscore(detail_value);
+        const float z = detection_enabled && signed_overlay ? statistics[id].members[target.index].zscore(detail_value) : NAN;
         const uint32_t color = !std::isfinite(z) || std::fabs(z) < outlier_sigma ? IM_COL32(245,245,245,240) :
             z > 0 ? IM_COL32(255,65,95,240) : IM_COL32(40,215,255,240);
         immediate::Scope world(app->gfx.depth_overlay, "Lavery selected parameter");
@@ -6041,7 +7905,8 @@ struct Lavery : viamd::EventHandler {
                 const int state = metric_state(id, detail_value);
                 if (state >= 0) {
                     const auto& stats = statistics[id].members[target.index];
-                    if (!stats.reference(detail_value).count)
+                    if (!detection_enabled) snprintf(label,sizeof(label),"%s",metric_state_name(id,state));
+                    else if (!stats.reference(detail_value).count)
                         snprintf(label, sizeof(label), "%s (no baseline)", metric_state_name(id,state));
                     else snprintf(label, sizeof(label), "%s (baseline usually %s, %.0f%%)", metric_state_name(id,state),
                         metric_state_name(id,stats.state), stats.state_fraction*100);
@@ -6101,7 +7966,7 @@ struct Lavery : viamd::EventHandler {
 
     void draw_signed_overlay() {
         measurement_labels.clear();
-        if (!signed_overlay || display_bases.empty()) return;
+        if (!visual_feedback_enabled(detection_enabled,signed_overlay,measurement_feedback) || display_bases.empty()) return;
         draw_event_glow();
         if (markers.empty()) return;
         immediate::Scope scope(app->gfx.depth_overlay, "Lavery signed outliers");
@@ -6173,7 +8038,7 @@ struct Lavery : viamd::EventHandler {
                     groove = true;
                     const uint32_t parameter_pick = pickable ? parameter_pick_id(id, marker.index) : 0xFFFFFFFFu;
                     const float v = values[id][current_frame() * columns[id] + marker.index];
-                    const float z = statistics[id].members[marker.index].zscore(v);
+                    const float z = detection_enabled && signed_overlay ? statistics[id].members[marker.index].zscore(v) : NAN;
                     const uint32_t tint = !std::isfinite(z) || std::fabs(z) < event_end_sigma() ? IM_COL32(235,235,235,220) :
                         z > 0 ? IM_COL32(255,65,95,220) : IM_COL32(40,215,255,220);
                     for (const auto& span : display_grooves[id - MinorGroove][marker.index]) {

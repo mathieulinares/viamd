@@ -53,6 +53,18 @@ uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_s
 
 } // namespace
 
+bool pairing_profile_samples(std::vector<float>* out, const std::vector<PairingState>& values, PairingState state) {
+    if (!out || state<=Pairing_Unavailable || state>=Pairing_Count ||
+        std::any_of(values.begin(),values.end(),[](PairingState v) { return v>=Pairing_Count; })) {
+        MD_LOG_ERROR("Lavery: invalid pairing occupancy-profile category");
+        return false;
+    }
+    out->resize(values.size());
+    for (size_t i=0;i<values.size();++i)
+        (*out)[i]=values[i]==Pairing_Unavailable ? NAN : values[i]==state ? 100.0f : 0.0f;
+    return true;
+}
+
 const char* pairing_state_name(PairingState state) {
     switch (state) {
     case Pairing_WatsonCrick: return "Watson-Crick";

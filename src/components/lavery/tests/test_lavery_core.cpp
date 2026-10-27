@@ -388,6 +388,116 @@ UTEST(lavery_core, statistics_handle_empty_and_invalid_matrices) {
     EXPECT_FALSE(compute_statistics(nullptr, {}, 0));
 }
 
+UTEST(lavery_core, structural_bend_reconstructs_pair_normal_angle_with_twist) {
+    constexpr double rad=3.14159265358979323846/180;
+    const BasePairFrame a={{0,0,0},{1,0,0},{0,1,0},{0,0,1}};
+    for (const vec3_t axis : {vec3_t{1,0,0},vec3_t{0,0,1},vec3_normalize(vec3_t{1,2,3})}) {
+        for (const float angle : {0.0f,10.0f,60.0f,150.0f}) {
+            const quat_t q=quat_axis_angle(axis,(float)(angle*rad));
+            const BasePairFrame b={{0,0,3.4f},quat_mul_vec3(q,a.x),quat_mul_vec3(q,a.y),quat_mul_vec3(q,a.z)};
+            Values values;
+            ASSERT_TRUE(compute_step(&values,a,b));
+            const double expected=std::acos(std::clamp((double)vec3_dot(a.z,b.z),-1.0,1.0))/rad;
+            EXPECT_NEAR(step_bend_degrees(values.metric[Tilt],values.metric[Roll],values.metric[Twist]),expected,.002);
+        }
+    }
+    EXPECT_EQ(step_bend_degrees(0,0,36),0.0f);
+    EXPECT_NEAR(step_bend_degrees(0,30,0),30.0f,1e-5);
+    EXPECT_LT(step_bend_degrees(30,40,120),50.0f);
+    EXPECT_TRUE(std::isnan(step_bend_degrees(NAN,0,0)));
+    EXPECT_TRUE(std::isnan(step_bend_degrees(180,180,180)));
+}
+
+UTEST(lavery_core, structural_candidate_occupancy_uses_valid_frames_and_inclusive_threshold) {
+    std::vector<float> bend,candidates;
+    ASSERT_TRUE(bend_profile_samples(&bend,&candidates,{0,0,NAN,0},{30,20,40,40},{0,0,0,0},30));
+    EXPECT_EQ(candidates[0],100.0f);
+    EXPECT_EQ(candidates[1],0.0f);
+    EXPECT_TRUE(std::isnan(candidates[2]));
+    std::vector<MemberStatistics> summary;
+    ASSERT_TRUE(sequence_statistics(&summary,candidates,1,false));
+    EXPECT_EQ(summary[0].count,(size_t)3);
+    EXPECT_NEAR(summary[0].mean,200.0/3,1e-10);
+    ASSERT_TRUE(sequence_statistics(&summary,candidates,1,false,1,3));
+    EXPECT_EQ(summary[0].mean,0.0);
+    EXPECT_EQ(summary[0].count,(size_t)1);
+    EXPECT_FALSE(bend_profile_samples(&bend,&candidates,{0},{0},{},30));
+    EXPECT_FALSE(bend_profile_samples(&bend,&candidates,{0},{0},{0},0));
+    EXPECT_FALSE(bend_profile_samples(&bend,&candidates,{0},{0},{0},NAN));
+}
+
+UTEST(lavery_core, structural_state_occupancy_preserves_unavailable_and_partition) {
+    const std::vector<float> values={-90,90,NAN,-80};
+    std::vector<float> bi,bii;
+    ASSERT_TRUE(state_profile_samples(&bi,values,EpsilonZeta,0));
+    ASSERT_TRUE(state_profile_samples(&bii,values,EpsilonZeta,1));
+    for (size_t i : {(size_t)0,(size_t)1,(size_t)3}) EXPECT_EQ(bi[i]+bii[i],100.0f);
+    EXPECT_TRUE(std::isnan(bi[2]));
+    EXPECT_FALSE(state_profile_samples(&bi,values,Roll,0));
+    const std::vector<PairingState> chemistry={Pairing_WatsonCrick,Pairing_Unavailable,Pairing_Unpaired,Pairing_Hoogsteen};
+    std::vector<float> hg;
+    ASSERT_TRUE(pairing_profile_samples(&hg,chemistry,Pairing_Hoogsteen));
+    EXPECT_TRUE(std::isnan(hg[1]));
+    EXPECT_EQ(hg[0],0.0f); EXPECT_EQ(hg[2],0.0f); EXPECT_EQ(hg[3],100.0f);
+    std::vector<MemberStatistics> summary;
+    ASSERT_TRUE(sequence_statistics(&summary,hg,1,false));
+    EXPECT_EQ(summary[0].count,(size_t)3);
+    EXPECT_NEAR(summary[0].mean,100.0/3,1e-10);
+    EXPECT_FALSE(pairing_profile_samples(&hg,chemistry,Pairing_Unavailable));
+}
+
+UTEST(lavery_core, structural_twist_difference_requires_reference_and_wraps) {
+    std::vector<float> difference;
+    std::vector<MemberStatistics> reference={{179,1,10},{}};
+    ASSERT_TRUE(twist_difference_samples(&difference,{-179,36,178,40},reference));
+    EXPECT_EQ(difference[0],2.0f); EXPECT_EQ(difference[2],-1.0f);
+    EXPECT_TRUE(std::isnan(difference[1])); EXPECT_TRUE(std::isnan(difference[3]));
+    ASSERT_TRUE(twist_difference_samples(&difference,{},{}));
+    EXPECT_FALSE(twist_difference_samples(&difference,{1},{}));
+    EXPECT_FALSE(twist_difference_samples(&difference,{1},reference));
+}
+
+UTEST(lavery_core, sequence_profile_preserves_stable_spatial_anomalies_and_period_spread) {
+    const std::vector<float> values={1,40,NAN, 3,40,NAN, 101,40,NAN};
+    std::vector<MemberStatistics> profile;
+    ASSERT_TRUE(sequence_statistics(&profile,values,3,false,0,2));
+    ASSERT_EQ(profile.size(),(size_t)3);
+    EXPECT_EQ(profile[0].mean,2.0);
+    EXPECT_EQ(profile[0].sd,1.0);
+    EXPECT_EQ(profile[0].count,(size_t)2);
+    EXPECT_EQ(profile[1].mean,40.0);
+    EXPECT_EQ(profile[1].sd,0.0);
+    EXPECT_EQ(profile[2].count,(size_t)0);
+    ASSERT_TRUE(sequence_statistics(&profile,values,3,false,0,2,{0,0,1}));
+    EXPECT_EQ(profile[0].mean,21.0);
+    EXPECT_EQ(profile[1].count,(size_t)4);
+    EXPECT_EQ(profile[2].count,(size_t)0);
+    ASSERT_TRUE(sequence_statistics(&profile,values,3,false,2,3));
+    EXPECT_EQ(profile[0].mean,101.0);
+    EXPECT_EQ(profile[0].sd,0.0);
+}
+
+UTEST(lavery_core, sequence_profile_uses_wrapped_angles_without_state_conditioning) {
+    std::vector<MemberStatistics> profile;
+    ASSERT_TRUE(sequence_statistics(&profile,{179,-179},1,true));
+    EXPECT_NEAR(std::fabs(profile[0].mean),180,1e-10);
+    EXPECT_NEAR(profile[0].sd,1,1e-10);
+    ASSERT_TRUE(sequence_statistics(&profile,{-60,60},1,true));
+    EXPECT_NEAR(profile[0].mean,0,1e-10);
+    EXPECT_NEAR(profile[0].sd,60,1e-10);
+    EXPECT_EQ(profile[0].state_metric,-1);
+    ASSERT_TRUE(sequence_statistics(&profile,{},0,false));
+    EXPECT_TRUE(profile.empty());
+    ASSERT_TRUE(sequence_statistics(&profile,{},2,false));
+    EXPECT_EQ(profile[0].count,(size_t)0);
+    EXPECT_FALSE(sequence_statistics(nullptr,{},0,false));
+    EXPECT_FALSE(sequence_statistics(&profile,{1},0,false));
+    EXPECT_FALSE(sequence_statistics(&profile,{1,2,3},2,false));
+    EXPECT_FALSE(sequence_statistics(&profile,{1},1,false,1,0));
+    EXPECT_FALSE(sequence_statistics(&profile,{1},1,false,0,2));
+    EXPECT_FALSE(sequence_statistics(&profile,{1},1,false,0,1,{1}));
+}
+
 UTEST(lavery_core, statistics_are_stable_for_large_offsets_and_multiple_outliers) {
     MetricStatistics stats;
     ASSERT_TRUE(compute_statistics(&stats, {1000000, 10, 1000001, 12, 1000002, 14}, 2));
@@ -695,6 +805,77 @@ UTEST(lavery_core, physical_duration_filters_elapsed_time_not_sample_count) {
     EXPECT_EQ(detect_events(frames, 10, event_steps(), options).size(), (size_t)1);
     options.min_duration = 0.001;
     EXPECT_TRUE(detect_events(frames, 10, event_steps(), options).empty());
+}
+
+UTEST(lavery_core, event_duration_and_state_residence_accept_exactly_200_ps_independently) {
+    std::vector<std::vector<MemberOutlier>> frames(6);
+    for (size_t f=0;f<3;++f) frames[f]={event_sample(0,false,0,4)};
+    const std::vector<float> phase={10,10,10,160,160,160};
+    EventOptions event_options;
+    event_options.times={0,100,200,300,400,500};
+    event_options.min_duration=200;
+    EventOptions state_options=event_options;
+    std::vector<StateSwitch> changes;
+    ASSERT_EQ(detect_events(frames,10,event_steps(),event_options).size(),(size_t)1);
+    ASSERT_TRUE(detect_state_switches(&changes,phase,1,Phase,state_options));
+    ASSERT_EQ(changes.size(),(size_t)1);
+    event_options.min_duration=200.001;
+    EXPECT_TRUE(detect_events(frames,10,event_steps(),event_options).empty());
+    ASSERT_TRUE(detect_state_switches(&changes,phase,1,Phase,state_options));
+    EXPECT_EQ(changes.size(),(size_t)1);
+    state_options.min_duration=200.001;
+    ASSERT_TRUE(detect_state_switches(&changes,phase,1,Phase,state_options));
+    EXPECT_TRUE(changes.empty());
+}
+
+UTEST(lavery_core, heatmap_cell_edges_preserve_irregular_physical_times_and_frame_fallback) {
+    const float times[]={10,20,50,100};
+    const double edges[]={5,15,35,75,125};
+    for (size_t i=0;i<5;++i) EXPECT_EQ(sample_cell_edge(i,times,4),edges[i]);
+    EXPECT_EQ(nearest_frame(34.99,times,4),(size_t)1);
+    EXPECT_EQ(nearest_frame(35,times,4),(size_t)2);
+    for (size_t i=0;i<5;++i) EXPECT_EQ(sample_cell_edge(i,nullptr,4),(double)i-.5);
+    EXPECT_EQ(sample_cell_edge(0,times,1),9.5);
+    EXPECT_EQ(sample_cell_edge(1,times,1),10.5);
+    EXPECT_TRUE(std::isnan(sample_cell_edge(5,times,4)));
+}
+
+UTEST(lavery_core, measurement_feedback_stays_enabled_without_detection_or_signed_outliers) {
+    for (bool detection : {false,true}) for (bool signed_outliers : {false,true}) {
+        EXPECT_TRUE(visual_feedback_enabled(detection,signed_outliers,true));
+        EXPECT_EQ(visual_feedback_enabled(detection,signed_outliers,false),detection && signed_outliers);
+    }
+}
+
+UTEST(lavery_core, sequence_landmarks_map_to_heatmap_rows_without_snapping_or_crossing_gaps) {
+    const std::vector<StepIndex> steps={{0,1},{1,2},{2,3},{5,6},{6,7}};
+    double row=NAN;
+    ASSERT_TRUE(sequence_heatmap_row(2.5,Class_Pair,steps,&row));
+    EXPECT_EQ(row,1.5);
+    ASSERT_TRUE(sequence_heatmap_row(2.5,Class_Nucleotide,steps,&row));
+    EXPECT_EQ(row,3.5);
+    ASSERT_TRUE(sequence_heatmap_row(2.5,Class_Step,steps,&row));
+    EXPECT_EQ(row,1);
+    ASSERT_TRUE(sequence_heatmap_row(3,Class_Step,steps,&row));
+    EXPECT_EQ(row,1.5);
+    ASSERT_TRUE(sequence_heatmap_row(6.5,Class_Step,steps,&row));
+    EXPECT_EQ(row,3);
+    EXPECT_FALSE(sequence_heatmap_row(4.5,Class_Step,steps,&row));
+    EXPECT_FALSE(sequence_heatmap_row(1,Class_Step,steps,&row));
+}
+
+UTEST(lavery_core, explicit_export_sequence_scope_tests_both_step_endpoints_and_partner) {
+    const std::vector<StepIndex> steps={{0,1},{1,2},{2,3},{5,6}};
+    EXPECT_FALSE(sequence_export_member(Class_Pair,0,steps,2,3,0));
+    EXPECT_TRUE(sequence_export_member(Class_Pair,1,steps,2,3,0));
+    EXPECT_TRUE(sequence_export_member(Class_Step,1,steps,2,3,0));
+    EXPECT_FALSE(sequence_export_member(Class_Step,0,steps,2,3,0));
+    EXPECT_FALSE(sequence_export_member(Class_Step,2,steps,2,3,0));
+    EXPECT_TRUE(sequence_export_member(Class_Nucleotide,2,steps,2,3,1));
+    EXPECT_FALSE(sequence_export_member(Class_Nucleotide,3,steps,2,3,1));
+    EXPECT_TRUE(sequence_export_member(Class_Nucleotide,3,steps,2,3,2));
+    EXPECT_FALSE(sequence_export_member(Class_Nucleotide,2,steps,2,3,2));
+    EXPECT_TRUE(sequence_export_member(Class_Nucleotide,3,steps,1,SIZE_MAX,0));
 }
 
 UTEST(lavery_core, physical_gap_uses_quiet_time_with_irregular_sampling) {
@@ -1867,6 +2048,47 @@ UTEST(lavery_core, csv_sample_has_reproducible_values_quality_baseline_and_flags
     EXPECT_TRUE(missing.find("Nonfinite atomic coordinates") != std::string::npos);
     EXPECT_TRUE(missing.find(",nan,0,") != std::string::npos);
     EXPECT_TRUE(missing.find(",2,2,nan,2,1,0,1,16") != std::string::npos);
+}
+
+UTEST(lavery_core, parameter_csv_without_detection_keeps_values_and_reference_but_no_outlier_flags) {
+    CsvSample sample;
+    sample.metric=Stretch;
+    sample.value=8;
+    sample.baseline={2,2,4};
+    sample.sigma=2;
+    sample.selected_mask=16;
+    sample.member_outlier=true;
+    const auto enabled=csv_sample(sample);
+    EXPECT_NE(enabled.find(",2,2,3,2,1,1,1,16,"),std::string::npos);
+    sample.detection_enabled=false;
+    const auto disabled=csv_sample(sample);
+    EXPECT_NE(disabled.find("bp/stretch,Angstrom,8,1,0,\"Good\",2,2,3,nan,0,0,0,0,"),std::string::npos);
+    sample.detection_enabled=true;
+    const auto restored=csv_sample(sample);
+    EXPECT_STREQ(restored.c_str(),enabled.c_str());
+}
+
+UTEST(lavery_core, measurements_only_csv_blanks_all_reference_fields_without_changing_schema_or_values) {
+    CsvSample sample;
+    sample.run="measurements";
+    sample.metric=Stretch; sample.value=8;
+    sample.baseline={2,2,4};
+    sample.selected_mask=16; sample.member_outlier=true;
+    sample.reference_source="unavailable_external_reference";
+    sample.include_reference=false;
+    const auto row=csv_sample(sample);
+    EXPECT_STREQ(row.c_str(),"\"measurements\",0,0,\"\",bp,0,\"\",\"\",\"\",bp/stretch,Angstrom,8,1,0,\"Good\",,,,,,,,,,,,,\n");
+    EXPECT_EQ(std::count(row.begin(),row.end(),','),27);
+    EXPECT_EQ(row.find("mean_sd"),std::string::npos);
+    EXPECT_EQ(row.find("own_history"),std::string::npos);
+    EXPECT_EQ(row.find(sample.reference_source),std::string::npos);
+    sample.detection_enabled=false;
+    const auto disabled=csv_sample(sample);
+    EXPECT_STREQ(row.c_str(),disabled.c_str());
+    sample.value=NAN; sample.quality=Quality_InvalidBase;
+    const auto invalid=csv_sample(sample);
+    EXPECT_NE(invalid.find(",nan,0,"),std::string::npos);
+    EXPECT_NE(invalid.find(quality_description(Quality_InvalidBase)),std::string::npos);
 }
 
 UTEST(lavery_core, detects_geometric_pairs_once_and_in_component_order) {

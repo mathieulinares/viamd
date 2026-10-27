@@ -18,11 +18,12 @@
 
 // How frames map to the screen, shared with the timeline's plots
 struct TimelinePeriodAxis {
-    const float* frame_times = nullptr;     // per frame, in the timeline's unit (timeline.x_values)
+    const float* frame_times = nullptr;     // Per-frame times; nullptr uses frame indices
     int          num_frames = 0;
     double*      view_beg = nullptr;        // the visible span of time, which the lane pans and zooms
     double*      view_end = nullptr;
     const char*  time_unit = "";            // "ns"; empty when the frames have no time of their own
+    uint32_t     view_id = 0;               // Stable per-view ID; lane and plots must use the same ID
 };
 
 // Call where the lane goes, before the plots of the timeline. Ctrl-drag in it moves current_frame.

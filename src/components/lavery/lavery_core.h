@@ -169,6 +169,9 @@ enum ReferenceScope : int {
     Reference_Count,
 };
 const char* reference_scope_name(ReferenceScope scope);
+inline bool visual_feedback_enabled(bool detection_enabled, bool signed_outliers, bool measurements) {
+    return measurements || (detection_enabled && signed_outliers);
+}
 
 // Display-only index: preserves endpoints, extrema and a missing-data break per bucket.
 // Queries refine boundary buckets and return original sample indices in chronological order.
@@ -215,6 +218,16 @@ struct MemberStatistics {
     bool is_outlier(float value, float sigma) const;
 };
 
+double wrap_degrees(double value); // [-180, 180)
+// Exact angle between adjacent pair normals from this implementation's rotation-vector components.
+float step_bend_degrees(float tilt, float roll, float twist);
+// Percent indicators; unavailable samples remain NaN. Occupancy is their per-position mean.
+bool bend_profile_samples(std::vector<float>* bend, std::vector<float>* candidates,
+    const std::vector<float>& tilt, const std::vector<float>& roll, const std::vector<float>& twist, float threshold);
+bool state_profile_samples(std::vector<float>* out, const std::vector<float>& values, Metric metric, int state);
+bool twist_difference_samples(std::vector<float>* out, const std::vector<float>& values,
+    const std::vector<MemberStatistics>& reference);
+
 // Input is frame-major; heatmap output is member-major with row zero at highest Y.
 struct MetricStatistics {
     std::vector<MemberStatistics> members;
@@ -234,6 +247,17 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
                         size_t first_frame = 0, size_t end_frame = SIZE_MAX,
                         const std::vector<uint32_t>& member_groups = {});
 
+// Raw per-position mean and population SD, without state conditioning or a heatmap.
+// Optional groups pool reference samples without mixing distinct helices.
+bool sequence_statistics(std::vector<MemberStatistics>* out, const std::vector<float>& values, size_t member_count,
+                         bool angular, size_t first_frame = 0, size_t end_frame = SIZE_MAX,
+                         const std::vector<uint32_t>& member_groups = {});
+const char* csv_sequence_profile_header();
+std::string csv_sequence_profile_row(const std::string& run, Metric metric, size_t member, const std::string& label,
+    double position, const std::string& source, size_t first, size_t end, const MemberStatistics& summary,
+    size_t frame, float value, const std::string& reference_source, const MemberStatistics* reference,
+    const std::string& quantity = {}, const std::string& unit = {}, bool included = true);
+
 struct ReferenceMember {
     std::string label, identity;
     std::array<std::vector<float>, Metric_Count> values;
@@ -246,6 +270,11 @@ struct ComparisonMemberFilter {
 };
 bool comparison_member_matches(const ComparisonMemberFilter& filter, int cls,
     const std::string& label, const std::string& pair_a, const std::string& pair_b, bool* metadata_missing);
+// Mask in place; optional membership distinguishes filtered positions from unavailable samples.
+bool filter_sequence_profile(std::vector<MemberStatistics>* summary, int cls,
+    const std::vector<StepIndex>& steps, const std::vector<std::string>& pairs,
+    const std::vector<std::string>& labels, const ComparisonMemberFilter& filter, int partner,
+    size_t* metadata_excluded, std::vector<uint8_t>* included = nullptr);
 struct ExternalReference {
     std::string path, run, fingerprint;
     std::array<std::vector<ReferenceMember>, Class_Count> members;
@@ -261,7 +290,21 @@ bool external_statistics(MetricStatistics* out, const ExternalReference& source,
 std::vector<float> external_samples(const ExternalReference& source, Metric metric, const std::vector<int>& mapping,
                                     size_t member, const std::vector<uint32_t>& groups = {});
 std::vector<float> pooled_external_samples(const ExternalReference& source, Metric metric);
-struct FrameCandidate { size_t frame = 0; double score = 0; };
+// Explicit workflow reference, independent of detection. Raw summaries omit state conditioning.
+bool workflow_reference_statistics(MetricStatistics* out, const std::vector<float>& current, size_t members,
+    Metric metric, size_t first, size_t end, Baseline baseline, bool raw,
+    const std::vector<uint32_t>& groups = {}, const ExternalReference* external = nullptr,
+    const std::vector<int>& mapping = {});
+struct FrameCandidate {
+    size_t frame = 0;
+    double score = 0;
+    size_t used_features = 0, total_features = 0;
+    std::string omitted_features;
+};
+struct FrameRankingDiagnostics {
+    size_t frames = 0, comparable = 0, strict = 0;
+    std::vector<size_t> missing_values, missing_references, invalid_scales;
+};
 struct FrameFeature { Metric metric = Buckle; size_t member = 0; };
 struct PeriodSummary {
     size_t valid = 0, missing = 0, referenced = 0;
@@ -276,7 +319,8 @@ bool add_frame_features(std::vector<FrameFeature>* features, int cls, uint32_t p
 bool representative_frames(std::vector<FrameCandidate>* out, const std::array<std::vector<float>, Metric_Count>& values,
     const std::array<MetricStatistics, Metric_Count>& statistics, const std::array<size_t, Metric_Count>& columns,
     const std::vector<FrameFeature>& features, size_t first, size_t end, size_t count, double separation,
-    const std::vector<double>& times, std::string* error);
+    const std::vector<double>& times, std::string* error, double coverage = 1.0,
+    FrameRankingDiagnostics* diagnostics = nullptr);
 bool export_representative_frames(const md_system_t& sys, const std::string& run, const std::string& xtc_path,
     const std::vector<FrameCandidate>& frames, const std::string& provenance, std::string* error);
 
@@ -523,7 +567,9 @@ struct CsvSample {
     float value = 0;
     uint16_t quality = 0;
     MemberStatistics baseline;
-    float sigma = 2.5f;
+    float sigma = 3.0f;
+    bool detection_enabled = true;
+    bool include_reference = true;
     uint32_t selected_mask = 0;
     bool member_outlier = false;
     Baseline baseline_method = Baseline_MeanSD;
@@ -540,6 +586,10 @@ bool compute_outlier_counts(std::vector<FrameOutliers>* out, const std::vector<f
 
 // Timestamps must be ordered. A null timestamp array selects frame-index coordinates.
 size_t nearest_frame(double x, const float* times, size_t frame_count);
+double sample_cell_edge(size_t edge, const float* times, size_t count);
+bool sequence_heatmap_row(double position, int cls, const std::vector<StepIndex>& steps, double* row);
+bool sequence_export_member(int cls, size_t member, const std::vector<StepIndex>& steps,
+    size_t bp_first, size_t bp_last, int partner);
 
 // Pairs are chosen once from the first frame and are returned in component order.
 size_t detect_pairs(Pair* out, size_t cap, const BaseFrame* bases, size_t count,
@@ -571,6 +621,7 @@ enum PairingState : uint8_t {
     Pairing_Unavailable, Pairing_WatsonCrick, Pairing_Hoogsteen, Pairing_Other, Pairing_Unpaired,
     Pairing_Count,
 };
+bool pairing_profile_samples(std::vector<float>* out, const std::vector<PairingState>& values, PairingState state);
 const char* pairing_state_name(PairingState state);
 struct PairingEvidence {
     uint8_t canonical = 0, hoogsteen = 0, expected = 0;

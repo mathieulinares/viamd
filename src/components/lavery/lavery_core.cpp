@@ -164,8 +164,61 @@ OutlierAssessment assess_outliers(const float* values, const MemberStatistics* s
     return out;
 }
 
-static double wrap_degrees(double delta) {
+double wrap_degrees(double delta) {
     return delta - 360.0 * std::floor((delta + 180.0) / 360.0);
+}
+
+float step_bend_degrees(float tilt, float roll, float twist) {
+    if (!std::isfinite(tilt) || !std::isfinite(roll) || !std::isfinite(twist)) return NAN;
+    const double transverse=std::hypot((double)tilt,(double)roll);
+    const double rotation=std::hypot(transverse,(double)twist);
+    if (rotation>180.001) return NAN;
+    if (rotation<1e-12) return 0;
+    constexpr double rad=3.14159265358979323846/180;
+    return (float)(2*std::asin(std::clamp(transverse/rotation*std::sin(rotation*rad*.5),0.0,1.0))/rad);
+}
+
+bool bend_profile_samples(std::vector<float>* bend, std::vector<float>* candidates,
+    const std::vector<float>& tilt, const std::vector<float>& roll, const std::vector<float>& twist, float threshold) {
+    if (!bend || !candidates || bend==candidates || tilt.size()!=roll.size() || tilt.size()!=twist.size() ||
+        !std::isfinite(threshold) || threshold<=0 || threshold>180) {
+        MD_LOG_ERROR("Lavery: invalid bending-profile input/threshold");
+        return false;
+    }
+    bend->resize(tilt.size()); candidates->resize(tilt.size());
+    for (size_t i=0;i<tilt.size();++i) {
+        const float angle=step_bend_degrees(tilt[i],roll[i],twist[i]);
+        (*bend)[i]=angle;
+        (*candidates)[i]=std::isfinite(angle) ? (angle>=threshold ? 100.0f : 0.0f) : NAN;
+    }
+    return true;
+}
+
+bool state_profile_samples(std::vector<float>* out, const std::vector<float>& values, Metric metric, int state) {
+    if (!out || state<0 || state>=metric_state_count(metric)) {
+        MD_LOG_ERROR("Lavery: invalid occupancy-profile category");
+        return false;
+    }
+    out->resize(values.size());
+    for (size_t i=0;i<values.size();++i) {
+        const int actual=metric_state(metric,values[i]);
+        (*out)[i]=actual<0 ? NAN : actual==state ? 100.0f : 0.0f;
+    }
+    return true;
+}
+
+bool twist_difference_samples(std::vector<float>* out, const std::vector<float>& values,
+    const std::vector<MemberStatistics>& reference) {
+    if (!out || (reference.empty() ? !values.empty() : values.size()%reference.size()!=0)) {
+        MD_LOG_ERROR("Lavery: invalid reference-relative twist profile");
+        return false;
+    }
+    out->resize(values.size());
+    for (size_t i=0;i<values.size();++i) {
+        const auto& r=reference[i%reference.size()];
+        (*out)[i]=r.count && std::isfinite(values[i]) ? (float)wrap_degrees(values[i]-r.mean) : NAN;
+    }
+    return true;
 }
 
 MemberStatistics::Reference MemberStatistics::reference(float value) const {
@@ -426,6 +479,39 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
     return true;
 }
 
+bool sequence_statistics(std::vector<MemberStatistics>* out, const std::vector<float>& values, size_t member_count,
+                         bool angular, size_t first_frame, size_t end_frame,
+                         const std::vector<uint32_t>& member_groups) {
+    if (!out || (member_count ? values.size()%member_count : !values.empty()) ||
+        (!member_groups.empty() && (member_groups.size()!=member_count ||
+            *std::max_element(member_groups.begin(),member_groups.end())>=member_count))) {
+        MD_LOG_ERROR("Lavery: invalid sequence-profile matrix or groups");
+        return false;
+    }
+    const size_t frames=member_count ? values.size()/member_count : 0;
+    if (end_frame==SIZE_MAX) end_frame=frames;
+    if (first_frame>end_frame || end_frame>frames) {
+        MD_LOG_ERROR("Lavery: invalid sequence-profile frame range");
+        return false;
+    }
+    out->assign(member_count,{});
+    const size_t group_count=member_groups.empty() ? member_count :
+        (size_t)*std::max_element(member_groups.begin(),member_groups.end())+1;
+    std::vector<std::vector<size_t>> groups(group_count);
+    for (size_t m=0;m<member_count;++m) groups[member_groups.empty() ? m : member_groups[m]].push_back(m);
+    for (const auto& group : groups) {
+        if (group.empty()) continue;
+        std::vector<float> samples;
+        samples.reserve((end_frame-first_frame)*group.size());
+        for (size_t f=first_frame;f<end_frame;++f)
+            for (size_t m : group) samples.push_back(values[f*member_count+m]);
+        MetricStatistics summary;
+        if (!compute_statistics(&summary,samples,1,angular)) return false;
+        for (size_t m : group) (*out)[m]=summary.members[0];
+    }
+    return true;
+}
+
 std::string csv_quote(const std::string& text) {
     std::string out = "\"";
     for (char c : text) { out += c; if (c == '"') out += '"'; }
@@ -578,12 +664,18 @@ std::string csv_sample(const CsvSample& s) {
         }
     }
     row += csv_quote(reason.empty() ? "Good" : reason);
+    if (!s.include_reference) {
+        row += ",,,,,,,,,,,,,\n";
+        return row;
+    }
     const auto ref = s.baseline.reference(s.value);
     snprintf(buf, sizeof(buf), ",%.17g,%.17g,%.9g,%.9g,%d,%d,%d,%u,%s,%.17g,%.17g,%s,",
         ref.count ? ref.mean : std::numeric_limits<double>::quiet_NaN(),
         ref.count ? ref.sd : std::numeric_limits<double>::quiet_NaN(),
-        s.baseline.zscore(s.value), s.sigma, (s.selected_mask & (1u << (s.metric - class_first_metric(metric_class(s.metric))))) ? 1 : 0,
-        s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0, s.member_outlier ? 1 : 0, s.selected_mask,
+        s.baseline.zscore(s.value), s.detection_enabled ? s.sigma : std::numeric_limits<float>::quiet_NaN(),
+        s.detection_enabled && (s.selected_mask & (1u << (s.metric - class_first_metric(metric_class(s.metric))))) ? 1 : 0,
+        s.detection_enabled && s.baseline.is_outlier(s.value, s.sigma) ? 1 : 0,
+        s.detection_enabled && s.member_outlier ? 1 : 0, s.detection_enabled ? s.selected_mask : 0,
         s.baseline_method == Baseline_MedianMAD ? "median_mad" : "mean_sd", s.baseline_begin, s.baseline_end,
         s.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
     row += std::string(buf)+csv_quote(s.reference_source)+"\n";
@@ -1121,6 +1213,52 @@ std::string csv_event_row(const CsvEventRow& r) {
         r.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
     row += std::string(buf)+csv_quote(r.reference_source)+"\n";
     return row;
+}
+
+double sample_cell_edge(size_t edge, const float* times, size_t count) {
+    if (!count || edge>count) {
+        MD_LOG_ERROR("Lavery: invalid heatmap sample edge");
+        return NAN;
+    }
+    if (!times) return (double)edge-.5;
+    if (count==1) return times[0]+(edge ? .5 : -.5);
+    if (!edge) return (double)times[0]-(times[1]-(double)times[0])*.5;
+    if (edge==count) return (double)times[count-1]+(times[count-1]-(double)times[count-2])*.5;
+    return ((double)times[edge-1]+times[edge])*.5;
+}
+
+bool sequence_export_member(int cls, size_t member, const std::vector<StepIndex>& steps,
+    size_t bp_first, size_t bp_last, int partner) {
+    if (cls<0 || cls>=Class_Count || !bp_first || bp_last<bp_first || partner<0 || partner>2 ||
+        (cls==Class_Step && member>=steps.size())) {
+        MD_LOG_ERROR("Lavery: invalid sequence export selection");
+        return false;
+    }
+    if (cls==Class_Nucleotide && partner && member%2!=(size_t)partner-1) return false;
+    const size_t first=cls==Class_Step ? steps[member].a+1 : cls==Class_Nucleotide ? member/2+1 : member+1;
+    const size_t last=cls==Class_Step ? steps[member].b+1 : first;
+    return first>=bp_first && last<=bp_last;
+}
+
+bool sequence_heatmap_row(double position, int cls, const std::vector<StepIndex>& steps, double* row) {
+    if (!row || !std::isfinite(position) || cls<0 || cls>=Class_Count) {
+        MD_LOG_ERROR("Lavery: invalid sequence landmark mapping");
+        return false;
+    }
+    if (cls!=Class_Step) {
+        *row=cls==Class_Nucleotide ? (position-1)*2+.5 : position-1;
+        return true;
+    }
+    const auto coordinate=[](const StepIndex& step) { return ((double)step.a+step.b)*.5+1; };
+    for (size_t s=0;s<steps.size();++s) {
+        const double x=coordinate(steps[s]);
+        if (position==x) { *row=(double)s; return true; }
+        if (s && position<x && position>coordinate(steps[s-1]) && steps[s-1].b==steps[s].a) {
+            *row=(double)s-1+(position-coordinate(steps[s-1]))/(x-coordinate(steps[s-1]));
+            return true;
+        }
+    }
+    return false;
 }
 
 size_t nearest_frame(double x, const float* times, size_t frame_count) {

@@ -70,6 +70,32 @@ and infinite cells are transparent (with and without labels, in both matrix
 layouts), including a 147-by-2501 nucleosome-sized matrix. Build with
 `cmake --build build --target viamd_plot_test`, then run
 `ctest --test-dir build --output-on-failure -R '^viamd_plot_test$'`.
+Sequence-profile rendering also checks two-partner mean/SD bands, current-frame
+points, reference curves and the shared outside legend with missing positions.
+Sequence landmark rendering checks that a step-boundary guide keeps its exact
+position across profile views without adding legend items or changing axis limits.
+Top-panel names stagger into nonoverlapping rectangles inside the plot. Sequence
+tick positions and text remain integer-only, including zoom ranges with no BP
+integer inside them (which correctly have no ticks).
+Occupancy regressions check stacked state bars reaching 100%, separate partner
+positions, unavailable-position gaps, finite vertices, and individual bend bars
+at exact step midpoints.
+Physical-time heatmap regressions verify nonuniform cell widths, finite
+geometry and row-zero placement against the member axis. Horizontal landmark
+labels avoid overlaps and add neither legend entries nor fitted-axis extent.
+Timeline-guide rendering covers single-time markers, period boundaries/shading,
+partially visible periods, offscreen exclusion, finite vertices and staggered
+labels without legend or axis-limit changes. Production uses the existing
+Timeline frame resolver (including following windows) before mapping to time.
+The production Timeline annotation editor is also compiled into this headless
+runner. Mouse regressions create time markers on irregular timestamps and
+periods without timestamps, move/resize/delete shared periods and Ctrl-scrub the
+current frame. Lane pan/zoom updates the linked plot without changing another
+view's axis. Two simultaneous views with different positions and zoom ranges
+verify that their lane geometry and editing state remain independent while
+using the same annotations. Modifier input uses ImGui's key-event queue.
+The shared series-row regression clicks Whole trajectory's visibility checkbox
+without changing a filtered series, and checks checkbox/colour/Edit/name order.
 
 ## Lavery numerical reference
 
@@ -78,7 +104,51 @@ partners, stale-frame clearing, adjoining-step invalidation, exclusion from
 statistics, periodic pairing, geometric quality flags, missing/unsupported fit diagnostics,
 multi-parameter contributor masks and strict sigma thresholds, consecutive event
 grouping and peak tracking, and the parameter/event CSV records' 28/42-column shapes, escaping,
-units, baselines, validity and outlier flags. Run without launching the GUI:
+units, baselines, validity and outlier flags.
+Disabled-detection CSV tests preserve measured/reference values and z-scores,
+with unavailable sigma and no detection masks/flags, then restore normal export
+behaviour when re-enabled.
+Measurements-only CSV regressions verify the unchanged 28-column shape, empty
+reference/statistical-classification fields, preserved values/quality and raw
+reference reimport, independent of the detection toggle.
+Reference-preparation roundtrips cover every parameter/class, both nucleotide
+partners and selected frame/time bounds without an existing reference, plus
+explicitly narrowed exports retaining only their selected measurements.
+Representative ranking regressions cover strict default coverage, ceiling-based
+relaxed thresholds, missing-value/reference/scale diagnostics, RMS normalization
+by usable features, zero usable features, temporal separation and invalid
+coverage. XTC/GRO/CSV roundtrips verify per-frame coverage and omitted-feature
+provenance alongside original rank/time/coordinates.
+The production feedback-enablement predicate is tested for every combination
+of detection, signed-outlier overlay and measurement feedback: measurements
+remain enabled without detection, while automatic outliers do not.
+Sequence-profile cases cover stable spatial differences, population spread,
+period bounds, missing samples, helix pooling, angular wrapping without state
+conditioning, and the 20-column profile CSV including optional reference fields.
+Explicit export regressions cover inclusive BP bounds (both endpoints for
+steps), partner selection, separate period summaries, and empty current-frame
+columns rather than a hidden live snapshot. Numerical heatmap checks cover
+irregular timestamp cell edges, explicit frame fallback and sequence landmark
+mapping without snapping or interpolation across step-chain gaps.
+Filtered profile-series regressions use the production in-place mask to check
+independent period means/SD, both step endpoints, nucleotide/base and partner
+selection, retained sequence slots and invalid metadata shapes. Headless ImPlot
+tests render several filtered traces and grouped state stacks with finite
+vertices, gaps, independent legend entries and separate bar lanes.
+Profile dataset CSV checks retain original member IDs/step midpoints, empty
+filtered slots and independently calculated counts/mean/SD for separate periods,
+without implicit references or current-frame snapshots.
+Independent-workflow reference tests verify that own-history representative
+ranking differs from pooled sequence comparison, that extraction can use a
+different interval from its reference, and that copied external samples remain
+unchanged when detection's source is modified. Raw profiles retain unconditioned
+mean/SD while ranking retains within-state baselines. Pooled external references
+and invalid mappings/groups/empty intervals are checked explicitly.
+Structural-view tests reconstruct bend angles against rotated pair normals,
+including nonzero Twist; verify inclusive candidate thresholds, valid-sample
+occupancy denominators and missing pairing evidence; and check wrapped
+reference-relative Twist and the derived quantities/units in CSV exports.
+Run without launching the GUI:
 
 ```
 cmake --build build --target viamd viamd_test

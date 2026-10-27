@@ -4,7 +4,7 @@ This page describes the Lavery component in
 `src/components/lavery/`. For the short version, see
 [lavery-quickstart.md](./lavery-quickstart.md).
 The quick start also includes a [1BNA screenshot tour](./lavery-quickstart.md#gui-tour-1bna)
-covering all six result tabs and both state sub-tabs.
+covering Outliers, heatmaps, state switches, Distribution and Export.
 
 ## 1. Concepts
 
@@ -27,10 +27,14 @@ Frame counts and timestamps need not match the active trajectory. Mean/SD,
 Median/MAD, circular wrapping and within-state baselines retain their usual
 definitions. The current trajectory is never mixed into an external reference.
 
-Use **Export reference CSV (all classes)** on the control to export all pair,
-step and nucleotide parameters over its **Baseline range**. Select Current
-trajectory first. The existing **Export parameter CSV** still exports every
-frame of the plotted class; those files (including older exports without
+Use **Export > Data > Measurements > Prepare a reference CSV...** on the control.
+This presets all parameters, positions and both partners. Choose **Time** (whole
+trajectory, a named equilibration period or a custom interval), then **Save reference CSV...**.
+No existing reference is needed. The comparison method fits the baseline when
+these raw samples are imported. Narrowing parameters/positions is allowed, with
+a warning that only exported measurements will be available later.
+Ordinary measurement exports save the explicitly
+chosen parameters and positions; those files (including older exports without
 `reference_source`) can also be imported, but absent classes/parameters have no
 reference. Event CSVs, snapshot-oracle CSVs and arbitrary wide tables are not
 parameter-reference files. Import currently accepts one run per file and
@@ -277,8 +281,9 @@ Short excursions are ignored. Missing data resets the remembered source.
 Detection starts fresh at the selected range boundary; no transition is inferred
 from an unseen source outside it. No gaps are bridged and no hierarchy is applied.
 
-The initial residence follows the event duration default; users can override it
-independently. Rows report source/destination states, destination-run residence
+The default residence is **200 ps**, independently adjustable from the outlier
+duration (also initially 200 ps) and pairing residence. Legacy saved `-1` values
+still follow event duration. Rows report source/destination states, destination-run residence
 and the shortest signed angular change between the two qualified runs' circular
 means. These are not sigma scores and do not enter the outlier-event ranking.
 The Event parameters mask and Detection range apply. Clicking a row selects
@@ -318,7 +323,7 @@ clicking rows controls selection and Export provides selected-pair raw runs.
 The raw all-pair view is in **State heatmap > Pairing chemistry**;
 the selected pair is highlighted there instead of repeating
 it in a separate compact timeline. Raw-run CSV export is
-also available under **Export > Analysis tables > Pairing-state runs CSV**.
+also available under **Export > Data > Events & state switches > Pairing-state runs**.
 It annotates chemistry without changing pair quality, excluded measurements,
 outlier events, baselines or the existing canonical pair-loss gate.
 
@@ -380,8 +385,11 @@ The most recent qualified run of the same source state replaces an earlier one,
 just as before; missing data still resets the source. This presentation does not
 change detection, ranking, thresholds or run qualification.
 
-Hover a row or select it to read the source and destination spans, observed
-residences and intervening sample count. The parameter timeline shades the
+Click a row to read the source and destination spans, observed residences and
+intervening sample count in the stable detail panel below the table. Row hover
+only previews the affected structure; it does not open a floating detail window.
+This applies to both nucleotide and pairing transition tables.
+The parameter timeline shades the
 source blue, intervening interval amber and destination purple.
 The inspector selection summary includes member, parameter, state change,
 angular change, timing and current-sample quality; an outlier-event selection
@@ -420,7 +428,7 @@ timeline, distribution and heatmap panels are not carried into other tabs.
 
 ```
 +------------+-----------------------------------------------+
-|  Settings  | Outliers | Parameter heatmap | State heatmap | State switches | Compare | Export |
+|  Settings  | Outliers | Parameter heatmap | State heatmap | State switches | Sequence profile | Distribution | Export |
 |  (shared   +-----------------------------------------------+
 |  sidebar)  |                                               |
 |            |          Active tab: full analysis area       |
@@ -447,7 +455,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
 - **Settings** (left sidebar):
   There is no global Selection block or duplicate Frame input. Selection is
   contextual: click events/members/parameters, transition rows or heatmap cells.
-  Parameter heatmap has local Class/Parameter controls, Compare has an independent Class selector,
+  Parameter heatmap and Sequence profile have local Class/Parameter controls, Distribution has an independent Class selector,
   Outliers has an optional Count scope chooser, and Export has a local
   parameter/member chooser for table exports.
   *Detection* (Tolerance, Min duration / Min frames,
@@ -464,18 +472,136 @@ not insert/remove reason paragraphs above the timeline and distribution.
   measurement styling, labels, axis and layout reset. **Evidence...** opens
   selected-parameter validity/contact diagnostics from any tab.
 - **Analysis workspace**, ordered **Outliers**, **Parameter heatmap**, **State heatmap**,
-  **State switches**, **Compare**, **Export**:
+  **State switches**, **Sequence profile**, **Distribution**, **Export**:
   - **Outliers** shows the event table on top, including member/parameter
     inspection and pooled-reference anomalous regions. Below-left is the
     trajectory-wide count overview beside the selected event/member's distribution.
     Beneath both is the selected parameter's full-width timeline, with the
     selected event span shaded. These are visible panels, not a dialog.
     There is no heatmap in this tab.
+  - **Sequence profile** preserves spatial position. **View: Parameters** shows one selected parameter from
+    Intra-base pair, Inter-base pair or Nucleotide, averaged over the whole run or
+    one named Timeline period. Default: inter-pair Roll. Means and optional
+    population-SD bands describe temporal variation at each position, not
+    standard errors or significance. Current-frame points follow playback
+    independently of the averaging interval. Nucleotides have separate traces
+    for pair partners 1 and 2, with exact strand/residue identities on hover.
+    BP positions are 1-based detected-pair indices, not residue or dyad indices;
+    steps use endpoint midpoints. Curves break at helix boundaries and missing
+    positions. Angular values use circular-origin unwrapping; branch crossings
+    break lines rather than connecting across 360 degrees. Multimodal means may
+    be weakly populated.
+    **Reference mean** uses raw mean/population SD from the local **Sequence
+    reference**, its interval, own-history/pooled-helix scope and external mapping.
+    Unlike detection baselines, these summaries are not state-conditioned and
+    do not use median/MAD or sigma thresholds. Missing mappings/references stay
+    absent, with counts in the tooltip. Hover previews the member's geometry;
+    click selects the parameter/member at the current frame, clearing event or
+    transition inspection. Fit view restores the complete sequence extent.
+    This is a general geometry profile, not a categorical kink detector:
+    persistent localized Roll/Tilt deviations are candidates for inspection.
+    Profile controls are session-only. Statistical export is exclusively under
+    **Export > Data > Sequence profiles**, where measurements and scope are
+    chosen independently of the displayed view.
+    **Reference** stays first, before View and averaging controls. Its settings
+    are visible when the reference overlay or Twist difference uses them;
+    otherwise they are collapsed under **Reference settings**. Representative
+    frames always exposes Reference because ranking requires it.
+    **Add filtered series** adds independently named/coloured whole-trajectory,
+    named-period or custom-interval summaries with visibility, optional SD,
+    BP range, pair-type and nucleotide/partner filters and Duplicate/Remove.
+    The default primary series is Whole trajectory. Add immediately opens a
+    popup; Edit reopens it, with Done/Duplicate/Remove, matching Distribution
+    and export datasets instead of an inline tree editor.
+    All profile views use the same series recipes and sequence coordinates.
+    Filtering masks positions rather than removing/renumbering them, and both
+    step endpoints must match. Each interval gets its own mean/population SD
+    or raw occupancy. Hover reports each series' counts and statistics.
+    Bend occupancies use grouped bars; categorical occupancies use separate
+    stacked lanes, primary first then list order, retaining state colours.
+    External overlays require the mapped Reference; additional profile series
+    currently use only the active trajectory. Series are session-only.
+    Its **View** selector also offers **Bending / Kinks**, **Twist / Unwinding**,
+    **Stacking geometry**, **Groove geometry** and **State occupancy**. These
+    aligned panels share linked x-axis limits while retaining separate units:
+    - Bending shows exact adjacent pair-normal angle, Rise context and candidate
+      occupancy. The adjustable initial threshold is **20 degrees**, inclusive.
+      Candidates are exploratory, not validated kink assignments. With
+      `theta = sqrt(Tilt^2 + Roll^2 + Twist^2)` and `b = sqrt(Tilt^2 + Roll^2)`,
+      the angle is `2 asin((b/theta) sin(theta/2))` (consistent angular units;
+      zero rotation gives zero bend). This follows the implementation's
+      rotation-vector decomposition, not an assumed Euler-angle convention.
+      Rise is not a detection criterion. Mean bends reaching the threshold have
+      red markers; occupancy counts individual qualifying frames divided by
+      frames with valid bend geometry, independently of Rise validity.
+    - Twist shows raw Twist and its wrapped difference from the raw sidebar
+      reference mean. The difference is always computed, even with Reference
+      mean hidden. Missing/mismapped references remain unavailable. Positive
+      means overtwisted and negative undertwisted relative to that reference,
+      not supercoiling or linking-number changes.
+    - Stacking shows Rise/Slide/Shift, not stacking energy or contact assignment.
+      Grooves shows Minor/Major widths with terminal missing values preserved.
+    - State occupancy shows each state of BI/BII, anti/syn, pucker, Alpha/Gamma
+      rotamers or pairing chemistry. Percentages use only available raw states;
+      unavailable samples are reported separately and never treated as Unpaired.
+      Residence filters do not apply. Both nucleotide partners remain separate.
+      States are stacked vertical bars on a fixed 0-100% axis; each state uses
+      the corresponding State heatmap colour. Partners have adjacent bars, left
+      for Partner 1 and right for Partner 2. Hover reports all state percentages
+      and valid/missing counts. Entirely unavailable positions are gaps.
+      Current frame optionally adds a narrower 0/100% state stack alongside each
+      interval-average stack, not an additional interval occupancy.
+    SD bands apply to numerical quantities, not occupancy panels. Current-frame
+    points, molecular picking and CSV export work throughout. Raw reference
+    overlays are supported in Parameters, Twist, Stacking and Grooves; derived
+    bend/occupancy reference comparisons are not reconstructed from independently
+    filtered CSV metrics or missing categorical chemistry evidence.
+    **Landmarks** groups the marking actions and shared sequence-landmark list
+    across all profile views. Shift-click adds a position, or expand Landmarks
+    and use Mark selected position; the list offers names,
+    colours, visibility, selection and removal. Guides remain at exact positions,
+    including step boundaries when switching to pair/nucleotide properties.
+    Guide tooltips show the source identity and nearest real samples in the
+    current view (both neighbours for a step boundary), never interpolation.
+    Visible marks also become horizontal guides in parameter and state heatmaps,
+    retaining their names/colours and exact sequence positions. Pair/nucleotide
+    heatmaps keep a step marker between adjacent BPs. Step heatmaps map only
+    available contiguous step chains, without snapping or bridging chain gaps.
+    These guides are 3 px thick in both profile and heatmap orientations.
+    Parameter and both State heatmaps have the same editable annotation lane
+    above their plots as the VIAMD Timeline. Shift-drag creates a period;
+    Shift-click creates a time marker, in either the lane or plot. Drag a bar
+    to move it, drag a handle to resize, double-click to rename, and right-click
+    for notes, colour, follow-current-frame mode and deletion. Delete removes
+    the annotation under the pointer. **Periods / markers...** exposes the same
+    lane-layout, shading and interaction help as the Timeline.
+    Names, colours, frame ranges and workspace persistence are shared with
+    Timeline, not copied. Following periods resolve against the current frame.
+    Each view retains its own zoom and lane geometry; lane pan/zoom stays linked
+    to its heatmap. Ctrl-drag scrubs the current frame. Shift gestures neither
+    pan the plot nor select a heatmap member. Period shading follows the shared
+    Timeline setting (hovered/edited periods, or all periods when enabled).
+    The yellow current-time cursor remains distinct. Sequence landmarks remain
+    separate horizontal position guides.
+    Bending's Mark candidates (snapshot) adds steps at/above the explicit
+    occupancy cutoff with at least one qualifying frame; source range, angle
+    threshold and occupancy cutoff are recorded and are not updated by later
+    setting changes. Duplicate positions are reused and made visible.
+    Landmarks are session-only and cleared on analysis reset; they do not
+    change calculations or CSV schemas. Aligned panels use one bottom
+    Sequence position axis label instead of repeated BP-midpoint labels.
+    Axis ticks are integer BP numbers; step names use endpoint labels such as
+    Step 53-54, retaining the midpoint coordinate internally. Names appear inside
+    the top panel only, staggered into nonoverlapping rows, not on the bottom
+    axis/caption. Reference mean defaults to enabled where supported.
+    Bend-candidate occupancy uses individual vertical bars; its axis autoscales
+    from zero to the displayed maximum with padding. Fixed 0-100% restores a
+    common full percentage scale. Continuous quantities retain lines.
   - **State switches** selects Nucleotide conformations or Pairing chemistry.
     Nucleotide switches retain Event parameters/Detection range; pairing
     transitions retain whole-run scope and separate residence, now across all
     pairs before display filtering.
-    Period/sample comparisons are in the separate **Compare** tab.
+    Period/sample comparisons are in the separate **Distribution** tab.
     Two subviews, **Nucleotide conformations** and **Pairing chemistry**, show
     the table below compact display and residence controls.
     Search matches labels, conformation and state direction (case-insensitive,
@@ -506,7 +632,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
     No selected row or a row hidden by filters leaves a selection hint instead.
     Filters affect table rows only, not detection, residence rules or raw
     state history. Disabled Event parameters are not silently enabled.
-    CSV exports are under **Export > Analysis tables**, not above transition tables.
+    CSV exports are under **Export > Data**, not above transition tables.
     The all-nucleotide-switches CSV contains every detected switch; the shown
     variant applies the nucleotide display filters. Neither follows table sorting.
     Pairing raw-run CSV contains all runs of its explicitly selected export pair,
@@ -526,21 +652,58 @@ not insert/remove reason paragraphs above the timeline and distribution.
     plotted class/parameter; evidence is not a chemistry label. The fixed-height
     quality status in the event details and plot reason tooltips remain
     available without opening the evidence dialog.
-  - **Export** has a **View** selector for **Representative frames** (feature
-    selection, ranking and XTC/GRO/CSV) or **Analysis tables** (parameter/reference
-    CSV, all/shown events, nucleotide switches, displayed axis and selected-pair
-    raw runs), rather than stacked expanding sections.
-  - **Compare** is a distribution dashboard. **Class: Intra-base pair /
+  - **Export** has visible **Data** and **Representative frames** sub-tabs.
+    Data starts with **Save: Measurements / Sequence profiles / Distributions /
+    Events & transitions**, each with a focused form rather than four numbered
+    stages. Parameters and positions have compact summaries and expandable
+    selectors. Measurements choose one **Time** interval. **Prepare a reference
+    CSV...** presets the same measurement export to all parameters/positions,
+    both partners and the whole run; Time remains adjustable, without requiring
+    any baseline. **Save reference CSV...** writes the same reusable raw schema.
+    Ordinary forms use **Save CSV...**.
+    Profiles and distributions share a **Datasets** list, initially the whole
+    trajectory. Each row has its own name, Time interval, BP range, pair/base
+    filters and nucleotide partners. **Add filtered series** opens its popup
+    immediately; **Edit** reopens it, with **Done / Duplicate / Remove**,
+    consistently with Distribution and Sequence profile.
+    Their filter widgets are shared with the plotting tabs. Each interval gets
+    its own result; filtered profiles keep the original sequence slots.
+    Distribution datasets can instead select/import CSVs; CSV numbering is its
+    own and nucleotide datasets require Both partners. External sequence
+    comparisons use the explicitly mapped Reference, not unmapped CSV series.
+    No hidden connection to plot recipes/visibility or playback exists.
+    Sequence, Data export and representative ranking references are independent.
+    Event/switch exports include all detected rows, independent of display
+    filters; raw pairing runs use an explicitly chosen pair and include missing
+    and short runs. Advanced **Export centreline coordinates...** is beside
+    **Smoothed midpoint axis** in Visual feedback, not in Data.
+    Representative frames starts with Reference, followed by **Features**,
+    **Extraction** and automatically updated **Results** with XTC/GRO/CSV export.
+    Feature shortcuts are collapsed separately from the main parameter/member
+    picker. Selected features, class counts and weighting details share one
+    expandable summary. Data offers a collapsed
+    **Add reference comparison** section above data selection, off by default.
+    Explicitly selecting **Twist difference from reference** reveals its required
+    Reference at the top; ordinary Twist is a reference-free parameter choice.
+    Ordinary values, means/SD, occupancy and histograms need no reference.
+    The unrelated generic
+    parameter/member-for-table-exports chooser is removed.
+  - **Distribution** is a distribution dashboard. **Class: Intra-base pair /
     Inter-base pair / Nucleotide** displays **6 / 8 / 10 parameter plots**.
     Members are pooled, not selected individually; each finite member-frame
     sample has equal weight. The former Measure, member-specific, state-occupancy
     and period-summary views are no longer part of this tab.
-    **Add distribution** creates an independent overlay. The single bottom
-    legend controls visibility across every plot and provides **Edit** for
+    **Add filtered series** creates an independent overlay. The visible Series
+    list above the plots controls visibility across every plot and provides **Edit** for
     its name, colour, source and filters; **Duplicate** and **Remove** operate
     on that overlay only. No global filter silently changes other overlays.
+    No duplicate bottom series legend is shown. Sequence profiles likewise use
+    the top list plus a non-interactive marker/state key. Series popup editors
+    share pointer-relative positioning and viewport-bounded size constraints.
+    Reference controls do not repeat a textual summary of their selected fields;
+    interpretation/help is in tooltips, while errors and scientific warnings remain.
     Sources are whole trajectory, **Current frame (live)**, named period,
-    independently imported CSV, or detection-reference CSV. Period endpoints
+    or independently imported CSV. Period endpoints
     are inclusive; current-frame groups follow playback.
     Filters are inclusive BP range, pair type (All, AT/AU, GC, other
     canonical-base combinations), and A/T/G/C/U for nucleotides.
@@ -549,9 +712,10 @@ not insert/remove reason paragraphs above the timeline and distribution.
     **Add CSV...** imports an independent dataset and adds an overlay, without
     changing detection. CSV groups pool their own members without mapping or
     timestamp alignment. Filters use the CSV's own numbering and labels.
-    Members lacking required metadata are excluded and reported in hover details.
+    Members lacking required metadata are excluded and reported as warnings.
     Each parameter uses **32 shared physical-unit bins** and independently
-    normalized densities. **Style: Bars / Lines / Filled area**, **Line width**
+    normalized densities. **Filled area** is the initial style.
+    **Appearance** groups **Style: Bars / Lines / Filled area**, **Line width**
     (1-6 px) and fill **Opacity** (0-1) apply uniformly across the grid.
     Plot tooltips report valid/missing samples, mean and population SD.
     Angular series share a pooled circular
@@ -563,12 +727,18 @@ not insert/remove reason paragraphs above the timeline and distribution.
     is displayed as zero, not treated as a calibrated standardized deviation.
     CSV missing counts are explicitly unknown (the importer retains valid
     samples only); missing parameters/empty filtered groups are explicit.
-    The detection-reference source reads the reference already loaded in Settings;
-    independent **Add CSV...** imports do not replace it.
+    Independent **Add CSV...** imports do not replace the detection reference.
+    To also use a detection CSV as a distribution, import it explicitly here;
+    no copy-from-detection button or live link is provided.
     CSV samples need no timestamp alignment and are never represented as a
     timeline period. Sample counts are correlated, not independent observations
-    or significance tests. **Export Compare distributions CSV** exports visible
-    overlays, bin edges/densities, summaries and source/filter descriptions.
+    or significance tests. **Export > Data > Distributions** independently
+    chooses parameters, datasets and scope, and exports shared bin edges/densities,
+    summaries and source/filter descriptions. Display visibility and styles do
+    not change this setup. One export dataset list owns all source/interval,
+    BP, pair/base and partner selections; there are no competing global selectors,
+    additional-series lists or copy-plotted-series controls. Summary export
+    datasets never follow the live frame.
     Results are cached by class, source/filter revisions, period bounds/names
     and current frame for live groups. Overlays, imported comparison datasets
     and style controls are currently session-only.
@@ -583,8 +753,15 @@ not insert/remove reason paragraphs above the timeline and distribution.
   In **Parameter heatmap**, double-clicking fits the complete trajectory and member range,
   matching State history; fitting does not stop at the rendered zoomed-in slice.
   Hovering the count overview lists events at that frame. The separate parameter
-  heatmap (Reset view, Go to selection) shows every member against frame,
-  with outliers marked.
+  heatmap (Fit view, Go to selection) shows every member against physical time,
+  with outliers marked. Both parameter and state heatmaps use time for hover,
+  cursor, picking and scrubbing; clicking the parameter map selects member and
+  time together. Cell edges are midpoints of adjacent timestamps, extrapolated
+  by half a sample spacing at the ends, so irregular sampling retains its actual
+  widths. Member zero is aligned with its labelled row, selection and landmarks.
+  Only data without a physical time unit uses an explicitly labelled frame-index
+  fallback. Missing, nonfinite or non-increasing physical timestamps produce an
+  error rather than silently switching axes.
 - **Outliers > Event details**: the **Distribution** (middle-right) and **Timeline**
   (full-width bottom row) of the selected
   member and parameter, with values, baseline (mean/SD or median/scaled MAD),
@@ -651,6 +828,27 @@ or changing frame returns to trajectory-only distributions. Changing event,
 member or parameter recomputes the cached overlay and refits the plot.
 
 ### Detection
+
+**Enable outlier detection** is a workspace-persisted master switch. Off bypasses
+sigma classification and event generation, clears event inspection and transient
+outlier feedback (automatic signed markers, event contours/glow and bands), and
+disables event export and detection-only controls. It preserves
+settings and leaves parameter/reference calculation, sequence profiles, bend
+candidates, distributions, state occupancy and state-switch detection available.
+Normal molecular selection, manually added sequence landmarks and the explicitly
+enabled midpoint axis remain. **Visual feedback > Selection / measurement
+feedback** independently controls selected geometry, hover previews, measurement
+labels/picking and state-switch inspection. These remain available with detection
+off; sigma-based colours become neutral, without restoring automatic outliers.
+The Signed outlier overlay switch no longer disables measurement geometry.
+Previously added Timeline periods are not deleted.
+Re-enabling recomputes events rather than restoring stale results.
+
+The initial tolerance is **3 sigma**; the outlier minimum duration and both
+nucleotide/pairing residence defaults are independently **200 ps**. Without
+timestamps they use **3-frame** fallback thresholds. These are exploratory
+defaults, not universal physical cutoffs or multiple-testing significance levels.
+Explicit settings loaded from existing workspaces are preserved.
 
 Events are built from **samples**: one sample is one member (base pair or
 step) in one frame. A sample takes part when one of the following holds:
@@ -726,7 +924,7 @@ interval. A large interval between consecutive observations cannot establish
 whether an event stopped in between; it is not treated as observed quiet time.
 
 Time controls use ps or ns (**Time in ns**), stored in ps. The initial minimum
-is two median positive sampling intervals; legacy workspaces migrate their
+is **200 ps**; legacy workspaces with saved `-1` migrate their
 saved minimum as `(EventMinFrames - 1) * median_interval`, and their gap limit as
 `EventMaxGap * median_interval`. This is a starting point, not a universal
 physical lifetime. Subsequent edits are physical times, independent of sampling
@@ -767,10 +965,9 @@ Counts, heatmaps, event bands, viewport feedback and state switches are not
 filtered. This keeps scientific detection separate from table presentation;
 it is not a performance shortcut for full-trajectory analysis.
 
-**Export events CSV** still exports every detected event. **Export shown events
-CSV** respects the table filters at the current frame, preserving original event
-and parent IDs. A filtered export may reference a hidden parent without exporting
-that parent's rows. The limit is stored in the workspace separately for physical
+**Export > Data > Events & state switches > Outlier events** exports every
+detected event, preserving original event and parent IDs. Table display filters
+do not change the exported contents. The limit is stored in the workspace separately for physical
 time and frame fallback; older workspaces remain Unlimited.
 
 For each event, the following are recorded:
@@ -1158,10 +1355,14 @@ ranges from 0 to 1, defaults to 0.5, and scales the original layer alphas
 (18/10/5 of 255). It is a colour-only overlay: no depth, picking or velocity
 writes. Both combines this faint context with the native silhouette. Off removes
 region context, not precise contribution markers or native measurements.
-**Signed outlier overlay** remains the master switch and **Soft marker halos**
+**Selection / measurement feedback** controls selected geometry/hover previews
+independently of outlier detection and its signed overlay. While detection is off,
+selected markers and geometry are neutral, and molecule tooltips show raw
+values/states without sigma/outlier labels.
+**Signed outlier overlay** controls outlier-specific feedback only; **Soft marker halos**
 affects the small contribution markers only.
 
-`EventVisualStyle` (0 contour, 1 glow, 2 both, 3 off) and `GlowStrength`
+`MeasurementFeedback`, `EventVisualStyle` (0 contour, 1 glow, 2 both, 3 off) and `GlowStrength`
 are stored in the Lavery workspace section. Workspaces without these settings
 use glow/0.5; explicitly saved styles and strengths are preserved.
 `EventsFollowPlayback` stores the table-follow toggle and defaults to enabled.
@@ -1227,31 +1428,35 @@ All other active contributors stay compact rather than acquiring a label cloud.
 
 ## 5. CSV exports
 
-All export controls are in **Export**. Table sorting does not change scientific
-identities or export ordering. Display filters affect only exports explicitly
-labelled **shown**:
+Statistical exports are in **Export > Data**, separate from **Representative
+frames**. Table sorting, display filters and plot visibility do not change
+their selections or ordering. Review the export-specific measurements and scope:
 
 | Control | Scope |
 |---|---|
-| Export parameter CSV | Every frame/member/parameter of the class in Export's local chooser; not the independently selected Compare class |
-| Export reference CSV (all classes) | All classes in the current-trajectory Baseline range; disabled for external-reference detection |
-| Export events CSV / Export shown events CSV | All events / Outliers display-filtered events; stable original event and parent IDs |
-| Export all nucleotide switches CSV / Export shown nucleotide switches CSV | All detected / Conformation, BP range, destination State and Search-filtered nucleotide transitions |
-| Pairing-state runs CSV | All raw runs of the export-specific pair, including unavailable and short runs; not the filtered chemistry transition table |
-| Export Compare distributions CSV | Visible overlays in the current Compare class; opens Compare to refresh live sources and bins before saving |
-| Export displayed axis CSV | Displayed frame's axis |
+| Raw parameter samples | Explicitly chosen parameters, inclusive BP range, nucleotide partner and whole-run/named-period intervals; only selected parameters assessed |
+| Prepare a reference CSV | Presets Measurements to all parameters/positions/both partners; choose Time and save raw samples, without an existing reference |
+| Outlier events | All detected events under the analysis settings; stable original event and parent IDs; unavailable with detection off |
+| Nucleotide switches | All detected transitions under the residence settings; not filtered by Conformation, BP range, destination State or Search display controls |
+| Pairing-state runs | All raw runs of the export-specific pair, including unavailable and short runs; not the filtered chemistry transition table |
+| Distribution histograms | Explicit parameter, BP/partner and dataset selection; whole trajectory, periods, independent CSVs and/or reference, not displayed overlays |
+| Sequence profile summaries | Explicit parameters/quantities and independently filtered datasets; optional raw reference summaries; no implicit current-frame values |
+| Export centreline coordinates (Visual feedback) | Displayed frame's smoothed midpoint centreline, beside its visual controls |
 | Export XTC + GRO + CSV | Explicitly ranked representative frames; native coordinates and mapping/provenance CSV |
 
-### Compare distributions CSV
+### Distribution histograms CSV
 
-This derived, long-form CSV contains one row per parameter, visible overlay and
+Distribution and Sequence profile have no Export setup shortcut. Statistical
+export actions live only in **Export > Data**.
+
+This derived, long-form CSV contains one row per chosen parameter, dataset and
 histogram bin (32 bins whenever that parameter has finite samples):
 
 ```
 run,class,parameter,unit,distribution,source_filters,bin_lower,bin_upper,density,valid,missing,mean,sd,angular_origin
 ```
 
-`source_filters` records the source path/period/current frame, inclusive BP
+`source_filters` records the source path/period, inclusive BP
 bounds, pair type, nucleotide filter and metadata exclusions. `valid`, `missing`,
 mean and population SD repeat per bin. Missing CSV counts are empty/unknown,
 not zero. Empty groups have zero density and `nan` mean/SD; if every group is
@@ -1262,10 +1467,62 @@ Changing Bars/Lines/Filled area does not change exported histogram data.
 This is **not** a raw parameter CSV and cannot be reimported as a detection
 reference. Use parameter/reference exports for that.
 
+### Sequence profile CSV
+
+The underlying profile schema has one row per original member/selected parameter
+and dataset interval:
+
+```
+run,class,parameter,unit,member,label,bp_position,source,begin_frame,end_frame,valid,missing,mean,sd,current_frame,current_value,reference_source,reference_valid,reference_mean,reference_sd
+```
+
+`member` is 1-based; frame bounds and current frame are 0-based, with inclusive
+exported bounds. `bp_position` is the BP index or step endpoint midpoint.
+`source` identifies the dataset name, whole run/named period/custom interval and
+its BP/pair/base/partner filters. Counts and mean/population SD
+use all original samples in that interval, regardless of detection settings.
+No valid samples gives `nan` mean/SD, not zero. Angular means retain their
+native summary branch; plotted equivalent angles may differ by 360 degrees.
+Filtered-out positions retain their original member IDs and coordinates, but
+counts, summaries and reference fields are empty. They are not zero occupancy or
+acquisition gaps; included positions with no available samples instead have
+valid count zero, an actual missing count and `nan` summaries.
+Data exports deliberately leave `current_frame` and `current_value` empty:
+there is no implicit snapshot of the displayed frame. With reference inclusion disabled, the four
+reference fields are empty. When enabled, provenance records the source,
+own/pooled scope and baseline bounds or external mapping; missing reference
+samples give count zero and `nan` statistics. These are raw summaries, not
+state-conditioned detection centres/scales. This derived CSV cannot be imported
+as a parameter reference.
+
+All Data profile exports prepend a `view` column (21 fields total), combining
+chosen parameters and structural groups in long form. Each dataset gets
+separate rows and bounds. `parameter` names the quantity/state, and `unit` is `deg`,
+`Angstrom` or `%`. `source` additionally records the bend threshold/definition or
+occupancy denominator. For occupancy, `mean` is the available-sample percentage;
+`sd` is the population spread of 0/100 indicators, not an uncertainty estimate.
+Twist-difference rows always
+include their reference provenance and raw Twist reference summary, even when
+reference inclusion is unchecked; those fields are not a residual baseline.
+
 ### Baseline-centred representative frames
 
 **Export > Representative frames** ranks actual trajectory frames by
-`sqrt(mean(z_i^2))` against the **active reference**, either current or imported.
+`sqrt(mean(z_i^2))` against the independent **Reference** block at the very top,
+before feature selection and extraction controls.
+The default is **Own history**, whole trajectory, **Mean / SD**. Other choices
+are Pooled helix and External reference with local member mapping (optionally
+pooled within target helices). Reference intervals are whole trajectory, named
+period or custom inclusive physical-time/frame bounds, independent of extraction.
+Own history finds frames typical of each position's usual behaviour and can
+retain a persistent kink. Pooled helix favours the broader helix population,
+not necessarily that position's usual geometry. Neither is a structural
+straightness or most-populated-conformation guarantee.
+Configure each workflow directly; no reference copy/paste action is needed.
+Sequence reference and Data export reference follow the same local setup model,
+defaulting to Pooled helix and Own history respectively; their raw summaries
+remain mean/population SD, without state conditioning. These local reference
+setups are session-only, like existing profile/export selections.
 **All intra**, **All inter**, **All nucleotide** and **All classes** add every
 parameter/member combination in those classes directly. For finer control,
 expand **Choose parameter components and members**: each class has a mixed-state
@@ -1284,21 +1541,39 @@ Each feature is weighted equally; this is a diagonal RMS-z distance, not a
 covariance-aware Mahalanobis distance.
 
 Choose **Number of frames**, **Minimum separation** (ps/ns or frame fallback)
-and optionally **Search Detection range / timeline period**. Otherwise search
-the whole run. Every candidate must have a finite value and a nonempty,
-nonzero-scale reference for **every** feature, in its current conformational
-state when applicable. Missing values cannot improve a score, and different
-frames are never compared on different feature subsets.
+and an **Extraction interval**: whole trajectory, named period or custom
+inclusive time/frame bounds. It is not linked to Detection range or the
+ranking reference interval. **Required feature coverage** defaults to **100%**:
+every candidate needs a finite value and a nonempty, nonzero-scale reference for
+every feature, in its current conformational state when applicable.
+Explicitly lowering coverage requires at least `ceil(coverage * feature_count)`
+usable features, always at least one. RMS z is calculated over those usable
+features only. Missing features are never filled with zero. Relaxed scores can
+compare different subsets and therefore are not directly equivalent; the UI
+warns about this, and each selected frame records used/total features and all
+omitted metric/member IDs with reasons.
+
+The preview refreshes on relevant setting changes. Counts show the extraction
+interval size, strictly comparable frames, eligible frames at the selected
+coverage and selected/requested frames after temporal separation. **Blocking
+features / reasons** reports, per feature, missing measurements, missing
+reference/state samples and zero/invalid scales. These counts describe feature
+availability, not a sigma or score cutoff. Drag Minimum separation to see the
+selected count change. No separate ranking action is required.
 
 Ranking uses all original samples, not display summaries. Exact score ties
 prefer the earliest original frame. Greedily select the best remaining
 candidate sufficiently far from all previously selected frames; equality at
 the separation threshold qualifies. This may yield fewer than requested
 frames, reported as selected/requested. It is not a globally optimal
-time-spacing or clustering algorithm. Changing statistics, mappings, ranges,
-features or ranking controls invalidates the preview until reranked.
+time-spacing or clustering algorithm. Changing local ranking-reference
+statistics/mappings/intervals, extraction ranges, features or ranking controls
+automatically reranks the preview. Detection or Sequence reference changes
+alone do not. Export provenance records reference source/fingerprint, mapping,
+method, baseline interval, features and extraction interval.
 
-The preview lists rank, original frame, current time and score; click a row to
+The preview lists rank, original frame, current time, score and used/total feature
+coverage; hover coverage for omitted features/reasons. Click a row to
 inspect the first selected feature at that frame. **Export XTC + GRO + CSV...**
 writes all current-system atoms in **chronological** order, original physical
 timestamps and XTC step fields set to original frame indices. The companion
@@ -1308,10 +1583,13 @@ Periodic boxes (including triclinic terms) are preserved. Export does not
 unwrap/recenter molecules, subset atoms or alter the source trajectory.
 
 The accompanying CSV contains
-`output_frame,original_frame,time_ps,score,rank,reference`;
+`output_frame,original_frame,time_ps,score,rank,reference,used_features,total_features,coverage,omitted_features`;
 all frame indices are zero-based, rank is one-based. Reference provenance
 includes path/fingerprint, method/scope, features/mapping, search interval and
-separation. Current-reference provenance also includes baseline frame bounds.
+separation and required feature coverage. `coverage` is the usable fraction
+(0–1); `omitted_features` lists metric/member IDs and reasons. Legacy callers
+without feature metadata leave coverage fields empty. Current-reference
+provenance also includes baseline frame bounds.
 The exported order differs from score order; the rank column preserves it.
 The exporter refuses existing outputs, invalid coordinates, indistinguishable
 XTC float timestamps, unsupported GRO names or missing physical F64 run times.
@@ -1328,7 +1606,8 @@ state-balanced representatives are not implemented.
 
 ### Parameter CSV (Export CSV)
 
-One row per frame, member and parameter of the current class. `class` is
+One row per chosen frame, member and parameter, across the selected classes.
+Named/custom intervals are identified in `run`. `class` is
 `bp`, `step` or `nt`; for a nucleotide, `pair_a` is its base pair.
 
 ```
@@ -1337,7 +1616,15 @@ quality_flags,quality_reason,mean,sd,zscore,sigma,parameter_selected,parameter_o
 member_outlier,selected_mask,baseline,baseline_begin,baseline_end,reference_scope,reference_source
 ```
 
-The `baseline` column is `mean_sd` or `median_mad`. The `mean` and `sd` columns
+**Include reference statistics / z-scores / sigma flags** is off by default.
+Measurements-only exports do not calculate or validate any reference: fields
+from `mean` through `reference_source` are empty, not zero or implicit defaults.
+The 28-column schema, raw values, validity, quality and identities are preserved,
+so these files remain reusable as external references. An unavailable external
+comparison cannot block a measurements-only export.
+
+When reference inclusion is enabled, `baseline` is `mean_sd` or `median_mad`.
+The `mean` and `sd` columns
 contain that baseline's center and scale for the current state. Appended
 `baseline_begin` / `baseline_end` give the first/last included reference sample
 coordinates in `time_unit` (or `frame`); invalid intervals export `nan`.
@@ -1346,9 +1633,23 @@ throughout. `valid` still describes the measured value: a finite value can have
 `nan` reference statistics/z-score if its state is absent from the baseline.
 `reference_scope` is `own_history` or `helix_history`, identifying the population
 used for the reference statistics. `reference_source` records the source and
-mapped members as described above. There are 28 columns.
+mapped members as described above. In Raw parameter samples, `parameter_selected`
+is true for every exported parameter, `selected_mask` includes the chosen
+parameters in that class, and `member_outlier` assesses that mask when detection
+is enabled. Preparing a reference CSV presets all parameters/classes/positions
+and both partners, but allows an explicit subset.
+When detection
+is off and reference inclusion is enabled, measured values and baseline statistics/z-scores are retained but
+`sigma` is `nan`, `parameter_selected`, `parameter_outlier`, `member_outlier`
+and `selected_mask` are zero. No sigma classification is performed. There are
+28 columns.
 
-### Events CSV (Export events CSV)
+Optional raw sample baseline statistics come from the independent Data export reference,
+not the detection reference. The detection tolerance and enabled toggle still
+control the optional sigma flags. Event CSVs retain their actual detection
+reference and settings; changing the Data export reference does not redetect events.
+
+### Events CSV (Outlier events)
 
 One row per event, member and parameter:
 
@@ -1409,15 +1710,16 @@ must be rebuilt after loading/recomputing a trajectory.
 
 | Key | Type | Default |
 |---|---|---|
+| DetectionEnabled | bool; disables sigma/event detection and its transient feedback, not raw or state analysis | 1 |
 | ShowWindow, ShowHeatmap, SyncViewport, CompareAll, ShowAxis, SignedOverlay, OverlayHalo, AggregateOutliers | bool | - |
 | SelectedParameters | bit mask, class-local (bit k = k-th parameter of the plotted class) | 1023 |
 | MeasurementText | bool, viewport value text only | 0 |
-| StateMinTimePs | float, independent minimum source/destination residence; -1 follows event minimum | -1 |
+| StateMinTimePs | float, independent minimum source/destination residence; legacy -1 follows event minimum | 200 |
 | StateMinFrames | int, residence samples in frame fallback | 3 |
 | PairingMinTimePs | float, nonnegative pairing source/destination residence | 200 |
 | PairingMinFrames | int, positive pairing residence samples in frame fallback | 3 |
 | StateHistoryKind | int, BI/BII, chi, pucker, alpha, gamma, pairing (0-5) | 0 |
-| OutlierSigma | float | - |
+| OutlierSigma | float | 3 |
 | Metric, Member | int | - |
 | Baseline | 0 = Mean/SD, 1 = Median/MAD | 0 |
 | BaselineRangeEnabled | bool; 0 = Full trajectory, 1 = Custom or Timeline period | 0 |
@@ -1428,7 +1730,7 @@ must be rebuilt after loading/recomputing a trajectory.
 | EventParameters | int (24-bit mask, bit k = Metric k: Buckle..Stagger, Tilt..Rise, grooves, Alpha..Epsilon − Zeta) | 16777215 |
 | EventMinFrames | int, 1-100000 | 3 |
 | EventMaxGap | int, 0-100000 | 0 |
-| EventMinTimePs | float, nonnegative ps; -1 requests migration | -1 |
+| EventMinTimePs | float, nonnegative ps; legacy -1 requests migration | 200 |
 | EventGapTimePs | float, nonnegative ps; -1 requests migration | -1 |
 | EventRangeEnabled | bool | 0 |
 | EventRangePeriod | bool; when enabled, use Timeline period instead of Custom | 0 |

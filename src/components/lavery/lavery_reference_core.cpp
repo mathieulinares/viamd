@@ -21,6 +21,47 @@
 #include <limits>
 
 namespace lavery {
+bool workflow_reference_statistics(MetricStatistics* out, const std::vector<float>& current, size_t members,
+    Metric metric, size_t first, size_t end, Baseline baseline, bool raw,
+    const std::vector<uint32_t>& groups, const ExternalReference* external, const std::vector<int>& mapping) {
+    if (out) *out={};
+    if (!out || !members || metric<0 || metric>=Metric_Count || baseline<0 || baseline>=Baseline_Count ||
+        (!external && (current.size()%members || first>=end || end>current.size()/members)) ||
+        (!groups.empty() && groups.size()!=members) ||
+        std::any_of(groups.begin(),groups.end(),[&](uint32_t group) { return group>=members; }) ||
+        (external && (!external->records || mapping.size()!=members))) {
+        MD_LOG_ERROR("Lavery: invalid workflow reference configuration");
+        return false;
+    }
+    if (external) for (int member : mapping) {
+        if (member < -1 || (member>=0 && (size_t)member>=external->members[metric_class(metric)].size())) {
+            MD_LOG_ERROR("Lavery: invalid workflow reference mapping");
+            return false;
+        }
+    }
+    if (!external) {
+        if (raw) return sequence_statistics(&out->members,current,members,metric_is_angular(metric),first,end,groups);
+        return compute_statistics(out,current,members,metric_is_angular(metric),baseline,
+            metric_state_count(metric) ? (int)metric : -1,first,end,groups);
+    }
+    if (!raw) return external_statistics(out,*external,mapping,current,metric,baseline,groups);
+    out->members.assign(members,{});
+    std::vector<MemberStatistics> cached(members);
+    std::vector<uint8_t> ready(members,0);
+    for (size_t m=0;m<members;++m) {
+        if (mapping[m]<0) continue;
+        const size_t group=groups.empty() ? m : groups[m];
+        if (!ready[group]) {
+            std::vector<MemberStatistics> summary;
+            if (!sequence_statistics(&summary,external_samples(*external,metric,mapping,m,groups),1,metric_is_angular(metric)))
+                return false;
+            cached[group]=summary[0]; ready[group]=1;
+        }
+        out->members[m]=cached[group];
+    }
+    return true;
+}
+
 namespace {
 bool fail(std::string* error, const std::string& message) {
     if (error) *error = message;
@@ -82,6 +123,38 @@ std::string reference_identity(int cls, const std::string& label, const std::str
     if (cls == Class_Pair) return first;
     const auto second = pair_identity(b);
     return first.empty() || second.empty() ? std::string{} : first+" -> "+second;
+}
+
+bool filter_sequence_profile(std::vector<MemberStatistics>* summary, int cls,
+    const std::vector<StepIndex>& steps, const std::vector<std::string>& pairs,
+    const std::vector<std::string>& labels, const ComparisonMemberFilter& filter, int partner,
+    size_t* metadata_excluded, std::vector<uint8_t>* included) {
+    if (!summary || !metadata_excluded || cls<0 || cls>=Class_Count || !filter.bp_first ||
+        filter.bp_last<filter.bp_first || partner<0 || partner>2 || filter.pair_type<0 || filter.pair_type>3 ||
+        summary->size()!=labels.size() ||
+        summary->size()!=(cls==Class_Step ? steps.size() : pairs.size()*(cls==Class_Nucleotide ? 2 : 1))) {
+        MD_LOG_ERROR("Lavery: invalid sequence profile filter");
+        return false;
+    }
+    if (cls==Class_Step) for (const auto& step : steps) if (step.a>=pairs.size() || step.b>=pairs.size()) {
+        MD_LOG_ERROR("Lavery: invalid sequence profile step endpoints");
+        return false;
+    }
+    *metadata_excluded=0;
+    if (included) included->assign(summary->size(),0);
+    for (size_t m=0;m<summary->size();++m) {
+        if (!sequence_export_member(cls,m,steps,filter.bp_first,filter.bp_last,partner)) {
+            (*summary)[m]={};
+            continue;
+        }
+        const auto& a=pairs[cls==Class_Step ? steps[m].a : cls==Class_Nucleotide ? m/2 : m];
+        const std::string b=cls==Class_Step ? pairs[steps[m].b] : "";
+        bool missing=false;
+        if (!comparison_member_matches(filter,cls,labels[m],a,b,&missing)) (*summary)[m]={};
+        else if (included) (*included)[m]=1;
+        if (missing) ++*metadata_excluded;
+    }
+    return true;
 }
 
 bool comparison_member_matches(const ComparisonMemberFilter& filter, int cls,
@@ -232,6 +305,44 @@ std::vector<float> pooled_external_samples(const ExternalReference& source, Metr
     return samples;
 }
 
+const char* csv_sequence_profile_header() {
+    return "run,class,parameter,unit,member,label,bp_position,source,begin_frame,end_frame,valid,missing,mean,sd,current_frame,current_value,reference_source,reference_valid,reference_mean,reference_sd\n";
+}
+
+std::string csv_sequence_profile_row(const std::string& run, Metric metric, size_t member, const std::string& label,
+    double position, const std::string& source, size_t first, size_t end, const MemberStatistics& summary,
+    size_t frame, float value, const std::string& reference_source, const MemberStatistics* reference,
+    const std::string& quantity, const std::string& unit, bool included) {
+    if (end<=first || summary.count>end-first) {
+        MD_LOG_ERROR("Lavery: invalid sequence-profile CSV interval/count");
+        return {};
+    }
+    char row[512];
+    snprintf(row,sizeof(row),"%.17g,",position);
+    std::string output=csv_quote(run)+","+class_csv_name(metric_class(metric))+","+
+        (quantity.empty() ? metric_path(metric) : csv_quote(quantity))+","+
+        (unit.empty() ? (metric_uses_degrees(metric) ? "deg" : "Angstrom") : csv_quote(unit))+","+std::to_string(member+1)+","+
+        csv_quote(label)+","+row+csv_quote(source)+",";
+    snprintf(row,sizeof(row),"%zu,%zu,",first,end-1);
+    output+=row;
+    if (included) {
+        snprintf(row,sizeof(row),"%zu,%zu,%.17g,%.17g,",summary.count,end-first-summary.count,
+            summary.count ? summary.mean : NAN,summary.count ? summary.sd : NAN);
+        output+=row;
+    } else output+=",,,,";
+    if (frame==SIZE_MAX || !included) output+=",,";
+    else {
+        snprintf(row,sizeof(row),"%zu,%.17g,",frame,(double)value);
+        output+=row;
+    }
+    if (reference && included) {
+        snprintf(row,sizeof(row),",%zu,%.17g,%.17g\n",reference->count,
+            reference->count ? reference->mean : NAN,reference->count ? reference->sd : NAN);
+        output+=csv_quote(reference_source)+row;
+    } else output+=",,,\n";
+    return output;
+}
+
 const char* csv_comparison_header() {
     return "run,class,parameter,unit,distribution,source_filters,bin_lower,bin_upper,density,valid,missing,mean,sd,angular_origin\n";
 }
@@ -332,11 +443,13 @@ bool add_frame_features(std::vector<FrameFeature>* features, int cls, uint32_t m
 bool representative_frames(std::vector<FrameCandidate>* out, const std::array<std::vector<float>, Metric_Count>& values,
     const std::array<MetricStatistics, Metric_Count>& statistics, const std::array<size_t, Metric_Count>& columns,
     const std::vector<FrameFeature>& features, size_t first, size_t end, size_t count, double separation,
-    const std::vector<double>& times, std::string* error) {
+    const std::vector<double>& times, std::string* error, double coverage, FrameRankingDiagnostics* diagnostics) {
     if (!out) return fail(error,"Missing frame-ranking output");
     if (error) error->clear();
     out->clear();
-    if (features.empty() || first>=end || !count || !std::isfinite(separation) || separation<0)
+    if (diagnostics) *diagnostics={};
+    if (features.empty() || first>=end || !count || !std::isfinite(separation) || separation<0 ||
+        !std::isfinite(coverage) || coverage<=0 || coverage>1)
         return fail(error,"Choose features, a valid search interval, positive frame count and nonnegative separation");
     if (!times.empty()) {
         if (times.size()<end) return fail(error,"Frame-ranking timestamps do not cover the search interval");
@@ -352,21 +465,50 @@ bool representative_frames(std::vector<FrameCandidate>* out, const std::array<st
             return fail(error,"Invalid or duplicate representative-frame feature");
     }
     std::vector<FrameCandidate> ranked;
+    const size_t required=std::max(size_t(1),(size_t)std::ceil(coverage*features.size()-1e-9));
+    if (diagnostics) {
+        diagnostics->frames=end-first;
+        diagnostics->missing_values.resize(features.size());
+        diagnostics->missing_references.resize(features.size());
+        diagnostics->invalid_scales.resize(features.size());
+    }
     for (size_t f = first; f < end; ++f) {
         double sum = 0;
-        bool valid = true;
-        for (const auto& feature : features) {
+        size_t used=0;
+        std::string omitted;
+        for (size_t i=0;i<features.size();++i) {
+            const auto& feature=features[i];
             const auto id = feature.metric;
             const auto& stats = statistics[id].members[feature.member];
             const float v = values[id][f*columns[id]+feature.member];
             const auto ref = stats.reference(v);
-            if (!std::isfinite(v) || !ref.count || !std::isfinite(ref.sd) || ref.sd<=0) { valid=false; break; }
             const double z = stats.zscore(v);
+            const char* reason=nullptr;
+            if (!std::isfinite(v)) {
+                reason="missing_value";
+                if (diagnostics) ++diagnostics->missing_values[i];
+            } else if (!ref.count) {
+                reason="missing_reference";
+                if (diagnostics) ++diagnostics->missing_references[i];
+            } else if (!std::isfinite(ref.sd) || ref.sd<=0 || !std::isfinite(z)) {
+                reason="invalid_scale";
+                if (diagnostics) ++diagnostics->invalid_scales[i];
+            }
+            if (reason) {
+                if (!omitted.empty()) omitted+="; ";
+                omitted+=std::string(metric_path(id))+":"+std::to_string(feature.member+1)+"="+reason;
+                continue;
+            }
             sum += z*z;
+            ++used;
         }
-        if (valid && std::isfinite(sum)) ranked.push_back({f,std::sqrt(sum/features.size())});
+        if (diagnostics && used==features.size()) ++diagnostics->strict;
+        if (used>=required && std::isfinite(sum)) {
+            ranked.push_back({f,std::sqrt(sum/used),used,features.size(),std::move(omitted)});
+            if (diagnostics) ++diagnostics->comparable;
+        }
     }
-    if (ranked.empty()) return fail(error,"No comparable frames: every feature needs finite data and a nonzero reference scale in its state");
+    if (ranked.empty()) return fail(error,"No comparable frames at the required feature coverage. Inspect missing values, references and nonzero scales.");
     std::sort(ranked.begin(),ranked.end(),[](const auto& a,const auto& b) { return a.score==b.score ? a.frame<b.frame : a.score<b.score; });
     std::set<double> selected;
     for (const auto& candidate : ranked) {
@@ -410,6 +552,8 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
     std::sort(frames.begin(),frames.end(),[](const auto& a,const auto& b) { return a.frame<b.frame; });
     for (size_t i = 0; i < frames.size(); ++i)
         if (frames[i].frame>=frame_count || frames[i].frame>INT_MAX || !std::isfinite(frames[i].score) ||
+            frames[i].used_features>frames[i].total_features ||
+            (frames[i].total_features && !frames[i].used_features) ||
             (i && frames[i-1].frame==frames[i].frame)) return fail(error,"Invalid or duplicate export frame");
     const double to_ps = md_unit_scale(time_attr->unit)/md_unit_scale(md_unit_picosecond());
     float previous = -std::numeric_limits<float>::infinity();
@@ -428,7 +572,7 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
     std::ofstream gro(gro_path), csv(csv_path);
     bool ok = gro.good() && csv.good();
     std::vector<std::array<float,3>> xyz(sys.atom.count);
-    csv << "output_frame,original_frame,time_ps,score,rank,reference\n";
+    csv << "output_frame,original_frame,time_ps,score,rank,reference,used_features,total_features,coverage,omitted_features\n";
     for (size_t n = 0; n < frames.size() && ok; ++n) {
         const auto f = frames[n].frame;
         ok = md_system_extract_frame(extract,(int64_t)f,&state);
@@ -448,7 +592,12 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
             reinterpret_cast<rvec*>(xyz.data()),1000.f)==exdrOK;
         const auto rank = std::find_if(candidates.begin(),candidates.end(),[&](const auto& c) { return c.frame==f; })-candidates.begin()+1;
         csv.precision(17);
-        csv << n << ',' << f << ',' << time << ',' << frames[n].score << ',' << rank << ',' << csv_quote(provenance) << '\n';
+        csv << n << ',' << f << ',' << time << ',' << frames[n].score << ',' << rank << ',' << csv_quote(provenance) << ',';
+        if (frames[n].total_features)
+            csv << frames[n].used_features << ',' << frames[n].total_features << ','
+                << (double)frames[n].used_features/frames[n].total_features;
+        else csv << ",,";
+        csv << ',' << csv_quote(frames[n].omitted_features) << '\n';
         if (!n) {
             gro << "Lavery representative frame " << f << ", t= " << time << " ps\n" << sys.atom.count << '\n';
             for (size_t a = 0; a < sys.atom.count; ++a) {
