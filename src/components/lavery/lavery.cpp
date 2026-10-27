@@ -276,6 +276,7 @@ struct Lavery : viamd::EventHandler {
     };
     std::vector<ComparisonOverlay> comparison_overlays = {ComparisonOverlay{}};
     int comparison_edit = -1;
+    bool comparison_export_requested = false;
     std::vector<std::string> comparison_labels, comparison_notes;
     int export_view = 0;
     int state_history_cached_kind = -1;
@@ -1539,8 +1540,14 @@ struct Lavery : viamd::EventHandler {
         if (ImGui::Button("Export shown events CSV", ImVec2(wide, 0))) export_events_csv(frame_count, true);
         ImGui::SetItemTooltip("Respect maximum shown duration, text/region filter and Active now.\n"
             "Event and parent IDs are preserved; a hidden parent may not have an exported row.");
-        if (ImGui::Button("Export state switches CSV", ImVec2(wide, 0))) export_state_switches_csv();
-        ImGui::SetItemTooltip("Nucleotide switches using Event parameters and Detection range. Pairing raw-run export is below.");
+        if (ImGui::Button("Export all nucleotide switches CSV", ImVec2(wide, 0))) export_state_switches_csv();
+        ImGui::SetItemTooltip("All detected nucleotide switches; display filters and table sorting do not change this export.");
+        if (ImGui::Button("Export shown nucleotide switches CSV", ImVec2(wide, 0))) export_state_switches_csv(true);
+        ImGui::SetItemTooltip("Use the nucleotide Conformation, BP range, destination State and Search filters. Original detection order.");
+        if (ImGui::Button("Export Compare distributions CSV", ImVec2(wide, 0))) {
+            comparison_export_requested=true;
+        }
+        ImGui::SetItemTooltip("Open Compare to export its current class and visible distributions, including filters, bins and statistics.");
         if (ImGui::Button("Export displayed axis CSV", ImVec2(wide, 0))) export_axis();
         if (ImGui::CollapsingHeader("Pairing-state runs CSV")) {
             ImGui::TextWrapped("Export all raw runs of the selected pair, including unavailable and short runs. Residence only annotates qualification.");
@@ -3087,6 +3094,16 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
+    bool nucleotide_switch_shown(const StateSwitch& change) const {
+        const Metric families[]={Buckle,EpsilonZeta,Chi,Phase,Alpha,Gamma};
+        const std::string text=nucleotide_labels[change.member]+" "+metric_name(change.metric)+" "+
+            metric_state_name(change.metric,change.from)+" -> "+metric_state_name(change.metric,change.to);
+        return (!transition_family || change.metric==families[transition_family]) &&
+            change.member/2>=(size_t)(nucleotide_bp_first-1) && change.member/2<(size_t)nucleotide_bp_last &&
+            (!transition_family || nucleotide_to<0 || change.to==nucleotide_to) &&
+            transition_search[0].PassFilter(text.c_str());
+    }
+
     void draw_state_switches(size_t frame_count) {
         const float* times = timeline_times(frame_count);
         const Metric families[]={Buckle,EpsilonZeta,Chi,Phase,Alpha,Gamma};
@@ -3123,13 +3140,7 @@ struct Lavery : viamd::EventHandler {
         std::vector<size_t> shown;
         for (size_t i=0; i<state_switches.size(); ++i) {
             const auto& change=state_switches[i];
-            const std::string text=nucleotide_labels[change.member]+" "+metric_name(change.metric)+" "+
-                metric_state_name(change.metric,change.from)+" -> "+metric_state_name(change.metric,change.to);
-            if ((!transition_family || change.metric==families[transition_family]) &&
-                change.member/2>=(size_t)(nucleotide_bp_first-1) &&
-                change.member/2<(size_t)nucleotide_bp_last &&
-                (!transition_family || nucleotide_to<0 || change.to==nucleotide_to) &&
-                transition_search[0].PassFilter(text.c_str())) shown.push_back(i);
+            if (nucleotide_switch_shown(change)) shown.push_back(i);
         }
         ImGui::TextDisabled("%zu shown / %zu detected; angular change and residence, not sigma severity",shown.size(),state_switches.size());
         ImGui::SetItemTooltip("Time and residence use the trajectory's time unit, or frames without physical timestamps.\n"
@@ -3218,7 +3229,7 @@ struct Lavery : viamd::EventHandler {
         ImGui::EndChild();
     }
 
-    void export_state_switches_csv() {
+    void export_state_switches_csv(bool shown_only=false) {
         char path[4096] = {};
         if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
         md_file_t file = {};
@@ -3235,9 +3246,12 @@ struct Lavery : viamd::EventHandler {
                 md_unit_scale(md_unit_picosecond()) / md_unit_scale(app->timeline.time_unit);
         }
         std::string output = csv_state_switch_header();
-        for (const auto& change : state_switches) output += csv_state_switch_row(run, nucleotide_labels[change.member],
+        for (const auto& change : state_switches) {
+            if (shown_only && !nucleotide_switch_shown(change)) continue;
+            output += csv_state_switch_row(run, nucleotide_labels[change.member],
             change, times ? times[change.begin] : (double)change.begin, times ? times[change.end] : (double)change.end, unit, minimum,
             times ? times[change.source_begin] : (double)change.source_begin, times ? times[change.source_end] : (double)change.source_end);
+        }
         bool ok = md_file_write(file, output.data(), output.size()) == output.size();
         if (!md_file_close(&file)) ok = false;
         if (!ok) MD_LOG_ERROR("Lavery: state-switch CSV write failed; '%s' may be incomplete", path);
@@ -4051,7 +4065,31 @@ struct Lavery : viamd::EventHandler {
             }
             comparison_key=key;
         }
-        if (comparison_labels.empty()) { ImGui::TextDisabled("Add a distribution or import a CSV dataset."); return; }
+        if (comparison_labels.empty()) {
+            comparison_export_requested=false;
+            ImGui::TextDisabled("Add a distribution or import a CSV dataset before plotting or exporting.");
+            return;
+        }
+        if (comparison_export_requested) {
+            comparison_export_requested=false;
+            char path[4096]={};
+            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,STR_LIT("csv"))) {
+                md_file_t file={};
+                if (!md_file_open(&file,str_from_cstr(path),MD_FILE_WRITE|MD_FILE_CREATE|MD_FILE_TRUNCATE)) {
+                    MD_LOG_ERROR("Lavery: could not open comparison CSV '%s'",path);
+                } else {
+                    std::string output=csv_comparison_header();
+                    for (int k=0;k<parameters;++k) for (size_t g=0;g<comparison_overlays.size();++g)
+                        if (comparison_overlays[g].visible)
+                            output+=csv_comparison_group(run,(Metric)(first_metric+k),comparison_labels[g],comparison_notes[g],
+                                dashboard_comparisons[first_metric+k],g,comparison_overlays[g].source<3);
+                    bool ok=md_file_write(file,output.data(),output.size())==output.size();
+                    if (!md_file_close(&file)) ok=false;
+                    if (!ok) MD_LOG_ERROR("Lavery: comparison CSV write failed; '%s' may be incomplete",path);
+                    else MD_LOG_INFO("Lavery: exported Compare distributions to '%s'",path);
+                }
+            }
+        }
         ImGui::TextDisabled("Independent distributions | 32 shared bins | independently normalized");
         ImGui::SetItemTooltip("Each finite member-frame sample has equal weight; this is not a distribution of member averages.\n"
             "Overlapping periods share samples; samples are correlated, not independent observations.\n"
@@ -4251,7 +4289,7 @@ struct Lavery : viamd::EventHandler {
             }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Compare")) {
+        if (ImGui::BeginTabItem("Compare",nullptr,comparison_export_requested ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)) {
             draw_comparison(frame_count);
             ImGui::EndTabItem();
         }

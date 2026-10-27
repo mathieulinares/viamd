@@ -232,6 +232,36 @@ std::vector<float> pooled_external_samples(const ExternalReference& source, Metr
     return samples;
 }
 
+const char* csv_comparison_header() {
+    return "run,class,parameter,unit,distribution,source_filters,bin_lower,bin_upper,density,valid,missing,mean,sd,angular_origin\n";
+}
+
+std::string csv_comparison_group(const std::string& run, Metric metric, const std::string& name,
+    const std::string& source_filters, const SampleComparison& comparison, size_t group, bool missing_known) {
+    const auto& h=comparison.histogram;
+    if (group>=h.valid.size() || group>=comparison.summaries.size() || group>=comparison.missing.size()) {
+        MD_LOG_ERROR("Lavery: invalid comparison CSV group");
+        return {};
+    }
+    const auto& summary=comparison.summaries[group];
+    const std::string prefix=csv_quote(run)+","+class_csv_name(metric_class(metric))+","+metric_path(metric)+","+
+        (metric_uses_degrees(metric) ? "deg" : "Angstrom")+","+csv_quote(name)+","+csv_quote(source_filters)+",";
+    const std::string missing=missing_known ? std::to_string(comparison.missing[group]) : "";
+    std::string output;
+    const size_t bins=h.centers.size();
+    for (size_t b=0;b<std::max((size_t)1,bins);++b) {
+        char row[512];
+        const double lower=bins ? h.centers[b]-h.bin_width*.5 : NAN;
+        const double upper=bins ? h.centers[b]+h.bin_width*.5 : NAN;
+        const double density=bins ? h.density[group*bins+b] : 0;
+        snprintf(row,sizeof(row),"%.17g,%.17g,%.17g,%zu,%s,%.17g,%.17g,%.17g\n",
+            lower,upper,density,h.valid[group],missing.c_str(),
+            summary.count ? summary.mean : NAN,summary.count ? summary.sd : NAN,comparison.angular_origin);
+        output+=prefix+row;
+    }
+    return output;
+}
+
 std::vector<float> external_samples(const ExternalReference& source, Metric metric, const std::vector<int>& mapping,
                                     size_t member, const std::vector<uint32_t>& groups) {
     std::vector<float> samples;

@@ -13,38 +13,112 @@ It then flags frames where a pair, step or nucleotide deviates from its chosen
 trajectory or imported control baseline, and detects residence-qualified state switches separately.
 For the full reference, see [lavery.md](./lavery.md).
 
+## GUI tour: 1BNA
+
+These screenshots use the 1BNA DNA trajectory: **2001 frames, 0-10000 ps**.
+They illustrate the current interface with a full-trajectory reference, not a
+new scientific validation or the restricted baseline used in earlier reports.
+Expand a section to see the corresponding views.
+
+<details>
+<summary>Outliers and Parameter heatmap</summary>
+
+The Outliers table, shared middle row and full-width timeline:
+
+![1BNA Outliers](./images/lavery/1bna-outliers.png)
+
+The numerical heatmap has independent class/parameter controls:
+
+![1BNA Parameter heatmap](./images/lavery/1bna-parameter-heatmap.png)
+
+</details>
+
+<details>
+<summary>State heatmap: nucleotide conformations and pairing chemistry</summary>
+
+Raw nucleotide-state history:
+
+![1BNA nucleotide State heatmap](./images/lavery/1bna-state-heatmap-nucleotides.png)
+
+Raw pairing-chemistry history:
+
+![1BNA pairing State heatmap](./images/lavery/1bna-state-heatmap-pairing.png)
+
+</details>
+
+<details>
+<summary>State switches: nucleotide conformations and pairing chemistry</summary>
+
+Pucker transitions for both nucleotides of BP 1, with selected-transition context:
+
+![1BNA nucleotide State switches](./images/lavery/1bna-state-switches-nucleotides.png)
+
+The separate pairing-chemistry transition table has no qualifying transitions
+at the displayed 200 ps residence threshold in this example. This does not mean
+the raw pairing history is constant.
+
+![1BNA pairing State switches](./images/lavery/1bna-state-switches-pairing.png)
+
+</details>
+
+<details>
+<summary>Compare: independent distributions and one shared legend</summary>
+
+Six intra-pair parameters compare the whole trajectory with GC pairs at the
+current frame. Each overlay has its own source and filters.
+
+![1BNA Compare dashboard](./images/lavery/1bna-compare.png)
+
+</details>
+
+<details>
+<summary>Export: analysis tables and representative frames</summary>
+
+Explicit all/shown exports and the Compare histogram export:
+
+![1BNA analysis-table exports](./images/lavery/1bna-export-tables.png)
+
+Example ranking using all 72 intra-pair features. Broad feature selections can
+yield no comparable frames if any required feature is unavailable.
+
+![1BNA representative-frame ranking](./images/lavery/1bna-export-representatives.png)
+
+</details>
+
 ## Watch states change along the trajectory
 
-Open **State heatmap** in the results tabs. Choose BI/BII, anti/syn, sugar
-pucker, Alpha/Gamma rotamers or Pairing chemistry. Each row is a member,
+Open **State heatmap** in the results tabs. Its **Nucleotide conformations**
+sub-tab offers BI/BII, anti/syn, sugar pucker and Alpha/Gamma rotamers in the
+**Conformation** dropdown; **Pairing chemistry** has its own sub-tab. Each row is a member,
 time runs horizontally, and colour is the raw state. Hover for exact values;
 click to select the member and jump to that time. White means multiple states
 fall in a display bin: zoom in. Grey means unavailable, not physically unpaired.
 Minimum residence filters transition tables without repainting this history.
 
-Use **Fit view** in States, or double-click either the state history or the numerical heatmap to fit the full
+Use **Fit view**, or double-click either the state history or the numerical heatmap to fit the full
 trajectory/member extent, even when the display is currently zoomed in.
-Under **Compare > Measure: Period summary (states / chemistry)**, compare named timeline periods:
-choose chemistry/state occupancies or the plotted parameter's mean/RMS z,
-and all/internal/terminal/selected members. Counts distinguish missing samples
-and samples with a usable reference. Overlapping periods include shared samples;
-percentages are sample occupancies, not statistically independent observations.
+Raw histories include short excursions; transition tables apply minimum residence
+without changing the history colours.
 
 **State switches** has **Nucleotide conformations** and **Pairing chemistry**
 views, each centred on its transition table. Pairing lists all pairs by default
-(minimum residence 200 ps). Only residence, **Search**
-and **Filter...** are above the table; there is no duplicate pair picker.
+(minimum residence 200 ps). Nucleotide controls are ordered **Conformation,
+BP range, State**, then minimum residence and **Search**. Pairing chemistry
+uses **BP range, State**, then residence and Search.
 Search matches member labels, conformation names and transitions.
 There is no permanent Selection sidebar or Focus selected pair toggle.
 Click event/member/parameter rows or heatmap cells to select what to inspect.
-**Filter...** contains member scope, conformation family, From/To and Clear filters.
-The button gains a `*` when advanced filters are active.
+BP bounds are inclusive and 1-based; a nucleotide BP range includes both strands.
+**State** selects transitions *into* that state, or **Any**; choose a nucleotide
+conformation before selecting a specific state. These controls do not depend on
+the member currently selected elsewhere.
 Select a row for a detail strip below the table with source/destination spans,
 intervening samples, clipping and **Go to source / Go to destination**.
 CSV exports remain under **Export > Analysis tables**.
-Counts show **shown / detected**; **Clear filters** resets the current view. These are
+Counts show **shown / detected**. These are
 display filters: detection, residence thresholds, Event parameters, raw history
-and export contents do not change.
+and all-detected export contents do not change. **Export shown nucleotide switches CSV**
+uses the nucleotide display filters; the all-switches export does not.
 The selected pair is highlighted in the all-member History plot; there is no
 duplicate compact timeline. The annotation distinguishes
 Watson-Crick, A-T/U Hoogsteen, Other, Unpaired and Unavailable using explicit
@@ -63,7 +137,8 @@ and the selected parameter timeline spanning the full width below both.
 These plots are visible, not hidden in a dialog.
 There is no heatmap in Outliers.
 Nucleotide and chemistry transitions share State switches; click any column header
-to sort, or Shift-click for multiple sort columns. Time is the default sort.
+to sort, or Shift-click for multiple sort columns. The default order is numeric
+BP number, then nucleotide and transition time (pair then time for chemistry).
 Raw histories share **State heatmap**. **Parameter heatmap** has local
 Class/Parameter controls, a thick black selected-member line and a thick yellow
 current-frame line. Parameters and states have separate tabs. Compare has its own tab.
@@ -75,29 +150,42 @@ class/parameter, not necessarily the state category currently displayed.
 
 ### Compare distributions, including an external simulation
 
-Open **Compare**, choose a class/parameter/member using its local controls, and use
-**Comparison groups** to select any combination of the whole current trajectory,
-named timeline periods and the external CSV. All numerical parameters are
-available. Periods select inclusive sample ranges; no time alignment with CSV
-samples is required.
+Choose **Class: Intra-base pair / Inter-base pair / Nucleotide** to see a grid of
+**6 / 8 / 10 parameter distributions**. Initially, the whole trajectory pools all
+members. This is a distribution of member-frame samples, not member averages.
 
-The main plot overlays densities using common bins, physical units and separate
-normalization per group. The table shows valid/missing counts, mean and population
-SD. Angular series use a common circular origin so equivalent angles across the
-wrap boundary stay together. Hover help explains the convention.
+**Add distribution** creates an independent overlay. Use **Edit** in the shared
+bottom legend to name it, choose its colour and source, and set its filters:
 
-Use **External CSV / mapping** to import or resolve identities without changing
-Reference source. The imported file/mapping is shared with detection: replacing
-it changes detection if detection already uses that external reference. Merely
-selecting comparison groups never changes detection. Missing parameters and
-unmapped members are explicit, not replaced with current-trajectory data.
-CSV missing counts are unknown because only valid imported samples are retained.
+- Whole trajectory, **Current frame (live)**, named period, imported CSV or the
+  already loaded detection-reference CSV.
+- Inclusive **BP from / BP to**, or **Through last BP**.
+- **Pair type:** all, AT/AU, GC or other canonical-base combinations.
+  For steps, both endpoint pairs must match the range and type.
+- In the nucleotide class, an optional A/T/G/C/U filter.
 
-**Parameter-state occupancies** compares derived states (BI/BII, anti/syn,
-pucker or rotamers) with grouped percentage bars, including CSV samples.
-**Period summary (states / chemistry)** retains the multi-member period table;
-pairing chemistry is current-trajectory-only because parameter CSVs do not store
-its contact annotation. Sample counts do not imply statistical independence.
+Adding or editing an overlay never filters the others. **Duplicate** provides a
+starting point for a related subset; **Remove** deletes only that overlay.
+Legend checkboxes show/hide each overlay across the entire grid.
+The current-frame source follows playback and pools selected members in that frame.
+
+**Add CSV...** imports another independent Lavery parameter CSV and adds an overlay.
+It does not replace the detection reference. CSV members are pooled without residue
+mapping or timestamp alignment. Filters use the CSV's own BP numbering and residue
+labels; unavailable filter metadata is reported, not silently ignored. Excluded/
+missing CSV samples are unknown because the importer retains valid values only.
+
+Every parameter uses **32 shared bins**, physical units and independent density
+normalization. Global **Style: Bars / Lines / Filled area**, **Line width** and
+fill **Opacity** apply uniformly. Hover a plot for valid/missing counts, mean
+and population SD. Angular series share a circular origin; equivalent angles
+may differ by 360 degrees. Overlapping periods share samples; counts are not
+independent-observation estimates or significance tests.
+
+**Export > Analysis tables > Export Compare distributions CSV** exports visible
+overlays of the selected Compare class, their bin edges/densities, statistics and
+source/filter descriptions. This derived CSV is not a raw parameter-reference CSV.
+Comparison overlays and style controls are currently session-only.
 
 ### Compare against a control simulation
 
@@ -178,8 +266,8 @@ structures of the current simulation.
    **Distribution** overlays the inspected event's values across its
    entire frame span on the full-trajectory distribution, for the selected
    member and parameter. This includes valid gap/non-contributing frames.
-   Event colour matches its contour; fewer than 10 valid samples are shown as
-   individual diamonds rather than a density curve. Median and range summarize
+   All densities use **32-bin bars**, including sparse events; transparent event
+   overlays match their contour colour. Legends are below the plots. Median and range summarize
    the event (hover for valid/missing counts); the current-frame line stays visible.
    With trajectory timestamps, **Min duration** and **Bridge gaps** use physical
    time. Toggle **Time in ns** for ps/ns input. Any positive minimum removes
@@ -284,7 +372,7 @@ collapse it again to keep the sidebar compact.
   Native defaults remain 1 px, line opacity 0.6 and plane opacity 0.5.
 - **Reset visual defaults** restores the event style and shared measurement
   defaults, without changing detection or selections. Axis and Reset layout
-  remain accessible in the popup; heatmaps have their own analysis tab.
+  remain accessible in the expandable section; heatmaps have their own analysis tabs.
   Changes are live and workspace-saved.
 - Glow is colour-only: it cannot block cartoon/atom picking or overwrite motion
   data. Contours follow the actual representation; the optional broad glow uses
@@ -486,7 +574,7 @@ own residence setting, independent of that mask/range.
 - [ ] GUI check of paused inspection: clicking an event, member or parameter
   should hide other events; Play or a frame change should restore automatic
   feedback without leaving stale highlights.
-- [ ] GUI check of the dividers and plot-height handles (drag, double-click
+- [ ] GUI check of the shared row/sidebar dividers (drag, double-click
   reset, Reset layout, workspace save/load), smaller window sizes, the row
   context menu, hidden columns, Active now, the filter box, Up/Down navigation
   (should not move ImGui's navigation highlight) and the footprint tooltip.

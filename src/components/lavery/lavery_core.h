@@ -331,6 +331,9 @@ struct SampleComparison {
 // Angular samples share a pooled circular origin; summaries use wrapped deviations.
 bool compare_samples(SampleComparison* out, const std::vector<std::vector<float>>& groups,
                      bool angular, size_t bins = 48);
+const char* csv_comparison_header();
+std::string csv_comparison_group(const std::string& run, Metric metric, const std::string& name,
+    const std::string& source_filters, const SampleComparison& comparison, size_t group, bool missing_known);
 
 struct EventDistribution {
     std::vector<double> samples, density;

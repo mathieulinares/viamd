@@ -530,3 +530,23 @@ UTEST(lavery_core, comparison_overlay_filters_are_independent_and_require_metada
     EXPECT_STREQ(external.members[Class_Step][0].pair_a.c_str(),gc.c_str());
     EXPECT_STREQ(external.members[Class_Step][0].pair_b.c_str(),"2: S1:DG2 / S2:DC23");
 }
+
+UTEST(lavery_core, comparison_csv_preserves_bins_filters_statistics_and_unknown_missing_counts) {
+    SampleComparison result;
+    ASSERT_TRUE(compare_samples(&result,{{2,3,4,NAN},{}},false,32));
+    const std::string header=csv_comparison_header();
+    EXPECT_EQ((size_t)std::count(header.begin(),header.end(),','),(size_t)13);
+    const auto current=csv_comparison_group("run",Rise,"GC, bp 1-3","Current frame 20 | BP 1-3 | GC",result,0,true);
+    EXPECT_EQ((size_t)std::count(current.begin(),current.end(),'\n'),(size_t)32);
+    EXPECT_NE(current.find("\"GC, bp 1-3\""),std::string::npos);
+    EXPECT_NE(current.find("Current frame 20 | BP 1-3 | GC"),std::string::npos);
+    EXPECT_NE(current.find(",3,1,3,"),std::string::npos);
+    const auto external=csv_comparison_group("run",Rise,"CSV","source.csv",result,0,false);
+    EXPECT_NE(external.find(",3,,3,"),std::string::npos);
+    const auto missing=csv_comparison_group("run",Rise,"Absent","source.csv",result,1,false);
+    EXPECT_NE(missing.find(",0,,nan,nan,"),std::string::npos);
+    ASSERT_TRUE(compare_samples(&result,{{}},false,32));
+    const auto empty=csv_comparison_group("run",Rise,"Empty","No matching members",result,0,true);
+    EXPECT_EQ((size_t)std::count(empty.begin(),empty.end(),'\n'),(size_t)1);
+    EXPECT_NE(empty.find("nan,nan,0,0,0,nan,nan"),std::string::npos);
+}
