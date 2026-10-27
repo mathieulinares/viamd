@@ -115,4 +115,68 @@ UTEST_F(heatmap, fitting_visible_subset_restores_full_trajectory_and_member_exte
     EXPECT_NEAR(fitted.Y.Max,9.5,1e-8);
 }
 
+UTEST_F(heatmap, comparison_grid_renders_32_bin_overlays_with_one_shared_bottom_legend) {
+    double centers[32],density[32];
+    for (int b=0;b<32;++b) { centers[b]=b+.5; density[b]=1./32; }
+    for (int frame=0;frame<6;++frame) {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos(ImVec2(0,0));
+        ImGui::SetNextWindowSize(ImVec2(900,700));
+        ImGui::Begin("Comparison dashboard",nullptr,ImGuiWindowFlags_NoSavedSettings);
+        int rendered=0;
+        const float grid_height=ImGui::GetContentRegionAvail().y-90;
+        const float top=ImGui::GetCursorScreenPos().y;
+        ImGui::BeginChild("Grid",ImVec2(0,grid_height));
+        if (ImGui::BeginTable("Parameter grid",3,ImGuiTableFlags_SizingStretchSame)) {
+            for (int parameter=0;parameter<6;++parameter) {
+                ImGui::TableNextColumn();
+                ImGui::PushID(parameter);
+                ImPlot::SetNextAxesToFit();
+                if (ImPlot::BeginPlot("Parameter",ImVec2(-1,250),ImPlotFlags_NoLegend)) {
+                    ImPlot::SetupAxes("deg","Density");
+                    for (int group=0;group<3;++group) {
+                        const char* label=group==0 ? "Whole trajectory" : group==1 ? "Period" : "Missing CSV parameter";
+                        const ImVec4 color=ImPlot::GetColormapColor(group);
+                        const int style=frame/2;
+                        if (group<2) {
+                            if (style==0) {
+                                ImPlot::SetNextFillStyle(color,.35f);
+                                ImPlot::SetNextLineStyle(color,3);
+                                ImPlot::PlotBars(label,centers,density,32,1);
+                            } else {
+                                if (style==2) {
+                                    ImPlot::SetNextFillStyle(color,.35f);
+                                    ImPlot::PlotShaded(label,centers,density,32,0.0);
+                                }
+                                ImPlot::SetNextLineStyle(color,3);
+                                ImPlot::PlotLine(label,centers,density,32);
+                            }
+                        } else ImPlot::PlotDummy(label);
+                    }
+                    auto* plot=ImPlot::GetCurrentPlot();
+                    ImPlot::EndPlot();
+                    EXPECT_TRUE((plot->Flags&ImPlotFlags_NoLegend)!=0);
+                    EXPECT_GT(plot->PlotRect.GetHeight(),100.f);
+                    ++rendered;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        EXPECT_EQ(rendered,6);
+        ImGui::EndChild();
+        EXPECT_GE(ImGui::GetCursorScreenPos().y,top+grid_height);
+        ImGui::BeginChild("Shared legend",ImVec2(0,0));
+        for (int group=0;group<3;++group) {
+            ImGui::PushID(group);
+            bool visible=true;
+            ImGui::Checkbox("Distribution",&visible);
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::End();
+        ImGui::Render();
+    }
+}
+
 UTEST_MAIN();

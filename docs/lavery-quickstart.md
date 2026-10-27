@@ -15,23 +15,36 @@ For the full reference, see [lavery.md](./lavery.md).
 
 ## Watch states change along the trajectory
 
-Open **State history > View: History** in the results tabs. Choose BI/BII, anti/syn, sugar
+Open **State heatmap** in the results tabs. Choose BI/BII, anti/syn, sugar
 pucker, Alpha/Gamma rotamers or Pairing chemistry. Each row is a member,
 time runs horizontally, and colour is the raw state. Hover for exact values;
 click to select the member and jump to that time. White means multiple states
 fall in a display bin: zoom in. Grey means unavailable, not physically unpaired.
 Minimum residence filters transition tables without repainting this history.
 
-Use **Fit view** in History, or double-click either State history or the numerical heatmap to fit the full
+Use **Fit view** in States, or double-click either the state history or the numerical heatmap to fit the full
 trajectory/member extent, even when the display is currently zoomed in.
-Under **State history > View: Compare stages**, compare named timeline periods:
+Under **Compare > Measure: Period summary (states / chemistry)**, compare named timeline periods:
 choose chemistry/state occupancies or the plotted parameter's mean/RMS z,
 and all/internal/terminal/selected members. Counts distinguish missing samples
 and samples with a usable reference. Overlapping periods include shared samples;
 percentages are sample occupancies, not statistically independent observations.
 
-**State switches > Switch type: Pairing chemistry** adds the selected-pair
-transition table (default residence 200 ps), with CSV export of all raw runs.
+**State switches** has **Nucleotide conformations** and **Pairing chemistry**
+views, each centred on its transition table. Pairing lists all pairs by default
+(minimum residence 200 ps). Only residence, **Search**
+and **Filter...** are above the table; there is no duplicate pair picker.
+Search matches member labels, conformation names and transitions.
+There is no permanent Selection sidebar or Focus selected pair toggle.
+Click event/member/parameter rows or heatmap cells to select what to inspect.
+**Filter...** contains member scope, conformation family, From/To and Clear filters.
+The button gains a `*` when advanced filters are active.
+Select a row for a detail strip below the table with source/destination spans,
+intervening samples, clipping and **Go to source / Go to destination**.
+CSV exports remain under **Export > Analysis tables**.
+Counts show **shown / detected**; **Clear filters** resets the current view. These are
+display filters: detection, residence thresholds, Event parameters, raw history
+and export contents do not change.
 The selected pair is highlighted in the all-member History plot; there is no
 duplicate compact timeline. The annotation distinguishes
 Watson-Crick, A-T/U Hoogsteen, Other, Unpaired and Unavailable using explicit
@@ -42,13 +55,49 @@ still have Good quality because one shared canonical bond survives.
 
 ## Control references and representative frames
 
-Results tabs are ordered **Outliers > State switches > State history > Export**.
-Nucleotide and chemistry transitions share State switches; raw histories share
-State history. History and Compare stages occupy separate views, as do
+Results tabs are ordered **Outliers > Parameter heatmap > State heatmap > State switches > Compare > Export**.
+Each tab fills the analysis area; timeline and distribution are not permanent
+panels underneath other tabs. Outliers has the event table on top, the count
+overview beside the selected event/member distribution in the middle row,
+and the selected parameter timeline spanning the full width below both.
+These plots are visible, not hidden in a dialog.
+There is no heatmap in Outliers.
+Nucleotide and chemistry transitions share State switches; click any column header
+to sort, or Shift-click for multiple sort columns. Time is the default sort.
+Raw histories share **State heatmap**. **Parameter heatmap** has local
+Class/Parameter controls, a thick black selected-member line and a thick yellow
+current-frame line. Parameters and states have separate tabs. Compare has its own tab.
+Separate views also contain
 Representative frames and Analysis tables under Export.
-The inspector's **Evidence...** button opens the former Pairing & coverage table
+The shared settings sidebar's **Evidence...** button opens the former Pairing & coverage table
 in a resizable dialog. It reports the plotted
 class/parameter, not necessarily the state category currently displayed.
+
+### Compare distributions, including an external simulation
+
+Open **Compare**, choose a class/parameter/member using its local controls, and use
+**Comparison groups** to select any combination of the whole current trajectory,
+named timeline periods and the external CSV. All numerical parameters are
+available. Periods select inclusive sample ranges; no time alignment with CSV
+samples is required.
+
+The main plot overlays densities using common bins, physical units and separate
+normalization per group. The table shows valid/missing counts, mean and population
+SD. Angular series use a common circular origin so equivalent angles across the
+wrap boundary stay together. Hover help explains the convention.
+
+Use **External CSV / mapping** to import or resolve identities without changing
+Reference source. The imported file/mapping is shared with detection: replacing
+it changes detection if detection already uses that external reference. Merely
+selecting comparison groups never changes detection. Missing parameters and
+unmapped members are explicit, not replaced with current-trajectory data.
+CSV missing counts are unknown because only valid imported samples are retained.
+
+**Parameter-state occupancies** compares derived states (BI/BII, anti/syn,
+pucker or rotamers) with grouped percentage bars, including CSV samples.
+**Period summary (states / chemistry)** retains the multi-member period table;
+pairing chemistry is current-trajectory-only because parameter CSVs do not store
+its contact annotation. Sample counts do not imply statistical independence.
 
 ### Compare against a control simulation
 
@@ -90,7 +139,7 @@ structures of the current simulation.
    the overview (count plot, heatmap) and inspector (timeline, distribution)
    below. Drag the thin dividers between sections, or under any plot or list,
    to resize; double-click a divider to restore its default. Sizes are saved in
-   the workspace; **Visual feedback... > Reset layout** restores everything. The timeline
+   the workspace; **Visual feedback > Reset layout** restores everything. The timeline
    and distribution refit when you select a new series.
 2. Choose a class (Intra / Inter / Nucleotide), parameter and member. The time
    series, heatmap and inspector all follow your selection. Bimodal parameters
@@ -182,7 +231,7 @@ structures of the current simulation.
      temporarily show its measurement.
    - Detailed geometry respects depth, with faint dashed through-structure
      cues for selected distance/dihedral paths. Context stays subtle and
-     **Visual feedback... > Measurements > Measurement value labels** enables the text boxes; it is
+     **Visual feedback > Measurements > Measurement value labels** enables the text boxes; it is
      **off by default**. Turning text off does not disable geometry, contours or
      hover tooltips.
    - Play the trajectory: all active events automatically get a thin coloured
@@ -202,7 +251,7 @@ structures of the current simulation.
      Contours follow the visible representation and its filters, periodic copies
      and assemblies. Normal selection and hover remain independent, drawn above
      the event contours. **Soft marker halos** affects small markers only.
-     **Visual feedback... > Event regions > Contour thickness** adjusts the outline from **1x to
+     **Visual feedback > Event regions > Contour thickness** adjusts the outline from **1x to
      4x** (default **1.5x**). Changes are live, HiDPI-scaled and saved in the
      workspace; **1x** restores the original native width. Normal VIAMD
      selection and measurement line widths are unaffected.
@@ -211,14 +260,14 @@ structures of the current simulation.
      Shift/Ctrl selection gestures keep their native meaning.
    - The GUI is one non-dockable window: settings left, events above the plots.
      Rarely used settings sit in collapsed sections (**Event parameters**,
-     **Advanced detection**, **Tools**) or the compact **Visual
-     feedback...** popup; help text is in
-     tooltips (hover labels or `(?)`).
+     **Advanced detection**, **Visual feedback**); help text is in
+     tooltips (hover labels or `(?)`). There is no Tools section;
+     **Recompute analysis** is at the bottom of the sidebar.
 
-### Visual feedback popup
+### Visual feedback dropdown
 
-The sidebar's **Visual feedback...** button replaces the old Display section;
-it opens a compact popup, not another permanent pane.
+Expand the sidebar's **Visual feedback** header to show its controls;
+collapse it again to keep the sidebar compact.
 
 - **Event regions:** select **Contour**, **Glow**, **Both**, or **Off**.
   Contour is the default. Adjust contour thickness (1-4x) and/or glow strength
@@ -234,8 +283,9 @@ it opens a compact popup, not another permanent pane.
   0.8 first; increase plane opacity only if the angle planes remain hard to read.
   Native defaults remain 1 px, line opacity 0.6 and plane opacity 0.5.
 - **Reset visual defaults** restores the event style and shared measurement
-  defaults, without changing detection or selections. Heatmap, axis and Reset
-  layout remain accessible in the popup. Changes are live and workspace-saved.
+  defaults, without changing detection or selections. Axis and Reset layout
+  remain accessible in the popup; heatmaps have their own analysis tab.
+  Changes are live and workspace-saved.
 - Glow is colour-only: it cannot block cartoon/atom picking or overwrite motion
   data. Contours follow the actual representation; the optional broad glow uses
   the original base-centred context geometry.
@@ -288,7 +338,7 @@ definitions and are not a numerical identity check.
   unavailable and excluded from analysis. Missing terminal torsions are normal.
 - **Distorted but calculable geometry:** warnings only; finite values stay in
   statistics and event detection so real deformation is not hidden.
-- **Inspector > Evidence...** shows quality for the selected parameter. Hover a
+- **Settings > Evidence...** shows quality for the selected parameter. Hover a
   viewport marker to see parameter-specific reasons; parameter CSV exports
   preserve the same flags and reasons.
 - The inspector and hover details distinguish **Unavailable - excluded from
@@ -370,7 +420,7 @@ Angular parameters such as Twist and Opening wrap correctly at +/-180°.
 
 ## State switches, separately from outlier events
 
-Use **State switches > Switch type: Nucleotide conformations** beside **Outliers** for North/South, BI/BII,
+Use **State switches > Nucleotide conformations** beside **Outliers** for North/South, BI/BII,
 anti/syn and Alpha/Gamma rotamer changes. Both the source and destination
 must meet **Min residence** (ps/ns, or frames without physical timestamps).
 The initial residence is the event minimum duration; it can be adjusted

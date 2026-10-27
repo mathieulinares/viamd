@@ -84,6 +84,54 @@ std::string reference_identity(int cls, const std::string& label, const std::str
     return first.empty() || second.empty() ? std::string{} : first+" -> "+second;
 }
 
+bool comparison_member_matches(const ComparisonMemberFilter& filter, int cls,
+    const std::string& label, const std::string& pair_a, const std::string& pair_b, bool* metadata_missing) {
+    *metadata_missing=false;
+    auto base=[](const std::string& text) {
+        const auto colon=text.find(':');
+        if (colon==std::string::npos) return char(0);
+        const auto end=text.find_first_of("0123456789 -",colon+1);
+        const auto name=text.substr(colon+1,end==std::string::npos ? end : end-colon-1);
+        if (name=="A" || name=="DA" || name=="ADE") return 'A';
+        if (name=="T" || name=="DT" || name=="THY") return 'T';
+        if (name=="U" || name=="DU" || name=="URA") return 'U';
+        if (name=="G" || name=="DG" || name=="GUA") return 'G';
+        if (name=="C" || name=="DC" || name=="CYT") return 'C';
+        return char(0);
+    };
+    auto pair_matches=[&](const std::string& pair) {
+        if (filter.bp_first!=1 || filter.bp_last!=SIZE_MAX) {
+            size_t bp=0;
+            const auto colon=pair.find(':');
+            if (colon==std::string::npos) { *metadata_missing=true; return false; }
+            const auto parsed=std::from_chars(pair.data(),pair.data()+colon,bp);
+            if (parsed.ec!=std::errc() || parsed.ptr!=pair.data()+colon || !bp) {
+                *metadata_missing=true;
+                return false;
+            }
+            if (bp<filter.bp_first || bp>filter.bp_last) return false;
+        }
+        if (filter.pair_type) {
+            const auto identity=pair_identity(pair);
+            const auto slash=identity.find(" / ");
+            if (slash==std::string::npos) { *metadata_missing=true; return false; }
+            const char a=base(identity.substr(0,slash)), b=base(identity.substr(slash+3));
+            if (!a || !b) { *metadata_missing=true; return false; }
+            const bool at=(a=='A' && (b=='T' || b=='U')) || (b=='A' && (a=='T' || a=='U'));
+            const bool gc=(a=='G' && b=='C') || (a=='C' && b=='G');
+            if (filter.pair_type!=(at ? 1 : gc ? 2 : 3)) return false;
+        }
+        return true;
+    };
+    if (!pair_matches(pair_a) || (cls==Class_Step && !pair_matches(pair_b))) return false;
+    if (cls==Class_Nucleotide && filter.nucleotide) {
+        const char nucleotide=base(label);
+        if (!nucleotide) { *metadata_missing=true; return false; }
+        if (nucleotide!=filter.nucleotide) return false;
+    }
+    return true;
+}
+
 bool load_external_reference(ExternalReference* out, const std::string& path, std::string* error) {
     if (!out) return fail(error,"Missing external reference output");
     *out = {};
@@ -133,12 +181,14 @@ bool load_external_reference(ExternalReference* out, const std::string& path, st
         auto [it,inserted] = ids.emplace(member,result.members[cls].size());
         const auto identity = reference_identity(cls,get("label"),get("pair_a"),get("pair_b"));
         if (inserted) {
-            result.members[cls].push_back({get("label"),identity,{}});
+            result.members[cls].push_back({get("label"),identity,{},get("pair_a"),get("pair_b")});
             frame_ids[cls].emplace_back();
         }
         frame_ids[cls][it->second][metric].push_back(frame);
         auto& target = result.members[cls][it->second];
-        if (target.label!=get("label") || target.identity!=identity) return fail(error,"Reference member identity changes within CSV");
+        if (target.label!=get("label") || target.identity!=identity ||
+            target.pair_a!=get("pair_a") || target.pair_b!=get("pair_b"))
+            return fail(error,"Reference member identity changes within CSV");
         if (get("valid")!="0" && get("valid")!="1") return fail(error,"Invalid CSV valid flag");
         if (get("valid")=="1") {
             float value = 0;
@@ -171,6 +221,15 @@ std::vector<int> match_reference_members(const std::vector<ReferenceMember>& sou
         if (matches!=1 || std::count(ids.begin(),ids.end(),ids[m])!=1) mapping[m]=-1;
     }
     return mapping;
+}
+
+std::vector<float> pooled_external_samples(const ExternalReference& source, Metric metric) {
+    std::vector<float> samples;
+    for (const auto& member : source.members[metric_class(metric)]) {
+        const auto& values=member.values[metric];
+        samples.insert(samples.end(),values.begin(),values.end());
+    }
+    return samples;
 }
 
 std::vector<float> external_samples(const ExternalReference& source, Metric metric, const std::vector<int>& mapping,

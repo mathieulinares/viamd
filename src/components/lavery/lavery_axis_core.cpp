@@ -123,6 +123,50 @@ bool compute_distributions(DistributionComparison* out, const std::vector<float>
     return true;
 }
 
+bool compare_samples(SampleComparison* out, const std::vector<std::vector<float>>& groups,
+                     bool angular, size_t bins) {
+    if (!out || groups.empty() || !bins || bins>4096) {
+        MD_LOG_ERROR("Lavery: invalid comparison dimensions");
+        return false;
+    }
+    *out={};
+    constexpr double rad=3.14159265358979323846/180.;
+    double sine=0,cosine=0;
+    if (angular) for (const auto& group : groups) for (float v : group) if (std::isfinite(v)) {
+        sine+=std::sin(v*rad); cosine+=std::cos(v*rad);
+    }
+    out->angular_origin=angular ? std::atan2(sine,cosine)/rad : 0;
+    auto unwrap=[&](double v) { return angular ? out->angular_origin+std::remainder(v-out->angular_origin,360.) : v; };
+    auto& h=out->histogram;
+    double lo=INFINITY,hi=-INFINITY;
+    for (const auto& group : groups) for (float v : group) if (std::isfinite(v)) {
+        const double x=unwrap(v);
+        lo=std::min(lo,x); hi=std::max(hi,x);
+    }
+    h.valid.assign(groups.size(),0);
+    out->summaries.resize(groups.size());
+    out->missing.assign(groups.size(),0);
+    if (std::isfinite(lo)) {
+        if (lo==hi) { const double pad=std::max(.5,std::fabs(lo)*1e-6); lo-=pad; hi+=pad; }
+        h.bin_width=(hi-lo)/bins;
+        h.centers.resize(bins);
+        for (size_t b=0;b<bins;++b) h.centers[b]=lo+(b+.5)*h.bin_width;
+        h.density.assign(groups.size()*bins,0);
+    }
+    for (size_t g=0;g<groups.size();++g) {
+        MetricStatistics stats;
+        if (!compute_statistics(&stats,groups[g],1,angular)) return false;
+        out->summaries[g]=stats.members[0];
+        for (float v : groups[g]) {
+            if (!std::isfinite(v)) { ++out->missing[g]; continue; }
+            const size_t bin=std::min(bins-1,(size_t)std::max(0.,(unwrap(v)-lo)/h.bin_width));
+            ++h.valid[g]; ++h.density[g*bins+bin];
+        }
+        if (h.valid[g]) for (size_t b=0;b<bins;++b) h.density[g*bins+b]/=h.valid[g]*h.bin_width;
+    }
+    return true;
+}
+
 bool compute_event_distribution(EventDistribution* out, const std::vector<float>& values,
                                 size_t member_count, size_t member, size_t begin, size_t end,
                                 const DistributionComparison& reference) {

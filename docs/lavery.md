@@ -225,7 +225,7 @@ Distortion is **warning-only**, not an exclusion criterion:
 These broad warning thresholds are heuristic, not a calibrated force-field
 validation. Finite warning-bearing measurements remain in all analysis and
 event detection: unusual deformation may be the signal of interest.
-The selected parameter's quality appears in **Inspector > Evidence...** and plot
+The selected parameter's quality appears in **Settings > Evidence...** and plot
 tooltips. Viewport tooltips name each affected parameter and its reasons.
 Parameter CSV rows carry the individual parameter's flags and explanations;
 warnings do not change the `valid` column to zero.
@@ -288,7 +288,7 @@ validate residence thresholds and transitions scientifically.
 
 ### Member-by-time state history
 
-The **State history > View: History** view shows raw categorical states with time on X and one
+The **State heatmap** tab shows raw categorical states with time on X and one
 member per row. Choose **BI / BII**, **anti / syn**, **Sugar pucker (North /
 South)**, **Alpha rotamers**, **Gamma rotamers**, or **Pairing chemistry**.
 Nucleotide states use nucleotide rows; pairing chemistry uses fixed-pair rows.
@@ -308,9 +308,12 @@ the underlying scientific series remains full resolution.
 
 ### Pairing chemistry (separate from pair-loss validity)
 
-**State switches > Switch type: Pairing chemistry** shows the selected fixed
-pair's current chemistry, residence-qualified transitions and **Export pairing
-CSV**. The raw all-pair view is in **State history > View: History > States:
+**State switches > Pairing chemistry** shows
+residence-qualified transitions across all fixed pairs by default, with a Pair
+column, Search and optional advanced filters.
+There is no pair picker or Focus selected pair toggle in the transition view;
+clicking rows controls selection and Export provides selected-pair raw runs.
+The raw all-pair view is in **State heatmap > States:
 Pairing chemistry**; the selected pair is highlighted there instead of repeating
 it in a separate compact timeline. Raw-run CSV export is
 also available under **Export > Analysis tables > Pairing-state runs CSV**.
@@ -409,25 +412,27 @@ coverage and plot/viewport tooltips. No quality policy or validity rule changes.
 
 ## 2. Window layout
 
-The Lavery workspace is one non-dockable window with child sections separated
-by draggable dividers. No dock tabs or separate panel title bars consume space;
-each section scrolls independently:
+The Lavery workspace is one non-dockable window with a shared settings sidebar
+and full-page analysis tabs. Switching tabs replaces the entire analysis area;
+timeline, distribution and heatmap panels are not carried into other tabs.
 
 ```
-+------------+------------------------------------------+
-|            |  Events & quality                        |
-|  Settings  |  (events table, pairing quality)         |
-|  (sidebar) +=====================+====================+
-|            |  Overview           |  Inspector         |
-|            |  (count + heatmap)  |  (timeline + dist) |
-+------------+---------------------+--------------------+
++------------+-----------------------------------------------+
+|  Settings  | Outliers | Parameter heatmap | State heatmap | State switches | Compare | Export |
+|  (shared   +-----------------------------------------------+
+|  sidebar)  |                                               |
+|            |          Active tab: full analysis area       |
+|            |                                               |
++------------+-----------------------------------------------+
 ```
 
-Drag a divider (sidebar | right, events = bottom, overview | inspector) to
-resize; the split is stored as a fraction of the window. A thin handle under
+Drag the sidebar divider to resize; the split is stored as a fraction of the
+window. In Outliers, drag the horizontal divider to resize the table, and the
+lower vertical divider to resize the count overview against the event details.
+A thin handle under
 the count plot, timeline, distribution and current-frame list resizes that
 element (60-2000 px). Double-clicking any divider or handle restores its
-default, and **Visual feedback... > Reset layout** restores all of them. Sizes are saved
+default, and **Visual feedback > Reset layout** restores all of them. Sizes are saved
 in the workspace (see [Workspace keys](#workspace-keys)).
 
 To keep the window light, help text lives in tooltips: hover a label, a
@@ -438,25 +443,79 @@ individual validity/warning reasons; changing quality during playback does
 not insert/remove reason paragraphs above the timeline and distribution.
 
 - **Settings** (left sidebar):
-  *Selection* (class, parameter, member, frame; valid-member counts in the
-  member tooltip) and *Detection* (Tolerance, Min duration / Min frames,
+  There is no global Selection block or duplicate Frame input. Selection is
+  contextual: click events/members/parameters, transition rows or heatmap cells.
+  Parameter heatmap has local Class/Parameter controls, Compare has Class/Parameter/Member,
+  Outliers has an optional Count scope chooser, and Export has a local
+  parameter/member chooser for table exports.
+  *Detection* (Tolerance, Min duration / Min frames,
   Baseline range, Detection range) are always visible. Collapsed sections:
   *Event parameters* (the 2x6 grid; the header names the subset),
   *Advanced detection* (baseline, neighbourhood or whole structure,
   hierarchy and burst extra, hysteresis, bridge gaps, Time in ns,
-  count any selected parameter) and *Tools* (Recompute analysis).
+  count any selected parameter) and *Visual feedback*.
+  **Recompute analysis** is a full-width button at the bottom of the sidebar;
+  there is no Tools section.
   CSV exports are in the **Export** results tab.
-  The **Visual feedback...** popup provides **Event regions** and
+  The expandable **Visual feedback** section provides **Event regions** and
   **Measurements** tabs for region style, contour/glow strength, native
-  measurement styling, labels, axis, heatmap and layout reset.
-- **Results** (top), ordered **Outliers**, **State switches**, **State history**,
-  **Export**:
-  - **Outliers** retains event inspection and pooled-reference anomalous regions.
+  measurement styling, labels, axis and layout reset. **Evidence...** opens
+  selected-parameter validity/contact diagnostics from any tab.
+- **Analysis workspace**, ordered **Outliers**, **Parameter heatmap**, **State heatmap**,
+  **State switches**, **Compare**, **Export**:
+  - **Outliers** shows the event table on top, including member/parameter
+    inspection and pooled-reference anomalous regions. Below-left is the
+    trajectory-wide count overview beside the selected event/member's distribution.
+    Beneath both is the selected parameter's full-width timeline, with the
+    selected event span shaded. These are visible panels, not a dialog.
+    There is no heatmap in this tab.
   - **State switches** selects Nucleotide conformations or Pairing chemistry.
     Nucleotide switches retain Event parameters/Detection range; pairing
-    transitions retain selected-pair, whole-run scope and separate residence.
-  - **State history** has a **View** selector: **History** retains raw all-member
-    state views; **Compare stages** summarizes each named timeline period with inclusive
+    transitions retain whole-run scope and separate residence, now across all
+    pairs before display filtering.
+    Period/sample comparisons are in the separate **Compare** tab.
+    Two subviews, **Nucleotide conformations** and **Pairing chemistry**, show
+    the table immediately below a compact residence/search/filter toolbar.
+    Search matches labels, conformation and state direction (case-insensitive,
+    comma-separated inclusion and `-` exclusion via ImGui's text filter).
+    No permanent Focus selected pair toggle is shown. Optional member scopes
+    in Filter capture the current row/heatmap selection without changing it.
+    Search and advanced directions
+    are independent between the two views.
+    **Filter...** opens advanced **Member scope: All / Selected pair** and,
+    for nucleotides, **Selected nucleotide**, plus family and direction choices.
+    Advanced selected-nucleotide scope also captures rather than follows selection.
+    The button displays `*` when advanced filters are active.
+    Nucleotide **Conformation** filters BI/BII, anti/syn, pucker, Alpha or Gamma.
+    **From / To** use the chosen family's existing state names; they are hidden
+    for All nucleotide families. Pairing directions exclude Unavailable, which
+    resets transition detection rather than forming an assignable state.
+    Counts show **shown / detected**; **Clear filters** in the popup resets
+    the current view's search, focus and advanced choices to All/Any.
+    Nucleotide columns are Nucleotide, Conformation, Transition, Time, Residence.
+    Pairing columns are Pair, Transition, Time, Residence. Time/residence use
+    trajectory units (frames without physical timestamps).
+    Click any column header to sort ascending or descending; Shift-click adds
+    another sort column. Both tables default to chronological Time order.
+    Sorting preserves the selected transition and does not reorder detection
+    results or exports.
+    A reserved, scrollable detail strip below the table shows the selected
+    transition's source/destination intervals, intervening samples and clipping.
+    **Go to source / Go to destination** selects that member and jumps to the
+    corresponding run onset; nucleotide detail also shows angular change.
+    No selected row or a row hidden by filters leaves a selection hint instead.
+    Filters affect table rows only, not detection, residence rules or raw
+    state history. Disabled Event parameters are not silently enabled.
+    CSV exports are under **Export > Analysis tables**, not above transition tables.
+    Nucleotide CSV exports still contain all detected switches; pairing CSV
+    still contains all raw runs of the selected pair, not filtered transitions.
+  - **Parameter heatmap** shows a full-size numerical heatmap with local class
+    and parameter controls (all pair, step and nucleotide parameters are available).
+    The selected member is marked by a black horizontal line and the current frame
+    by a yellow vertical line, both 4 pixels thick.
+  - **State heatmap** retains raw all-member state history, including pairing
+    chemistry as well as nucleotide conformations.
+    **Compare > Period summary (states / chemistry)** summarizes each named timeline period with inclusive
     bounds (overlap samples appear in each overlapping period). Choose pairing
     chemistry, nucleotide states or the plotted parameter, and all/internal/
     terminal/selected members. Terminal pairs are the two ends of each fixed
@@ -468,31 +527,59 @@ not insert/remove reason paragraphs above the timeline and distribution.
     only from z summaries and counted via Referenced. State-conditioned
     parameters show their state occupancies. Changing periods, reference or
     selection recomputes the cached summary; no new baseline is fit per stage.
-    Only one view occupies the results area at a time; the stage table no longer
+    Only one view occupies the results area at a time; the period table no longer
     shrinks the history plot. The duplicate selected-pair mini-timeline is removed.
-    **Inspector > Evidence...** opens a resizable **Validity & contact evidence**
+    **Settings > Evidence...** opens a resizable **Validity & contact evidence**
     dialog with selected-member reasons and the all-member coverage table for the
     plotted class/parameter; evidence is not a chemistry label. The fixed-height
-    quality status and reason tooltips remain visible without opening the dialog.
+    quality status in the event details and plot reason tooltips remain
+    available without opening the evidence dialog.
   - **Export** has a **View** selector for **Representative frames** (feature
     selection, ranking and XTC/GRO/CSV) or **Analysis tables** (parameter/reference
     CSV, all/shown events, nucleotide switches, displayed axis and selected-pair
     raw runs), rather than stacked expanding sections.
+  - **Compare** provides **Parameter distributions**, **Parameter-state occupancies**
+    and the existing **Period summary (states / chemistry)**.
+    Select any numerical parameter/member using local Compare controls, then choose whole
+    trajectory, named periods and/or external CSV in **Comparison groups**.
+    Distributions use shared physical-unit bins and independently normalized
+    densities for unequal sample counts. Angular series share a pooled circular
+    origin; values are unwrapped within 180 degrees of it. Means and population
+    SD use each group's own circular unwrapping, not state-conditioned detection
+    statistics. Equivalent angles can differ by 360 degrees in the displayed
+    axis or mean. Broad/multimodal angular distributions still require care.
+    Parameter-state occupancies show grouped percentages using finite samples.
+    Valid/missing counts and per-group mean/SD accompany the plot. A zero spread
+    is displayed as zero, not treated as a calibrated standardized deviation.
+    CSV missing counts are explicitly unknown (the importer retains valid
+    samples only); missing mappings/parameters are reported without substitution.
+    **External CSV / mapping** reuses the imported file and identity mapping
+    without changing Reference source. Importing/replacing this shared reference
+    affects detection if it is already using external mode; choosing groups does
+    not change detection, baseline ranges or pooled-reference settings.
+    CSV samples need no timestamp alignment and are never represented as a
+    timeline period. Pairing chemistry remains current-trajectory-only in Period
+    summary because parameter CSVs lack chemistry annotations.
+    Comparison results are cached by source revision, parameter/member and
+    selected periods' resolved bounds/names. Group choices are transient.
   Pairing states and Pairing & coverage no longer occupy separate top-level tabs.
-- **Overview** (bottom left): a single summary line (current-frame outliers /
+- **Outliers > Outliers over time**: a single summary line (current-frame outliers /
   valid members, with coverage, chance totals and controls in its tooltip, and
   a "near chance" warning when the trajectory total is below twice the chance
   level), arrow buttons stepping to the previous/next outlying frame, then the
   outlier count per frame, with events shaded
   as bands (matching the event contour colours) and a dashed line
   at the count expected by chance (see [Chance level](#chance-level)).
-  Double-clicking the heatmap fits the complete trajectory and member range,
+  In **Parameter heatmap**, double-clicking fits the complete trajectory and member range,
   matching State history; fitting does not stop at the rendered zoomed-in slice.
-  Hovering lists the events at that frame. Below it, the heatmap (Reset view,
-  Go to selection) shows every member against frame, with outliers marked.
-- **Inspector** (bottom right): the **Timeline** and **Distribution** of the selected
+  Hovering the count overview lists events at that frame. The separate parameter
+  heatmap (Reset view, Go to selection) shows every member against frame,
+  with outliers marked.
+- **Outliers > Event details**: the **Distribution** (middle-right) and **Timeline**
+  (full-width bottom row) of the selected
   member and parameter, with values, baseline (mean/SD or median/scaled MAD),
-  z-scores and quality flags, followed by the **Current-frame outliers** list
+  z-scores and quality flags. The expandable **Current-frame outliers** list
+  is below the count overview
   (outliers at the displayed frame, strongest first; hovering a row previews
   it in the viewport). **Both plots refit their axes automatically**
   whenever the series changes: a new parameter, member, baseline, **All
@@ -532,7 +619,7 @@ construction can still take time on large trajectories.
 
 ### Event distribution comparison
 
-Click an event, member or parameter to inspect it. The Inspector's distribution
+Click an event, member or parameter to select it. The visible event-detail distribution
 keeps the selected member's full-trajectory density and overlays that member
 and parameter across the event's **inclusive frame span**, including valid
 samples in bridged gaps and frames where it did not contribute. Missing values
@@ -1045,14 +1132,14 @@ the same representation mark pass as selection/highlight, including cartoon
 sugar/base slabs, backbone bands, visibility filters, periodic images and
 assembly copies. The same post-processing mask filter and silhouette edge
 calculation produce the contour, with its own thickness multiplier and
-framebuffer scale. **Visual feedback... > Event regions > Contour thickness** ranges from 1x to 4x,
+framebuffer scale. **Visual feedback > Event regions > Contour thickness** ranges from 1x to 4x,
 defaults to 1.5x and updates live without redrawing the molecular scene or masks.
 The multiplier is saved as `ContourThickness` in the Lavery workspace section;
 workspaces without this setting use 1.5x. Native selection/highlight thickness
 is independent. Contour-only mode uses no surrounding proxy spheres or interior fill.
 
-The **Visual feedback...** button replaces the sidebar Display section with a
-compact popup containing **Event regions** and **Measurements** tabs. Event
+The expandable **Visual feedback** sidebar section contains
+**Event regions** and **Measurements** tabs. Event
 region styles are **Contour**, **Glow** (default), **Both**, and **Off**.
 Glow restores the original three base-centred translucent sphere layers, using
 the same palette and child-priority ownership as contours. **Glow strength**
@@ -1119,7 +1206,7 @@ do not replace visual inspection on a complete trajectory.
 Additional pixel checks verify 1/2/4/6 px native line widths at two orthographic
 zooms and in perspective, opacity 0/0.25/1, and near-plane crossing.
 
-**Visual feedback... > Measurements > Measurement value labels** is off by default and saved with the
+**Visual feedback > Measurements > Measurement value labels** is off by default and saved with the
 workspace. Geometry and hover tooltips remain available without text.
 When enabled, value labels share the native measurement text/background styling, with
 screen-space separation for nearby labels. They are redrawn every UI frame
@@ -1315,14 +1402,16 @@ must be rebuilt after loading/recomputing a trajectory.
 | EventsMaxShownTimePs | finite nonnegative float, maximum shown event duration in ps; 0 is Unlimited | 0 |
 | EventsMaxShownFrames | nonnegative int, maximum shown inclusive frame span without physical time; 0 is Unlimited | 0 |
 | LayoutSidebar | float, sidebar width / window width, 0.12-0.5 | 0.24 |
-| LayoutEvents | float, events height / right-area height, 0.1-0.8 | 0.34 |
-| LayoutOverview | float, overview width / bottom width, 0.2-0.8 | 0.52 |
+| LayoutEvents | float, Outliers table height / workspace height | 0.34 |
+| LayoutOverview | float, Outliers count overview width / lower area width | 0.52 |
 | LayoutCountPlot, LayoutTimelinePlot, LayoutDistributionPlot, LayoutOutlierList | float, pixels, 60-2000 | 180, 220, 180, 160 |
 
 If a workspace has no new keys, it loads with these defaults. An older 12-bit
 `EventParameters` mask keeps its choices and gains the grooves and all
 nucleotide parameters. Out-of-range or
 non-finite layout values are clamped or reset.
+`ShowHeatmap` is retained for legacy workspace compatibility; it does not hide
+the dedicated Parameter heatmap tab.
 
 ## 7. Implementation notes
 

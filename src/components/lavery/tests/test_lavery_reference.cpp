@@ -11,6 +11,7 @@
 #include <fstream>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 using namespace lavery;
 namespace {
@@ -321,4 +322,211 @@ UTEST(lavery_core, representative_xtc_gro_export_preserves_atoms_times_coordinat
     EXPECT_FALSE(export_representative_frames(sys,"run/test",(files.dir/"failed.xtc").string(),{{0,0}},"",&error));
     for (const char* name : {"failed.xtc","failed.gro","failed.csv"}) EXPECT_FALSE(std::filesystem::exists(files.dir/name));
     md_arena_allocator_destroy(alloc);
+}
+
+UTEST(lavery_core, transition_filters_preserve_scope_direction_and_missing_selection) {
+    TransitionFilter filter;
+    EXPECT_TRUE(filter.matches(Class_Pair,7,Pairing_WatsonCrick,Pairing_Hoogsteen));
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,14,0,1));
+    filter.scope=TransitionFilter::SelectedPair;
+    filter.pair=7;
+    EXPECT_TRUE(filter.matches(Class_Pair,7,1,2));
+    EXPECT_FALSE(filter.matches(Class_Pair,6,1,2));
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,14,0,1));
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,15,1,0));
+    EXPECT_FALSE(filter.matches(Class_Nucleotide,16,0,1));
+    filter.from=0; filter.to=1;
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,14,0,1));
+    EXPECT_FALSE(filter.matches(Class_Nucleotide,14,1,0));
+    filter.from=-1;
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,15,2,1));
+    filter.scope=TransitionFilter::SelectedNucleotide;
+    EXPECT_FALSE(filter.matches(Class_Nucleotide,15,0,1));
+    filter.nucleotide=15;
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,15,0,1));
+    EXPECT_FALSE(filter.matches(Class_Nucleotide,14,0,1));
+    EXPECT_FALSE(filter.matches(Class_Pair,7,0,1));
+    EXPECT_FALSE(filter.matches(Class_Step,15,0,1));
+    filter=TransitionFilter{};
+    EXPECT_TRUE(filter.matches(Class_Nucleotide,14,1,0));
+    EXPECT_TRUE(filter.matches(Class_Pair,6,Pairing_Other,Pairing_Unpaired));
+    filter.scope=TransitionFilter::SelectedPair;
+    filter.pair=SIZE_MAX;
+    EXPECT_FALSE(filter.matches(Class_Pair,0,1,2));
+    EXPECT_FALSE(filter.matches(Class_Nucleotide,0,0,1));
+}
+
+UTEST(lavery_core, pairing_filters_keep_all_pair_detection_and_raw_history_intact) {
+    const std::vector<PairingState> states={
+        Pairing_WatsonCrick,Pairing_Unpaired,
+        Pairing_WatsonCrick,Pairing_Unpaired,
+        Pairing_Hoogsteen,Pairing_WatsonCrick,
+        Pairing_Hoogsteen,Pairing_WatsonCrick};
+    EventOptions options;
+    options.min_frames=2;
+    TransitionFilter filter;
+    size_t detected=0, shown=0;
+    for (size_t pair=0; pair<2; ++pair) {
+        std::vector<PairingRun> history;
+        std::vector<PairingTransition> changes;
+        ASSERT_TRUE(pairing_runs(&history,states,2,pair));
+        ASSERT_TRUE(pairing_transitions(&changes,history,options));
+        ASSERT_EQ(history.size(),(size_t)2);
+        ASSERT_EQ(changes.size(),(size_t)1);
+        const auto& change=changes.front();
+        detected+=changes.size();
+        EXPECT_TRUE(filter.matches(Class_Pair,pair,change.source.state,change.destination.state));
+        TransitionFilter selected;
+        selected.scope=TransitionFilter::SelectedPair;
+        selected.pair=0;
+        selected.from=Pairing_WatsonCrick;
+        selected.to=Pairing_Hoogsteen;
+        shown+=selected.matches(Class_Pair,pair,change.source.state,change.destination.state);
+        EXPECT_EQ(history.front().begin,(size_t)0);
+        EXPECT_EQ(history.back().end,(size_t)3);
+    }
+    EXPECT_EQ(detected,(size_t)2);
+    EXPECT_EQ(shown,(size_t)1);
+    EXPECT_EQ(states.front(),Pairing_WatsonCrick);
+    EXPECT_EQ(states.back(),Pairing_WatsonCrick);
+}
+UTEST(lavery_core, comparison_unequal_groups_share_bins_and_unit_integrals) {
+    SampleComparison result;
+    const float nan=std::numeric_limits<float>::quiet_NaN();
+    ASSERT_TRUE(compare_samples(&result,{{1,2,3,nan},{1,1,2,2,3,3},{},{nan}},false,12));
+    ASSERT_EQ(result.histogram.valid.size(),(size_t)4);
+    EXPECT_EQ(result.histogram.valid[0],(size_t)3);
+    EXPECT_EQ(result.histogram.valid[1],(size_t)6);
+    EXPECT_EQ(result.missing[0],(size_t)1);
+    EXPECT_EQ(result.missing[3],(size_t)1);
+    EXPECT_NEAR(result.summaries[0].mean,2,1e-8);
+    EXPECT_NEAR(result.summaries[0].sd,std::sqrt(2./3),1e-8);
+    for (size_t g=0;g<4;++g) {
+        double integral=0;
+        for (size_t b=0;b<12;++b) integral+=result.histogram.density[g*12+b]*result.histogram.bin_width;
+        EXPECT_NEAR(integral,g<2 ? 1. : 0.,1e-8);
+    }
+    for (size_t b=0;b<12;++b) EXPECT_NEAR(result.histogram.density[b],result.histogram.density[12+b],1e-8);
+    ASSERT_TRUE(compare_samples(&result,{{5,5},{5}},false));
+    EXPECT_GT(result.histogram.bin_width,0);
+    EXPECT_NEAR(result.summaries[0].sd,0,1e-8);
+}
+
+UTEST(lavery_core, comparison_angles_wrap_across_the_branch_cut_without_changing_samples) {
+    SampleComparison result;
+    const std::vector<std::vector<float>> groups={{179,-179},{539,181}};
+    ASSERT_TRUE(compare_samples(&result,groups,true,16));
+    EXPECT_LT(result.histogram.centers.back()-result.histogram.centers.front(),3);
+    EXPECT_NEAR(result.summaries[0].sd,1,1e-6);
+    EXPECT_NEAR(std::remainder(result.summaries[0].mean-result.summaries[1].mean,360.),0,1e-6);
+    for (size_t b=0;b<16;++b) EXPECT_NEAR(result.histogram.density[b],result.histogram.density[16+b],1e-6);
+    EXPECT_EQ(groups[0][1],-179.f);
+    ASSERT_TRUE(compare_samples(&result,{{},{NAN}},true));
+    EXPECT_TRUE(result.histogram.centers.empty());
+    EXPECT_EQ(result.histogram.valid[0],(size_t)0);
+    EXPECT_EQ(result.missing[1],(size_t)1);
+    EXPECT_FALSE(compare_samples(&result,{},false));
+    EXPECT_FALSE(compare_samples(&result,{{1}},false,0));
+}
+
+UTEST(lavery_core, comparison_external_csv_and_period_samples_share_units_not_time) {
+    Files files;
+    const auto path=(files.dir/"reference.csv").string();
+    {
+        std::ofstream csv(path);
+        csv<<csv_header();
+        csv<<sample(9000,3,1,Rise)<<sample(9500,5,1,Rise);
+    }
+    ExternalReference external;
+    std::string error;
+    ASSERT_TRUE(load_external_reference(&external,path,&error));
+    const auto control=external_samples(external,Rise,{0},0);
+    const std::vector<float> period={2,4,6,NAN};
+    SampleComparison result;
+    ASSERT_TRUE(compare_samples(&result,{control,period},false));
+    EXPECT_EQ(result.histogram.valid[0],(size_t)2);
+    EXPECT_EQ(result.histogram.valid[1],(size_t)3);
+    EXPECT_NEAR(result.summaries[0].mean,4,1e-8);
+    EXPECT_NEAR(result.summaries[1].mean,4,1e-8);
+    EXPECT_EQ(result.missing[1],(size_t)1);
+    EXPECT_EQ(external.members[Class_Step][0].values[Rise].size(),(size_t)2);
+    EXPECT_EQ(period[0],2.f);
+    ASSERT_TRUE(compare_samples(&result,{external_samples(external,Rise,{-1},0),period},false));
+    EXPECT_EQ(result.histogram.valid[0],(size_t)0);
+    EXPECT_EQ(result.histogram.valid[1],(size_t)3);
+}
+
+UTEST(lavery_core, dashboard_pools_all_csv_members_and_keeps_32_normalized_bins) {
+    ExternalReference source;
+    source.members[Class_Step].resize(2);
+    source.members[Class_Step][0].values[Rise]={2,3};
+    source.members[Class_Step][1].values[Rise]={4};
+    source.members[Class_Step][0].values[Twist]={179,-179};
+    source.members[Class_Step][1].values[Twist]={180};
+    source.members[Class_Pair].resize(1);
+    source.members[Class_Pair][0].values[Buckle]={90};
+    const auto pooled=pooled_external_samples(source,Rise);
+    ASSERT_EQ(pooled.size(),(size_t)3);
+    EXPECT_EQ(pooled[0],2.f);
+    EXPECT_EQ(pooled[2],4.f);
+    EXPECT_TRUE(pooled_external_samples(source,Slide).empty());
+    SampleComparison result;
+    ASSERT_TRUE(compare_samples(&result,{pooled,{2,3,4,NAN},{}},false,32));
+    ASSERT_EQ(result.histogram.centers.size(),(size_t)32);
+    ASSERT_EQ(result.histogram.density.size(),(size_t)96);
+    EXPECT_EQ(result.histogram.valid[0],(size_t)3);
+    EXPECT_EQ(result.histogram.valid[2],(size_t)0);
+    EXPECT_EQ(result.missing[1],(size_t)1);
+    EXPECT_NEAR(result.summaries[0].mean,3,1e-8);
+    double area=0;
+    for (size_t b=0;b<32;++b) {
+        area+=result.histogram.density[b]*result.histogram.bin_width;
+        EXPECT_NEAR(result.histogram.density[b],result.histogram.density[32+b],1e-8);
+    }
+    EXPECT_NEAR(area,1,1e-8);
+    ASSERT_TRUE(compare_samples(&result,{pooled_external_samples(source,Twist),{180}},true,32));
+    EXPECT_LT(result.histogram.centers.back()-result.histogram.centers.front(),3);
+    EXPECT_EQ(class_parameter_count(Class_Pair),6);
+    EXPECT_EQ(class_parameter_count(Class_Step),8);
+    EXPECT_EQ(class_parameter_count(Class_Nucleotide),10);
+}
+
+UTEST(lavery_core, comparison_overlay_filters_are_independent_and_require_metadata) {
+    const std::string gc="1: S1:DC1 / S2:DG24", at="2: S1:DA2 / S2:DT23";
+    ComparisonMemberFilter all, filtered;
+    bool missing=false;
+    filtered.bp_first=filtered.bp_last=1;
+    filtered.pair_type=2;
+    EXPECT_TRUE(comparison_member_matches(filtered,Class_Pair,"",gc,"",&missing));
+    EXPECT_FALSE(missing);
+    EXPECT_FALSE(comparison_member_matches(filtered,Class_Pair,"",at,"",&missing));
+    EXPECT_FALSE(missing);
+    EXPECT_TRUE(comparison_member_matches(all,Class_Pair,"",at,"",&missing));
+    EXPECT_FALSE(comparison_member_matches(filtered,Class_Step,"",gc,at,&missing));
+    filtered.bp_last=2; filtered.pair_type=0;
+    EXPECT_TRUE(comparison_member_matches(filtered,Class_Step,"",gc,at,&missing));
+    filtered.nucleotide='G';
+    EXPECT_TRUE(comparison_member_matches(filtered,Class_Nucleotide,"S2:DG24 (bp 1)",gc,"",&missing));
+    EXPECT_FALSE(comparison_member_matches(filtered,Class_Nucleotide,"S1:DC1 (bp 1)",gc,"",&missing));
+    EXPECT_FALSE(comparison_member_matches(filtered,Class_Nucleotide,"unknown",gc,"",&missing));
+    EXPECT_TRUE(missing);
+    EXPECT_FALSE(comparison_member_matches(filtered,Class_Pair,"","","",&missing));
+    EXPECT_TRUE(missing);
+    EXPECT_TRUE(comparison_member_matches(all,Class_Pair,"","","",&missing));
+    filtered={}; filtered.pair_type=1;
+    EXPECT_TRUE(comparison_member_matches(filtered,Class_Pair,"",at,"",&missing));
+    EXPECT_TRUE(comparison_member_matches(filtered,Class_Pair,"","3: S1:A3 / S2:U22","",&missing));
+    filtered.pair_type=3;
+    EXPECT_TRUE(comparison_member_matches(filtered,Class_Pair,"","3: S1:DA3 / S2:DA22","",&missing));
+    EXPECT_FALSE(comparison_member_matches(filtered,Class_Pair,"","3: S1:UNK3 / S2:DA22","",&missing));
+    EXPECT_TRUE(missing);
+    Files files;
+    const auto path=(files.dir/"reference.csv").string();
+    { std::ofstream csv(path); csv<<csv_header()<<sample(0,3); }
+    ExternalReference external;
+    std::string error;
+    ASSERT_TRUE(load_external_reference(&external,path,&error));
+    ASSERT_EQ(external.members[Class_Step].size(),(size_t)1);
+    EXPECT_STREQ(external.members[Class_Step][0].pair_a.c_str(),gc.c_str());
+    EXPECT_STREQ(external.members[Class_Step][0].pair_b.c_str(),"2: S1:DG2 / S2:DC23");
 }

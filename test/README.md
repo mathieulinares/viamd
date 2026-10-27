@@ -98,6 +98,12 @@ Pooled-reference regressions cover persistent local anomalies, separate helices,
 singleton pairs, pair/step/nucleotide grouping, baseline intervals, missing
 samples, circular and within-state references, unchanged own-history behavior,
 full-span anomalous regions, and exported reference-scope metadata.
+Transition display-filter regressions cover all-member, selected-pair (both
+nucleotides), selected-nucleotide and missing-selection scopes, From/To
+directions and clearing filters independently of transition detection.
+Sample-comparison regressions cover unequal group lengths, shared histogram
+bins, independently unit-normalized densities, population SD, constant/empty/
+missing groups and circular wrapping across +/-180 degrees.
 
 Display-summary regressions exercise 500,000 frames, strided series,
 single-frame positive/negative peaks, missing-data breaks, exact samples on

@@ -237,7 +237,15 @@ bool compute_statistics(MetricStatistics* out, const std::vector<float>& values,
 struct ReferenceMember {
     std::string label, identity;
     std::array<std::vector<float>, Metric_Count> values;
+    std::string pair_a, pair_b;
 };
+struct ComparisonMemberFilter {
+    size_t bp_first = 1, bp_last = SIZE_MAX;
+    int pair_type = 0; // 0 all, 1 AT/AU, 2 GC, 3 other; both endpoints for steps
+    char nucleotide = 0;
+};
+bool comparison_member_matches(const ComparisonMemberFilter& filter, int cls,
+    const std::string& label, const std::string& pair_a, const std::string& pair_b, bool* metadata_missing);
 struct ExternalReference {
     std::string path, run, fingerprint;
     std::array<std::vector<ReferenceMember>, Class_Count> members;
@@ -252,6 +260,7 @@ bool external_statistics(MetricStatistics* out, const ExternalReference& source,
                          const std::vector<uint32_t>& groups = {});
 std::vector<float> external_samples(const ExternalReference& source, Metric metric, const std::vector<int>& mapping,
                                     size_t member, const std::vector<uint32_t>& groups = {});
+std::vector<float> pooled_external_samples(const ExternalReference& source, Metric metric);
 struct FrameCandidate { size_t frame = 0; double score = 0; };
 struct FrameFeature { Metric metric = Buckle; size_t member = 0; };
 struct PeriodSummary {
@@ -312,6 +321,17 @@ struct DistributionComparison {
 bool compute_distributions(DistributionComparison* out, const std::vector<float>& values,
                            size_t member_count, size_t bins = 48);
 
+struct SampleComparison {
+    DistributionComparison histogram;
+    std::vector<MemberStatistics> summaries;
+    std::vector<size_t> missing;
+    double angular_origin = 0;
+};
+// Unequal-sized groups share physical-unit bins and independently normalized densities.
+// Angular samples share a pooled circular origin; summaries use wrapped deviations.
+bool compare_samples(SampleComparison* out, const std::vector<std::vector<float>>& groups,
+                     bool angular, size_t bins = 48);
+
 struct EventDistribution {
     std::vector<double> samples, density;
     size_t missing = 0;
@@ -325,6 +345,14 @@ bool compute_event_distribution(EventDistribution* out, const std::vector<float>
 struct FrameOutliers {
     size_t outliers = 0;
     size_t valid = 0;
+};
+
+struct TransitionFilter {
+    enum Scope { All, SelectedPair, SelectedNucleotide };
+    Scope scope = All;
+    size_t pair = 0, nucleotide = SIZE_MAX;
+    int from = -1, to = -1;
+    bool matches(int cls, size_t member, int source, int destination) const;
 };
 
 // One member (base pair, step or nucleotide) in one frame that takes part in event detection: outlying at the

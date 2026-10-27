@@ -173,7 +173,7 @@ struct Lavery : viamd::EventHandler {
     char event_filter[64] = {};
     int event_nav_target = -1; // event scrolled into view after keyboard navigation
     // Persistent layout: pane fractions of the window and plot heights in pixels.
-    float layout_sidebar = 0.24f, layout_events = 0.34f, layout_overview = 0.52f;
+    float layout_sidebar = 0.24f, layout_events = 0.34f, layout_overview = 0.52f, layout_middle = 0.55f;
     float count_plot_height = 180, timeline_plot_height = 220, distribution_plot_height = 180, outliers_list_height = 160;
     std::vector<int> event_order;      // table order of outlier_events
     std::vector<uint8_t> event_expanded;
@@ -233,8 +233,15 @@ struct Lavery : viamd::EventHandler {
     std::vector<PairingState> pairing_states;
     std::vector<PairingRun> pairing_history;
     std::vector<PairingTransition> pairing_changes;
+    struct PairChange { size_t pair; PairingTransition change; };
+    std::vector<PairChange> all_pairing_changes;
+    int transition_family = 0;
+    int nucleotide_bp_first = 1, nucleotide_bp_last = INT_MAX;
+    int pairing_bp_first = 1, pairing_bp_last = INT_MAX;
+    int nucleotide_to = -1, pairing_to = -1;
+    size_t inspected_pairing_change = SIZE_MAX;
+    ImGuiTextFilter transition_search[2];
     size_t pairing_cached_member = SIZE_MAX;
-    int state_switch_kind = 0;
     int period_summary_kind = 0, period_summary_scope = 1;
     uint64_t period_summary_key = 0;
     struct PeriodRow {
@@ -247,7 +254,29 @@ struct Lavery : viamd::EventHandler {
     float pairing_min_time_ps = 200;
     int pairing_min_frames = 3;
     int state_history_kind = 0;
-    int state_history_view = 0;
+    int state_history_nucleotide_kind = 0;
+    bool state_history_tabs_initialized = false;
+    uint64_t comparison_key = 0;
+    std::array<SampleComparison, Metric_Count> dashboard_comparisons;
+    int comparison_class = Class_Pair;
+    int comparison_style = 0;
+    float comparison_line_width = 1.5f, comparison_opacity = .35f;
+    struct ComparisonCSV { ExternalReference data; };
+    std::vector<ComparisonCSV> comparison_csvs;
+    std::string comparison_error;
+    uint64_t comparison_csv_revision = 0;
+    struct ComparisonOverlay {
+        char name[128] = "Whole trajectory";
+        int source = 0; // whole, current frame, period, CSV, detection reference
+        uint32_t period = 0;
+        size_t csv = 0;
+        int bp_first = 1, bp_last = INT_MAX, pair_type = 0, nucleotide = 0;
+        bool visible = true;
+        ImVec4 color = ImVec4(.25f,.7f,1,1);
+    };
+    std::vector<ComparisonOverlay> comparison_overlays = {ComparisonOverlay{}};
+    int comparison_edit = -1;
+    std::vector<std::string> comparison_labels, comparison_notes;
     int export_view = 0;
     int state_history_cached_kind = -1;
     std::vector<StateSummary> state_history_summaries;
@@ -359,11 +388,14 @@ struct Lavery : viamd::EventHandler {
         for (auto& selected : representative_members) selected.clear();
         representative_key = 0;
         period_summary_key = 0;
+        comparison_key = 0;
         period_summary_rows.clear();
         pair_contacts.clear();
         pairing_states.clear();
         pairing_history.clear();
         pairing_changes.clear();
+        all_pairing_changes.clear();
+        inspected_pairing_change = SIZE_MAX;
         pairing_cached_member = SIZE_MAX;
         pairing_changes_key = 0;
         state_history_cached_kind = -1;
@@ -634,6 +666,7 @@ struct Lavery : viamd::EventHandler {
                 viamd::write_flt(state, STR_LIT("LayoutSidebar"), layout_sidebar);
                 viamd::write_flt(state, STR_LIT("LayoutEvents"), layout_events);
                 viamd::write_flt(state, STR_LIT("LayoutOverview"), layout_overview);
+                viamd::write_flt(state, STR_LIT("LayoutMiddle"), layout_middle);
                 viamd::write_flt(state, STR_LIT("LayoutCountPlot"), count_plot_height);
                 viamd::write_flt(state, STR_LIT("LayoutTimelinePlot"), timeline_plot_height);
                 viamd::write_flt(state, STR_LIT("LayoutDistributionPlot"), distribution_plot_height);
@@ -660,7 +693,19 @@ struct Lavery : viamd::EventHandler {
                 pairing_min_time_ps = 200;
                 pairing_min_frames = 3;
                 state_history_kind = 0;
-                state_history_view = export_view = 0;
+                state_history_nucleotide_kind = 0;
+                state_history_tabs_initialized = false;
+                export_view = 0;
+                comparison_class=Class_Pair;
+                comparison_style=0; comparison_line_width=1.5f; comparison_opacity=.35f;
+                comparison_csvs.clear(); comparison_error.clear(); ++comparison_csv_revision;
+                comparison_overlays={ComparisonOverlay{}}; comparison_edit=-1;
+                comparison_key=0;
+                transition_family=0;
+                nucleotide_bp_first=1; nucleotide_bp_last=INT_MAX;
+                pairing_bp_first=1; pairing_bp_last=INT_MAX;
+                nucleotide_to = pairing_to = -1;
+                for (auto& search : transition_search) search.Clear();
                 aggregate_outliers = false;
                 selected_parameters = 1023;
                 baseline = Baseline_MeanSD;
@@ -873,6 +918,7 @@ struct Lavery : viamd::EventHandler {
                     else if (str_eq(key, STR_LIT("LayoutSidebar"))) viamd::extract_flt(layout_sidebar, arg);
                     else if (str_eq(key, STR_LIT("LayoutEvents"))) viamd::extract_flt(layout_events, arg);
                     else if (str_eq(key, STR_LIT("LayoutOverview"))) viamd::extract_flt(layout_overview, arg);
+                    else if (str_eq(key, STR_LIT("LayoutMiddle"))) viamd::extract_flt(layout_middle, arg);
                     else if (str_eq(key, STR_LIT("LayoutCountPlot"))) viamd::extract_flt(count_plot_height, arg);
                     else if (str_eq(key, STR_LIT("LayoutTimelinePlot"))) viamd::extract_flt(timeline_plot_height, arg);
                     else if (str_eq(key, STR_LIT("LayoutDistributionPlot"))) viamd::extract_flt(distribution_plot_height, arg);
@@ -891,6 +937,7 @@ struct Lavery : viamd::EventHandler {
         layout_sidebar = 0.24f;
         layout_events = 0.34f;
         layout_overview = 0.52f;
+        layout_middle = 0.55f;
         count_plot_height = 180;
         timeline_plot_height = 220;
         distribution_plot_height = 180;
@@ -907,6 +954,7 @@ struct Lavery : viamd::EventHandler {
         fraction(layout_sidebar, 0.12f, 0.5f, 0.24f);
         fraction(layout_events, 0.1f, 0.8f, 0.34f);
         fraction(layout_overview, 0.2f, 0.8f, 0.52f);
+        fraction(layout_middle, 0.2f, 0.8f, 0.55f);
         pixels(count_plot_height, 180);
         pixels(timeline_plot_height, 220);
         pixels(distribution_plot_height, 180);
@@ -931,13 +979,6 @@ struct Lavery : viamd::EventHandler {
         else ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x, 0.5f * (a.y + b.y)), ImVec2(b.x, 0.5f * (a.y + b.y)), color, hovered || active ? 2.0f : 1.0f);
         if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) *value = -1; // caller resets
         return active;
-    }
-
-    // Horizontal handle below a fixed-height element (plot or list); double-click restores 'fallback'.
-    static void height_handle(const char* id, float* height, float fallback) {
-        float h = *height;
-        splitter(id, false, &h, 60.0f, 2000.0f);
-        *height = h < 0 ? fallback : h;
     }
 
     void maybe_start() {
@@ -1290,7 +1331,6 @@ struct Lavery : viamd::EventHandler {
         const ImVec2 size = ImGui::GetContentRegionAvail();
         const size_t frame_count = run_num_frames(app);
         sanitize_layout();
-        const float handle = std::max(4.0f, ImGui::GetStyle().ItemSpacing.y);
         float sidebar_width = std::max(ImGui::GetFontSize() * 10, size.x * layout_sidebar);
         if (ImGui::BeginChild("Settings", ImVec2(sidebar_width, 0))) draw_shared_controls();
         ImGui::EndChild();
@@ -1308,41 +1348,13 @@ struct Lavery : viamd::EventHandler {
         update_statistics(frame_count);
         if (!baseline_range_error.empty()) ImGui::TextWrapped("%s", baseline_range_error.c_str());
         int count = (int)columns[metric];
-        bool ready = count > 0 && frame_count;
-        if (ready) member = std::clamp(member, 0, count - 1);
-        auto unavailable = [&]() {
-            ImGui::TextDisabled("No inter-base-pair links found. Select Intra-base pair.");
-        };
+        if (count > 0) member = std::clamp(member, 0, count - 1);
         const ImPlotInputMap input = ImPlot::GetInputMap();
         if (ImGui::GetIO().KeyCtrl) ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
         if (frame_count) update_counts(count, frame_count);
-        const ImVec2 right = ImGui::GetContentRegionAvail();
-        float events_height = std::max(ImGui::GetFrameHeight() * 4, right.y * layout_events);
-        if (ImGui::BeginChild("Events & quality", ImVec2(0, events_height))) {
-            if (frame_count) draw_events_quality(frame_count); else unavailable();
-        }
-        ImGui::EndChild();
-        splitter("##split_events", false, &events_height, ImGui::GetFrameHeight() * 4, right.y - ImGui::GetFrameHeight() * 6);
-        layout_events = events_height < 0 ? 0.34f : events_height / std::max(1.0f, right.y);
-        // Clicking an event member can switch between intra- and inter-base pairs above.
-        count = (int)columns[metric];
-        ready = count > 0 && frame_count;
-        if (ready) member = std::clamp(member, 0, count - 1);
-        const float bottom = ImGui::GetContentRegionAvail().x;
-        float overview_width = std::max(1.0f, (bottom - handle) * layout_overview);
-        if (ImGui::BeginChild("Overview", ImVec2(overview_width, 0))) {
-            if (ready) {
-                draw_outlier_timeline(count, frame_count);
-                if (show_heatmap) draw_heatmap(count, frame_count, statistics[metric].heatmap, &member);
-            } else unavailable();
-        }
-        ImGui::EndChild();
-        ImGui::SameLine(0, 0);
-        splitter("##split_overview", true, &overview_width, bottom * 0.2f, bottom * 0.8f);
-        layout_overview = overview_width < 0 ? 0.52f : overview_width / std::max(1.0f, bottom - handle);
-        ImGui::SameLine(0, 0);
-        if (ImGui::BeginChild("Inspector", ImVec2(0, 0))) {
-            if (ready) draw_inspector(count, frame_count); else unavailable();
+        if (ImGui::BeginChild("Analysis workspace", ImVec2(0,0))) {
+            if (frame_count) draw_workspace(frame_count);
+            else ImGui::TextDisabled("No trajectory samples available.");
         }
         ImGui::EndChild();
         ImGui::EndGroup();
@@ -1357,9 +1369,8 @@ struct Lavery : viamd::EventHandler {
         else clear_highlight();
     }
 
-    void draw_shared_controls() {
-        ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.5f);
-        ImGui::SeparatorText("Selection");
+    void draw_parameter_selection(bool choose_member) {
+        ImGui::PushItemWidth(ImGui::GetFontSize()*14);
         int group = metric_cls();
         if (ImGui::Combo("Class", &group, "Intra-base pair\0Inter-base pair\0Nucleotide\0")) {
             selected_detail_active = true;
@@ -1395,7 +1406,7 @@ struct Lavery : viamd::EventHandler {
         } else {
             member = std::clamp(member, 0, count - 1);
             int member_number = member + 1;
-            if (ImGui::InputInt(group == Class_Step ? "Step" : group == Class_Nucleotide ? "Nucleotide" : "Base pair", &member_number)) {
+            if (choose_member && ImGui::InputInt(group == Class_Step ? "Step" : group == Class_Nucleotide ? "Nucleotide" : "Base pair", &member_number)) {
                 selected_detail_active = true;
                 member = std::clamp(member_number, 1, count) - 1;
                 focus_heatmap_selection = true;
@@ -1410,13 +1421,14 @@ struct Lavery : viamd::EventHandler {
                 "A missing internal pair invalidates both neighbouring steps; gaps are never bridged.",
                 frame, valid_pairs, pairs.size(), valid_steps, steps.size());
         }
-        int frame_number = (int)std::llround(app->animation.frame);
-        if (ImGui::InputInt("Frame", &frame_number)) {
-            app->animation.frame = (double)std::clamp(frame_number, 0, (int)run_num_frames(app) - 1);
-            app->animation.mode = PlaybackMode::Stopped;
-            focus_heatmap_selection = true;
-        }
+        ImGui::PopItemWidth();
+    }
 
+    void draw_shared_controls() {
+        ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.5f);
+        const int group=metric_cls();
+        const int offset=class_first_metric(group);
+        if (columns[metric] && run_num_frames(app)) draw_evidence((int)columns[metric]);
         ImGui::SeparatorText("Detection");
         draw_external_reference();
         ImGui::Combo("Compare against", &reference_scope,
@@ -1465,13 +1477,7 @@ struct Lavery : viamd::EventHandler {
             }
         }
 
-        if (ImGui::Button("Visual feedback...", ImVec2(-FLT_MIN, 0))) ImGui::OpenPopup("##visual_feedback");
-        ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize()*29,0), ImGuiCond_Appearing);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(0,0),
-            ImVec2(ImGui::GetMainViewport()->WorkSize.x*0.95f, ImGui::GetMainViewport()->WorkSize.y*0.85f));
-        if (ImGui::BeginPopup("##visual_feedback", ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("Visual feedback");
-            ImGui::Separator();
+        if (ImGui::CollapsingHeader("Visual feedback")) {
             ImGui::PushItemWidth(ImGui::GetFontSize()*12);
             if (ImGui::BeginTabBar("##visual_tabs")) {
                 if (ImGui::BeginTabItem("Event regions")) {
@@ -1499,7 +1505,6 @@ struct Lavery : viamd::EventHandler {
                 ImGui::EndTabBar();
             }
             ImGui::Separator();
-            ImGui::Checkbox("Heatmap", &show_heatmap);
             ImGui::Checkbox("Smoothed midpoint axis", &show_axis);
             if (ImGui::Button("Reset visual defaults")) {
                 event_visual_style = EventVisual_Glow;
@@ -1510,19 +1515,14 @@ struct Lavery : viamd::EventHandler {
                 reset_measurement_style(app);
             }
             ImGui::SetItemTooltip("Also restores shared VIAMD measurement colours, opacity and line width. Does not change detection or selection.");
-            ImGui::SameLine();
-            if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
             if (ImGui::Button("Reset layout")) reset_layout();
             ImGui::PopItemWidth();
-            ImGui::EndPopup();
         }
 
-        if (ImGui::CollapsingHeader("Tools")) {
-            if (ImGui::Button("Recompute analysis", ImVec2(-FLT_MIN, 0))) reset_requested = true;
-            ImGui::TextDisabled("Exports are in the Export results tab.");
-            ImGui::TextDisabled("Script: attr(\"lavery/step/twist\")");
-            ImGui::SetItemTooltip("Canonical A/G/C/T/U; fixed partners identified in frame 0.");
-        }
+        const float gap=ImGui::GetContentRegionAvail().y-ImGui::GetFrameHeightWithSpacing();
+        if (gap>0) ImGui::Dummy(ImVec2(0,gap));
+        if (ImGui::Button("Recompute analysis", ImVec2(-FLT_MIN, 0))) reset_requested = true;
+        ImGui::SetItemTooltip("Recompute all trajectory parameters with fixed partners identified in frame 0.");
         ImGui::PopItemWidth();
     }
 
@@ -1808,66 +1808,44 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
-    void draw_inspector(int count, size_t frame_count) {
+    void draw_inspector(int count, size_t frame_count, bool timeline_only=false) {
         const auto& labels = class_labels(metric_cls());
         const std::vector<float>& data = values[metric];
         if (data.size() < frame_count * (size_t)count) return;
         const auto& stats = statistics[metric];
-        ImGui::TextDisabled("%s z-score", reference_source ? "External" : statistics_reference_scope == Reference_HelixHistory ? "Pooled-helix" : "Temporal");
         const size_t current_frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame),
             (int64_t)0, (int64_t)frame_count - 1);
         const float current_value = data[current_frame * count + member];
-        if (std::isfinite(current_value)) {
-            const std::string state = state_text((Metric)metric, (size_t)member, current_value);
-            ImGui::Text("Frame %zu: %.3f %s (%+.2f sigma)", current_frame, current_value,
-                metric_unit((Metric)metric), stats.members[member].zscore(current_value));
-            if (!state.empty()) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("%s", state.c_str() + 1);
-                ImGui::SetItemTooltip("Baseline uses the selected reference's samples in the current state, not the dominant state.\n"
-                    "State changes are detected separately with a minimum residence time.");
+        if (!timeline_only) {
+            ImGui::Text("%s / %s",labels[member].c_str(),metric_name((Metric)metric));
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextDisabled("%s z-score",reference_source ? "External" :
+                    statistics_reference_scope==Reference_HelixHistory ? "Pooled-helix" : "Temporal");
+                if (std::isfinite(current_value)) {
+                    ImGui::Text("Frame %zu: %.3f %s (%+.2f sigma)%s",current_frame,current_value,
+                        metric_unit((Metric)metric),stats.members[member].zscore(current_value),
+                        state_text((Metric)metric,member,current_value).c_str());
+                } else ImGui::Text("Frame %zu: no valid sample",current_frame);
+                if (inspected_event<outlier_events.size()) {
+                    const auto& event=outlier_events[inspected_event];
+                    ImGui::Text("Event #%zu / %s | bp %u-%u | %zu members",inspected_event+1,
+                        event_kinds[inspected_event].c_str(),event.pair_first+1,event.pair_last+1,event.members.size());
+                    draw_run_span("Event span",event.begin,event.end,timeline_times(frame_count),false);
+                }
+                ImGui::EndTooltip();
             }
-        } else {
-            ImGui::Text("Frame %zu: selected member has no valid sample", current_frame);
+            draw_quality(quality_at(current_frame,member),std::isfinite(current_value),true);
         }
-        ImGui::SetItemTooltip("In plots: Ctrl-click / Ctrl-drag to jump / scrub time; drag / wheel to pan / zoom.\n"
-            "Drag the thin line under a plot to resize it; double-click it to restore the default.");
         const float* times = timeline_times(frame_count);
         char time_label[64];
         timeline_label(time_label, sizeof(time_label), times);
-        if (inspected_switch < state_switches.size()) {
-            const auto& change = state_switches[inspected_switch];
-            ImGui::TextWrapped("%s / %s: %s -> %s (%+.1f deg)",
-                nucleotide_labels[change.member].c_str(), metric_name(change.metric),
-                metric_state_name(change.metric, change.from), metric_state_name(change.metric, change.to), change.angular_change);
-            draw_switch_context(change, times, frame_count);
-            draw_quality(parameter_quality(current_frame, change.member, change.metric),
-                std::isfinite(values[change.metric][current_frame*columns[change.metric]+change.member]),true);
-        } else if (inspected_event < outlier_events.size()) {
-            const auto& event = outlier_events[inspected_event];
-            ImGui::TextWrapped("%s #%zu / %s | bp %u-%u | %zu members",
-                statistics_reference_scope == Reference_HelixHistory ? "Region" : "Event",
-                inspected_event+1, event_kinds[inspected_event].c_str(), event.pair_first+1, event.pair_last+1, event.members.size());
-            draw_run_span(statistics_reference_scope == Reference_HelixHistory ? "Region span" : "Event span",
-                event.begin, event.end, times, false);
-            ImGui::TextWrapped("Selected: %s / %s", labels[member].c_str(), metric_name((Metric)metric));
-            draw_quality(quality_at(current_frame, member), std::isfinite(current_value),true);
-        } else {
-            draw_quality(quality_at(current_frame, member), std::isfinite(current_value),true);
-        }
-        if (ImGui::Button("Evidence...")) ImGui::OpenPopup("Validity & contact evidence");
-        ImGui::SetItemTooltip("Inspect the selected parameter's validity and contact evidence for all members.");
-        ImGui::SetNextWindowSize(ImVec2(780,480), ImGuiCond_FirstUseEver);
-        bool evidence_open = true;
-        if (ImGui::BeginPopupModal("Validity & contact evidence", &evidence_open)) {
-            ImGui::Text("Selected: %s", labels[member].c_str());
-            draw_quality(quality_at(current_frame, member), std::isfinite(current_value));
-            draw_pairing_coverage(count);
-            ImGui::EndPopup();
-        }
-        if (ImGui::CollapsingHeader("Timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (timeline_only) {
+        ImGui::SeparatorText("Timeline");
         ImGui::Checkbox("All members", &compare_all);
         ImGui::SetItemTooltip("Overlay every member instead of only the selected one.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s / %s",labels[member].c_str(),metric_name((Metric)metric));
         struct TimelineData {
             const float* values;
             const float* times;
@@ -1887,8 +1865,9 @@ struct Lavery : viamd::EventHandler {
         } else {
             follow_cursor(timeline_follow, times, frame_count);
         }
-        if (ImPlot::BeginPlot("##Timeline", ImVec2(-1, timeline_plot_height))) {
+        if (ImPlot::BeginPlot("##Timeline", ImVec2(-1, std::max(1.0f,ImGui::GetContentRegionAvail().y)))) {
             ImPlot::SetupAxes(time_label, metric_unit((Metric)metric));
+            ImPlot::SetupLegend(ImPlotLocation_South, ImPlotLegendFlags_Outside | ImPlotLegendFlags_Horizontal);
             const double first_x = times ? times[0] : 0;
             const double last_x = times ? times[frame_count - 1] : (double)frame_count - 1;
             ImPlot::SetupAxisLimits(ImAxis_X1, first_x, std::max(first_x + 1.0, last_x), ImPlotCond_Once);
@@ -1927,6 +1906,17 @@ struct Lavery : viamd::EventHandler {
                 ImPlot::GetPlotDrawList()->AddRectFilled(ImPlot::PlotToPixels(begin, limits.Y.Max),
                     ImPlot::PlotToPixels(end, limits.Y.Min), IM_COL32(190,128,255,35));
                 ImPlot::PopPlotClipRect();
+            } else if (inspected_event < outlier_events.size()) {
+                const auto& event=outlier_events[inspected_event];
+                const auto limits=ImPlot::GetPlotLimits();
+                const double begin=times ? times[event.begin] : (double)event.begin;
+                const double end=times ? times[event.end] : (double)event.end;
+                ImVec4 color=event_color(inspected_event);
+                color.w=.18f;
+                ImPlot::PushPlotClipRect();
+                ImPlot::GetPlotDrawList()->AddRectFilled(ImPlot::PlotToPixels(begin,limits.Y.Max),
+                    ImPlot::PlotToPixels(end,limits.Y.Min),ImGui::GetColorU32(color));
+                ImPlot::PopPlotClipRect();
             }
             scrub_timeline("##parameter_scrub", times, frame_count);
             draw_time_cursor(times, frame_count);
@@ -1934,12 +1924,13 @@ struct Lavery : viamd::EventHandler {
             ImPlot::EndPlot();
         }
         ImGui::PopID();
-        height_handle("##timeline_height", &timeline_plot_height, 220);
+            return;
         }
 
         const auto& member_stats = stats.members[member];
         const auto current_reference = member_stats.reference(current_value);
-        if (ImGui::CollapsingHeader("Distribution", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SeparatorText("Distribution");
+        {
             ImGui::SetItemTooltip("Full-trajectory density per member. Click an event to overlay its whole span.");
             auto& pinned = comparison_members[metric_cls()];
             char compare_preview[64];
@@ -1976,7 +1967,7 @@ struct Lavery : viamd::EventHandler {
                     "A missing state has no reference. Singleton/constant references have zero spread, not a calibrated sigma.");
             }
             auto& histogram = distributions[metric];
-            if (histogram.valid.empty() && !compute_distributions(&histogram, data, (size_t)count)) {
+            if (histogram.valid.empty() && !compute_distributions(&histogram, data, (size_t)count, 32)) {
                 ImGui::TextUnformatted("Could not calculate distributions. See the application log.");
                 return;
             }
@@ -2014,7 +2005,7 @@ struct Lavery : viamd::EventHandler {
                                 metric_state((Metric)metric, v) == reference_state)) pooled.push_back(v);
                         }
                     }
-                    if (!compute_distributions(&reference_distribution, pooled, 1)) {
+                    if (!compute_distributions(&reference_distribution, pooled, 1, 32)) {
                         ImGui::TextUnformatted("Could not calculate pooled reference distribution. See the application log.");
                         return;
                     }
@@ -2051,26 +2042,27 @@ struct Lavery : viamd::EventHandler {
                 ImGui::SetItemTooltip("Frames %zu-%zu: %zu valid, %zu missing.\n"
                     "All finite values of this member and parameter in the inclusive event span,\n"
                     "including bridged gaps and frames where this member is not a contributor.\n"
-                    "Density uses the full trajectory's bins and is normalized independently.\n"
-                    "Fewer than 10 valid samples: individual sample marks instead of a density curve.",
+                    "Density uses the full trajectory's 32 bins and is normalized independently.",
                     begin, end, event_distribution.samples.size(), event_distribution.missing);
             }
             if (distribution_key != distribution_fit_key) {
                 distribution_fit_key = distribution_key;
                 ImPlot::SetNextAxesToFit();
             }
-            if (ImPlot::BeginPlot("##Distribution", ImVec2(-1, distribution_plot_height))) {
+            if (ImPlot::BeginPlot("##Distribution", ImVec2(-1,std::max(1.0f,ImGui::GetContentRegionAvail().y)))) {
                 ImPlot::SetupAxes(metric_unit((Metric)metric), "Probability density");
+                ImPlot::SetupLegend(ImPlotLocation_South, ImPlotLegendFlags_Outside);
                 if ((reference_source || statistics_reference_scope == Reference_HelixHistory) && !reference_distribution.centers.empty()) {
-                    ImPlot::SetNextLineStyle(ImVec4(1,0.8f,0.2f,1), 2.5f);
-                    ImPlot::PlotLine(reference_source ? "External reference" : "Pooled helix reference", reference_distribution.centers.data(),
-                        reference_distribution.density.data(), (int)reference_distribution.centers.size());
+                    ImPlot::SetNextFillStyle(ImVec4(1,0.8f,0.2f,1), 0.4f);
+                    ImPlot::PlotBars(reference_source ? "External reference" : "Pooled helix reference", reference_distribution.centers.data(),
+                        reference_distribution.density.data(), (int)reference_distribution.centers.size(), reference_distribution.bin_width);
                 }
                 if (!histogram.centers.empty()) {
                     auto plot = [&](int m) {
                         if (!histogram.valid[m]) return;
-                        ImPlot::PlotLine(labels[m].c_str(), histogram.centers.data(),
-                            histogram.density.data() + (size_t)m * histogram.centers.size(), (int)histogram.centers.size());
+                        ImPlot::SetNextFillStyle(IMPLOT_AUTO_COL, 0.4f);
+                        ImPlot::PlotBars(labels[m].c_str(), histogram.centers.data(),
+                            histogram.density.data() + (size_t)m * histogram.centers.size(), (int)histogram.centers.size(), histogram.bin_width);
                     };
                     for (int m : pinned) if (m != member) plot(m);
                     plot(member);
@@ -2078,15 +2070,9 @@ struct Lavery : viamd::EventHandler {
                         char label[64];
                         snprintf(label, sizeof(label), "%s #%zu (%zu samples)", span_kind, span_id + 1, event_distribution.samples.size());
                         const ImVec4 color = span_color;
-                        if (event_distribution.samples.size() >= 10) {
-                            ImPlot::SetNextLineStyle(color, 2.5f);
-                            ImPlot::PlotLine(label, histogram.centers.data(), event_distribution.density.data(),
-                                (int)histogram.centers.size());
-                        } else {
-                            std::vector<double> y(event_distribution.samples.size(), 0.0);
-                            ImPlot::SetNextMarkerStyle(ImPlotMarker_Diamond, 5, color, 1, color);
-                            ImPlot::PlotScatter(label, event_distribution.samples.data(), y.data(), (int)y.size());
-                        }
+                        ImPlot::SetNextFillStyle(color, 0.4f);
+                        ImPlot::PlotBars(label, histogram.centers.data(), event_distribution.density.data(),
+                            (int)histogram.centers.size(), histogram.bin_width);
                     }
                 }
                 const size_t frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame),
@@ -2095,11 +2081,7 @@ struct Lavery : viamd::EventHandler {
                 if (std::isfinite(value)) ImPlot::PlotInfLines("Current value", &value, 1);
                 ImPlot::EndPlot();
             }
-            height_handle("##distribution_height", &distribution_plot_height, 180);
-        } else if (!member_stats.count) {
-            ImGui::TextDisabled("No finite values for this member; other members remain available below.");
         }
-        draw_current_outliers(count, frame_count);
     }
 
     const float* timeline_times(size_t frame_count) const {
@@ -2373,9 +2355,11 @@ struct Lavery : viamd::EventHandler {
         ++external_revision;
     }
 
-    void draw_external_reference() {
-        ImGui::Combo("Reference source",&reference_source,"Current trajectory\0External CSV\0");
-        if (!reference_source) return;
+    void draw_external_reference(bool comparison_only=false) {
+        if (!comparison_only) {
+            ImGui::Combo("Reference source",&reference_source,"Current trajectory\0External CSV\0");
+            if (!reference_source) return;
+        }
         if (ImGui::Button("Import reference CSV...")) {
             char path[4096] = {};
             if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
@@ -2392,7 +2376,7 @@ struct Lavery : viamd::EventHandler {
             saved_reference_fingerprint.clear();
         }
         if (!external_error.empty()) ImGui::TextWrapped("Reference error: %s",external_error.c_str());
-        ImGui::TextWrapped("Reference: %s; %zu CSV records. Uses all valid imported raw samples; current-trajectory Baseline range is ignored.",
+        ImGui::TextWrapped("Reference: %s; %zu CSV records. Uses all valid imported raw samples.",
             external_reference.run.c_str(),external_reference.records);
         for (int cls=0; cls<Class_Count; ++cls) {
             const auto matched=std::count_if(external_mapping[cls].begin(),external_mapping[cls].end(),[](int r) { return r>=0; });
@@ -2429,7 +2413,9 @@ struct Lavery : viamd::EventHandler {
             }
             ImGui::TreePop();
         }
-        ImGui::TextWrapped("Pooled mode uses mapped source members within each target helix, counted once. Unmatched targets and absent parameters/states never borrow the current simulation.");
+        ImGui::TextWrapped(comparison_only ?
+            "Comparison uses the mapped member's samples, without time alignment or pooling. Import/mapping is shared with detection; selecting comparison groups does not change the detection reference." :
+            "Pooled mode uses mapped source members within each target helix, counted once. Unmatched targets and absent parameters/states never borrow the current simulation. Current-trajectory Baseline range is ignored.");
     }
 
     void update_statistics(size_t frame_count) {
@@ -2674,9 +2660,9 @@ struct Lavery : viamd::EventHandler {
         follow.max = limits.X.Max;
     }
 
-    void draw_time_cursor(const float* times, size_t frame_count) const {
+    void draw_time_cursor(const float* times, size_t frame_count, float thickness=2) const {
         const double x = cursor_x(times, frame_count);
-        ImPlot::SetNextLineStyle(ImVec4(1, 0.8f, 0, 1), 2);
+        ImPlot::SetNextLineStyle(ImVec4(1, 0.8f, 0, 1), thickness);
         ImPlot::PlotInfLines("Current frame", &x, 1);
     }
 
@@ -2955,7 +2941,8 @@ struct Lavery : viamd::EventHandler {
         ImGui::PushID(metric);
         ImGui::PushID(x_label);
         follow_cursor(count_follow, times, frame_count);
-        if (ImPlot::BeginPlot("##Outliers over time", ImVec2(-1, count_plot_height), ImPlotFlags_NoLegend)) {
+        if (ImPlot::BeginPlot("##Outliers over time", ImVec2(-1,std::max(1.0f,
+            ImGui::GetContentRegionAvail().y*.65f)), ImPlotFlags_NoLegend)) {
             ImPlot::SetupAxes(x_label, "Outliers");
             ImPlot::SetupAxisLimits(ImAxis_X1, x_at(0), std::max(x_at(0) + 1.0, x_at(frame_count - 1)), ImPlotCond_Once);
             ImPlot::SetupAxisLimits(ImAxis_Y1, 0, count, ImPlotCond_Always);
@@ -2999,7 +2986,6 @@ struct Lavery : viamd::EventHandler {
         }
         ImGui::PopID();
         ImGui::PopID();
-        height_handle("##count_plot_height", &count_plot_height, 180);
     }
 
     template <typename X>
@@ -3054,8 +3040,72 @@ struct Lavery : viamd::EventHandler {
         ImPlot::PopPlotClipRect();
     }
 
+    void draw_transition_bp_range(int& first, int& last) {
+        const int max_bp=std::max(1,(int)pairs.size());
+        first=std::clamp(first,1,max_bp);
+        last=std::clamp(last,first,max_bp);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*6);
+        if (ImGui::InputInt("BP range: from",&first)) {
+            first=std::clamp(first,1,max_bp);
+            last=std::max(last,first);
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*6);
+        if (ImGui::InputInt("to##bp_range",&last))
+            last=std::clamp(last,first,max_bp);
+    }
+
+    float transition_table_height() const {
+        return std::max(ImGui::GetFrameHeight()*3,
+            ImGui::GetContentRegionAvail().y-ImGui::GetTextLineHeightWithSpacing()*8);
+    }
+
+    template <typename Compare>
+    void sort_transition_rows(std::vector<size_t>& shown, Compare compare) const {
+        auto* specs=ImGui::TableGetSortSpecs();
+        if (!specs || !specs->SpecsCount) return;
+        std::stable_sort(shown.begin(),shown.end(),[&](size_t a,size_t b) {
+            for (int i=0;i<specs->SpecsCount;++i) {
+                const auto& spec=specs->Specs[i];
+                const int order=compare(a,b,spec.ColumnIndex);
+                if (order) return spec.SortDirection==ImGuiSortDirection_Ascending ? order<0 : order>0;
+            }
+            return a<b;
+        });
+        specs->SpecsDirty=false;
+    }
+
+    void draw_transition_navigation(int cls, uint32_t target, int parameter, size_t source, size_t destination) {
+        if (ImGui::Button("Go to source")) {
+            select_target(cls,target,parameter,source);
+            inspection_frame=app->animation.frame;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Go to destination")) {
+            select_target(cls,target,parameter,destination);
+            inspection_frame=app->animation.frame;
+        }
+    }
+
     void draw_state_switches(size_t frame_count) {
         const float* times = timeline_times(frame_count);
+        const Metric families[]={Buckle,EpsilonZeta,Chi,Phase,Alpha,Gamma};
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*12);
+        if (ImGui::Combo("Conformation",&transition_family,
+            "All\0BI / BII\0anti / syn\0Pucker\0Alpha\0Gamma\0")) nucleotide_to=-1;
+        draw_transition_bp_range(nucleotide_bp_first,nucleotide_bp_last);
+        ImGui::BeginDisabled(!transition_family);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*12);
+        const Metric family=families[transition_family];
+        if (ImGui::BeginCombo("State",nucleotide_to<0 ? "Any" : metric_state_name(family,nucleotide_to))) {
+            if (ImGui::Selectable("Any",nucleotide_to<0)) nucleotide_to=-1;
+            for (int state=0; state<metric_state_count(family); ++state)
+                if (ImGui::Selectable(metric_state_name(family,state),nucleotide_to==state)) nucleotide_to=state;
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("Show transitions into this state. Choose a conformation first.");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*8);
         if (times) {
             const float scale = event_time_ns ? 0.001f : 1.0f;
             float residence = (state_min_time_ps < 0 ? event_min_time_ps : state_min_time_ps) * scale;
@@ -3067,22 +3117,65 @@ struct Lavery : viamd::EventHandler {
         }
         ImGui::SetItemTooltip("Both source and destination must remain in one state for this long.\n"
             "Short excursions are ignored; missing samples reset the source.\n"
-            "Uses Event parameters and Detection range, not sigma or gap bridging.");
-        ImGui::TextDisabled("%zu switches; angular change and residence, not sigma severity", state_switches.size());
-        if (ImGui::BeginTable("##state_switches", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) {
-            for (const char* title : {"Member / parameter", "Transition", "Destination start", "Observed residence", "Change (deg)"}) ImGui::TableSetupColumn(title);
+            "Uses Event parameters and Detection range, not sigma or gap bridging.\n"
+            "Export all detected transitions under Export > Analysis tables.");
+        transition_search[0].Draw("Search",ImGui::GetFontSize()*12);
+        std::vector<size_t> shown;
+        for (size_t i=0; i<state_switches.size(); ++i) {
+            const auto& change=state_switches[i];
+            const std::string text=nucleotide_labels[change.member]+" "+metric_name(change.metric)+" "+
+                metric_state_name(change.metric,change.from)+" -> "+metric_state_name(change.metric,change.to);
+            if ((!transition_family || change.metric==families[transition_family]) &&
+                change.member/2>=(size_t)(nucleotide_bp_first-1) &&
+                change.member/2<(size_t)nucleotide_bp_last &&
+                (!transition_family || nucleotide_to<0 || change.to==nucleotide_to) &&
+                transition_search[0].PassFilter(text.c_str())) shown.push_back(i);
+        }
+        ImGui::TextDisabled("%zu shown / %zu detected; angular change and residence, not sigma severity",shown.size(),state_switches.size());
+        ImGui::SetItemTooltip("Time and residence use the trajectory's time unit, or frames without physical timestamps.\n"
+            "Angular change, clipping and source/destination spans appear below the table on selection.");
+        if (transition_family && !(event_parameters & (1u<<families[transition_family])))
+            ImGui::TextDisabled("This conformation is disabled in Event parameters; the filter does not enable it.");
+        if (ImGui::BeginTable("##state_switches", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
+            ImGuiTableFlags_Sortable | ImGuiTableFlags_SortMulti,
+            ImVec2(0,transition_table_height()))) {
+            ImGui::TableSetupColumn("Nucleotide / BP",ImGuiTableColumnFlags_DefaultSort);
+            ImGui::TableSetupColumn("Conformation");
+            ImGui::TableSetupColumn("Transition");
+            ImGui::TableSetupColumn("Time");
+            ImGui::TableSetupColumn("Residence");
             ImGui::TableHeadersRow();
+            sort_transition_rows(shown,[&](size_t a,size_t b,int column) {
+                const auto& x=state_switches[a];
+                const auto& y=state_switches[b];
+                auto order=[](const auto& lhs,const auto& rhs) { return lhs<rhs ? -1 : lhs>rhs ? 1 : 0; };
+                switch (column) {
+                case 0: {
+                    const int nucleotide=order(x.member,y.member);
+                    return nucleotide ? nucleotide : order(x.begin,y.begin);
+                }
+                case 1: return std::strcmp(metric_name(x.metric),metric_name(y.metric));
+                case 2: {
+                    const int source=std::strcmp(metric_state_name(x.metric,x.from),metric_state_name(y.metric,y.from));
+                    return source ? source : std::strcmp(metric_state_name(x.metric,x.to),metric_state_name(y.metric,y.to));
+                }
+                case 3: return order(x.begin,y.begin);
+                case 4: return times ? order(times[x.end]-times[x.begin],times[y.end]-times[y.begin]) :
+                    order(x.end-x.begin,y.end-y.begin);
+                default: return 0;
+                }
+            });
             const float row_height = 2 * ImGui::GetTextLineHeightWithSpacing() + 2 * ImGui::GetStyle().CellPadding.y;
             ImGuiListClipper clipper;
-            clipper.Begin((int)state_switches.size(), row_height);
+            clipper.Begin((int)shown.size(), row_height);
             while (clipper.Step()) {
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                const size_t i = (size_t)row;
+                const size_t i = shown[row];
                 const auto& change = state_switches[i];
                 ImGui::PushID((int)i);
                 ImGui::TableNextRow(ImGuiTableRowFlags_None, row_height);
                 ImGui::TableNextColumn();
-                const std::string label = nucleotide_labels[change.member] + " / " + metric_name(change.metric);
+                const std::string& label = nucleotide_labels[change.member];
                 if (ImGui::Selectable(label.c_str(), inspected_switch == i, ImGuiSelectableFlags_SpanAllColumns)) {
                     inspected_event = SIZE_MAX;
                     select_target(Class_Nucleotide, change.member, change.metric - Alpha, change.begin);
@@ -3096,6 +3189,8 @@ struct Lavery : viamd::EventHandler {
                     ImGui::EndTooltip();
                 }
                 ImGui::TableNextColumn();
+                ImGui::TextUnformatted(metric_name(change.metric));
+                ImGui::TableNextColumn();
                 ImGui::Text("%s -> %s", metric_state_name(change.metric, change.from), metric_state_name(change.metric, change.to));
                 ImGui::TextDisabled("%s", change.intervening_samples() ? "separated runs" : "adjacent runs");
                 ImGui::TableNextColumn();
@@ -3104,18 +3199,23 @@ struct Lavery : viamd::EventHandler {
                 if (times) ImGui::Text("%.3f", times[change.end]-times[change.begin]);
                 else ImGui::Text("%zu frames", change.end-change.begin+1);
                 if (change.destination_clipped) ImGui::TextDisabled("%s", change.end == frame_count-1 ? "ongoing at end" : "range-clipped");
-                ImGui::TableNextColumn();
-                ImGui::Text("%+.1f", change.angular_change);
                 ImGui::PopID();
             }
             }
             ImGui::EndTable();
         }
-        if (times) {
-            char unit[32];
-            md_unit_print(unit, sizeof(unit), app->timeline.time_unit);
-            ImGui::TextDisabled("Start / residence in %s. Click to inspect at destination onset; hover for source context.", unit);
+        if (ImGui::BeginChild("Nucleotide transition detail",ImVec2(0,0))) {
+            if (inspected_switch<state_switches.size() &&
+                std::find(shown.begin(),shown.end(),inspected_switch)!=shown.end()) {
+                const auto& change=state_switches[inspected_switch];
+                ImGui::Text("%s / %s: %s -> %s (%+.1f deg)",nucleotide_labels[change.member].c_str(),
+                    metric_name(change.metric),metric_state_name(change.metric,change.from),
+                    metric_state_name(change.metric,change.to),change.angular_change);
+                draw_transition_navigation(Class_Nucleotide,change.member,change.metric-Alpha,change.source_begin,change.begin);
+                draw_switch_context(change,times,frame_count);
+            } else ImGui::TextDisabled("Select a transition for source/destination context.");
         }
+        ImGui::EndChild();
     }
 
     void export_state_switches_csv() {
@@ -3485,9 +3585,9 @@ struct Lavery : viamd::EventHandler {
     void draw_pairing_states(size_t frame_count, PairingView view=PairingView_Transitions) {
         const bool export_only=view==PairingView_Export;
         if (pairs.empty() || pairing_states.size() != frame_count*pairs.size()) return;
-        size_t p = metric_cls() == Class_Step ? steps[member].a :
+        size_t p = metric_cls() == Class_Step ? ((size_t)member<steps.size() ? steps[member].a : 0) :
             metric_cls() == Class_Nucleotide ? (size_t)member/2 : (size_t)member;
-        if (ImGui::BeginCombo("Pair", pair_labels[p].c_str())) {
+        if (export_only && ImGui::BeginCombo("Pair (raw export)", pair_labels[p].c_str())) {
             for (size_t i = 0; i < pairs.size(); ++i) if (ImGui::Selectable(pair_labels[i].c_str(), i == p)) {
                 p = i;
                 inspected_event = inspected_switch = SIZE_MAX;
@@ -3498,16 +3598,20 @@ struct Lavery : viamd::EventHandler {
         if (p != pairing_cached_member) {
             if (!pairing_runs(&pairing_history, pairing_states, pairs.size(), p)) return;
             pairing_cached_member = p;
-            pairing_changes_key = 0;
         }
         const float* times = timeline_times(frame_count);
-        const size_t frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame), (int64_t)0, (int64_t)frame_count-1);
-        ImGui::Text("Current: %s", pairing_state_name(pairing_states[frame*pairs.size()+p]));
-        ImGui::TextWrapped("Explicit-H annotation, independent of sigma and pairing-disruption validity. WC: A-T/U or G-C; Hoogsteen: A-T/U only. No H / missing evidence: unavailable.");
-        ImGui::SetItemTooltip("Requires all expected directional H bonds and compatible base geometry.\n"
-            "WC: both chi in [-180,-60] deg; Hoogsteen: adenine chi [0,120], partner anti.\n"
-            "Other includes partial contacts or uncertain orientation. Unpaired requires disrupted geometry and no candidate contacts.\n"
-            "G-C Hoogsteen and other noncanonical chemistries are not identified.");
+        if (!export_only) {
+            draw_transition_bp_range(pairing_bp_first,pairing_bp_last);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize()*12);
+            if (ImGui::BeginCombo("State",pairing_to<0 ? "Any" : pairing_state_name((PairingState)pairing_to))) {
+                if (ImGui::Selectable("Any",pairing_to<0)) pairing_to=-1;
+                for (int state=1; state<Pairing_Count; ++state)
+                    if (ImGui::Selectable(pairing_state_name((PairingState)state),pairing_to==state)) pairing_to=state;
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip("Show transitions into this state. Unavailable resets detection rather than forming a transition.");
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*8);
         if (times) {
             const float scale = event_time_ns ? .001f : 1;
             float duration = pairing_min_time_ps*scale;
@@ -3528,8 +3632,7 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         {
-            ImGui::TextWrapped("Pairing transitions: selected pair, whole run. Independent of Event parameters and Detection range. Both states must meet Pairing min residence; unavailable resets the source.");
-            uint64_t key = md_hash64(&pairing_min_time_ps, sizeof(pairing_min_time_ps), p+1);
+            uint64_t key = md_hash64(&pairing_min_time_ps, sizeof(pairing_min_time_ps), 0xC4E1);
             key = md_hash64(&pairing_min_frames, sizeof(pairing_min_frames), key);
             key = md_hash64(&frame_count, sizeof(frame_count), key);
             if (key != pairing_changes_key) {
@@ -3541,46 +3644,125 @@ struct Lavery : viamd::EventHandler {
                     for (size_t f = 0; f < frame_count; ++f) options.times[f] = times[f]*to_ps;
                     options.min_duration = pairing_min_time_ps;
                 }
-                if (!pairing_transitions(&pairing_changes, pairing_history, options)) return;
+                std::vector<PairChange> changes;
+                std::vector<PairingRun> history;
+                for (size_t pair=0; pair<pairs.size(); ++pair) {
+                    if (!pairing_runs(&history,pairing_states,pairs.size(),pair) ||
+                        !pairing_transitions(&pairing_changes,history,options)) {
+                        MD_LOG_ERROR("Lavery: could not calculate pairing transitions for pair %zu",pair+1);
+                        ImGui::TextUnformatted("Could not calculate pairing transitions. See the application log.");
+                        return;
+                    }
+                    for (const auto& change : pairing_changes) changes.push_back({pair,change});
+                }
+                std::stable_sort(changes.begin(),changes.end(),[](const PairChange& a,const PairChange& b) {
+                    return a.change.destination.begin<b.change.destination.begin;
+                });
+                all_pairing_changes=std::move(changes);
+                inspected_pairing_change=SIZE_MAX;
                 pairing_changes_key = key;
             }
-            if (ImGui::Button("Export pairing CSV")) export_pairing_csv(p, times);
-            ImGui::SameLine();
-            ImGui::TextDisabled("%zu transitions", pairing_changes.size());
         }
-        if (ImGui::BeginTable("##pairing_changes", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable)) {
-            for (const char* label : {"Transition", "Destination start", "Residence", "Intervening samples"}) ImGui::TableSetupColumn(label);
+        transition_search[1].Draw("Search",ImGui::GetFontSize()*12);
+        std::vector<size_t> shown;
+        for (size_t i=0; i<all_pairing_changes.size(); ++i) {
+            const auto& row=all_pairing_changes[i];
+            const std::string text=pair_labels[row.pair]+" "+pairing_state_name(row.change.source.state)+" -> "+
+                pairing_state_name(row.change.destination.state);
+            if (row.pair>=(size_t)(pairing_bp_first-1) && row.pair<(size_t)pairing_bp_last &&
+                (pairing_to<0 || row.change.destination.state==pairing_to) &&
+                transition_search[1].PassFilter(text.c_str())) shown.push_back(i);
+        }
+        ImGui::TextDisabled("%zu shown / %zu detected",shown.size(),all_pairing_changes.size());
+        ImGui::SetItemTooltip("Whole-run explicit-H chemistry; independent of Event parameters and Detection range.\n"
+            "WC: A-T/U or G-C. Hoogsteen: A-T/U only. Unavailable resets the source.\n"
+            "Time and residence use the trajectory's time unit, or frames without physical timestamps.\n"
+            "Export selected-pair raw runs under Export > Analysis tables.");
+        if (ImGui::BeginTable("##pairing_changes", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
+            ImGuiTableFlags_Sortable | ImGuiTableFlags_SortMulti,
+            ImVec2(0,transition_table_height()))) {
+            ImGui::TableSetupColumn("Pair",ImGuiTableColumnFlags_DefaultSort);
+            ImGui::TableSetupColumn("Transition");
+            ImGui::TableSetupColumn("Time");
+            ImGui::TableSetupColumn("Residence");
             ImGui::TableHeadersRow();
+            sort_transition_rows(shown,[&](size_t a,size_t b,int column) {
+                const auto& x=all_pairing_changes[a];
+                const auto& y=all_pairing_changes[b];
+                const auto& xd=x.change.destination;
+                const auto& yd=y.change.destination;
+                auto order=[](const auto& lhs,const auto& rhs) { return lhs<rhs ? -1 : lhs>rhs ? 1 : 0; };
+                switch (column) {
+                case 0: {
+                    const int pair=order(x.pair,y.pair);
+                    return pair ? pair : order(xd.begin,yd.begin);
+                }
+                case 1: {
+                    const int source=std::strcmp(pairing_state_name(x.change.source.state),pairing_state_name(y.change.source.state));
+                    return source ? source : std::strcmp(pairing_state_name(xd.state),pairing_state_name(yd.state));
+                }
+                case 2: return order(xd.begin,yd.begin);
+                case 3: return times ? order(times[xd.end]-times[xd.begin],times[yd.end]-times[yd.begin]) :
+                    order(xd.end-xd.begin,yd.end-yd.begin);
+                default: return 0;
+                }
+            });
             ImGuiListClipper clipper;
-            clipper.Begin((int)pairing_changes.size());
+            clipper.Begin((int)shown.size());
             while (clipper.Step()) for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const auto& change = pairing_changes[i];
+                const auto& row=all_pairing_changes[shown[i]];
+                const auto& change = row.change;
                 const auto& dest = change.destination;
-                ImGui::PushID(i);
+                ImGui::PushID((int)shown[i]);
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
+                ImGui::TextUnformatted(pair_labels[row.pair].c_str());
+                ImGui::TableNextColumn();
                 const std::string label = std::string(pairing_state_name(change.source.state))+" -> "+pairing_state_name(dest.state);
-                if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
+                if (ImGui::Selectable(label.c_str(), inspected_pairing_change==shown[i], ImGuiSelectableFlags_SpanAllColumns)) {
                     inspected_event = inspected_switch = SIZE_MAX;
-                    select_target(Class_Pair, p, Buckle, dest.begin);
+                    select_target(Class_Pair, row.pair, Buckle, dest.begin);
+                    inspected_pairing_change=shown[i];
                 }
-                if (ImGui::IsItemHovered()) preview.push_back({Class_Pair, (uint32_t)p, class_all_parameters(Class_Pair)});
+                if (ImGui::IsItemHovered()) {
+                    preview.push_back({Class_Pair, (uint32_t)row.pair, class_all_parameters(Class_Pair)});
+                    ImGui::BeginTooltip();
+                    draw_run_span("Source",change.source.begin,change.source.end,times,true);
+                    draw_run_span("Destination",dest.begin,dest.end,times,true);
+                    ImGui::EndTooltip();
+                }
                 ImGui::TableNextColumn();
                 if (times) ImGui::Text("%.3f", times[dest.begin]); else ImGui::Text("%zu", dest.begin);
                 ImGui::TableNextColumn();
                 if (times) ImGui::Text("%.3f", times[dest.end]-times[dest.begin]); else ImGui::Text("%zu", dest.end-dest.begin+1);
-                ImGui::TableNextColumn();
-                ImGui::Text("%zu", dest.begin-change.source.end-1);
                 ImGui::PopID();
             }
             ImGui::EndTable();
         }
+        if (ImGui::BeginChild("Pairing transition detail",ImVec2(0,0))) {
+            if (inspected_pairing_change<all_pairing_changes.size() &&
+                std::find(shown.begin(),shown.end(),inspected_pairing_change)!=shown.end()) {
+                const auto& row=all_pairing_changes[inspected_pairing_change];
+                const auto& change=row.change;
+                ImGui::Text("%s: %s -> %s",pair_labels[row.pair].c_str(),
+                    pairing_state_name(change.source.state),pairing_state_name(change.destination.state));
+                draw_transition_navigation(Class_Pair,(uint32_t)row.pair,Buckle,change.source.begin,change.destination.begin);
+                draw_run_span("Source",change.source.begin,change.source.end,times,true);
+                draw_run_span("Destination",change.destination.begin,change.destination.end,times,true);
+                ImGui::TextDisabled("%zu intervening samples; short runs are skipped, not relabelled.",
+                    change.destination.begin-change.source.end-1);
+                if (!change.source.begin) ImGui::TextDisabled("Source already present at trajectory start; onset unknown.");
+                if (change.destination.end==frame_count-1) ImGui::TextDisabled("Ongoing at trajectory end; residence is a lower bound.");
+            } else ImGui::TextDisabled("Select a transition for source/destination context.");
+        }
+        ImGui::EndChild();
     }
 
     void draw_period_summary(size_t frame_count) {
         ImGui::Combo("Summary",&period_summary_kind,
             "Pairing chemistry\0BI / BII\0anti / syn\0Pucker North / South\0Alpha rotamers\0Gamma rotamers\0Plotted parameter\0");
         ImGui::Combo("Members in summary",&period_summary_scope,"All\0Internal\0Terminal\0Selected plotted member\0");
+        if (period_summary_kind==6 || period_summary_scope==3) draw_parameter_selection(period_summary_scope==3);
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         ImGui::SetItemTooltip("Sample occupancies, not independent observations.\n"
@@ -3595,7 +3777,7 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         const auto& periods=app->timeline.periods;
-        if (!periods.count) { ImGui::TextWrapped("Create timeline periods to compare stages."); return; }
+        if (!periods.count) { ImGui::TextWrapped("Create timeline periods to compare periods."); return; }
         uint64_t key=md_hash64(&period_summary_kind,sizeof(period_summary_kind),statistics_key);
         key=md_hash64(&period_summary_scope,sizeof(period_summary_scope),key);
         key=md_hash64(&id,sizeof(id),key);
@@ -3670,35 +3852,414 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
-    void draw_events_quality(size_t frame_count) {
+    void draw_comparison(size_t frame_count) {
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*16);
+        ImGui::Combo("Class",&comparison_class,"Intra-base pair\0Inter-base pair\0Nucleotide\0");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*9);
+        ImGui::Combo("Style",&comparison_style,"Bars\0Lines\0Filled area\0");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize()*7);
+        ImGui::SliderFloat("Line width",&comparison_line_width,1,6,"%.1f px",ImGuiSliderFlags_AlwaysClamp);
+        if (comparison_style!=1) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize()*7);
+            ImGui::SliderFloat("Opacity",&comparison_opacity,0,1,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        }
+        const int cls=comparison_class;
+        const int first_metric=class_first_metric(cls);
+        const int parameters=class_parameter_count(cls);
+        const size_t count=class_members(cls);
+        if (ImGui::Button("Add distribution")) {
+            ComparisonOverlay overlay;
+            snprintf(overlay.name,sizeof(overlay.name),"Distribution %zu",comparison_overlays.size()+1);
+            overlay.color=ImPlot::GetColormapColor((int)comparison_overlays.size());
+            comparison_overlays.push_back(overlay);
+            comparison_edit=(int)comparison_overlays.size()-1;
+            ++comparison_csv_revision;
+            ImGui::OpenPopup("Distribution settings");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Add CSV...")) {
+            char path[4096]={};
+            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+                ComparisonCSV source;
+                if (load_external_reference(&source.data,path,&comparison_error)) {
+                    comparison_csvs.push_back(std::move(source));
+                    ComparisonOverlay overlay;
+                    overlay.source=3; overlay.csv=comparison_csvs.size()-1;
+                    overlay.color=ImPlot::GetColormapColor((int)comparison_overlays.size());
+                    snprintf(overlay.name,sizeof(overlay.name),"CSV %zu: %s",comparison_csvs.size(),comparison_csvs.back().data.run.c_str());
+                    comparison_overlays.push_back(overlay);
+                    ++comparison_csv_revision;
+                    comparison_error.clear();
+                } else MD_LOG_ERROR("Lavery comparison: %s",comparison_error.c_str());
+            }
+        }
+        ImGui::SetItemTooltip("Add an independent comparison dataset. Does not change the detection reference.\n"
+            "All imported members are pooled; residue mapping and matching frame times are not required.");
+        if (ImGui::BeginPopup("Distribution settings")) {
+            if (comparison_edit>=0 && (size_t)comparison_edit<comparison_overlays.size()) {
+                auto& overlay=comparison_overlays[comparison_edit];
+                bool edited=ImGui::InputText("Name",overlay.name,sizeof(overlay.name));
+                edited|=ImGui::ColorEdit4("Colour",&overlay.color.x,ImGuiColorEditFlags_NoInputs);
+                edited|=ImGui::Combo("Source",&overlay.source,"Whole trajectory\0Current frame (live)\0Named period\0Imported CSV\0Detection reference CSV\0");
+                if (overlay.source==2) {
+                    const auto* period=timeline_periods_find(&app->timeline.periods,overlay.period);
+                    if (ImGui::BeginCombo("Period",period ? period->name : "Choose period")) {
+                        for (int p=0;p<app->timeline.periods.count;++p) {
+                            const auto& candidate=app->timeline.periods.items[p];
+                            if (ImGui::Selectable(candidate.name,overlay.period==candidate.id)) {
+                                overlay.period=candidate.id; edited=true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                if (overlay.source==3 && ImGui::BeginCombo("CSV",overlay.csv<comparison_csvs.size() ?
+                    comparison_csvs[overlay.csv].data.path.c_str() : "Import a CSV first")) {
+                    for (size_t c=0;c<comparison_csvs.size();++c) if (ImGui::Selectable(comparison_csvs[c].data.path.c_str(),overlay.csv==c)) {
+                        overlay.csv=c; edited=true;
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::InputInt("BP from",&overlay.bp_first)) {
+                    overlay.bp_first=std::max(1,overlay.bp_first);
+                    overlay.bp_last=std::max(overlay.bp_first,overlay.bp_last); edited=true;
+                }
+                bool all=overlay.bp_last==INT_MAX;
+                if (ImGui::Checkbox("Through last BP",&all)) {
+                    overlay.bp_last=all ? INT_MAX : overlay.bp_first; edited=true;
+                }
+                if (!all && ImGui::InputInt("BP to",&overlay.bp_last)) {
+                    overlay.bp_last=std::max(overlay.bp_first,overlay.bp_last); edited=true;
+                }
+                edited|=ImGui::Combo("Pair type",&overlay.pair_type,"All\0AT / AU\0GC\0Other canonical-base combination\0");
+                if (cls==Class_Step) ImGui::TextDisabled("Both step endpoints must match BP range and pair type.");
+                if (cls==Class_Nucleotide)
+                    edited|=ImGui::Combo("Nucleotide",&overlay.nucleotide,"All\0A\0T\0G\0C\0U\0");
+                ImGui::TextDisabled("Filters apply only to this distribution.");
+                if (edited) ++comparison_csv_revision;
+                if (ImGui::Button("Done")) ImGui::CloseCurrentPopup();
+                ImGui::SameLine();
+                if (ImGui::Button("Duplicate")) {
+                    ComparisonOverlay copy=overlay;
+                    const std::string name=std::string(overlay.name)+" (copy)";
+                    snprintf(copy.name,sizeof(copy.name),"%s",name.c_str());
+                    copy.color=ImPlot::GetColormapColor((int)comparison_overlays.size());
+                    comparison_overlays.push_back(copy);
+                    comparison_edit=(int)comparison_overlays.size()-1;
+                    ++comparison_csv_revision;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Remove")) {
+                    comparison_overlays.erase(comparison_overlays.begin()+comparison_edit);
+                    comparison_edit=-1; ++comparison_csv_revision;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        if (!comparison_error.empty()) ImGui::TextWrapped("CSV error: %s",comparison_error.c_str());
+        uint64_t key=md_hash64(&cls,sizeof(cls),external_revision);
+        key=md_hash64(&comparison_csv_revision,sizeof(comparison_csv_revision),key);
+        key=md_hash64(&frame_count,sizeof(frame_count),key);
+        key=md_hash64(&count,sizeof(count),key);
+        const size_t current=current_frame();
+        for (const auto& overlay : comparison_overlays) {
+            if (overlay.source==1) key=md_hash64(&current,sizeof(current),key);
+            const auto bounds=overlay.source==2 ? period_frames(overlay.period,frame_count) : std::pair<int,int>{-1,-1};
+            key=md_hash64(&bounds.first,sizeof(bounds.first),key);
+            key=md_hash64(&bounds.second,sizeof(bounds.second),key);
+            if (overlay.source==2) if (const auto* p=timeline_periods_find(&app->timeline.periods,overlay.period))
+                key=md_hash64(p->name,strlen(p->name),key);
+        }
+        const bool changed=key!=comparison_key;
+        if (changed) {
+            comparison_labels.clear(); comparison_notes.clear();
+            std::vector<std::pair<int,int>> ranges;
+            std::vector<const ExternalReference*> sources;
+            for (const auto& overlay : comparison_overlays) {
+                comparison_labels.push_back(overlay.name);
+                const ExternalReference* source=nullptr;
+                std::pair<int,int> range={0,(int)frame_count-1};
+                std::string note="Whole trajectory";
+                if (overlay.source==1) { range={(int)current,(int)current}; note="Current frame "+std::to_string(current); }
+                if (overlay.source==2) {
+                    range=period_frames(overlay.period,frame_count);
+                    const auto* p=timeline_periods_find(&app->timeline.periods,overlay.period);
+                    note=p ? p->name : "Missing period";
+                }
+                if (overlay.source>=3) {
+                    range={-1,-1};
+                    source=overlay.source==4 ? &external_reference :
+                        overlay.csv<comparison_csvs.size() ? &comparison_csvs[overlay.csv].data : nullptr;
+                    note=source && source->records ? source->path : "No CSV loaded";
+                }
+                note+=" | BP "+std::to_string(overlay.bp_first)+"-"+(overlay.bp_last==INT_MAX ? "last" : std::to_string(overlay.bp_last));
+                const char* types[]={"all pairs","AT/AU","GC","other canonical-base pairs"};
+                note+=" | "; note+=types[overlay.pair_type];
+                if (cls==Class_Nucleotide && overlay.nucleotide) { note+=" | nucleotide "; note+=" ATGCU"[overlay.nucleotide]; }
+                ranges.push_back(range); sources.push_back(source); comparison_notes.push_back(note);
+            }
+            for (int k=0;k<parameters;++k) {
+                const Metric id=(Metric)(first_metric+k);
+                std::vector<std::vector<float>> samples(sources.size());
+                for (size_t g=0;g<sources.size();++g) {
+                    const auto& overlay=comparison_overlays[g];
+                    if (!overlay.visible) continue;
+                    ComparisonMemberFilter filter;
+                    filter.bp_first=overlay.bp_first;
+                    filter.bp_last=overlay.bp_last==INT_MAX ? SIZE_MAX : (size_t)overlay.bp_last;
+                    filter.pair_type=overlay.pair_type;
+                    filter.nucleotide=cls==Class_Nucleotide ? " ATGCU"[overlay.nucleotide] : 0;
+                    if (!overlay.nucleotide) filter.nucleotide=0;
+                    size_t unknown=0;
+                    if (sources[g]) {
+                        for (const auto& source : sources[g]->members[cls]) {
+                            bool missing=false;
+                            if (comparison_member_matches(filter,cls,source.label,source.pair_a,source.pair_b,&missing)) {
+                                const auto& v=source.values[id];
+                                samples[g].insert(samples[g].end(),v.begin(),v.end());
+                            } else if (missing) ++unknown;
+                        }
+                    } else {
+                        const auto [first,last]=ranges[g];
+                        if (first>=0 && last>=first && count) {
+                            const auto& v=values[id];
+                            const size_t end=((size_t)last+1)*count;
+                            if (end>v.size()) {
+                                MD_LOG_ERROR("Lavery: incomplete comparison parameter data");
+                                ImGui::TextUnformatted("Incomplete parameter data. Recompute analysis.");
+                                return;
+                            }
+                            for (size_t m=0;m<count;++m) {
+                                const size_t a=cls==Class_Step ? steps[m].a : cls==Class_Nucleotide ? m/2 : m;
+                                const std::string b=cls==Class_Step ? pair_labels[steps[m].b] : "";
+                                bool missing=false;
+                                if (comparison_member_matches(filter,cls,class_labels(cls)[m],pair_labels[a],b,&missing)) {
+                                    for (int f=first;f<=last;++f) samples[g].push_back(v[(size_t)f*count+m]);
+                                } else if (missing) ++unknown;
+                            }
+                        }
+                    }
+                    if (k==0 && unknown) comparison_notes[g]+=" | "+std::to_string(unknown)+" members excluded: missing filter metadata";
+                }
+                if (!samples.empty() && !compare_samples(&dashboard_comparisons[id],samples,metric_is_angular(id),32)) {
+                    ImGui::TextUnformatted("Could not calculate comparison. See the application log.");
+                    return;
+                }
+            }
+            comparison_key=key;
+        }
+        if (comparison_labels.empty()) { ImGui::TextDisabled("Add a distribution or import a CSV dataset."); return; }
+        ImGui::TextDisabled("Independent distributions | 32 shared bins | independently normalized");
+        ImGui::SetItemTooltip("Each finite member-frame sample has equal weight; this is not a distribution of member averages.\n"
+            "Overlapping periods share samples; samples are correlated, not independent observations.\n"
+            "CSV datasets pool their own members without mapping; ensure compatible parameter conventions.\n"
+            "Angular distributions share a circular origin per parameter; equivalent angles may differ by 360 degrees.");
+        const bool fit=ImGui::Button("Fit all plots");
+        const float width=ImGui::GetContentRegionAvail().x;
+        const int grid_columns=width>ImGui::GetFontSize()*65 ? 3 : width>ImGui::GetFontSize()*38 ? 2 : 1;
+        const int rows=(parameters+grid_columns-1)/grid_columns;
+        const float available=ImGui::GetContentRegionAvail().y;
+        const float legend_height=std::min(available*.3f,
+            ImGui::GetFrameHeightWithSpacing()*(comparison_overlays.size()+1));
+        const float grid_height=std::max(1.0f,available-legend_height-ImGui::GetStyle().ItemSpacing.y);
+        const float height=std::max(180.0f,grid_height/rows-ImGui::GetStyle().CellPadding.y*2);
+        if (ImGui::BeginChild("Distribution dashboard",ImVec2(0,grid_height))) {
+            if (ImGui::BeginTable("Parameter grid",grid_columns,ImGuiTableFlags_SizingStretchSame)) {
+                for (int k=0;k<parameters;++k) {
+                    ImGui::TableNextColumn();
+                    const Metric id=(Metric)(first_metric+k);
+                    ImGui::PushID((int)id);
+                    if (changed || fit) ImPlot::SetNextAxesToFit();
+                    if (ImPlot::BeginPlot(metric_name(id),ImVec2(-1,height),ImPlotFlags_NoLegend)) {
+                        ImPlot::SetupAxes(metric_unit(id),"Density");
+                        const auto& result=dashboard_comparisons[id];
+                        const auto& h=result.histogram;
+                        for (size_t g=0;g<comparison_labels.size();++g) {
+                            if (!comparison_overlays[g].visible) continue;
+                            if (!h.valid[g]) continue;
+                            const ImVec4 color=comparison_overlays[g].color;
+                            const std::string item=comparison_labels[g]+"###overlay"+std::to_string(g);
+                            const double* density=h.density.data()+g*h.centers.size();
+                            const int bins=(int)h.centers.size();
+                            if (comparison_style==0) {
+                                ImPlot::SetNextFillStyle(color,comparison_opacity);
+                                ImPlot::SetNextLineStyle(color,comparison_line_width);
+                                ImPlot::PlotBars(item.c_str(),h.centers.data(),density,bins,h.bin_width);
+                            } else {
+                                if (comparison_style==2) {
+                                    ImPlot::SetNextFillStyle(color,comparison_opacity);
+                                    ImPlot::PlotShaded(item.c_str(),h.centers.data(),density,bins,0.0);
+                                }
+                                ImPlot::SetNextLineStyle(color,comparison_line_width);
+                                ImPlot::PlotLine(item.c_str(),h.centers.data(),density,bins);
+                            }
+                        }
+                        if (ImPlot::IsPlotHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::TextUnformatted(metric_name(id));
+                            for (size_t g=0;g<comparison_labels.size();++g) {
+                                if (!comparison_overlays[g].visible) continue;
+                                ImGui::TextColored(comparison_overlays[g].color,"%s",comparison_labels[g].c_str());
+                                ImGui::TextUnformatted(comparison_notes[g].c_str());
+                                ImGui::Text("Valid: %zu",h.valid[g]);
+                                if (h.valid[g]) ImGui::Text("Mean: %.3f | SD: %.3f",result.summaries[g].mean,result.summaries[g].sd);
+                                else ImGui::TextUnformatted("No finite samples / parameter absent.");
+                                if (comparison_overlays[g].source<3) ImGui::Text("Missing samples: %zu",result.missing[g]);
+                                else ImGui::TextUnformatted("CSV missing sample count: unknown.");
+                            }
+                            ImGui::EndTooltip();
+                        }
+                        ImPlot::EndPlot();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+        }
+        ImGui::EndChild();
+        bool edit_requested=false;
+        if (ImGui::BeginChild("Shared distribution legend",ImVec2(0,0))) {
+            ImGui::TextDisabled("Distributions  |  tick to show/hide; Edit changes only that overlay");
+            for (size_t g=0;g<comparison_overlays.size();++g) {
+                auto& overlay=comparison_overlays[g];
+                ImGui::PushID((int)g);
+                if (ImGui::Checkbox("##visible",&overlay.visible)) ++comparison_csv_revision;
+                ImGui::SameLine();
+                ImGui::ColorButton("##colour",overlay.color,ImGuiColorEditFlags_NoTooltip,ImVec2(ImGui::GetFrameHeight(),ImGui::GetFrameHeight()));
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Edit")) { comparison_edit=(int)g; edit_requested=true; }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(overlay.name);
+                ImGui::SetItemTooltip("%s",comparison_notes[g].c_str());
+                if (overlay.visible) {
+                    bool any=false;
+                    for (int k=0;k<parameters;++k) any|=dashboard_comparisons[first_metric+k].histogram.valid[g]>0;
+                    if (!any) { ImGui::SameLine(); ImGui::TextDisabled("(no matching samples)"); }
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        if (edit_requested) ImGui::OpenPopup("Distribution settings");
+    }
+
+    void draw_workspace(size_t frame_count) {
         const size_t frame = (size_t)std::clamp((int64_t)std::llround(app->animation.frame), (int64_t)0, (int64_t)frame_count - 1);
         if (!ImGui::BeginTabBar("EventsQuality")) return;
         if (ImGui::BeginTabItem("Outliers###outlier_events")) {
-            if (statistics_reference_scope == Reference_HelixHistory)
-                ImGui::TextWrapped("Pooled-reference anomalous regions: persistent differences need not be transitions during this recording.");
-            draw_events(frame, frame_count);
+            const ImVec2 area=ImGui::GetContentRegionAvail();
+            const float spacing=ImGui::GetStyle().ItemSpacing.y;
+            const float divider=std::max(4.0f,spacing);
+            const float rows_height=std::max(3.0f,area.y-2*(divider+2*spacing));
+            const float min_row=std::min(ImGui::GetFrameHeight()*4,rows_height/3);
+            float table_height=std::clamp(rows_height*layout_events,min_row,rows_height-2*min_row);
+            if (ImGui::BeginChild("Event table",ImVec2(0,table_height))) {
+                if (statistics_reference_scope == Reference_HelixHistory)
+                    ImGui::TextWrapped("Pooled-reference anomalous regions: persistent differences need not be transitions during this recording.");
+                draw_events(frame,frame_count);
+            }
+            ImGui::EndChild();
+            splitter("##split_events",false,&table_height,min_row,rows_height-2*min_row);
+            layout_events=table_height<0 ? .34f : table_height/rows_height;
+            int count=(int)columns[metric];
+            if (count) member=std::clamp(member,0,count-1);
+            const ImVec2 lower=ImGui::GetContentRegionAvail();
+            const float lower_rows=std::max(2*min_row,lower.y-divider-2*spacing);
+            float middle_height=std::clamp(lower_rows*layout_middle,min_row,lower_rows-min_row);
+            const float width=lower.x;
+            float overview_width=width*layout_overview;
+            if (ImGui::BeginChild("Outlier overview",ImVec2(overview_width,middle_height))) {
+                if (ImGui::TreeNode("Count scope")) {
+                    draw_parameter_selection(false);
+                    count=(int)columns[metric];
+                    update_statistics(frame_count);
+                    update_counts(count,frame_count);
+                    ImGui::TreePop();
+                }
+                if (count) {
+                    draw_outlier_timeline(count,frame_count);
+                    draw_current_outliers(count,frame_count);
+                }
+                else ImGui::TextDisabled("No members in the selected class.");
+            }
+            ImGui::EndChild();
+            ImGui::SameLine(0,0);
+            if (ImGui::BeginChild("Middle divider",ImVec2(divider,middle_height))) {
+                splitter("##split_outlier_details",true,&overview_width,width*.2f,width*.8f);
+            }
+            ImGui::EndChild();
+            layout_overview=overview_width<0 ? .52f : overview_width/std::max(1.0f,width);
+            ImGui::SameLine(0,0);
+            if (ImGui::BeginChild("Event details",ImVec2(0,middle_height))) {
+                if (count) draw_inspector(count,frame_count);
+                else ImGui::TextDisabled("Select a class with available members.");
+            }
+            ImGui::EndChild();
+            splitter("##split_outlier_timeline",false,&middle_height,min_row,lower_rows-min_row);
+            layout_middle=middle_height<0 ? .55f : middle_height/lower_rows;
+            if (ImGui::BeginChild("Event timeline",ImVec2(0,0))) {
+                if (count) draw_inspector(count,frame_count,true);
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Parameter heatmap")) {
+            draw_parameter_selection(false);
+            const int count=(int)columns[metric];
+            ImGui::TextDisabled("%s / %s",class_name(metric_cls()),metric_name((Metric)metric));
+            if (count) draw_heatmap(count,frame_count,statistics[metric].heatmap,&member);
+            else ImGui::TextDisabled("No members in this class. Choose another class above.");
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("State heatmap")) {
+            if (state_history_kind!=5) state_history_nucleotide_kind=state_history_kind;
+            const bool restore_chemistry=!state_history_tabs_initialized && state_history_kind==5;
+            if (ImGui::BeginTabBar("State history views")) {
+                if (ImGui::BeginTabItem("Nucleotide conformations")) {
+                    ImGui::Combo("Conformation", &state_history_nucleotide_kind,
+                        "BI / BII\0anti / syn\0Sugar pucker (North / South)\0Alpha rotamers\0Gamma rotamers\0");
+                    state_history_kind=state_history_nucleotide_kind;
+                    const bool fit=ImGui::Button("Fit view");
+                    draw_state_history(frame_count,fit);
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Pairing chemistry",nullptr,restore_chemistry ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None)) {
+                    state_history_kind=5;
+                    const bool fit=ImGui::Button("Fit view");
+                    draw_state_history(frame_count,fit);
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+                state_history_tabs_initialized=true;
+            }
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("State switches")) {
-            ImGui::Combo("Switch type",&state_switch_kind,"Nucleotide conformations\0Pairing chemistry\0");
-            if (state_switch_kind==0) {
-                ImGui::TextWrapped("Nucleotide transitions use Event parameters and Detection range, with their own minimum residence; sigma thresholds do not apply.");
-                if (ImGui::Button("Export state switches CSV")) export_state_switches_csv();
-                draw_state_switches(frame_count);
-            } else draw_pairing_states(frame_count);
+            if (ImGui::BeginTabBar("Transition views")) {
+                if (ImGui::BeginTabItem("Nucleotide conformations")) {
+                    draw_state_switches(frame_count);
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Pairing chemistry")) {
+                    draw_pairing_states(frame_count);
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("State history")) {
-            ImGui::Combo("View", &state_history_view, "History\0Compare stages\0");
-            if (state_history_view==0) {
-                ImGui::Combo("States", &state_history_kind,
-                    "BI / BII\0anti / syn\0Sugar pucker (North / South)\0Alpha rotamers\0Gamma rotamers\0Pairing chemistry\0");
-                const bool fit=ImGui::Button("Fit view");
-                draw_state_history(frame_count,fit);
-            } else draw_period_summary(frame_count);
+        if (ImGui::BeginTabItem("Compare")) {
+            draw_comparison(frame_count);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Export")) {
+            if (ImGui::TreeNode("Parameter / member for table exports")) {
+                draw_parameter_selection(true);
+                ImGui::TreePop();
+            }
             ImGui::Combo("View", &export_view, "Representative frames\0Analysis tables\0");
             if (export_view==0) draw_representatives(frame_count);
             else draw_analysis_exports(frame_count);
@@ -3707,11 +4268,27 @@ struct Lavery : viamd::EventHandler {
         ImGui::EndTabBar();
     }
 
+    void draw_evidence(int count) {
+        if (ImGui::Button("Evidence...")) ImGui::OpenPopup("Validity & contact evidence");
+        ImGui::SetItemTooltip("Inspect the selected parameter's validity and contact evidence for all members.");
+        ImGui::SetNextWindowSize(ImVec2(780,480),ImGuiCond_FirstUseEver);
+        bool evidence_open=true;
+        if (ImGui::BeginPopupModal("Validity & contact evidence",&evidence_open)) {
+            const size_t frame=current_frame();
+            ImGui::Text("Selected: %s",class_labels(metric_cls())[member].c_str());
+            draw_quality(quality_at(frame,member),std::isfinite(values[metric][frame*columns[metric]+member]));
+            draw_pairing_coverage(count);
+            ImGui::EndPopup();
+        }
+    }
+
     void draw_pairing_coverage(int count) {
             const size_t frame=current_frame();
             const auto& labels=class_labels(metric_cls());
             ImGui::TextWrapped("Plotted class: %s; parameter: %s. Contact/validity diagnostics are independent of the displayed state category.",class_name(metric_cls()),metric_name((Metric)metric));
-            ImGui::Text("Frame %zu | %zu / %d members have data", frame, outlier_counts[frame].valid, count);
+            size_t valid=0;
+            for (int m=0; m<count; ++m) valid+=std::isfinite(values[metric][frame*columns[metric]+m]);
+            ImGui::Text("Frame %zu | %zu / %d members have data", frame, valid, count);
             ImGui::TextDisabled("Explicit H: >=1 canonical H-bond (D-A <=3.5 A, H-D-A <=30 deg). No H: >=2 heavy contacts <=3.5 A.");
             if (metric_cls() == Class_Nucleotide)
                 ImGui::TextDisabled("Quality is for %s. Warnings retain finite values; contacts describe the parent pair.",
@@ -4551,7 +5128,7 @@ struct Lavery : viamd::EventHandler {
                 return std::fabs(a.second.peak_z) > std::fabs(b.second.peak_z);
             });
             ImGui::TextDisabled("%zu / %d outlying in frame %zu", ranked.size(), count, frame);
-            ImGui::BeginChild("##outlier_rows", ImVec2(0, outliers_list_height), ImGuiChildFlags_Borders);
+            ImGui::BeginChild("##outlier_rows", ImVec2(0, 0), ImGuiChildFlags_Borders);
             for (const auto& entry : ranked) {
                 const int m = entry.first;
                 const int peak = offset + entry.second.peak_metric;
@@ -4583,7 +5160,6 @@ struct Lavery : viamd::EventHandler {
                 ImGui::PopID();
             }
             ImGui::EndChild();
-            height_handle("##outlier_list_height", &outliers_list_height, 160);
         }
     }
 
@@ -4690,8 +5266,9 @@ struct Lavery : viamd::EventHandler {
                 nullptr, ImPlotPoint((double)first - 0.5, -0.5),
                 ImPlotPoint((double)(first + bins * bin_width) - 0.5, count - 0.5));
             scrub_timeline("##heatmap_scrub", nullptr, frame_count);
-            draw_time_cursor(nullptr, frame_count);
+            draw_time_cursor(nullptr, frame_count, 4);
             const double selected_row = *selected_member;
+            ImPlot::SetNextLineStyle(ImVec4(0,0,0,1),4);
             ImPlot::PlotInfLines("Selected member", &selected_row, 1, ImPlotInfLinesFlags_Horizontal);
             if (ImPlot::IsPlotHovered()) {
                 const ImPlotPoint pos = ImPlot::GetPlotMousePos();
@@ -4822,7 +5399,7 @@ struct Lavery : viamd::EventHandler {
                 markers.push_back({target.cls, target.index, target.mask, result.contributors,
                     std::isfinite(result.peak_z) ? result.peak_z : 0.0f});
             }
-            if (inspected_switch != SIZE_MAX) {
+            if (inspected_switch != SIZE_MAX && preview.empty()) {
                 const auto& change = state_switches[inspected_switch];
                 detail_metric = change.metric;
                 detail_target = {Class_Nucleotide, change.member, 1u << (change.metric-Alpha)};

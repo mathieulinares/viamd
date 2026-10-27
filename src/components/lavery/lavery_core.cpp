@@ -1690,4 +1690,11 @@ std::vector<uint32_t> helix_member_groups(size_t pair_count, const std::vector<S
     return members;
 }
 
+bool TransitionFilter::matches(int cls, size_t member, int source, int destination) const {
+    if (cls != Class_Pair && cls != Class_Nucleotide) return false;
+    if (scope == SelectedPair && (cls == Class_Nucleotide ? member / 2 : member) != pair) return false;
+    if (scope == SelectedNucleotide && (cls != Class_Nucleotide || member != nucleotide)) return false;
+    return (from < 0 || from == source) && (to < 0 || to == destination);
+}
+
 } // namespace lavery
