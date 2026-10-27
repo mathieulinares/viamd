@@ -315,8 +315,9 @@ production pipeline separately rejects one geometrically calculable pair with
 no canonical H-bonds, leaving 146 valid pairs and 144 valid inter-pair links.
 
 The midpoint-axis tests validate the documented smoothing/interpolation
-algorithm, not equivalence to Curves+'s screw-axis method. Docking, plot gestures,
-and 3D appearance require the user's manual GUI testing.
+algorithm, not equivalence to Curves+'s screw-axis method. The user confirmed
+that the current GUI checks passed on 2026-10-27; this is separate from the
+scientific equivalence checks.
 
 ## Note on global state
 

@@ -44,7 +44,8 @@ A series of videos is available on [youtube](https://youtube.com/playlist?list=P
 
 ## Experimental Lavery analysis
 
-See also: [quick start](docs/lavery-quickstart.md) and [full reference](docs/lavery.md).
+Start with the [short task guide](docs/lavery-quickstart.md), or open the
+[full reference and illustrated GUI tour](docs/lavery.md).
 
 The Lavery window uses VIAMD's atomistic nucleic-backbone ranges, perceived base
 rings, and glycosidic bonds to identify nucleotides. Geometric pairing uses

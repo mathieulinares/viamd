@@ -2,9 +2,22 @@
 
 This page describes the Lavery component in
 `src/components/lavery/`. For the short version, see
-[lavery-quickstart.md](./lavery-quickstart.md).
-The quick start also includes a [1BNA screenshot tour](./lavery-quickstart.md#gui-tour-1bna)
-covering Outliers, heatmaps, state switches, Distribution and Export.
+[quick start](./lavery-quickstart.md). This reference contains the detailed
+workflows, scientific interpretation and validation record.
+
+## Find what you need
+
+- [Concepts and baselines](#1-concepts)
+- [Window layout and controls](#2-window-layout)
+- [Illustrated GUI tour](#illustrated-gui-tour)
+- [Outlier events](#3-outlier-events)
+- [Viewport feedback](#4-viewport-feedback)
+- [CSV exports and representative frames](#5-csv-exports)
+- [Workspace keys](#6-workspace-keys-lavery-section)
+- [Implementation notes](#7-implementation-notes)
+- [Limitations](#8-limitations)
+- [Testing and scientific checks](#9-testing)
+- [Future improvements](#future-improvements)
 
 ## 1. Concepts
 
@@ -323,7 +336,7 @@ clicking rows controls selection and Export provides selected-pair raw runs.
 The raw all-pair view is in **State heatmap > Pairing chemistry**;
 the selected pair is highlighted there instead of repeating
 it in a separate compact timeline. Raw-run CSV export is
-also available under **Export > Data > Events & state switches > Pairing-state runs**.
+also available under **Export > Data > Save: Events & transitions > Pairing-state runs**.
 It annotates chemistry without changing pair quality, excluded measurements,
 outlier events, baselines or the existing canonical pair-loss gate.
 
@@ -443,7 +456,7 @@ resize the rows; a vertical divider splits count scope from distribution.
 Plots fill their sections; there are no individual plot/list height handles.
 Double-clicking a divider restores its
 default, and **Visual feedback > Reset layout** restores all of them. Sizes are saved
-in the workspace (see [Workspace keys](#workspace-keys)).
+in the workspace (see [Workspace keys](#6-workspace-keys-lavery-section)).
 
 To keep the window light, help text lives in tooltips: hover a label, a
 section header or a `(?)` marker. Rarely changed settings sit in collapsed
@@ -458,9 +471,10 @@ not insert/remove reason paragraphs above the timeline and distribution.
   Parameter heatmap and Sequence profile have local Class/Parameter controls, Distribution has an independent Class selector,
   Outliers has an optional Count scope chooser, and Export has a local
   parameter/member chooser for table exports.
-  *Detection* (Tolerance, Min duration / Min frames,
-  Baseline range, Detection range) are always visible. Collapsed sections:
-  *Event parameters* (the 2x6 grid; the header names the subset),
+  **Detection** can be collapsed while working in other tabs. When expanded,
+  it exposes Tolerance, Min duration / Min frames, Baseline range and
+  Detection range. Its collapsed subsections are
+  *Event parameters* (the three-class parameter grid; the header names the subset),
   *Advanced detection* (baseline, neighbourhood or whole structure,
   hierarchy and burst extra, hysteresis, bridge gaps, Time in ns,
   count any selected parameter) and *Visual feedback*.
@@ -513,6 +527,11 @@ not insert/remove reason paragraphs above the timeline and distribution.
     The default primary series is Whole trajectory. Add immediately opens a
     popup; Edit reopens it, with Done/Duplicate/Remove, matching Distribution
     and export datasets instead of an inline tree editor.
+    Sequence profile and Distribution use the same **checkbox / colour / Edit /
+    name** row, including Whole trajectory. Uncheck the primary series to show
+    only filtered profiles; Current frame and Reference mean retain their
+    separate overlay controls. The primary series offers Done/Duplicate rather
+    than Remove; its checkbox hides it without deleting its settings.
     All profile views use the same series recipes and sequence coordinates.
     Filtering masks positions rather than removing/renumbering them, and both
     step endpoints must match. Each interval gets its own mean/population SD
@@ -633,8 +652,8 @@ not insert/remove reason paragraphs above the timeline and distribution.
     Filters affect table rows only, not detection, residence rules or raw
     state history. Disabled Event parameters are not silently enabled.
     CSV exports are under **Export > Data**, not above transition tables.
-    The all-nucleotide-switches CSV contains every detected switch; the shown
-    variant applies the nucleotide display filters. Neither follows table sorting.
+    The nucleotide-switches CSV contains every detected switch, independently
+    of display filters and table sorting.
     Pairing raw-run CSV contains all runs of its explicitly selected export pair,
     not the BP-range-filtered transition table.
   - **Parameter heatmap** shows a full-size numerical heatmap with local class
@@ -802,6 +821,97 @@ distributions, detection and CSV exports. Display indexes are built lazily and
 cached. First use, changing reference/detection settings, and initial distribution
 construction can still take time on large trajectories.
 
+## Illustrated GUI tour
+
+The screenshots below use the bundled
+[1BNA workspace](../database/1BNA/1bna.via): 2001 frames over 0-10000 ps.
+They show the current native interface with other windows and viewport overlays
+hidden for readability. Settings and counts illustrate this trajectory, not
+recommended thresholds for every system.
+
+<details>
+<summary>Outliers and time annotations</summary>
+
+**Outliers** combines the event table, current-frame counts, distribution and
+parameter timeline. Secondary detection and visual controls stay collapsed.
+
+![Outliers with the detection sidebar and linked plots](./images/lavery/1bna-outliers.png)
+
+**Parameter heatmap** has an editable period/marker lane above the time axis.
+It uses the same annotations and interactions as Timeline.
+
+![Parameter heatmap with shared temperature periods](./images/lavery/1bna-parameter-heatmap.png)
+
+</details>
+
+<details>
+<summary>State heatmaps and residence-qualified transitions</summary>
+
+Both State heatmap views have the same editable time-annotation lane.
+Nucleotide conformations and pairing chemistry remain separate analyses.
+
+![Nucleotide BI/BII heatmap with time periods](./images/lavery/1bna-state-heatmap-nucleotides.png)
+
+![Pairing chemistry heatmap with the same time periods](./images/lavery/1bna-state-heatmap-pairing.png)
+
+**State switches** applies residence requirements, with a detail strip for the
+selected transition. The nucleotide example shows a source/destination pair
+separated by an intervening sample, rather than an instantaneous switch.
+
+![Nucleotide transitions and selected source/destination details](./images/lavery/1bna-state-switches-nucleotides.png)
+
+The pairing example has **no detected transitions at 200 ps minimum residence**.
+Visible colour changes or missing samples in a heatmap do not by themselves
+establish a residence-qualified transition.
+
+![Pairing transition table with no qualifying transitions at 200 ps](./images/lavery/1bna-state-switches-pairing.png)
+
+</details>
+
+<details>
+<summary>Sequence profile and Distribution: consistent series controls</summary>
+
+Sequence profile compares Whole trajectory with the initial named 300 K period.
+Each top row has the same visibility checkbox, colour, Edit action and name.
+The green reference overlay has its own control.
+
+![Sequence profile comparing the whole trajectory and initial 300 K period](./images/lavery/1bna-sequence-profile.png)
+
+Distribution uses the same series-row and Add filtered series interaction.
+Appearance controls stay collapsed until needed.
+
+![Distribution with the matching whole-trajectory visibility and edit controls](./images/lavery/1bna-compare.png)
+
+</details>
+
+<details>
+<summary>Export measurements and prepare a reusable baseline</summary>
+
+**Export > Data** separates the output kind from parameter, position and time
+selection. Reference comparison is optional for ordinary measurements.
+
+![Measurement export with the three parameter classes](./images/lavery/1bna-export-tables.png)
+
+**Prepare a reference CSV...** presets all 24 parameters, all positions and both
+partners. Choose the time interval before **Save reference CSV...**; the file can
+later be loaded as an External reference.
+
+![Reference CSV preparation with all parameters selected](./images/lavery/1bna-export-reference.png)
+
+</details>
+
+<details>
+<summary>Representative frames and feature coverage</summary>
+
+The reference comes first, then Features, Extraction and automatically refreshed
+Results. Here **All intra** adds 72 features: 866 frames satisfy 100% coverage,
+and 10 frames remain selected after 100 ps minimum separation. These are
+reference-centred frames, not a clustering or straightness result.
+
+![Representative frames with eligibility counts and per-frame coverage](./images/lavery/1bna-export-representatives.png)
+
+</details>
+
 ## 3. Outlier events
 
 ### Event distribution comparison
@@ -965,7 +1075,7 @@ Counts, heatmaps, event bands, viewport feedback and state switches are not
 filtered. This keeps scientific detection separate from table presentation;
 it is not a performance shortcut for full-trajectory analysis.
 
-**Export > Data > Events & state switches > Outlier events** exports every
+**Export > Data > Save: Events & transitions > Outlier events** exports every
 detected event, preserving original event and parent IDs. Table display filters
 do not change the exported contents. The limit is stored in the workspace separately for physical
 time and frame fallback; older workspaces remain Unlimited.
@@ -1171,8 +1281,8 @@ row is selected. This remains until playback resumes or the frame changes,
 then automatic all-active-event feedback returns. Detection-setting changes
 or recomputation also clear inspection; changing the plotted class alone does
 not. Hover previews cannot add other events during inspection. No persistent
-focus mode or pin controls are used. A **Selected** label identifies the event
-and, for a sub-event, its parent. The **Viewport** radio buttons switch between
+focus mode or pin controls are used. The **Viewport** radio buttons identify
+the inspected event and switch between
 the selected event, its parent (when present), and **All active** at the current
 frame. Switching scope preserves the selected table row and its inspector and
 distribution data, so returning to the sub-event takes one click. Clicking a
@@ -1523,14 +1633,16 @@ Sequence reference and Data export reference follow the same local setup model,
 defaulting to Pooled helix and Own history respectively; their raw summaries
 remain mean/population SD, without state conditioning. These local reference
 setups are session-only, like existing profile/export selections.
-**All intra**, **All inter**, **All nucleotide** and **All classes** add every
+Under **Feature shortcuts**, **All intra**, **All inter**, **All nucleotide**
+and **All classes** add every
 parameter/member combination in those classes directly. For finer control,
 expand **Choose parameter components and members**: each class has a mixed-state
 all-parameter checkbox, individual parameter checkboxes and a member list with
 Select all/Clear. Choose components and members across classes, then **Add chosen
 features**. Select all choices/Clear choices edit the pending selection only;
 Clear features removes the actual ranking list. All additions preserve existing
-features without duplicates. Per-class feature counts show the final weighting;
+features without duplicates. **Selected features** contains the editable feature
+list, Clear features and per-class counts showing the final weighting;
 larger classes contribute more total weight under equal-feature weighting.
 Use **Add plotted parameters** to add the current member and selected plotted
 parameter mask. **Add all members of plotted class** instead adds those
@@ -1831,8 +1943,7 @@ the dedicated Parameter heatmap tab.
   events use the Event parameters setting, so event bands can come from parameters
   that are not plotted.
 - Value labels are restricted to the selected/previewed parameter. They are
-  screen-space annotations, not reconstructed groove surfaces. Scientific and
-  GUI validation remain separate.
+  screen-space annotations, not reconstructed groove surfaces.
 - Neighbourhood is measured along the helix, not in 3D. Distortions that are
   far apart in sequence but in contact in space, such as RNA tertiary contacts,
   are separate events unless **Whole structure** is used.
@@ -1849,6 +1960,20 @@ the dedicated Parameter heatmap tab.
 - Only six event colours; further simultaneous events are grey.
 
 ## 9. Testing
+
+### GUI validation (2026-10-27)
+
+The current GUI checks passed, confirmed by the user.
+The automated rendering/interaction suite also passes all 18 tests, including
+shared series-row visibility and Timeline annotation-lane creation, move,
+resize, deletion, scrubbing and independent per-view pan/zoom. All seven
+Timeline period regressions pass, including workspace roundtrips.
+See [test/README.md](../test/README.md#headless-heatmap-rendering) for commands.
+
+GUI acceptance and numerical regression results do not establish physical
+event significance. The definition-aware groove comparison, broader trajectory
+coverage and event-threshold calibration remain scientific follow-up work,
+described under [Future improvements](#future-improvements).
 
 ### Local trajectory smoke check (2026-10-25)
 
@@ -2269,7 +2394,7 @@ false-positive rates.
 For the rendering changes, a local surfaceless OpenGL check using the actual
 immediate renderer verified that hidden hints are suppressed in front of an
 opaque depth plane, drawn behind it, and not replayed after queue submission,
-with no GL errors. Full cartoon appearance still requires GUI inspection.
+with no GL errors. The current GUI checks are recorded above.
 
 ```
 cd build
@@ -2315,3 +2440,28 @@ The core tests cover:
 - native timeline periods as reference/search windows, reversed/clipped bounds,
   following windows, markers, edits and missing IDs;
 - the events CSV and the baseline method/interval columns in parameter CSV.
+
+## Future improvements
+
+Remaining scientific validation and possible analysis extensions:
+
+### Scientific follow-up
+
+- Broaden independent checks beyond the current DNA/RNA fixtures and tested
+  trajectories, including representative deformed and high-temperature cases.
+- Validate event thresholds, hierarchy and false-positive behaviour on
+  representative trajectories. In particular, check background sub-events
+  during broad changes; small parent regions give noisy background medians.
+- Compare groove widths using explicitly matched definitions. VIAMD's direct
+  phosphorus-distance widths are not Curves+ curvilinear widths, so equality
+  cannot be assumed.
+
+### Analysis and performance
+
+- Explore more than two hierarchy levels and a sliding local background along
+  the helix, rather than one background per parent region.
+- Profile per-frame preparation and rendering on very large systems; detection
+  performance alone is not an end-to-end GUI benchmark.
+- Evaluate per-class event presets, including an intra/inter-focused preset,
+  without silently changing existing defaults.
+- Extend analysis to unpaired nucleotides, overhangs and loops.
