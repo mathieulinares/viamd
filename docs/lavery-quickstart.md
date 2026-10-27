@@ -13,15 +13,30 @@ It then flags frames where a pair, step or nucleotide deviates from its chosen
 trajectory or imported control baseline, and detects residence-qualified state switches separately.
 For the full reference, see [lavery.md](./lavery.md).
 
+## Download the 1BNA example
+
+The example is included in [database/1BNA](../database/1BNA/):
+
+- [dna.gro](../database/1BNA/dna.gro): DNA structure (758 atoms).
+- [box-anneal.xtc](../database/1BNA/box-anneal.xtc): annealing trajectory
+  (2001 frames, 0-10000 ps; approximately 5.7 MiB).
+- [box-anneal.edr](../database/1BNA/box-anneal.edr): energy data, including
+  temperature (approximately 5 MiB).
+- [1bna.via](../database/1BNA/1bna.via): ready-to-open VIAMD workspace.
+
+Download all four files into the **same folder**, or clone the repository.
+In VIAMD, use **File > Open Workspace...** to open `1bna.via`; its input paths are relative
+to the workspace. The workspace loads the energy data and displays temperature
+in the Timeline so you can follow the annealing schedule alongside structural
+changes. Adjust the Lavery controls as described below.
+
 ## GUI tour: 1BNA
 
 These screenshots use the 1BNA DNA trajectory: **2001 frames, 0-10000 ps**.
 They illustrate the current interface with a full-trajectory reference, not a
 new scientific validation or the restricted baseline used in earlier reports.
-Expand a section to see the corresponding views.
 
-<details>
-<summary>Outliers and Parameter heatmap</summary>
+### Outliers and Parameter heatmap
 
 The Outliers table, shared middle row and full-width timeline:
 
@@ -31,10 +46,7 @@ The numerical heatmap has independent class/parameter controls:
 
 ![1BNA Parameter heatmap](./images/lavery/1bna-parameter-heatmap.png)
 
-</details>
-
-<details>
-<summary>State heatmap: nucleotide conformations and pairing chemistry</summary>
+### State heatmap: nucleotide conformations and pairing chemistry
 
 Raw nucleotide-state history:
 
@@ -44,10 +56,7 @@ Raw pairing-chemistry history:
 
 ![1BNA pairing State heatmap](./images/lavery/1bna-state-heatmap-pairing.png)
 
-</details>
-
-<details>
-<summary>State switches: nucleotide conformations and pairing chemistry</summary>
+### State switches: nucleotide conformations and pairing chemistry
 
 Pucker transitions for both nucleotides of BP 1, with selected-transition context:
 
@@ -59,20 +68,14 @@ the raw pairing history is constant.
 
 ![1BNA pairing State switches](./images/lavery/1bna-state-switches-pairing.png)
 
-</details>
-
-<details>
-<summary>Compare: independent distributions and one shared legend</summary>
+### Compare: independent distributions and one shared legend
 
 Six intra-pair parameters compare the whole trajectory with GC pairs at the
 current frame. Each overlay has its own source and filters.
 
 ![1BNA Compare dashboard](./images/lavery/1bna-compare.png)
 
-</details>
-
-<details>
-<summary>Export: analysis tables and representative frames</summary>
+### Export: analysis tables and representative frames
 
 Explicit all/shown exports and the Compare histogram export:
 
@@ -82,8 +85,6 @@ Example ranking using all 72 intra-pair features. Broad feature selections can
 yield no comparable frames if any required feature is unavailable.
 
 ![1BNA representative-frame ranking](./images/lavery/1bna-export-representatives.png)
-
-</details>
 
 ## Watch states change along the trajectory
 
