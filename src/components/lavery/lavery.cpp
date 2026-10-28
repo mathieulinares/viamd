@@ -759,6 +759,15 @@ struct Lavery : viamd::EventHandler {
                 if (event && overlay_active() && event->surface_id == interaction_surface_main &&
                     event->kind == InteractionSurfaceEventKind::Click &&
                     event->selection_mode == InteractionSelectionMode::None) {
+                    if (inspected_event != SIZE_MAX || inspected_switch != SIZE_MAX) {
+                        inspected_event = inspected_switch = SIZE_MAX;
+                        selected_detail_active = false;
+                        detail_metric = -1;
+                        hovered_metric = hovered_frame = -1;
+                        preview.clear();
+                        measurement_labels.clear();
+                        break;
+                    }
                     int cls = Class_Pair;
                     int parameter = -1;
                     uint32_t index = 0;
