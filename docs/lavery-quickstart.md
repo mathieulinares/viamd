@@ -1,4 +1,4 @@
-# Lavery: quick start
+# Lavery: illustrated quick start
 
 Measure nucleic-acid geometry, compare trajectory segments and inspect unusual
 frames. Start here; use the [full reference](./lavery.md) for formulas,
@@ -31,6 +31,8 @@ automatically. With your own data, load a nucleic-acid structure and trajectory.
 Each tab has its own analysis area. Collapse **Detection** in the sidebar when
 you do not need it. Hover labels or `(?)` for help.
 
+![Outliers: detection controls, event table and linked plots](./images/lavery/1bna-outliers.png)
+
 ## 3. Compare the whole trajectory with a subset
 
 In **Sequence profile**, choose **View**, then a parameter or state family.
@@ -42,6 +44,8 @@ The default series is **Whole trajectory**.
 - The top series rows use **checkbox / colour / Edit / name** in both
   Sequence profile and Distribution. Uncheck **Whole trajectory** to hide it.
 - **Current frame** and **Reference mean** have separate overlay controls.
+- **Helix-wide** reference means appear as lines, with an SD band when enabled.
+  **Own history** compares each position with its own measurements.
 - **Fit view** restores the sequence extent. **Landmarks** groups position
   marking actions; **Shift-click** a profile to mark a position directly.
 
@@ -52,6 +56,10 @@ Profiles preserve sequence positions: filtering leaves gaps, never renumbers.
 In **Distribution**, choose the parameter **Class** and add/edit series in the
 same way. Each series owns its filters. **Add CSV...** compares an independent
 dataset without changing detection. Styling is under **Appearance**.
+
+![Sequence profile: visible series controls and a Helix-wide reference line](./images/lavery/1bna-sequence-profile.png)
+
+![Distribution: matching series controls for independent comparisons](./images/lavery/1bna-compare.png)
 
 ## 4. Mark time periods directly in a heatmap
 
@@ -71,6 +79,13 @@ Annotations are shared with Timeline and saved with the workspace.
 **Periods / markers...** controls lane layout and shading.
 These are **time** annotations; profile landmarks mark **sequence positions**.
 
+Parameter heatmap starts with **Reference**: **Follow detection reference**
+keeps its colours aligned with detected events and shows the active settings.
+Choose **Independent reference** to explore another reference without changing
+detection. State heatmaps show raw states and do not need a reference.
+
+![Parameter heatmap: independent reference and shared period/marker lane](./images/lavery/1bna-parameter-heatmap.png)
+
 ## 5. Inspect outliers and state switches
 
 Under **Detection**, choose the reference, **Tolerance** and **Min duration**.
@@ -85,6 +100,8 @@ ranges, use **Active now**, or expand **Duration filter** for a maximum span.
 For **State switches**, choose the conformation, BP range and destination state;
 set **Min residence**, then select a row for source/destination details.
 Raw State heatmap colours do not change with residence filtering.
+
+![State switches: residence-qualified transitions and source/destination details](./images/lavery/1bna-state-switches-nucleotides.png)
 
 **Keep in mind:** an outlier is not automatically a structural transition.
 Unavailable data is not zero or “unpaired”; a pairing-disruption event is not
@@ -116,6 +133,8 @@ reference**. **Add reference comparison** is optional; **Twist difference from
 reference** is the exception. Detection, Sequence profile, export and frame
 ranking have independent references—changing one does not change the others.
 
+![Export: measurements, positions and time scope](./images/lavery/1bna-export-tables.png)
+
 ## 7. Extract reference-centred frames
 
 Under **Export > Representative frames**:
@@ -134,6 +153,13 @@ that warning in mind. Counts and omissions are recorded in the output.
 
 These are frames closest to the reference centre—not necessarily the most
 populated conformation or the straightest DNA.
+
+![Representative frames: features, extraction controls and coverage results](./images/lavery/1bna-export-representatives.png)
+
+**Saving your work:** detection, visual settings and layout are saved with the
+workspace, as are shared Timeline periods/markers. Local workflow references,
+profile/distribution series and sequence landmarks are session-only; export
+results you need to keep.
 
 ---
 

@@ -54,6 +54,8 @@ enum MemberClass : uint8_t {
     Class_Count,
 };
 constexpr int MAX_CLASS_PARAMETERS = 10;
+constexpr uint32_t ALL_METRIC_PARAMETERS = (1u << Metric_Count) - 1u;
+uint32_t restore_event_parameters(uint32_t mask, bool legacy);
 int class_first_metric(int cls);
 int class_parameter_count(int cls);
 MemberClass metric_class(Metric metric);
@@ -514,6 +516,9 @@ std::string csv_state_switch_row(const std::string& run, const std::string& labe
 
 // Resolve inclusive physical-time bounds to sampled frame bounds. Reports invalid/empty ranges.
 bool event_time_range(EventOptions* options, double begin, double end, const char* context = "detection");
+// Inclusive physical-time bounds; returns a half-open frame interval without copying timestamps.
+bool sample_time_range(size_t* first, size_t* end, const float* times, size_t frames,
+    double time_scale, double begin, double last, const char* context = "workflow");
 
 // Groups outlying (frame, member) samples into events. Two samples join when they are at most
 // max_gap + 1 frames apart (or within max_gap_duration of quiet time when times are supplied)

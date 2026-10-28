@@ -31,6 +31,18 @@ struct PassParams {
     uint32_t picking_base_idx = 0;
 };
 
+struct SphereMesh {
+    int stacks;
+    int slices;
+    md_array(vec3_t) normals;
+    md_array(Index) indices;
+};
+
+struct CircleMesh {
+    int segments;
+    md_array(vec2_t) points;
+};
+
 struct Queue {
     const char* label = nullptr;
 
@@ -39,6 +51,8 @@ struct Queue {
     md_array(DrawCommand) commands = nullptr;
     md_array(Vertex) vertices = nullptr;
     md_array(Index) indices = nullptr;
+    md_array(SphereMesh) spheres = nullptr;
+    md_array(CircleMesh) circles = nullptr;
 
     int32_t curr_model_matrix_idx = -1;
     uint32_t curr_picking_base_idx = 0;
@@ -897,58 +911,50 @@ static void build_tangent_frame(vec3_t axis, vec3_t& out_u, vec3_t& out_v) {
 
 void draw_sphere(Queue& ctx, vec3_t center, float radius, uint32_t color, uint32_t picking_idx, int stacks, int slices) {
     ASSERT(stacks >= 2 && slices >= 3);
-    const float pi  = 3.14159265358979323846f;
-    const float tau = 2.0f * pi;
-
-    // Emit a quad (two triangles) directly so we can assign smooth per-vertex normals.
-    // On a unit sphere the outward normal at a point equals the point's position relative to center.
-    auto emit_quad = [&](vec3_t n00, vec3_t n10, vec3_t n01, vec3_t n11) {
-        vec3_t p00 = vec3_add(center, vec3_mul1(n00, radius));
-        vec3_t p10 = vec3_add(center, vec3_mul1(n10, radius));
-        vec3_t p01 = vec3_add(center, vec3_mul1(n01, radius));
-        vec3_t p11 = vec3_add(center, vec3_mul1(n11, radius));
-        const Index base = (Index)md_array_size(ctx.vertices);
-        Vertex v[4] = {
-            {p00, color, n00, picking_idx},
-            {p10, color, n10, picking_idx},
-            {p01, color, n01, picking_idx},
-            {p11, color, n11, picking_idx},
-        };
-        md_array_push_array(ctx.vertices, v, 4, ctx.arena);
-        // tri 0: p00, p11, p10
-        md_array_push(ctx.indices, base + 0, ctx.arena);
-        md_array_push(ctx.indices, base + 3, ctx.arena);
-        md_array_push(ctx.indices, base + 1, ctx.arena);
-        // tri 1: p00, p01, p11
-        md_array_push(ctx.indices, base + 0, ctx.arena);
-        md_array_push(ctx.indices, base + 2, ctx.arena);
-        md_array_push(ctx.indices, base + 3, ctx.arena);
-        append_draw_command(ctx, 6, GL_TRIANGLES);
-    };
-
-    for (int i = 0; i < stacks; ++i) {
-        const float phi0 = pi * ((float) i      / (float)stacks) - pi * 0.5f;
-        const float phi1 = pi * ((float)(i + 1) / (float)stacks) - pi * 0.5f;
-
-        const float cp0 = cosf(phi0), sp0 = sinf(phi0);
-        const float cp1 = cosf(phi1), sp1 = sinf(phi1);
-
-        for (int j = 0; j < slices; ++j) {
-            const float th0 = tau * ((float) j      / (float)slices);
-            const float th1 = tau * ((float)(j + 1) / (float)slices);
-
-            const float ct0 = cosf(th0), st0 = sinf(th0);
-            const float ct1 = cosf(th1), st1 = sinf(th1);
-
-            // Unit-sphere positions == smooth normals
-            vec3_t n00 = {cp0*ct0, cp0*st0, sp0};
-            vec3_t n10 = {cp1*ct0, cp1*st0, sp1};
-            vec3_t n01 = {cp0*ct1, cp0*st1, sp0};
-            vec3_t n11 = {cp1*ct1, cp1*st1, sp1};
-
-            emit_quad(n00, n10, n01, n11);
+    SphereMesh* mesh = nullptr;
+    for (size_t i = 0; i < md_array_size(ctx.spheres); ++i) {
+        if (ctx.spheres[i].stacks == stacks && ctx.spheres[i].slices == slices) {
+            mesh = &ctx.spheres[i];
+            break;
         }
     }
+    if (!mesh) {
+        SphereMesh shape = {stacks, slices, nullptr, nullptr};
+        const float pi = 3.14159265358979323846f;
+        const float tau = 2.0f*pi;
+        md_array_ensure(shape.normals, (size_t)(stacks+1)*(slices+1), ctx.arena);
+        md_array_ensure(shape.indices, (size_t)stacks*slices*6, ctx.arena);
+        for (int i = 0; i <= stacks; ++i) {
+            const float phi = pi*((float)i/(float)stacks)-pi*0.5f;
+            const float cp = cosf(phi), sp = sinf(phi);
+            for (int j = 0; j <= slices; ++j) {
+                const float theta = tau*((float)j/(float)slices);
+                const vec3_t normal = {cp*cosf(theta), cp*sinf(theta), sp};
+                md_array_push(shape.normals, normal, ctx.arena);
+            }
+        }
+        for (int i = 0; i < stacks; ++i) for (int j = 0; j < slices; ++j) {
+            const Index a = (Index)(i*(slices+1)+j), b = a+slices+1;
+            const Index indices[] = {a,b+1,b,a,a+1,b+1};
+            md_array_push_array(shape.indices, indices, 6, ctx.arena);
+        }
+        md_array_push(ctx.spheres, shape, ctx.arena);
+        mesh = md_array_last(ctx.spheres);
+    }
+    const Index base = (Index)md_array_size(ctx.vertices);
+    const size_t vertex_count = md_array_size(mesh->normals);
+    const size_t index_count = md_array_size(mesh->indices);
+    const size_t index_base = md_array_size(ctx.indices);
+    md_array_ensure(ctx.vertices, md_array_size(ctx.vertices) + vertex_count, ctx.arena);
+    md_array_resize(ctx.vertices, (size_t)base + vertex_count, ctx.arena);
+    md_array_ensure(ctx.indices, index_base + index_count, ctx.arena);
+    md_array_resize(ctx.indices, index_base + index_count, ctx.arena);
+    for (size_t i = 0; i < vertex_count; ++i) {
+        const vec3_t normal = mesh->normals[i];
+        ctx.vertices[base+i] = {vec3_add(center, vec3_mul1(normal, radius)), color, normal, picking_idx};
+    }
+    for (size_t i = 0; i < index_count; ++i) ctx.indices[index_base+i] = base+mesh->indices[i];
+    append_draw_command(ctx, index_count, GL_TRIANGLES);
 }
 
 void draw_sphere_wireframe(Queue& ctx, vec3_t center, float radius, uint32_t color, int stacks, int slices) {
@@ -985,78 +991,54 @@ void draw_sphere_wireframe(Queue& ctx, vec3_t center, float radius, uint32_t col
 
 void draw_cylinder(Queue& ctx, vec3_t from, vec3_t to, float radius, uint32_t color, uint32_t picking_idx, int segments) {
     ASSERT(segments >= 3);
-    const float tau = 6.28318530717958647692f;
-
+    CircleMesh* circle = nullptr;
+    for (size_t i = 0; i < md_array_size(ctx.circles); ++i) {
+        if (ctx.circles[i].segments == segments) {
+            circle = &ctx.circles[i];
+            break;
+        }
+    }
+    if (!circle) {
+        CircleMesh shape = {segments, nullptr};
+        for (int i = 0; i <= segments; ++i) {
+            const float theta = 6.28318530717958647692f*((float)i/(float)segments);
+            const vec2_t point = {cosf(theta), sinf(theta)};
+            md_array_push(shape.points, point, ctx.arena);
+        }
+        md_array_push(ctx.circles, shape, ctx.arena);
+        circle = md_array_last(ctx.circles);
+    }
     vec3_t axis = vec3_normalize(vec3_sub(to, from));
     vec3_t u, v;
     build_tangent_frame(axis, u, v);
-
-    for (int i = 0; i < segments; ++i) {
-        const float th0 = tau * ((float) i      / (float)segments);
-        const float th1 = tau * ((float)(i + 1) / (float)segments);
-
-        const float c0 = cosf(th0), s0 = sinf(th0);
-        const float c1 = cosf(th1), s1 = sinf(th1);
-
-        // Smooth outward normals for the side: radial direction only (no axis component)
-        vec3_t sn0 = vec3_add(vec3_mul1(u, c0), vec3_mul1(v, s0));
-        vec3_t sn1 = vec3_add(vec3_mul1(u, c1), vec3_mul1(v, s1));
-
-        vec3_t a0 = vec3_add(from, vec3_mul1(sn0, radius));
-        vec3_t a1 = vec3_add(from, vec3_mul1(sn1, radius));
-        vec3_t b0 = vec3_add(to,   vec3_mul1(sn0, radius));
-        vec3_t b1 = vec3_add(to,   vec3_mul1(sn1, radius));
-
-        // Side quad – smooth normals interpolated across the quad
-        {
-            const Index base = (Index)md_array_size(ctx.vertices);
-            Vertex sv[4] = {
-                {a0, color, sn0, picking_idx},
-                {a1, color, sn1, picking_idx},
-                {b0, color, sn0, picking_idx},
-                {b1, color, sn1, picking_idx},
-            };
-            md_array_push_array(ctx.vertices, sv, 4, ctx.arena);
-            md_array_push(ctx.indices, base + 0, ctx.arena);
-            md_array_push(ctx.indices, base + 3, ctx.arena);
-            md_array_push(ctx.indices, base + 2, ctx.arena);
-            md_array_push(ctx.indices, base + 0, ctx.arena);
-            md_array_push(ctx.indices, base + 1, ctx.arena);
-            md_array_push(ctx.indices, base + 3, ctx.arena);
-            append_draw_command(ctx, 6, GL_TRIANGLES);
-        }
-
-        // Bottom cap – flat normal pointing away from 'to'
-        {
-            vec3_t cap_n = vec3_mul1(axis, -1.f);
-            const Index base = (Index)md_array_size(ctx.vertices);
-            Vertex cv[3] = {
-                {from, color, cap_n, picking_idx},
-                {a1,   color, cap_n, picking_idx},
-                {a0,   color, cap_n, picking_idx},
-            };
-            md_array_push_array(ctx.vertices, cv, 3, ctx.arena);
-            md_array_push(ctx.indices, base + 0, ctx.arena);
-            md_array_push(ctx.indices, base + 1, ctx.arena);
-            md_array_push(ctx.indices, base + 2, ctx.arena);
-            append_draw_command(ctx, 3, GL_TRIANGLES);
-        }
-
-        // Top cap – flat normal pointing away from 'from'
-        {
-            const Index base = (Index)md_array_size(ctx.vertices);
-            Vertex cv[3] = {
-                {to, color, axis, picking_idx},
-                {b0, color, axis, picking_idx},
-                {b1, color, axis, picking_idx},
-            };
-            md_array_push_array(ctx.vertices, cv, 3, ctx.arena);
-            md_array_push(ctx.indices, base + 0, ctx.arena);
-            md_array_push(ctx.indices, base + 1, ctx.arena);
-            md_array_push(ctx.indices, base + 2, ctx.arena);
-            append_draw_command(ctx, 3, GL_TRIANGLES);
-        }
+    const Index base = (Index)md_array_size(ctx.vertices);
+    const size_t vertex_count = (size_t)(segments+1)*4+2;
+    const size_t index_base = md_array_size(ctx.indices);
+    const size_t index_count = (size_t)segments*12;
+    md_array_ensure(ctx.vertices, (size_t)base+vertex_count, ctx.arena);
+    md_array_resize(ctx.vertices, (size_t)base+vertex_count, ctx.arena);
+    md_array_ensure(ctx.indices, index_base+index_count, ctx.arena);
+    md_array_resize(ctx.indices, index_base+index_count, ctx.arena);
+    const vec3_t bottom_normal = vec3_mul1(axis, -1.0f);
+    ctx.vertices[base] = {from, color, bottom_normal, picking_idx};
+    ctx.vertices[base+1] = {to, color, axis, picking_idx};
+    for (int i = 0; i <= segments; ++i) {
+        const auto point = circle->points[i];
+        const vec3_t normal = vec3_add(vec3_mul1(u, point.x), vec3_mul1(v, point.y));
+        const vec3_t a = vec3_add(from, vec3_mul1(normal, radius));
+        const vec3_t b = vec3_add(to, vec3_mul1(normal, radius));
+        const Index first = base+2+(Index)i*4;
+        ctx.vertices[first] = {a, color, normal, picking_idx};
+        ctx.vertices[first+1] = {b, color, normal, picking_idx};
+        ctx.vertices[first+2] = {a, color, bottom_normal, picking_idx};
+        ctx.vertices[first+3] = {b, color, axis, picking_idx};
     }
+    for (int i = 0; i < segments; ++i) {
+        const Index a = base+2+(Index)i*4, b = a+4;
+        const Index indices[] = {a,b+1,a+1,a,b,b+1,base,b+2,a+2,base+1,a+3,b+3};
+        MEMCPY(ctx.indices+index_base+(size_t)i*12, indices, sizeof(indices));
+    }
+    append_draw_command(ctx, index_count, GL_TRIANGLES);
 }
 
 void draw_cylinder_wireframe(Queue& ctx, vec3_t from, vec3_t to, float radius, uint32_t color, int segments) {

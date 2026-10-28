@@ -94,3 +94,14 @@ target_include_directories(viamd_plot_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(viamd_plot_test PRIVATE implot imgui mdlib)
 add_test(NAME viamd_plot_test COMMAND viamd_plot_test)
+
+add_executable(viamd_geometry_test ui/test_immediate_geometry.cpp
+    ../src/gfx/gl_utils.cpp ../src/color_utils.cpp)
+target_compile_features(viamd_geometry_test PRIVATE cxx_std_20)
+target_compile_definitions(viamd_geometry_test PRIVATE UTEST_USE_OLD_QPC ${VIAMD_DEFINES} ${MD_DEFINES})
+target_compile_options(viamd_geometry_test PRIVATE ${VIAMD_FLAGS} $<$<CONFIG:Debug>:${VIAMD_FLAGS_DEB}> $<$<CONFIG:Release>:${VIAMD_FLAGS_REL}>)
+target_include_directories(viamd_geometry_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ext/mdlib/unittest
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(viamd_geometry_test PRIVATE imgui mdlib)
+add_test(NAME viamd_geometry_test COMMAND viamd_geometry_test)

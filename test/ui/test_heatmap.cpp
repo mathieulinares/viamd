@@ -735,4 +735,39 @@ UTEST_F(heatmap, timeline_markers_and_periods_share_time_coordinates_without_cha
     }
 }
 
+UTEST_F(heatmap, helix_wide_reference_is_a_marker_free_line_with_disconnected_bands) {
+    for (int frame=0;frame<2;++frame) {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowSize(ImVec2(900,700));
+        ImGui::Begin("Helix-wide reference",nullptr,ImGuiWindowFlags_NoSavedSettings);
+        if (ImPlot::BeginPlot("Reference",ImVec2(800,600),ImPlotFlags_NoLegend)) {
+            ImPlot::SetupAxesLimits(0,6,0,10,ImPlotCond_Always);
+            ImPlot::SetupFinish();
+            const auto* draw=ImPlot::GetPlotDrawList();
+            const std::vector<double> x={1,2,NAN,4,5},y={3,3,NAN,7,7};
+            const std::vector<double> lo={2,2,NAN,6,6},hi={4,4,NAN,8,8};
+            const int band_begin=draw->VtxBuffer.Size;
+            lavery::plot_sequence_trace("Reference band",x,y,&lo,&hi,ImVec4(0,1,0,1),ImPlotMarker_None);
+            EXPECT_GT(draw->VtxBuffer.Size,band_begin);
+            const float gap_min=ImPlot::PlotToPixels(2.1,0).x,gap_max=ImPlot::PlotToPixels(3.9,0).x;
+            for (int i=band_begin;i<draw->VtxBuffer.Size;++i) {
+                const auto p=draw->VtxBuffer[i].pos;
+                EXPECT_TRUE(std::isfinite(p.x) && std::isfinite(p.y));
+                EXPECT_TRUE(p.x<gap_min || p.x>gap_max);
+            }
+            const int line_begin=draw->VtxBuffer.Size;
+            lavery::plot_sequence_trace("Reference line",x,y,nullptr,nullptr,ImVec4(0,1,0,1),ImPlotMarker_None);
+            EXPECT_GT(draw->VtxBuffer.Size,line_begin);
+            const float y1=ImPlot::PlotToPixels(1,3).y,y2=ImPlot::PlotToPixels(4,7).y;
+            for (int i=line_begin;i<draw->VtxBuffer.Size;++i) {
+                const auto p=draw->VtxBuffer[i].pos;
+                EXPECT_TRUE(std::fabs(p.y-y1)<=2.5f || std::fabs(p.y-y2)<=2.5f);
+            }
+            ImPlot::EndPlot();
+        }
+        ImGui::End();
+        ImGui::Render();
+    }
+}
+
 UTEST_MAIN();

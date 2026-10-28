@@ -62,6 +62,15 @@ loading a system and looking at it.
 A component's tests include its headers through the component root, as `<foo/foo_core.h>`, so two
 components may name their headers alike without colliding.
 
+## Headless feedback geometry
+
+Build `viamd_geometry_test`, then run
+`ctest --test-dir build --output-on-failure -R '^viamd_geometry_test$'`.
+This CPU-only target verifies every sphere/cylinder triangle corner, winding,
+normal, colour and picking ID against the original geometry. It also checks
+batching, cache reuse after queue reset, and changed dimensions, positions,
+radii and attributes. It does not open a window or require an OpenGL context.
+
 ## Headless heatmap rendering
 
 Heatmap rendering regressions run separately in `viamd_plot_test`. They create
@@ -98,6 +107,13 @@ The shared series-row regression clicks Whole trajectory's visibility checkbox
 without changing a filtered series, and checks checkbox/colour/Edit/name order.
 
 ## Lavery numerical reference
+
+Workspace-mask regressions preserve explicit current selections (including no
+parameters), while retaining the legacy unversioned 12-bit migration.
+Shared time-range regressions compare workflow/baseline resolution with event
+resolution on scaled irregular timestamps, inclusive endpoints and invalid or
+empty intervals; failures clear the workflow bounds instead of selecting the
+whole trajectory.
 
 The Lavery core regressions also cover rejection of broken fixed
 partners, stale-frame clearing, adjoining-step invalidation, exclusion from
@@ -224,7 +240,7 @@ first-quarter reference intervals, and middle-half event/state-switch search
 intervals. Duration sweeps scale with the median sampling interval. Timings
 separate frame analysis from statistics; the test's peak memory includes its
 reference arrays and event sensitivity sweeps, not just application analysis.
-It also reports the strongest pooled-helix Rise anomaly and its fraction of
+It also reports the strongest Helix-wide Rise anomaly and its fraction of
 finite samples above 2.5 sigma for both statistical methods.
 
 For a small sampled XTC, set `VIAMD_LAVERY_VALIDATION_EXPORT` to an existing
@@ -318,6 +334,11 @@ The midpoint-axis tests validate the documented smoothing/interpolation
 algorithm, not equivalence to Curves+'s screw-axis method. The user confirmed
 that the current GUI checks passed on 2026-10-27; this is separate from the
 scientific equivalence checks.
+
+The GUI rendering regressions also cover marker-free Helix-wide reference lines
+and SD bands, including gaps between helices. Reference-core regressions check
+that independent heatmap statistics change the displayed cells without mutating
+detection statistics, and reject invalid intervals without reusing stale cells.
 
 ## Note on global state
 

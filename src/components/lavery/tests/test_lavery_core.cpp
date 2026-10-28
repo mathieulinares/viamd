@@ -17,6 +17,62 @@
 #include "data/lavery_curves_reference.h"
 using namespace lavery;
 
+UTEST(lavery_core, workspace_event_mask_preserves_current_subsets_and_legacy_migration) {
+    const uint32_t original_parameters = (1u << MinorGroove)-1u;
+    for (uint32_t mask : {0u,1u << Roll,original_parameters,1u << Chi,ALL_METRIC_PARAMETERS}) {
+        EXPECT_EQ(restore_event_parameters(mask,false),mask);
+        const uint32_t expected = mask < (1u << MinorGroove)
+            ? mask | (ALL_METRIC_PARAMETERS & ~original_parameters) : mask;
+        EXPECT_EQ(restore_event_parameters(mask,true),expected);
+    }
+    EXPECT_EQ(restore_event_parameters(UINT32_MAX,false),ALL_METRIC_PARAMETERS);
+}
+
+UTEST(lavery_core, workflow_time_ranges_match_detection_with_scaled_irregular_timestamps) {
+    const float times[] = {0,.005f,.015f,.03f,.05f};
+    constexpr double scale = 1000;
+    for (const auto& bounds : {std::pair{-10.0,100.0},std::pair{5.0,31.0},
+        std::pair{15.0,30.0},std::pair{0.0,0.0},std::pair{50.0,51.0}}) {
+        size_t first=99,end=99;
+        EventOptions detection;
+        for (float time : times) detection.times.push_back((double)time*scale);
+        ASSERT_TRUE(sample_time_range(&first,&end,times,5,scale,bounds.first,bounds.second));
+        ASSERT_TRUE(event_time_range(&detection,bounds.first,bounds.second));
+        EXPECT_EQ(first,detection.first_frame);
+        EXPECT_EQ(end,detection.last_frame+1);
+        ASSERT_LT(first,end);
+        ASSERT_LE(end,(size_t)5);
+        EXPECT_GE((double)times[first]*scale,bounds.first);
+        EXPECT_LE((double)times[end-1]*scale,bounds.second);
+        if (first) EXPECT_LT((double)times[first-1]*scale,bounds.first);
+        if (end<5) EXPECT_GT((double)times[end]*scale,bounds.second);
+    }
+    size_t first=0,end=0;
+    ASSERT_TRUE(sample_time_range(&first,&end,times,5,scale,0,(double)times[2]*scale));
+    EXPECT_EQ(first,(size_t)0);
+    EXPECT_EQ(end,(size_t)3);
+}
+
+UTEST(lavery_core, invalid_workflow_time_ranges_clear_bounds_without_full_run_fallback) {
+    const float times[] = {0,5,15,30};
+    size_t first=99,end=99;
+    for (const auto& bounds : {std::pair{6.0,14.0},std::pair{16.0,14.0},
+        std::pair{(double)NAN,15.0},std::pair{0.0,(double)INFINITY}}) {
+        EXPECT_FALSE(sample_time_range(&first,&end,times,4,1,bounds.first,bounds.second));
+        EXPECT_EQ(first,(size_t)0);
+        EXPECT_EQ(end,(size_t)0);
+    }
+    for (const float* invalid : {static_cast<const float*>(nullptr),times}) {
+        EXPECT_FALSE(sample_time_range(&first,&end,invalid,0,1,0,30));
+    }
+    for (const auto& invalid : {std::array<float,3>{0,5,5},std::array<float,3>{0,NAN,15},
+        std::array<float,3>{0,15,5}}) {
+        EXPECT_FALSE(sample_time_range(&first,&end,invalid.data(),invalid.size(),1,0,30));
+    }
+    for (double scale : {0.0,-1.0,(double)NAN,(double)INFINITY})
+        EXPECT_FALSE(sample_time_range(&first,&end,times,4,scale,0,30));
+}
+
 UTEST(lavery_core, pairing_states_require_complete_directional_evidence_and_orientation) {
     PairingEvidence ev;
     ev.complete = true;

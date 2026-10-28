@@ -302,6 +302,24 @@ UTEST(lavery_core, workflow_external_snapshots_and_raw_profiles_do_not_inherit_d
     EXPECT_FALSE(workflow_reference_statistics(&profile,{2,20},2,Rise,0,1,Baseline_MeanSD,true,{0,9},&pooled,{0,1}));
 }
 
+UTEST(lavery_core, independent_heatmap_reference_changes_cells_without_mutating_detection) {
+    const std::vector<float> values={0,10,2,12,4,14};
+    MetricStatistics detection,heatmap;
+    ASSERT_TRUE(workflow_reference_statistics(&detection,values,2,Rise,0,3,Baseline_MeanSD,false));
+    const auto original=detection.heatmap;
+    ASSERT_TRUE(workflow_reference_statistics(&heatmap,values,2,Rise,0,2,Baseline_MeanSD,false,{0,0}));
+    ASSERT_EQ(heatmap.heatmap.size(),values.size());
+    EXPECT_NEAR(heatmap.members[0].mean,6,1e-8);
+    EXPECT_NEAR(heatmap.members[1].mean,6,1e-8);
+    EXPECT_NEAR(heatmap.heatmap[0],4/std::sqrt(26.),1e-6);
+    EXPECT_NEAR(heatmap.heatmap[3],-6/std::sqrt(26.),1e-6);
+    EXPECT_GT(std::fabs(heatmap.heatmap[0]-detection.heatmap[0]),.01f);
+    for (size_t i=0;i<original.size();++i) EXPECT_EQ(detection.heatmap[i],original[i]);
+    EXPECT_FALSE(workflow_reference_statistics(&heatmap,values,2,Rise,2,2,Baseline_MeanSD,false));
+    EXPECT_TRUE(heatmap.heatmap.empty());
+    for (size_t i=0;i<original.size();++i) EXPECT_EQ(detection.heatmap[i],original[i]);
+}
+
 UTEST(lavery_core, representatives_rank_exact_rms_scores_and_temporal_separation) {
     std::array<std::vector<float>,Metric_Count> values;
     std::array<MetricStatistics,Metric_Count> stats;
