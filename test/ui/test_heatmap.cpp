@@ -473,6 +473,60 @@ UTEST_F(heatmap, structural_panels_link_bp_axes_with_percent_and_geometric_units
     }
 }
 
+UTEST_F(heatmap, sequence_landmark_drag_has_unique_ids_and_does_not_pan) {
+    double position=3.5;
+    ImVec2 handle;
+    ImGuiID active=0;
+    const auto render=[&]() {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos(ImVec2(0,0));
+        ImGui::SetNextWindowSize(ImVec2(900,700));
+        ImGui::Begin("Landmark dragging",nullptr,ImGuiWindowFlags_NoSavedSettings);
+        for (int panel=0;panel<2;++panel) {
+            ImGui::PushID(panel);
+            // Same-parity plot IDs exposed the old redundant CRC hash of plot.ID into plot.Items.ID (= ID-1).
+            char title[32];
+            for (int n=0;;++n) {
+                snprintf(title,sizeof(title),"Profile %d",n);
+                if (ImGui::GetID(title)&1u) break;
+            }
+            if (ImPlot::BeginPlot(title,ImVec2(800,280),ImPlotFlags_NoLegend)) {
+                ImPlot::SetupAxesLimits(.5,12.5,-5,105,ImPlotCond_Once);
+                double x=position;
+                bool held=false;
+                lavery::drag_sequence_landmark(0,&x,&held);
+                if (held) { position=x; active=GImGui->ActiveId; }
+                double other=9.5;
+                bool other_held=false;
+                lavery::drag_sequence_landmark(1,&other,&other_held);
+                EXPECT_FALSE(other_held);
+                lavery::plot_sequence_landmark(position,"Step 3-4",ImVec4(1,.35f,.65f,1));
+                if (panel==0) handle=ImPlot::PlotToPixels(position,50);
+                const auto limits=ImPlot::GetPlotLimits();
+                EXPECT_EQ(limits.X.Min,.5);
+                EXPECT_EQ(limits.X.Max,12.5);
+                ImPlot::EndPlot();
+            }
+            ImGui::PopID();
+        }
+        EXPECT_LE(GImGui->HoveredIdPreviousFrameItemCount,1);
+        ImGui::End();
+        ImGui::Render();
+    };
+    render(); render();
+    auto& io=ImGui::GetIO();
+    io.MousePos=handle;
+    render(); render();
+    io.MouseDown[0]=true;
+    render();
+    EXPECT_NE(active,0u);
+    io.MousePos.x+=80;
+    render(); render();
+    EXPECT_GT(position,3.5);
+    io.MouseDown[0]=false;
+    render();
+}
+
 UTEST_F(heatmap, sequence_landmarks_keep_step_boundaries_across_profile_views_without_affecting_fit) {
     const double position=7.5;
     for (int view=0;view<6;++view) {

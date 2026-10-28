@@ -38,6 +38,10 @@ you do not need it. Hover labels or `(?)` for help.
 In **Sequence profile**, choose **View**, then a parameter or state family.
 The default series is **Whole trajectory**.
 
+- Step parameters are grouped into **Step (local frame)**, **Helical (local axis)**
+  and **Grooves**. **View > Helical geometry** shows X-displacement, Inclination
+  and Helical Rise together; all six helical parameters remain individually
+  selectable. Event and export pickers have matching group all/none checkboxes.
 - **Add filtered series** opens its editor immediately. Choose its name, colour,
   time interval and sequence filters; click **Done**.
 - **Edit** reopens the editor; filtered series also offer **Duplicate / Remove**.
@@ -47,7 +51,10 @@ The default series is **Whole trajectory**.
 - **Helix-wide** reference means appear as lines, with an SD band when enabled.
   **Own history** compares each position with its own measurements.
 - **Fit view** restores the sequence extent. **Landmarks** groups position
-  marking actions; **Shift-click** a profile to mark a position directly.
+  marking actions; **Shift-click** a profile to mark a position directly, drag
+  a mark to move it. Marks appear in the viewport as lines across the DNA
+  (**Visual feedback > Landmarks**). During playback, pairing/contact warnings
+  do not hide these positional guides; only unconstructible geometry does.
 
 Profiles preserve sequence positions: filtering leaves gaps, never renumbers.
 **Mean +/- SD** shows temporal spread, not uncertainty of the mean.
@@ -91,7 +98,9 @@ detection. State heatmaps show raw states and do not need a reference.
 Under **Detection**, choose the reference, **Tolerance** and **Min duration**.
 **Baseline range** defines comparison samples; **Detection range** defines
 where to search. **Event parameters** chooses what can form events, independently
-of the parameter currently plotted.
+of the parameter currently plotted (local helical parameters are off by default).
+**Multiple testing** can replace the fixed Tolerance by a Bonferroni or
+Benjamini-Hochberg tolerance per frame.
 
 Click an event to inspect its peak; expand it for members and parameters.
 Playback or a frame change restores automatic feedback. Filter by words or BP
@@ -156,10 +165,10 @@ populated conformation or the straightest DNA.
 
 ![Representative frames: features, extraction controls and coverage results](./images/lavery/1bna-export-representatives.png)
 
-**Saving your work:** detection, visual settings and layout are saved with the
-workspace, as are shared Timeline periods/markers. Local workflow references,
-profile/distribution series and sequence landmarks are session-only; export
-results you need to keep.
+**Saving your work:** detection, visual settings, layout, local workflow
+references, profile/distribution series, export choices and sequence landmarks
+are saved with the workspace, as are shared Timeline periods/markers. Computed
+results are not: they are recomputed on load, so export results you need to keep.
 
 ---
 

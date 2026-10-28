@@ -32,13 +32,12 @@ bool contact_present(const PairContact& contact, const std::vector<uint64_t>& ke
         std::binary_search(keys.begin(), keys.end(), contact_key(contact.donor, contact.acceptor));
 }
 
-uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_system_state_t& state,
-                           const std::vector<uint64_t>& keys) {
-    *count = 0;
-    if (pair.contacts.size() != pair.expected_contacts) return Quality_NoncanonicalPair;
-    for (const auto& contact : pair.contacts) {
+uint8_t count_contacts(const std::vector<PairContact>& contacts, bool uses_hydrogens, const md_system_state_t& state,
+                       const std::vector<uint64_t>& keys) {
+    uint8_t count = 0;
+    for (const auto& contact : contacts) {
         bool present = false;
-        if (pair.uses_hydrogens) {
+        if (uses_hydrogens) {
             present = contact_present(contact, keys);
         } else if (contact.donor < state.num_atoms && contact.acceptor < state.num_atoms) {
             vec3_t delta = vec3_sub(md_state_coord(&state, contact.donor), md_state_coord(&state, contact.acceptor));
@@ -46,8 +45,29 @@ uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_s
             const float distance = vec3_length(delta);
             present = std::isfinite(distance) && distance >= 2.0f && distance <= 3.5f;
         }
-        if (present) ++*count;
+        if (present) ++count;
     }
+    return count;
+}
+
+PairType type_of(const PairChemistry& pair) {
+    for (int t = 0; t < PairType_Count; ++t)
+        if (!pair.sets[t].empty() && &pair.sets[t] != &pair.contacts && pair.sets[t].size() == pair.contacts.size() &&
+            std::equal(pair.sets[t].begin(), pair.sets[t].end(), pair.contacts.begin(), [](const PairContact& x, const PairContact& y) {
+                return x.donor == y.donor && x.acceptor == y.acceptor;
+            })) return (PairType)t;
+    return PairType_Count;
+}
+
+size_t family_contacts(PairType type, const PairChemistry& pair) {
+    return type == PairType_WatsonCrick && pair.purine_side < 0 ? 3 : 2;
+}
+
+uint16_t evaluate_contacts(uint8_t* count, const PairChemistry& pair, const md_system_state_t& state,
+                           const std::vector<uint64_t>& keys) {
+    *count = 0;
+    if (pair.contacts.empty() || pair.contacts.size() != pair.expected_contacts) return Quality_NoncanonicalPair;
+    *count = count_contacts(pair.contacts, pair.uses_hydrogens, state, keys);
     return *count >= (pair.uses_hydrogens ? 1 : 2) ? Quality_Good : Quality_NoPairContacts;
 }
 
@@ -71,8 +91,23 @@ const char* pairing_state_name(PairingState state) {
     case Pairing_Hoogsteen: return "Hoogsteen (A-T/U)";
     case Pairing_Other: return "Other / ambiguous";
     case Pairing_Unpaired: return "Unpaired";
+    case Pairing_Wobble: return "Wobble (G-T/U)";
+    case Pairing_ReverseWatsonCrick: return "Reverse Watson-Crick";
+    case Pairing_PartnerSwitch: return "Partner switch";
     default: return "Unavailable";
     }
+}
+
+PairType identify_pair_type(const PairChemistry& chemistry, const PairingEvidence& frame0, bool parallel_normals) {
+    auto supported = [&](PairType type) {
+        return !chemistry.sets[type].empty() && chemistry.sets[type].size() == family_contacts(type, chemistry);
+    };
+    auto formed = [&](PairType type) { return supported(type) && frame0.present[type] >= 2; };
+    if (parallel_normals) return formed(PairType_ReverseWatsonCrick) ? PairType_ReverseWatsonCrick : PairType_Count;
+    for (PairType type : {PairType_WatsonCrick, PairType_Hoogsteen, PairType_Wobble}) if (formed(type)) return type;
+    if (supported(PairType_WatsonCrick)) return PairType_WatsonCrick;
+    if (supported(PairType_Wobble)) return PairType_Wobble;
+    return PairType_Count;
 }
 
 PairingState classify_pairing(const PairingEvidence& ev, float chi_a, float chi_b, uint16_t geometry) {
@@ -85,6 +120,12 @@ PairingState classify_pairing(const PairingEvidence& ev, float chi_a, float chi_
     const auto wrap = [](float chi) { return chi-360.0*std::floor((chi+180.0)/360.0); };
     const auto anti = [&](float chi) { const auto a = wrap(chi); return a >= -180 && a <= -60; };
     const auto syn = [&](float chi) { const auto a = wrap(chi); return a >= 0 && a <= 120; };
+    if (ev.type == PairType_Wobble || ev.type == PairType_ReverseWatsonCrick) {
+        if (compatible && ev.native_expected && ev.native == ev.native_expected && anti(chi_a) && anti(chi_b))
+            return ev.type == PairType_Wobble ? Pairing_Wobble : Pairing_ReverseWatsonCrick;
+        if (!compatible && !ev.native) return Pairing_Unpaired;
+        return Pairing_Other;
+    }
     const bool wc = compatible && ev.canonical == ev.expected && anti(chi_a) && anti(chi_b);
     const bool hg = compatible && ev.purine_side >= 0 && ev.hoogsteen == 2 &&
         syn(ev.purine_side == 0 ? chi_a : chi_b) && anti(ev.purine_side == 0 ? chi_b : chi_a);
@@ -206,18 +247,27 @@ bool PairingValidator::initialize(const md_system_t& sys, const std::vector<Base
             md_bitmask_set_bit(&acceptors, (uint32_t)acceptor);
         };
         auto& chemistry = pairs_[p];
+        auto& sets = chemistry.sets;
         if (a->reference == 0 && b->reference == 3) {
-            add(chemistry.contacts, *a, "N6", *b, "O4");
-            add(chemistry.contacts, *b, "N3", *a, "N1");
-            add(chemistry.hoogsteen_contacts, *a, "N6", *b, "O4");
-            add(chemistry.hoogsteen_contacts, *b, "N3", *a, "N7");
+            add(sets[PairType_WatsonCrick], *a, "N6", *b, "O4");
+            add(sets[PairType_WatsonCrick], *b, "N3", *a, "N1");
+            add(sets[PairType_Hoogsteen], *a, "N6", *b, "O4");
+            add(sets[PairType_Hoogsteen], *b, "N3", *a, "N7");
+            add(sets[PairType_ReverseWatsonCrick], *b, "N3", *a, "N1");
+            add(sets[PairType_ReverseWatsonCrick], *a, "N6", *b, "O2");
             chemistry.purine_side = a == &bases[pairs[p].a] ? 0 : 1;
         } else if (a->reference == 1 && b->reference == 2) {
-            pairs_[p].expected_contacts = 3;
-            add(chemistry.contacts, *a, "N1", *b, "N3");
-            add(chemistry.contacts, *a, "N2", *b, "O2");
-            add(chemistry.contacts, *b, "N4", *a, "O6");
+            add(sets[PairType_WatsonCrick], *a, "N1", *b, "N3");
+            add(sets[PairType_WatsonCrick], *a, "N2", *b, "O2");
+            add(sets[PairType_WatsonCrick], *b, "N4", *a, "O6");
+        } else if (a->reference == 1 && b->reference == 3) {
+            add(sets[PairType_Wobble], *a, "N1", *b, "O2");
+            add(sets[PairType_Wobble], *b, "N3", *a, "O6");
         }
+        const PairType type = pairs[p].type < PairType_Count ? (PairType)pairs[p].type : PairType_WatsonCrick;
+        chemistry.contacts = sets[type];
+        chemistry.expected_contacts = family_contacts(type, chemistry);
+        chemistry.hoogsteen_contacts = sets[PairType_Hoogsteen];
     }
     const md_hbond_params_t params = md_hbond_params_preset(MD_HBOND_PRESET_GROMACS);
     const md_bitset_t donor_view = md_bitmask_view(&donors), acceptor_view = md_bitmask_view(&acceptors);
@@ -230,15 +280,17 @@ bool PairingValidator::initialize(const md_system_t& sys, const std::vector<Base
         return false;
     }
     for (auto& pair : pairs_) {
-        for (auto* contacts : {&pair.contacts, &pair.hoogsteen_contacts}) for (auto& contact : *contacts) {
+        std::vector<std::vector<PairContact>*> lists = {&pair.contacts, &pair.hoogsteen_contacts};
+        for (auto& set : pair.sets) lists.push_back(&set);
+        for (auto* contacts : lists) for (auto& contact : *contacts) {
             for (size_t d = 0; d < query_.num_donors; ++d) {
                 if (query_.donor_d[d] == contact.donor) {
                     contact.explicit_hydrogen = true;
                     contact.hydrogens.push_back(query_.donor_h[d]);
                 }
-                for (const auto& contact : pair.contacts) pair.uses_hydrogens |= contact.explicit_hydrogen;
             }
         }
+        for (const auto& set : pair.sets) for (const auto& contact : set) pair.uses_hydrogens |= contact.explicit_hydrogen;
     }
     initialized_ = true;
     return true;
@@ -265,11 +317,17 @@ bool PairingValidator::evaluate(std::vector<uint16_t>& quality, std::vector<uint
         for (size_t p = 0; p < pairs_.size(); ++p) {
             const auto& pair = pairs_[p];
             auto& ev = (*evidence)[p];
-            ev.expected = (uint8_t)pair.expected_contacts;
+            const auto& canonical = pair.sets[PairType_WatsonCrick];
+            ev.type = (uint8_t)type_of(pair);
+            ev.expected = (uint8_t)(canonical.empty() ? pair.expected_contacts : family_contacts(PairType_WatsonCrick, pair));
+            ev.native_expected = (uint8_t)pair.expected_contacts;
             ev.purine_side = pair.purine_side;
+            for (int t = 0; t < PairType_Count; ++t)
+                ev.present[t] = count_contacts(pair.sets[t], pair.uses_hydrogens, state, keys);
             ev.complete = pair.contacts.size() == pair.expected_contacts &&
-                (pair.purine_side < 0 || pair.hoogsteen_contacts.size() == 2);
-            for (const auto* list : {&pair.contacts, &pair.hoogsteen_contacts}) for (const auto& contact : *list) {
+                (ev.type != PairType_WatsonCrick && ev.type != PairType_Hoogsteen ? true :
+                 canonical.size() == ev.expected && (pair.purine_side < 0 || pair.hoogsteen_contacts.size() == 2));
+            for (const auto* list : {&canonical, &pair.hoogsteen_contacts, &pair.contacts}) for (const auto& contact : *list) {
                 bool finite = contact.donor < state.num_atoms && contact.acceptor < state.num_atoms;
                 if (finite) for (uint32_t atom : {contact.donor, contact.acceptor}) {
                     const auto v = md_state_coord(&state, atom);
@@ -282,8 +340,9 @@ bool PairingValidator::evaluate(std::vector<uint16_t>& quality, std::vector<uint
                 }
                 ev.complete &= contact.explicit_hydrogen && finite;
                 if (contact_present(contact, keys)) {
-                    if (list == &pair.contacts) ++ev.canonical;
-                    else ++ev.hoogsteen;
+                    if (list == &canonical) ++ev.canonical;
+                    else if (list == &pair.hoogsteen_contacts) ++ev.hoogsteen;
+                    else ++ev.native;
                 }
             }
         }
@@ -330,7 +389,7 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
         BasePairFrame frame;
         Values values;
         const bool present = compute_present_base_pair(&values, &frame, &geometry,
-            frames[pair.a], frames[pair.b], &state.unitcell);
+            frames[pair.a], frames[pair.b], &state.unitcell, pair.reversed);
         out->pair_quality[p] |= geometry | base_quality[pair.a] | base_quality[pair.b];
         if (present && out->pair_quality[p] == Quality_Good) {
             out->pair_values[p] = values;
@@ -377,13 +436,17 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
         }
     }
     out->pairing_states.resize(pairs.size());
+    std::vector<uint16_t> geometry(pairs.size());
     for (size_t p = 0; p < pairs.size(); ++p) {
         const auto pair = pairs[p];
-        const uint16_t geometry = pair_quality(frames[pair.a], frames[pair.b], &state.unitcell) |
+        geometry[p] = pair_quality(frames[pair.a], frames[pair.b], &state.unitcell) |
             base_quality[pair.a] | base_quality[pair.b];
         out->pairing_states[p] = classify_pairing(evidence[p], out->nucleotide_values[2*p].metric[Chi],
-            out->nucleotide_values[2*p+1].metric[Chi], geometry);
+            out->nucleotide_values[2*p+1].metric[Chi], geometry[p]);
     }
+    std::vector<uint8_t> switched;
+    if (!detect_partner_switches(&switched, frames, pairs, geometry, &state.unitcell)) return false;
+    for (size_t p = 0; p < pairs.size(); ++p) if (switched[p]) out->pairing_states[p] = Pairing_PartnerSwitch;
     // Groove widths from phosphorus positions along each helix; strand I is the strand of the first pair's base a.
     std::vector<int64_t> step_from(pairs.size(), -1);
     for (size_t s = steps.size(); s-- > 0;) if (steps[s].a < pairs.size()) step_from[steps[s].a] = (int64_t)s;

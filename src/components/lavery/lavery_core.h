@@ -30,8 +30,14 @@ enum Metric : uint32_t {
     Shift,
     Slide,
     Rise,
-    MinorGroove, // 3DNA direct P-P width minus 5.8 Angstrom; inter-base-pair class
+    MinorGroove, // 3DNA refined P-P width (direct where neighbours are missing) minus 5.8 Angstrom
     MajorGroove,
+    XDisplacement, // 3DNA local helical parameters (Lu & Olson 2003): helical mid-step frame
+    YDisplacement,
+    HelicalRise,
+    Inclination,
+    Tip,
+    HelicalTwist,
     Alpha,       // Nucleotide class: backbone torsions, glycosidic torsion and sugar pucker
     Beta,
     Gamma,
@@ -53,7 +59,25 @@ enum MemberClass : uint8_t {
     Class_Nucleotide,
     Class_Count,
 };
-constexpr int MAX_CLASS_PARAMETERS = 10;
+constexpr int MAX_CLASS_PARAMETERS = 14;
+constexpr uint32_t CLASS_LOCAL_ALL = (1u << MAX_CLASS_PARAMETERS) - 1u;
+// Saved metric indices/masks: layout 0 had no helical parameters (Alpha at 14); layout 1 is current.
+constexpr int METRIC_LAYOUT = 1;
+int migrate_metric(int metric, int layout);
+uint32_t migrate_metric_mask(uint32_t mask, int layout);
+constexpr uint32_t HELICAL_PARAMETERS = ((1u << (HelicalTwist + 1)) - 1u) & ~((1u << XDisplacement) - 1u);
+struct StepParameterGroup {
+    const char* name;
+    Metric first, last;
+    constexpr uint32_t mask() const { return ((1u << (last + 1)) - 1u) & ~((1u << first) - 1u); }
+};
+inline constexpr StepParameterGroup STEP_PARAMETER_GROUPS[] = {
+    {"Step (local frame)", Tilt, Rise},
+    {"Helical (local axis)", XDisplacement, HelicalTwist},
+    {"Grooves", MinorGroove, MajorGroove},
+};
+// Default detection family: helical parameters re-express Tilt/Roll/Twist/Shift/Slide/Rise.
+constexpr uint32_t DEFAULT_EVENT_PARAMETERS = ((1u << Metric_Count) - 1u) & ~HELICAL_PARAMETERS;
 constexpr uint32_t ALL_METRIC_PARAMETERS = (1u << Metric_Count) - 1u;
 uint32_t restore_event_parameters(uint32_t mask, bool legacy);
 int class_first_metric(int cls);
@@ -75,9 +99,24 @@ struct BaseFrame {
     vec3_t center = origin;
 };
 
+// Frame-0 pairing family of a tracked pair. Parameters are measured only while its own contacts are present.
+enum PairType : uint8_t {
+    PairType_WatsonCrick,         // cis A-T/U and G-C
+    PairType_Wobble,              // cis G-T/U: G N1-H...O2, T/U N3-H...O6
+    PairType_Hoogsteen,           // cis A-T/U: T/U N3-H...N7, A N6-H...O4
+    PairType_ReverseWatsonCrick,  // trans A-T/U (parallel base normals): T/U N3-H...N1, A N6-H...O2
+    PairType_Count,
+};
+const char* pair_type_name(PairType type);
+const char* pair_type_tag(PairType type); // short label suffix; empty for Watson-Crick
+
 struct Pair {
     uint32_t a = 0;
     uint32_t b = 0;
+    uint8_t type = PairType_WatsonCrick;
+    // Parallel base normals at frame 0: base b's x and y are reversed instead of its y and z, so an ideal
+    // reverse pair has near-zero intra-pair parameters. Not the 3DNA convention (which reports Opening near 180).
+    bool reversed = false;
 };
 
 // Sugar-phosphate atoms of one nucleotide: its own, the previous nucleotide's O3' and the next one's P and O5'
@@ -286,6 +325,13 @@ using ReferenceMapping = std::array<std::vector<int>, Class_Count>;
 std::string reference_identity(int cls, const std::string& label, const std::string& pair_a, const std::string& pair_b);
 bool load_external_reference(ExternalReference* out, const std::string& path, std::string* error);
 std::vector<int> match_reference_members(const std::vector<ReferenceMember>& source, const std::vector<std::string>& identities);
+using MemberLabels = std::array<const std::vector<std::string>*, Class_Count>;
+// Saved correspondences: one "class<TAB>target label<TAB>source label" line per target; empty source is unmatched.
+std::string reference_mapping_text(const ReferenceMapping& mapping, const ExternalReference& source, const MemberLabels& labels);
+// Overrides matching targets by label; unknown labels are ignored. Duplicate sources are unmapped and
+// reported by returning false.
+bool apply_reference_mapping_text(ReferenceMapping* mapping, const ExternalReference& source, const MemberLabels& labels,
+                                  const std::string& text);
 bool external_statistics(MetricStatistics* out, const ExternalReference& source, const std::vector<int>& mapping,
                          const std::vector<float>& current, Metric metric, Baseline baseline,
                          const std::vector<uint32_t>& groups = {});
@@ -340,10 +386,11 @@ void pseudorotation(const float nu[5], float* phase, float* amplitude);
 // A zero-amplitude sugar has undefined phase but retains its finite amplitude.
 void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell = nullptr,
                         NucleotideQuality* quality = nullptr, uint32_t present_atoms = (1u << BB_Count)-1);
-// 3DNA direct P-P groove widths (El Hassan & Calladine 1998) minus 5.8 A, for the n - 1 steps of one helix
+// 3DNA refined P-P groove widths (El Hassan & Calladine 1998) minus 5.8 A, for the n - 1 steps of one helix
 // of n consecutive pairs. p1/p2: phosphorus of the strand I / strand II nucleotide of each pair (non-finite
-// when missing). Minor (1-based step i) = mean(|P1(i+2) - P2(i-2)|, |P1(i+3) - P2(i-1)|), major = |P1(i-1) - P2(i+2)|;
-// NaN when an index falls outside the helix.
+// when missing). Minor (1-based step i) = mean(w(P1(i+2), P2(i-2)), w(P1(i+3), P2(i-1))), major = w(P1(i-1), P2(i+2));
+// w is the P-P distance times sin(angle to the mean backbone direction P(k+1) - P(k-1) of both strands), or the
+// direct distance when a flanking phosphate is missing. NaN when an index falls outside the helix.
 void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p2, size_t n,
                    const md_unitcell_t* cell = nullptr);
 // Pair chains linked by steps (step.a -> step.b), each in helix order.
@@ -542,6 +589,21 @@ int event_dominant_metric(const OutlierEvent& event);
 // |z| >= sigma by chance.
 double chance_outlier_probability(float sigma, int parameters);
 
+enum MultipleTesting : int {
+    MultipleTesting_None,
+    MultipleTesting_Bonferroni,          // family-wise error rate
+    MultipleTesting_BenjaminiHochberg,   // false discovery rate, step-up on the frame's z-scores
+    MultipleTesting_Count,
+};
+const char* multiple_testing_name(MultipleTesting method);
+// Two-sided Gaussian tolerance whose single-test exceedance probability is p (0 < p < 1).
+float gaussian_sigma_for_probability(double p);
+// Tolerance for one frame's family of two-sided tests at level alpha. abs_z holds the finite |z| of the
+// frame's valid tests (reordered on return). Bonferroni: tolerance for alpha / tests. Benjamini-Hochberg:
+// just below the smallest rejected |z|, or the Bonferroni tolerance when nothing is rejected.
+// Returns NaN for None or invalid input.
+float corrected_sigma(MultipleTesting method, double alpha, std::vector<float>* abs_z);
+
 struct CsvEventRow {
     std::string run, scope, baseline, label, time_unit, kind;
     size_t event = 0, begin = 0, end = 0, peak = 0, member = 0, member_frames = 0, member_lost = 0, parameter_peak = 0;
@@ -602,11 +664,13 @@ size_t detect_pairs(Pair* out, size_t cap, const BaseFrame* bases, size_t count,
 bool pair_is_present(const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr);
 
 // The six intra-pair values use the paired bases' relative transform in their midpoint frame.
-bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& a, const BaseFrame& b);
+bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& a, const BaseFrame& b,
+                       bool reversed = false);
 
 // Trajectory evaluation: reject absent fixed partners and clear stale values/frames.
 bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t* quality,
-                               const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr);
+                               const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr,
+                               bool reversed = false);
 
 struct PairContact {
     uint32_t donor = 0, acceptor = 0;
@@ -615,25 +679,39 @@ struct PairContact {
 };
 
 struct PairChemistry {
-    std::vector<PairContact> contacts;
+    std::array<std::vector<PairContact>, PairType_Count> sets; // complete only when the base identities support it
+    std::vector<PairContact> contacts;  // the pair's own (frame-0) family; gates parameter values
     bool uses_hydrogens = false;
     size_t expected_contacts = 2;
     std::vector<PairContact> hoogsteen_contacts;
     int purine_side = -1; // A-T/U only; G-C Hoogsteen/protonation is not classified.
 };
 
+// New states are appended so stored codes keep their meaning.
 enum PairingState : uint8_t {
     Pairing_Unavailable, Pairing_WatsonCrick, Pairing_Hoogsteen, Pairing_Other, Pairing_Unpaired,
+    Pairing_Wobble, Pairing_ReverseWatsonCrick,
+    Pairing_PartnerSwitch, // own geometry broken while a base pairs geometrically with another base
     Pairing_Count,
 };
 bool pairing_profile_samples(std::vector<float>* out, const std::vector<PairingState>& values, PairingState state);
 const char* pairing_state_name(PairingState state);
 struct PairingEvidence {
     uint8_t canonical = 0, hoogsteen = 0, expected = 0;
+    uint8_t native = 0, native_expected = 0, type = PairType_WatsonCrick;
+    // Contacts per family by the gating rule (hydrogen bonds, or heavy-atom distance without hydrogens).
+    std::array<uint8_t, PairType_Count> present = {};
     int purine_side = -1;
     bool complete = false; // All required donor hydrogens and finite contact atoms.
 };
 PairingState classify_pairing(const PairingEvidence& evidence, float chi_a, float chi_b, uint16_t geometry);
+// Frame-0 family of a geometrically detected pair; PairType_Count when unsupported (excluded).
+// Families with both contacts present win; otherwise cis pairs default to Watson-Crick, then wobble, by identity.
+PairType identify_pair_type(const PairChemistry& chemistry, const PairingEvidence& frame0, bool parallel_normals);
+// Per pair: 1 when its own geometry is broken and one of its bases forms a valid pairing geometry with another
+// base from a different strand whose own tracked pair (if any) is also broken. geometry is pair_quality per pair.
+bool detect_partner_switches(std::vector<uint8_t>* out, const std::vector<BaseFrame>& frames,
+    const std::vector<Pair>& pairs, const std::vector<uint16_t>& geometry, const md_unitcell_t* cell = nullptr);
 struct PairingRun {
     size_t begin = 0, end = 0;
     PairingState state = Pairing_Unavailable;
@@ -687,14 +765,28 @@ struct AxisPath {
 };
 AxisPath compute_axis(const std::vector<BasePairFrame>& frames, const std::vector<StepIndex>& steps,
                        const md_unitcell_t* cell = nullptr, int samples_per_step = 8);
+// 3DNA-style local helical axis: per step, the segment between the two pair origins projected onto its local
+// helical axis; consecutive steps of a helix are chained, with no connection across gaps.
+AxisPath compute_helical_axis(const std::vector<BasePairFrame>& frames, const std::vector<StepIndex>& steps,
+                              const md_unitcell_t* cell = nullptr);
 std::string csv_axis(const std::string& run, double frame, const AxisPath& axis);
 
 bool publish_series(md_attributes_t* table, const std::string& run, const char* leaf, const char* label,
                      md_attribute_type_t type, size_t frames, size_t members,
                      const void* data, size_t bytes, md_unit_t unit);
 
-// The six step values use consecutive pair midpoint frames.
+// The six step values use consecutive pair midpoint frames; also fills the local helical parameters.
 bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, BasePairFrame* midpoint = nullptr);
+
+// Positional guides only: ignore pairing/contact quality, but leave unconstructible frames zeroed.
+bool landmark_frames(std::vector<BasePairFrame>& pair_frames, std::vector<BasePairFrame>& step_frames,
+                     const std::vector<BaseFrame>& bases, const std::vector<Pair>& pairs,
+                     const std::vector<StepIndex>& steps, const md_unitcell_t* cell = nullptr);
+// 3DNA local helical parameters (x/y-displacement, helical rise, inclination, tip, helical twist) of two pair
+// frames. helical: the helical mid-step frame, z along the local helical axis; axis_points: the two pair origins
+// projected onto that axis. A zero helical twist uses the mean pair normal as axis.
+bool compute_helical_step(Values* out, const BasePairFrame& a, const BasePairFrame& b,
+                          BasePairFrame* helical = nullptr, vec3_t axis_points[2] = nullptr);
 
 const char* metric_name(Metric metric);
 const char* metric_path(Metric metric);

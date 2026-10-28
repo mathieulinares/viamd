@@ -84,6 +84,67 @@ AxisPath compute_axis(const std::vector<BasePairFrame>& frames, const std::vecto
     return result;
 }
 
+AxisPath compute_helical_axis(const std::vector<BasePairFrame>& frames, const std::vector<StepIndex>& steps,
+                              const md_unitcell_t* cell) {
+    AxisPath result;
+    result.offsets.push_back(0);
+    const size_t n = frames.size();
+    std::vector<int> next(n, -1), previous(n, -1), step_of(n, -1);
+    for (size_t s = 0; s < steps.size(); ++s) {
+        const auto step = steps[s];
+        if (step.a >= n || step.b >= n || step.a == step.b || next[step.a] >= 0 || previous[step.b] >= 0) {
+            MD_LOG_ERROR("Lavery: invalid or branching axis connectivity");
+            return result;
+        }
+        next[step.a] = (int)step.b;
+        previous[step.b] = (int)step.a;
+        step_of[step.a] = (int)s;
+    }
+    std::vector<bool> visited(n);
+    auto close = [&]() {
+        if (result.points.size() - result.offsets.back() >= 2) result.offsets.push_back(result.points.size());
+        else {
+            result.points.resize(result.offsets.back());
+            result.tangents.resize(result.offsets.back());
+        }
+    };
+    for (size_t start = 0; start < n; ++start) {
+        if (previous[start] >= 0 || visited[start]) continue;
+        BasePairFrame current = frames[start];
+        bool open = false;
+        for (int i = (int)start; i >= 0 && next[i] >= 0 && !visited[i]; i = next[i]) {
+            visited[i] = true;
+            BasePairFrame following = frames[next[i]];
+            vec3_t delta = vec3_sub(following.origin, current.origin);
+            if (cell) md_util_min_image_vec3(&delta, 1, cell);
+            following.origin = vec3_add(current.origin, delta);
+            Values values;
+            BasePairFrame helical;
+            vec3_t ends[2];
+            if (!compute_helical_step(&values, current, following, &helical, ends)) {
+                if (open) close();
+                open = false;
+            } else {
+                if (!open) {
+                    result.points.push_back(ends[0]);
+                    result.tangents.push_back(helical.z);
+                }
+                result.points.push_back(helical.origin);
+                result.tangents.push_back(helical.z);
+                const int after = next[next[i]];
+                if (after < 0) {
+                    result.points.push_back(ends[1]);
+                    result.tangents.push_back(helical.z);
+                }
+                open = true;
+            }
+            current = following;
+        }
+        if (open) close();
+    }
+    return result;
+}
+
 bool compute_distributions(DistributionComparison* out, const std::vector<float>& values,
                            size_t member_count, size_t bins) {
     if (!out || !member_count || !bins || bins > 4096 || values.size() % member_count) {

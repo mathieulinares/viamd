@@ -83,6 +83,12 @@ Sequence-profile rendering also checks two-partner mean/SD bands, current-frame
 points, reference curves and the shared outside legend with missing positions.
 Sequence landmark rendering checks that a step-boundary guide keeps its exact
 position across profile views without adding legend items or changing axis limits.
+Landmark mouse-drag tests verify independent handles across simultaneous plots,
+no plot panning and no conflicting widget IDs (including the old same-parity
+plot-ID collision).
+Lavery core landmark-frame tests cover continued placement through pairing
+disruptions, unchanged scientific validity, periodic images, reverse pairs,
+missing/nonfinite geometry and invalid topology.
 Top-panel names stagger into nonoverlapping rectangles inside the plot. Sequence
 tick positions and text remain integer-only, including zoom ranges with no BP
 integer inside them (which correctly have no ticks).
@@ -179,6 +185,17 @@ run-relative script compilation **and evaluation**, publication/replacement and
 cleanup. Task-system regressions cover cooperative interruption inside a single
 callback and a queued callback interrupted before execution. No GUI launch is
 needed for these checks.
+
+3DNA-style step regressions recover exact x/y-displacement, helical rise,
+inclination, tip and helical twist from an ideal screw of pair frames, check the
+local helical axis (screw-axis points, chain gaps), refined groove widths with
+direct-distance fallback, and the A-form signature of the local helical
+parameters on the 1RNA fixture. Workspace regressions cover the metric-layout
+migration of global parameter indices/masks and the saved external-reference
+mapping round trip. Pairing regressions cover frame-0 pair typing (formed
+contacts, parallel normals), wobble/reverse states requiring their own contacts,
+the reversed-pair flipped-axes convention and partner switches. Multiple-testing
+regressions cover the Bonferroni and Benjamini-Hochberg frame tolerances.
 
 Pooled-reference regressions cover persistent local anomalies, separate helices,
 singleton pairs, pair/step/nucleotide grouping, baseline intervals, missing

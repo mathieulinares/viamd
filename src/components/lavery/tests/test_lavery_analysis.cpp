@@ -1091,6 +1091,16 @@ UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_f
     const auto axis = compute_axis(result.pair_frames, steps, &state.unitcell);
     EXPECT_EQ(axis.offsets.size(), (size_t)2);
     EXPECT_EQ(axis.points.size(), (size_t)105);
+    // A-form signature of the 3DNA local helical parameters: displaced and inclined pairs, small tip.
+    float mean[Metric_Count] = {};
+    for (const auto& step : result.step_values)
+        for (int k = XDisplacement; k <= HelicalTwist; ++k) mean[k] += step.metric[k] / steps.size();
+    EXPECT_LT(mean[XDisplacement], -3.0f);
+    EXPECT_NEAR(mean[YDisplacement], 0.0f, 0.5f);
+    EXPECT_NEAR(mean[HelicalRise], 2.7f, 0.3f);
+    EXPECT_GT(mean[Inclination], 12.0f);
+    EXPECT_NEAR(mean[Tip], 0.0f, 3.0f);
+    EXPECT_NEAR(mean[HelicalTwist], 33.0f, 3.0f);
     md_arena_allocator_destroy(alloc);
 }
 

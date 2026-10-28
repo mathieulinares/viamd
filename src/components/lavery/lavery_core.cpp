@@ -242,7 +242,7 @@ float MemberStatistics::zscore(float value) const {
 }
 
 bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t* quality,
-                               const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell) {
+                               const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell, bool reversed) {
     if (!out || !pair_frame || !quality) {
         MD_LOG_ERROR("Lavery: invalid output for paired-frame evaluation");
         return false;
@@ -255,7 +255,7 @@ bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t*
     vec3_t delta = vec3_sub(b.origin, a.origin);
     if (cell) md_util_min_image_vec3(&delta, 1, cell);
     partner.origin = vec3_add(a.origin, delta);
-    if (!compute_base_pair(out, pair_frame, a, partner)) {
+    if (!compute_base_pair(out, pair_frame, a, partner, reversed)) {
         *quality |= Quality_AmbiguousTransform;
         *pair_frame = {};
         return false;
@@ -896,11 +896,63 @@ bool pair_is_present(const BaseFrame& a, const BaseFrame& b, const md_unitcell_t
     return std::isfinite(pairing_score(a, b, cell));
 }
 
-bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& a, const BaseFrame& b) {
+const char* pair_type_name(PairType type) {
+    switch (type) {
+    case PairType_WatsonCrick: return "Watson-Crick";
+    case PairType_Wobble: return "Wobble (G-T/U)";
+    case PairType_Hoogsteen: return "Hoogsteen (A-T/U)";
+    case PairType_ReverseWatsonCrick: return "Reverse Watson-Crick (A-T/U)";
+    default: return "Unsupported";
+    }
+}
+
+const char* pair_type_tag(PairType type) {
+    switch (type) {
+    case PairType_Wobble: return " [wobble]";
+    case PairType_Hoogsteen: return " [Hoogsteen]";
+    case PairType_ReverseWatsonCrick: return " [reverse WC]";
+    default: return "";
+    }
+}
+
+bool detect_partner_switches(std::vector<uint8_t>* out, const std::vector<BaseFrame>& frames,
+    const std::vector<Pair>& pairs, const std::vector<uint16_t>& geometry, const md_unitcell_t* cell) {
+    if (!out || geometry.size() != pairs.size()) {
+        MD_LOG_ERROR("Lavery: invalid partner-switch input");
+        return false;
+    }
+    constexpr uint16_t broken = Quality_Separation | Quality_Alignment | Quality_PlaneOffset;
+    std::vector<int64_t> base_pair(frames.size(), -1);
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        if (pairs[p].a >= frames.size() || pairs[p].b >= frames.size()) {
+            MD_LOG_ERROR("Lavery: invalid pair index for partner-switch detection");
+            return false;
+        }
+        base_pair[pairs[p].a] = base_pair[pairs[p].b] = (int64_t)p;
+    }
+    out->assign(pairs.size(), 0);
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        if (!(geometry[p] & broken) || (geometry[p] & Quality_InvalidBase)) continue;
+        for (uint32_t base : {pairs[p].a, pairs[p].b}) {
+            const uint32_t own = base == pairs[p].a ? pairs[p].b : pairs[p].a;
+            for (uint32_t other = 0; other < frames.size() && !(*out)[p]; ++other) {
+                if (other == base || other == own || frames[other].strand == frames[base].strand ||
+                    frames[other].component == frames[base].component) continue;
+                const int64_t q = base_pair[other];
+                if (q >= 0 && !(geometry[q] & broken)) continue;
+                if (pair_is_present(frames[base], frames[other], cell)) (*out)[p] = 1;
+            }
+        }
+    }
+    return true;
+}
+
+bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& a, const BaseFrame& b, bool reversed) {
     if (!out || !pair_frame) return false;
     BaseFrame aligned = b;
+    if (reversed) aligned.x = vec3_mul1(b.x, -1.0f);
+    else aligned.z = vec3_mul1(b.z, -1.0f);
     aligned.y = vec3_mul1(b.y, -1.0f);
-    aligned.z = vec3_mul1(b.z, -1.0f);
     float translation[3], rotation[3];
     if (!rigid_parameters(pair_frame, translation, rotation, a, aligned)) return false;
     // Curves+ reports intra-pair displacements with the opposite sense to
@@ -925,6 +977,124 @@ bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, B
         out->metric[Tilt + k] = rotation[k];
         out->metric[Shift + k] = translation[k];
     }
+    compute_helical_step(out, a, b);
+    return true;
+}
+
+bool landmark_frames(std::vector<BasePairFrame>& pair_frames, std::vector<BasePairFrame>& step_frames,
+                     const std::vector<BaseFrame>& bases, const std::vector<Pair>& pairs,
+                     const std::vector<StepIndex>& steps, const md_unitcell_t* cell) {
+    pair_frames.clear();
+    step_frames.clear();
+    for (const auto& pair : pairs) if (pair.a >= bases.size() || pair.b >= bases.size()) {
+        MD_LOG_ERROR("Lavery: invalid base index for landmark geometry");
+        return false;
+    }
+    for (const auto& step : steps) if (step.a >= pairs.size() || step.b >= pairs.size()) {
+        MD_LOG_ERROR("Lavery: invalid pair index for landmark geometry");
+        return false;
+    }
+    pair_frames.resize(pairs.size());
+    step_frames.resize(steps.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto& pair = pairs[p];
+        const auto& a = bases[pair.a];
+        auto b = bases[pair.b];
+        vec3_t delta = vec3_sub(b.origin, a.origin);
+        if (cell) md_util_min_image_vec3(&delta, 1, cell);
+        b.origin = vec3_add(a.origin, delta);
+        Values unused;
+        BasePairFrame frame;
+        if (compute_base_pair(&unused, &frame, a, b, pair.reversed)) pair_frames[p] = frame;
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        const auto& a = pair_frames[steps[s].a];
+        auto b = pair_frames[steps[s].b];
+        vec3_t delta = vec3_sub(b.origin, a.origin);
+        if (cell) md_util_min_image_vec3(&delta, 1, cell);
+        b.origin = vec3_add(a.origin, delta);
+        BasePairFrame midpoint;
+        float translation[3], rotation[3];
+        if (rigid_parameters(&midpoint, translation, rotation,
+            {a.origin, a.x, a.y, a.z}, {b.origin, b.x, b.y, b.z})) step_frames[s] = midpoint;
+    }
+    return true;
+}
+
+static vec3_t rotate_about(vec3_t v, vec3_t unit_axis, float radians) {
+    const float c = std::cos(radians), s = std::sin(radians);
+    return vec3_add(vec3_add(vec3_mul1(v, c), vec3_mul1(vec3_cross(unit_axis, v), s)),
+        vec3_mul1(unit_axis, vec3_dot(unit_axis, v) * (1.0f - c)));
+}
+
+// Angle (radians) from a to b after projecting both perpendicular to unit reference; positive about reference.
+static float signed_angle(vec3_t a, vec3_t b, vec3_t reference) {
+    a = vec3_sub(a, vec3_mul1(reference, vec3_dot(a, reference)));
+    b = vec3_sub(b, vec3_mul1(reference, vec3_dot(b, reference)));
+    return std::atan2(vec3_dot(vec3_cross(a, b), reference), vec3_dot(a, b));
+}
+
+bool compute_helical_step(Values* out, const BasePairFrame& a, const BasePairFrame& b,
+                          BasePairFrame* helical, vec3_t axis_points[2]) {
+    if (!out) return false;
+    for (int k = XDisplacement; k <= HelicalTwist; ++k) out->metric[k] = std::numeric_limits<float>::quiet_NaN();
+    const BaseFrame fa = {a.origin, a.x, a.y, a.z}, fb = {b.origin, b.x, b.y, b.z};
+    auto finite = [](vec3_t v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    if (!valid_frame(fa) || !valid_frame(fb) || !finite(a.origin) || !finite(b.origin)) return false;
+    // Lu & Olson (2003) / 3DNA helical_par: the axis is perpendicular to both x and y frame differences.
+    vec3_t axis = vec3_cross(vec3_sub(b.x, a.x), vec3_sub(b.y, a.y));
+    float length = vec3_length(axis);
+    if (length < 1.0e-6f) {
+        axis = vec3_add(a.z, b.z);
+        length = vec3_length(axis);
+        if (length < 1.0e-6f) return false;
+    }
+    axis = vec3_div1(axis, length);
+    // Rotate each pair frame about its hinge so that its z coincides with the axis.
+    auto align = [&](const BasePairFrame& f, vec3_t* x, vec3_t* y, vec3_t* hinge) {
+        const float tip_inclination = std::acos(std::clamp(vec3_dot(axis, f.z), -1.0f, 1.0f));
+        *hinge = vec3_cross(axis, f.z);
+        const float h = vec3_length(*hinge);
+        if (h < 1.0e-6f) { *x = f.x; *y = f.y; *hinge = {}; return 0.0f; }
+        *hinge = vec3_div1(*hinge, h);
+        *x = rotate_about(f.x, *hinge, -tip_inclination);
+        *y = rotate_about(f.y, *hinge, -tip_inclination);
+        return tip_inclination;
+    };
+    vec3_t x1, y1, hinge1, x2, y2, hinge2;
+    const float tip_inclination = align(a, &x1, &y1, &hinge1);
+    align(b, &x2, &y2, &hinge2);
+    const float twist = signed_angle(y1, y2, axis);
+    const vec3_t delta = vec3_sub(b.origin, a.origin);
+    const float rise = vec3_dot(delta, axis);
+    const float phi = vec3_length(hinge1) > 0.5f ? signed_angle(hinge1, y1, axis) : 0.0f;
+    // Pair-1 origin on the axis: the two origins are related by a screw of twist about the axis.
+    const vec3_t chord = vec3_sub(delta, vec3_mul1(axis, rise));
+    vec3_t axis1;
+    if (std::fabs(twist * RAD_TO_DEG) < 0.05f) {
+        axis1 = vec3_add(a.origin, vec3_mul1(chord, 0.5f));
+    } else {
+        const float chord_length = vec3_length(chord);
+        const vec3_t direction = chord_length > 1.0e-6f ?
+            rotate_about(vec3_div1(chord, chord_length), axis, 0.5f * 3.14159265358979f - 0.5f * twist) : vec3_t{};
+        axis1 = vec3_add(a.origin, vec3_mul1(direction, 0.5f * chord_length / std::sin(0.5f * twist)));
+    }
+    const vec3_t displacement = vec3_sub(a.origin, axis1);
+    out->metric[XDisplacement] = vec3_dot(displacement, x1);
+    out->metric[YDisplacement] = vec3_dot(displacement, y1);
+    out->metric[HelicalRise] = rise;
+    // As 3DNA: inclination tilts the pair about its x-axis, tip about its y-axis.
+    out->metric[Inclination] = tip_inclination * std::sin(phi) * RAD_TO_DEG;
+    out->metric[Tip] = tip_inclination * std::cos(phi) * RAD_TO_DEG;
+    out->metric[HelicalTwist] = twist * RAD_TO_DEG;
+    const vec3_t axis2 = vec3_add(axis1, vec3_mul1(axis, rise));
+    if (axis_points) { axis_points[0] = axis1; axis_points[1] = axis2; }
+    if (helical) {
+        helical->origin = vec3_mul1(vec3_add(axis1, axis2), 0.5f);
+        helical->z = axis;
+        helical->x = vec3_normalize(vec3_add(x1, x2));
+        helical->y = vec3_cross(helical->z, helical->x);
+    }
     return true;
 }
 
@@ -932,6 +1102,7 @@ const char* metric_name(Metric metric) {
     static const char* names[] = {
         "Buckle", "Propeller Twist", "Opening", "Shear", "Stretch", "Stagger",
         "Tilt", "Roll", "Twist", "Shift", "Slide", "Rise", "Minor Groove", "Major Groove",
+        "X-displacement", "Y-displacement", "Helical Rise", "Inclination", "Tip", "Helical Twist",
         "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Chi", "Pucker Phase", "Pucker Amplitude", "Epsilon - Zeta",
     };
     static_assert(sizeof(names) / sizeof(names[0]) == Metric_Count, "metric names");
@@ -943,6 +1114,8 @@ const char* metric_path(Metric metric) {
         "bp/buckle", "bp/propeller", "bp/opening", "bp/shear", "bp/stretch", "bp/stagger",
         "step/tilt", "step/roll", "step/twist", "step/shift", "step/slide", "step/rise",
         "step/minor_groove", "step/major_groove",
+        "step/x_displacement", "step/y_displacement", "step/helical_rise", "step/inclination", "step/tip",
+        "step/helical_twist",
         "nt/alpha", "nt/beta", "nt/gamma", "nt/delta", "nt/epsilon", "nt/zeta", "nt/chi",
         "nt/pucker_phase", "nt/pucker_amplitude", "nt/epsilon_minus_zeta",
     };
@@ -951,12 +1124,13 @@ const char* metric_path(Metric metric) {
 }
 
 bool metric_is_step(Metric metric) {
-    return metric >= Tilt && metric <= MajorGroove;
+    return metric >= Tilt && metric <= HelicalTwist;
 }
 
 bool metric_is_angular(Metric metric) {
     return metric == Buckle || metric == Propeller || metric == Opening ||
            metric == Tilt || metric == Roll || metric == Twist ||
+           metric == Inclination || metric == Tip || metric == HelicalTwist ||
            (metric >= Alpha && metric <= EpsilonZeta && metric != Amplitude);
 }
 
@@ -969,7 +1143,17 @@ int class_first_metric(int cls) {
 }
 
 int class_parameter_count(int cls) {
-    return cls == Class_Pair ? 6 : cls == Class_Step ? 8 : cls == Class_Nucleotide ? 10 : 0;
+    return cls == Class_Pair ? 6 : cls == Class_Step ? 14 : cls == Class_Nucleotide ? 10 : 0;
+}
+
+int migrate_metric(int metric, int layout) {
+    return layout < 1 && metric >= XDisplacement ? metric + (Alpha - XDisplacement) : metric;
+}
+
+uint32_t migrate_metric_mask(uint32_t mask, int layout) {
+    if (layout >= 1) return mask & ALL_METRIC_PARAMETERS;
+    const uint32_t low = mask & ((1u << XDisplacement) - 1u);
+    return (low | ((mask >> XDisplacement) << Alpha)) & ALL_METRIC_PARAMETERS;
 }
 
 MemberClass metric_class(Metric metric) {
@@ -1120,12 +1304,29 @@ void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p
     if (!minor || !major || n < 2 || !p1 || !p2) return;
     const float nan = std::numeric_limits<float>::quiet_NaN();
     constexpr float offset = 5.8f; // phosphate van der Waals diameter, as in Curves / El Hassan & Calladine
-    // 1-based pair index k -> P1(k), P2(k); NaN when outside [1, n] or missing.
+    auto phosphate = [&](const vec3_t* p, long k, vec3_t* out) {
+        if (k < 1 || k > (long)n || !finite3(p[k - 1])) return false;
+        *out = p[k - 1];
+        return true;
+    };
+    // 1-based pair index k -> P1(k), P2(k); NaN when outside [1, n] or missing. Refined (El Hassan & Calladine
+    // 1998, as 3DNA): the P-P distance times the sine of its angle to the mean local backbone direction,
+    // P(k+1) - P(k-1) on each strand; the direct distance when a flanking phosphate is missing.
     auto dist = [&](long i, long j) -> float {
-        if (i < 1 || j < 1 || i > (long)n || j > (long)n) return nan;
-        const vec3_t a = p1[i - 1], b = p2[j - 1];
-        if (!finite3(a) || !finite3(b)) return nan;
-        return vec3_length(bond(a, b, cell));
+        vec3_t a, b, a0, a1, b0, b1;
+        if (!phosphate(p1, i, &a) || !phosphate(p2, j, &b)) return nan;
+        const vec3_t pp = bond(b, a, cell);
+        const float direct = vec3_length(pp);
+        if (!phosphate(p1, i - 1, &a0) || !phosphate(p1, i + 1, &a1) ||
+            !phosphate(p2, j - 1, &b0) || !phosphate(p2, j + 1, &b1)) return direct;
+        const vec3_t da = bond(a0, a1, cell), db = bond(b0, b1, cell);
+        const float la = vec3_length(da), lb = vec3_length(db);
+        if (la < 1.0e-6f || lb < 1.0e-6f || direct < 1.0e-6f) return direct;
+        const vec3_t mean = vec3_add(vec3_div1(da, la), vec3_div1(db, lb));
+        const float lm = vec3_length(mean);
+        if (lm < 1.0e-6f) return direct;
+        const float cosine = std::clamp(vec3_dot(mean, pp) / (lm * direct), -1.0f, 1.0f);
+        return direct * std::sqrt(std::max(0.0f, 1.0f - cosine * cosine));
     };
     for (size_t s = 0; s + 1 < n; ++s) {
         for (Metric metric : {MinorGroove, MajorGroove}) {

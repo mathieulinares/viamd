@@ -722,7 +722,7 @@ UTEST(lavery_core, dashboard_pools_all_csv_members_and_keeps_32_normalized_bins)
     ASSERT_TRUE(compare_samples(&result,{pooled_external_samples(source,Twist),{180}},true,32));
     EXPECT_LT(result.histogram.centers.back()-result.histogram.centers.front(),3);
     EXPECT_EQ(class_parameter_count(Class_Pair),6);
-    EXPECT_EQ(class_parameter_count(Class_Step),8);
+    EXPECT_EQ(class_parameter_count(Class_Step),14);
     EXPECT_EQ(class_parameter_count(Class_Nucleotide),10);
 }
 
@@ -857,4 +857,43 @@ UTEST(lavery_core, comparison_csv_preserves_bins_filters_statistics_and_unknown_
     const auto empty=csv_comparison_group("run",Rise,"Empty","No matching members",result,0,true);
     EXPECT_EQ((size_t)std::count(empty.begin(),empty.end(),'\n'),(size_t)1);
     EXPECT_NE(empty.find("nan,nan,0,0,0,nan,nan"),std::string::npos);
+}
+
+UTEST(lavery_core, saved_reference_mapping_round_trips_by_label_and_rejects_duplicates) {
+    ExternalReference source;
+    for (const char* label : {"r1","r2","r3"}) {
+        ReferenceMember member;
+        member.label=label;
+        source.members[Class_Pair].push_back(member);
+    }
+    const std::vector<std::string> pairs={"1: A","2: B","3: C"}, steps={"1-2"}, nucleotides;
+    const MemberLabels labels={&pairs,&steps,&nucleotides};
+    ReferenceMapping manual;
+    manual[Class_Pair]={2,-1,0};
+    manual[Class_Step]={-1};
+    const std::string text=reference_mapping_text(manual,source,labels);
+
+    // Identity matching would map in order; the saved manual choice wins, including explicit unmatched.
+    ReferenceMapping restored;
+    restored[Class_Pair]={0,1,2};
+    restored[Class_Step]={-1};
+    EXPECT_TRUE(apply_reference_mapping_text(&restored,source,labels,text));
+    EXPECT_EQ(restored[Class_Pair][0],2);
+    EXPECT_EQ(restored[Class_Pair][1],-1);
+    EXPECT_EQ(restored[Class_Pair][2],0);
+    EXPECT_TRUE(reference_mapping_text(restored,source,labels)==text);
+
+    // Labels absent from the current system are ignored rather than applied by row number.
+    ReferenceMapping other;
+    other[Class_Pair]={0,1,2};
+    EXPECT_TRUE(apply_reference_mapping_text(&other,source,labels,"0\t9: Z\tr3\n"));
+    EXPECT_EQ(other[Class_Pair][0],0);
+    EXPECT_EQ(other[Class_Pair][2],2);
+
+    ReferenceMapping duplicate;
+    duplicate[Class_Pair]={0,1,2};
+    EXPECT_FALSE(apply_reference_mapping_text(&duplicate,source,labels,"0\t1: A\tr2\n"));
+    EXPECT_EQ(duplicate[Class_Pair][0],-1);
+    EXPECT_EQ(duplicate[Class_Pair][1],-1);
+    EXPECT_EQ(duplicate[Class_Pair][2],2);
 }

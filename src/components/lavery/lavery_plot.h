@@ -1,11 +1,24 @@
 #pragma once
 
 #include <implot.h>
+#include <implot_internal.h>
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
 namespace lavery {
+
+inline bool drag_sequence_landmark(int index, double* position, bool* held) {
+    // Finish plot setup before pushing IDs: setup establishes ImPlot's own ID scope.
+    ImPlot::GetPlotLimits();
+    ImGui::PushOverrideID(ImPlot::GetCurrentPlot()->ID);
+    ImGui::PushID("Lavery sequence landmark drag");
+    const bool changed=ImPlot::DragLineX(index,position,ImVec4(0,0,0,0),6,
+        ImPlotDragToolFlags_NoFit|ImPlotDragToolFlags_Delayed,nullptr,nullptr,held);
+    ImGui::PopID();
+    ImGui::PopID();
+    return changed;
+}
 
 inline bool draw_series_row(const char* name, bool* visible, const ImVec4& color, bool* edit) {
     const bool changed=ImGui::Checkbox("##visible",visible);

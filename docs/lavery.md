@@ -25,11 +25,20 @@ workflows, scientific interpretation and validation record.
 | Class | Members | Parameters (unit) |
 |---|---|---|
 | Intra-base pair | each detected base pair | Shear, Stretch, Stagger (Å); Buckle, Propeller, Opening (°) |
-| Inter-base pair (step) | each pair of consecutive base pairs | Shift, Slide, Rise (Å); Tilt, Roll, Twist (°); Minor and Major groove width (Å) |
+| Inter-base pair (step) | each pair of consecutive base pairs | Shift, Slide, Rise (Å); Tilt, Roll, Twist (°); Minor and Major groove width (Å); local helical X-displacement, Y-displacement, Helical rise (Å), Inclination, Tip, Helical twist (°) |
 | Nucleotide | each paired nucleotide (two per base pair) | Alpha, Beta, Gamma, Delta, Epsilon, Zeta, Chi, Pucker phase, Epsilon − Zeta (°); Pucker amplitude (°, linear) |
 
 Each frame produces one value per member and parameter, or no value when the
 geometry is invalid. Quality flags explain why a value is missing or suspicious.
+
+The step parameter selectors are organised into **Step (local frame)**,
+**Helical (local axis)** and **Grooves**. Event parameters, advanced aggregate
+selection, representative feature selection and Export's measurement picker use
+the same groups, with an all/none checkbox for each group. These are presentation
+groups, not new member classes:
+all still use the same step positions, event members and CSV columns. Groove
+widths remain phosphate-based measurements independent of the displayed axis.
+Helical parameters stay off by default in event detection.
 
 ### Workflow boundaries
 
@@ -43,10 +52,14 @@ geometry is invalid. Quality flags explain why a value is missing or suspicious.
 | Data export | Optional local reference | Explicit export measurements, positions, intervals and datasets |
 | Representative frames | Required local reference | Ranks distance from its centre, not population or straightness |
 
-Detection settings/references, layout and visual settings are workspace-persisted.
-Local workflow references, comparison series, export choices and sequence
-landmarks are session-only. Loading a workspace restores their defaults rather
-than carrying settings or cached results from the previous workspace.
+Detection settings/references, layout and visual settings are workspace-persisted,
+as are the local workflow references (Sequence, Export, Ranking, Heatmap),
+comparison CSV paths, comparison/profile series, export datasets and choices,
+representative-frame features and sequence landmarks
+(see [Workspace keys](#6-workspace-keys-lavery-section)). Computed results are not
+saved; they are recomputed after the trajectory analysis. Loading a workspace
+restores defaults for anything it does not contain rather than carrying settings
+or cached results from the previous workspace.
 Time periods/markers belong to VIAMD's shared Timeline and are saved there;
 sequence landmarks mark positions, not times.
 
@@ -277,18 +290,36 @@ The latter two are warnings; zero means no issue detected.
 New thresholds/flags do not change pair/step quality handling.
 
 **Grooves.** Minor and Major groove widths belong to the step class and use
-the 3DNA phosphorus-distance definition (El Hassan & Calladine), for 1-based
-step *i* along one helix:
+the 3DNA phosphorus pairs (El Hassan & Calladine), for 1-based step *i* along
+one helix:
 
 ```
-minor(i) = ½(|P1(i+2) − P2(i−2)| + |P1(i+3) − P2(i−1)|) − 5.8 Å
-major(i) = |P1(i−1) − P2(i+2)| − 5.8 Å
+minor(i) = ½(w(P1(i+2), P2(i−2)) + w(P1(i+3), P2(i−1))) − 5.8 Å
+major(i) = w(P1(i−1), P2(i+2)) − 5.8 Å
 ```
 
-P1/P2 are the phosphorus atoms on the two strands. The 5.8 Å phosphate
-diameter is subtracted (3DNA reports the raw P–P distance). Steps too close to
-a helix end, or with a missing P, have no value. Grooves are computed from the
+P1/P2 are the phosphorus atoms on the two strands. *w* is the 3DNA **refined**
+width: the P–P distance *d* times sin θ, where θ is the angle between the P–P
+vector and the mean local backbone direction (normalized P(k+1) − P(k−1) on
+each strand). It removes the part of the distance along the backbones. Where a
+flanking phosphate needed for the direction is missing (strand ends), *w* falls
+back to the direct P–P distance. The 5.8 Å phosphate diameter is subtracted
+(3DNA reports widths without it). Steps too close to a helix end, or with a
+missing P in the pair itself, have no value. Grooves are computed from the
 phosphates even when the step itself is flagged by quality checks.
+
+**Local helical parameters.** Each step also reports the 3DNA local helical
+parameters (Lu & Olson 2003, `helical_par`): the local helical axis is
+perpendicular to both frame-axis differences (x₂ − x₁) × (y₂ − y₁); each pair
+frame is tilted onto it. Helical twist and helical rise are the screw rotation
+and translation along that axis; X/Y-displacement locate pair 1's origin
+relative to the axis; Inclination and Tip are the pair tilt about its x- and
+y-axis. With zero helical twist the axis is undefined, and the mean pair normal
+is used. These parameters re-express the same two frames as the six step
+parameters, so they are **excluded from the default Event parameters** to avoid
+counting one deformation twice; tick them under **Inter** to detect on them.
+On the 1RNA fixture they show the A-form signature (X-displacement ≈ −4 Å,
+Inclination ≈ +18°, Helical rise ≈ 2.7 Å).
 
 **Within-state baselines.** Phase (North [270°, 90°) / South [90°, 270°)),
 Epsilon − Zeta (BI / BII), Chi (anti / syn: syn between 270° and 90°), Alpha
@@ -322,7 +353,9 @@ and the shortest signed angular change between the two qualified runs' circular
 means. These are not sigma scores and do not enter the outlier-event ranking.
 The Event parameters mask and Detection range apply. Clicking a row selects
 the nucleotide/parameter at destination onset, isolates its feedback and overlays
-the destination-run distribution. Playback or frame changes end inspection.
+the destination-run distribution. Playback or frame changes end inspection,
+unless measurement value labels are on (see section 3: the switch then stays
+selected and its torsion follows playback).
 The separate state-switch CSV includes state names, frames/times, angular change,
 residence and the minimum used. Standard state boundaries are heuristic:
 validate residence thresholds and transitions scientifically.
@@ -365,6 +398,9 @@ outlier events, baselines or the existing canonical pair-loss gate.
 |---|---|
 | Watson-Crick | Both A-T/U contacts (A N6 to T/U O4; T/U N3 to A N1), or all three G-C contacts (G N1 to C N3; G N2 to C O2; C N4 to G O6); both glycosidic torsions anti; compatible base geometry |
 | Hoogsteen (A-T/U) | A N6 to T/U O4 and T/U N3 to A N7; adenine syn and pyrimidine anti; compatible base geometry |
+| Wobble (G-T/U) | Both wobble contacts (G N1 to T/U O2; T/U N3 to G O6) of a pair typed wobble at frame 0; both anti; compatible base geometry |
+| Reverse Watson-Crick | Both trans A-T/U contacts (T/U N3 to A N1; A N6 to T/U O2) of a pair typed reverse at frame 0; both anti; compatible base geometry |
+| Partner switch | The pair's own geometry is broken while one of its bases forms a valid pairing geometry with a base of another strand whose own tracked pair, if any, is also broken |
 | Other / ambiguous | Finite, supported evidence, but neither full contact/orientation definition; includes partial contacts and uncertain orientations |
 | Unpaired | Disrupted ring separation, alignment or plane offset, with no candidate canonical or A-T/U Hoogsteen contacts |
 | Unavailable | Unsupported chemistry, missing contact atoms/donor hydrogens, nonfinite evidence or unavailable base/glycosidic geometry |
@@ -380,8 +416,20 @@ The classifier uses conservative disjoint chi windows: anti [-180, -60] degrees
 and adenine syn [0, 120] degrees, independently of the coarser anti/syn plot bins.
 Compatible base geometry uses the existing pair ring-separation, normal-alignment
 and plane-offset limits, not canonical-contact quality. **G-C Hoogsteen
-(including protonation) and other noncanonical chemistries are not identified**;
-such structures may appear Other, not Hoogsteen. These are evidence-based
+(including protonation), reverse G-C and other noncanonical chemistries are not
+identified**; such structures may appear Other, not Hoogsteen.
+
+**Pair types at frame 0.** Each detected pair is typed once from the first
+frame: a family whose two contacts are formed wins (Watson-Crick, then
+Hoogsteen, then wobble); parallel base normals require formed reverse
+Watson-Crick contacts. Otherwise A-T/U and G-C default to Watson-Crick and G-T/U
+to wobble; unsupported identities are excluded (logged). Non-Watson-Crick pairs
+carry a label tag such as `[wobble]` or `[reverse WC]`. For a wobble or reverse
+pair the state is evaluated against its own family; incompatible geometry
+without its contacts is Unpaired, anything else Other. **Reverse pairs** flip
+base b's x and y axes so that intra-pair parameters stay near zero (3DNA instead
+reports Opening near 180°); steps touching a reverse pair are therefore
+convention-dependent and not comparable with 3DNA. These are evidence-based
 annotations, not a comprehensive base-pair taxonomy or binding-energy model.
 
 Both source and destination must meet **Pairing min residence** (default 200 ps,
@@ -401,7 +449,8 @@ residence is endpoint time difference; frame fallback is inclusive sample count.
 `qualifies` indicates a non-unavailable run meeting the residence minimum, not
 whether that run forms a transition with a known source.
 The published U8 attribute `lavery/bp/pairing_state` uses codes 0 unavailable,
-1 Watson-Crick, 2 A-T/U Hoogsteen, 3 Other, 4 Unpaired.
+1 Watson-Crick, 2 A-T/U Hoogsteen, 3 Other, 4 Unpaired, 5 Wobble,
+6 Reverse Watson-Crick, 7 Partner switch.
 
 An important distinction: the canonical quality gate accepts one surviving
 explicit canonical bond. Its shared A N6 to T O4 bond can therefore keep a
@@ -540,7 +589,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
     transition inspection. Fit view restores the complete sequence extent.
     This is a general geometry profile, not a categorical kink detector:
     persistent localized Roll/Tilt deviations are candidates for inspection.
-    Profile controls are session-only. Statistical export is exclusively under
+    Profile controls are saved with the workspace. Statistical export is exclusively under
     **Export > Data > Sequence profiles**, where measurements and scope are
     chosen independently of the displayed view.
     **Reference** stays first, before View and averaging controls. Its settings
@@ -565,9 +614,10 @@ not insert/remove reason paragraphs above the timeline and distribution.
     Bend occupancies use grouped bars; categorical occupancies use separate
     stacked lanes, primary first then list order, retaining state colours.
     External overlays require the mapped Reference; additional profile series
-    currently use only the active trajectory. Series are session-only.
+    currently use only the active trajectory. Series are saved with the workspace.
     Its **View** selector also offers **Bending / Kinks**, **Twist / Unwinding**,
-    **Stacking geometry**, **Groove geometry** and **State occupancy**. These
+    **Stacking geometry**, **Groove geometry**, **State occupancy** and
+    **Helical geometry**. These
     aligned panels share linked x-axis limits while retaining separate units:
     - Bending shows exact adjacent pair-normal angle, Rise context and candidate
       occupancy. The adjustable initial threshold is **20 degrees**, inclusive.
@@ -586,6 +636,12 @@ not insert/remove reason paragraphs above the timeline and distribution.
       not supercoiling or linking-number changes.
     - Stacking shows Rise/Slide/Shift, not stacking energy or contact assignment.
       Grooves shows Minor/Major widths with terminal missing values preserved.
+    - Helical geometry shows X-displacement, Inclination and Helical Rise in
+      three aligned panels, with the same current-frame, reference and filtered
+      series controls. It is also available in Export's structural quantities.
+      The remaining local helical parameters are available individually in
+      Parameters. These describe a local screw axis, not a global helix property;
+      nearly untwisted steps can produce large, noisy displacements.
     - State occupancy shows each state of BI/BII, anti/syn, pucker, Alpha/Gamma
       rotamers or pairing chemistry. Percentages use only available raw states;
       unavailable samples are reported separately and never treated as Unpaired.
@@ -598,7 +654,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
       interval-average stack, not an additional interval occupancy.
     SD bands apply to numerical quantities, not occupancy panels. Current-frame
     points, molecular picking and CSV export work throughout. Raw reference
-    overlays are supported in Parameters, Twist, Stacking and Grooves; derived
+    overlays are supported in Parameters, Twist, Stacking, Grooves and Helical geometry; derived
     bend/occupancy reference comparisons are not reconstructed from independently
     filtered CSV metrics or missing categorical chemistry evidence.
     **Landmarks** groups the marking actions and shared sequence-landmark list
@@ -613,6 +669,21 @@ not insert/remove reason paragraphs above the timeline and distribution.
     heatmaps keep a step marker between adjacent BPs. Step heatmaps map only
     available contiguous step chains, without snapping or bridging chain gaps.
     These guides are 3 px thick in both profile and heatmap orientations.
+    Drag a landmark in any sequence profile to move it; it snaps to the nearest
+    position of its own class (nucleotides stay on their strand) and is committed
+    on release. Dropping on another landmark's position snaps back. Auto names
+    (`Step i-j`, `BP n`) follow the move; edited names are kept.
+    **Visual feedback > Landmarks** draws visible landmarks in the viewport as a
+    line across the DNA, along the base-pair long axis: at the mid-step frame for
+    steps, at the base-pair frame for BP and nucleotide landmarks. Placement uses
+    the displayed coordinates, independently of pairing/contact quality flags:
+    temporary pairing disruptions do not hide the guide during playback.
+    It is hidden only when the required base frames or midpoint orientation
+    cannot be constructed (missing/nonfinite geometry or an ambiguous transform).
+    No previous-frame position is held, and scientific measurement validity is
+    unchanged. The line uses the landmark colour, follows
+    playback and a live drag, and can show the landmark name. Thickness, opacity
+    and extension past the backbone (half-length 9 Å + extension) are editable.
     Parameter and both State heatmaps have the same editable annotation lane
     above their plots as the VIAMD Timeline. Shift-drag creates a period;
     Shift-click creates a time marker, in either the lane or plot. Drag a bar
@@ -632,7 +703,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
     occupancy cutoff with at least one qualifying frame; source range, angle
     threshold and occupancy cutoff are recorded and are not updated by later
     setting changes. Duplicate positions are reused and made visible.
-    Landmarks are session-only and cleared on analysis reset; they do not
+    Landmarks are saved with the workspace and cleared on analysis reset; they do not
     change calculations or CSV schemas. Aligned panels use one bottom
     Sequence position axis label instead of repeated BP-midpoint labels.
     Axis ticks are integer BP numbers; step names use endpoint labels such as
@@ -693,7 +764,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
     viewport feedback. Invalid references show an error rather than old data or
     silently substituting detection statistics. Heatmap hover z-scores use the
     same local reference as the colours, including state-conditioned parameters.
-    Like the other local workflow references, these settings are session-only.
+    Like the other local workflow references, these settings are saved with the workspace.
     The selected member is marked by a black horizontal line and the current frame
     by a yellow vertical line, both 4 pixels thick.
   - **State heatmap** retains raw all-member state history, including pairing
@@ -731,7 +802,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
     Event/switch exports include all detected rows, independent of display
     filters; raw pairing runs use an explicitly chosen pair and include missing
     and short runs. Advanced **Export centreline coordinates...** is beside
-    **Smoothed midpoint axis** in Visual feedback, not in Data.
+    **Helix axis** in Visual feedback, not in Data.
     Representative frames starts with Reference, followed by **Features**,
     **Extraction** and automatically updated **Results** with XTC/GRO/CSV export.
     Feature shortcuts are collapsed separately from the main parameter/member
@@ -796,7 +867,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
     datasets never follow the live frame.
     Results are cached by class, source/filter revisions, period bounds/names
     and current frame for live groups. Overlays, imported comparison datasets
-    and style controls are currently session-only.
+    and style controls are saved with the workspace; imported CSVs are re-read and checked on load.
   Pairing states and Pairing & coverage no longer occupy separate top-level tabs.
 - **Outliers > Outliers over time**: a single summary line (current-frame outliers /
   valid members, with coverage, chance totals and controls in its tooltip, and
@@ -973,7 +1044,7 @@ disables event export and detection-only controls. It preserves
 settings and leaves parameter/reference calculation, sequence profiles, bend
 candidates, distributions, state occupancy and state-switch detection available.
 Normal molecular selection, manually added sequence landmarks and the explicitly
-enabled midpoint axis remain. **Visual feedback > Selection / measurement
+enabled helix axis remain. **Visual feedback > Selection / measurement
 feedback** independently controls selected geometry, hover previews, measurement
 labels/picking and state-switch inspection. These remain available with detection
 off; sigma-based colours become neutral, without restoring automatic outliers.
@@ -1209,6 +1280,10 @@ between the two labels where there are two:
 | Shift, Slide | Step translation |
 | Rise | Unstacking (+) / Compressed step (−) |
 | Minor groove, Major groove | Widening (+) / Narrowing (−) |
+| X-displacement, Y-displacement | Helical displacement |
+| Helical rise | Helical unstacking (+) / Helical compression (−) |
+| Inclination, Tip | Base-pair inclination |
+| Helical twist | Helical overwinding (+) / Helical unwinding (−) |
 | Pucker phase, Pucker amplitude, Delta | Sugar fluctuation |
 | Epsilon, Zeta, Epsilon − Zeta | Epsilon / zeta fluctuation |
 | Alpha, Gamma | Alpha / gamma fluctuation |
@@ -1239,6 +1314,24 @@ When the curve stays near the dashed line, the hits are mostly noise.
 Rank events by **Score** rather than by count, and raise the tolerance or
 **Min duration** (or **Min frames** without timestamps). With the Median/MAD baseline, the Gaussian figure is
 approximate.
+
+### Multiple testing
+
+**Multiple testing** (Detection) replaces the fixed Tolerance by one derived
+per frame from that frame's family of tests (valid members × event
+parameters), at **Family alpha** (default 0.05):
+
+- **None**: the Tolerance slider (default).
+- **Bonferroni (FWER)**: tolerance = Gaussian two-sided quantile of
+  alpha / tests. The chance of any false outlier in a frame stays below alpha.
+- **Benjamini-Hochberg (FDR)**: the expected share of false outliers among a
+  frame's outliers stays below alpha. The tolerance adapts per frame to the
+  observed |z| values and is never stricter than Bonferroni.
+
+The sidebar shows the effective tolerance range and its current value. The
+continue threshold is the frame tolerance minus Hysteresis; child events start
+at the nominal tolerance plus Burst extra. Both corrections assume Gaussian,
+independent z-scores, like the chance level.
 
 ### Members and parameters
 
@@ -1321,7 +1414,13 @@ highlighted. Disable **Follow playback** to browse without automatic scrolling.
 During playback, Lavery hides neutral preview markers and selected-parameter
 measurement geometry, labels and hidden cues. Active-event regions and genuine
 outlier/pair-loss markers remain visible.
-Starting playback also clears the selected parameter's viewport inspection,
+With **Measurement value labels** on, a selected state switch or outlier event
+instead stays selected through playback and frame changes, and its measurement
+follows every frame: the switch's torsion, or for an event the member and
+parameter with the strongest peak, dimmed and labelled "(outside event)" when
+the frame is outside the event. Event inspection scope still applies, so only
+that event's feedback is shown. Click the selected row again to release it.
+Otherwise, starting playback also clears the selected parameter's viewport inspection,
 without changing the plot selection. Pausing does not restore the old grey
 measurement overlay; select a member or parameter again, or hover it, to inspect
 it in the viewport.
@@ -1433,7 +1532,7 @@ Only one parameter has detailed measurement annotations at a time:
   phosphate endpoints, with visible caps. The minor-groove spans are averaged.
   The same index helper drives numerical widths and their visual endpoints.
   The native distance geometry labels the raw P–P distances; a separate
-  label gives the reported width after subtracting 5.8 Å. Hover identifies
+  label gives the reported (refined) width after subtracting 5.8 Å. Hover identifies
   strand/residue/atom endpoints. The flanking backbone sections are included
   in the highlight. Missing flanking phosphates produce an unavailable label,
   not a misleading central-step replacement.
@@ -1450,7 +1549,16 @@ Only one parameter has detailed measurement annotations at a time:
 - **Pair/step parameters:** reference axes at the exact local midpoint frame,
   with a signed translation arrow or rotation-vector component arc. These
   diagrams are explicitly labelled as local-frame components, not ordinary
-  interatomic distances or angles.
+  interatomic distances or angles. Local helical parameters use the 3DNA
+  helical mid-step frame (z along the local helical axis) instead and are
+  labelled as helical mid-frame components.
+
+**Helix axis** (Visual feedback) draws either the **Smoothed midpoint** line
+(spline through base-pair midpoints, default) or the **Local helical (3DNA)**
+axis: a polyline through each step's local helical axis, from the first pair's
+axis point through every helical mid-step origin to the last pair's. The local
+axis is split at chain gaps and failed steps and is noisier by construction.
+Export centreline coordinates writes whichever axis is displayed.
 
 Measurement geometry uses a depth-tested transparent pass. Selected
 distance/dihedral paths also have faint dashed through-structure cues, rendered
@@ -1561,6 +1669,8 @@ When enabled, value labels share the native measurement text/background styling,
 screen-space separation for nearby labels. They are redrawn every UI frame
 even when the 3D scene is lazily cached, so a paused measurement does not vanish.
 Playback retains the one selected measurement, but ignores hover previews.
+With labels on, selected state switches and events also persist through
+playback (section 3).
 All other active contributors stay compact rather than acquiring a label cloud.
 
 ## 5. CSV exports
@@ -1578,7 +1688,7 @@ their selections or ordering. Review the export-specific measurements and scope:
 | Pairing-state runs | All raw runs of the export-specific pair, including unavailable and short runs; not the filtered chemistry transition table |
 | Distribution histograms | Explicit parameter, BP/partner and dataset selection; whole trajectory, periods, independent CSVs and/or reference, not displayed overlays |
 | Sequence profile summaries | Explicit parameters/quantities and independently filtered datasets; optional raw reference summaries; no implicit current-frame values |
-| Export centreline coordinates (Visual feedback) | Displayed frame's smoothed midpoint centreline, beside its visual controls |
+| Export centreline coordinates (Visual feedback) | Displayed frame's helix axis (smoothed midpoint or local helical), beside its visual controls |
 | Export XTC + GRO + CSV | Explicitly ranked representative frames; native coordinates and mapping/provenance CSV |
 
 ### Distribution histograms CSV
@@ -1659,7 +1769,7 @@ Configure each workflow directly; no reference copy/paste action is needed.
 Sequence reference and Data export reference follow the same local setup model,
 defaulting to Helix-wide and Own history respectively; their raw summaries
 remain mean/population SD, without state conditioning. These local reference
-setups are session-only, like existing profile/export selections.
+setups are saved with the workspace, like profile/export selections.
 Under **Feature shortcuts**, **All intra**, **All inter**, **All nucleotide**
 and **All classes** add every
 parameter/member combination in those classes directly. For finer control,
@@ -1850,15 +1960,23 @@ must be rebuilt after loading/recomputing a trajectory.
 | Key | Type | Default |
 |---|---|---|
 | DetectionEnabled | bool; disables sigma/event detection and its transient feedback, not raw or state analysis | 1 |
+| MetricLayout | int, parameter numbering of the saved workspace; written first; absent = 0 (before the helical parameters) | 1 |
 | ShowWindow, ShowHeatmap, SyncViewport, CompareAll, ShowAxis, SignedOverlay, OverlayHalo, AggregateOutliers | bool | - |
-| SelectedParameters | bit mask, class-local (bit k = k-th parameter of the plotted class) | 1023 |
-| MeasurementText | bool, viewport value text only | 0 |
+| AxisKind | int, 0 Smoothed midpoint / 1 Local helical (3DNA) | 0 |
+| SelectedParameters | bit mask, class-local (bit k = k-th parameter of the plotted class) | 16383 |
+| MeasurementText | bool, viewport value text; also keeps a selected switch/event followed during playback | 0 |
+| LandmarkView, LandmarkViewLabels | bool, viewport landmark lines and names | 1 |
+| LandmarkRadius | float, line radius in Å, 0.05-1 | 0.25 |
+| LandmarkOpacity | float, 0.1-1 | 0.8 |
+| LandmarkExtension | float, Å past the backbone, 0-10 | 2 |
 | StateMinTimePs | float, independent minimum source/destination residence; legacy -1 follows event minimum | 200 |
 | StateMinFrames | int, residence samples in frame fallback | 3 |
 | PairingMinTimePs | float, nonnegative pairing source/destination residence | 200 |
 | PairingMinFrames | int, positive pairing residence samples in frame fallback | 3 |
 | StateHistoryKind | int, BI/BII, chi, pucker, alpha, gamma, pairing (0-5) | 0 |
 | OutlierSigma | float | 3 |
+| MultipleTesting | int, 0 None / 1 Bonferroni / 2 Benjamini-Hochberg | 0 |
+| FamilyAlpha | float, 0.001-0.2 | 0.05 |
 | Metric, Member | int | - |
 | Baseline | 0 = Mean/SD, 1 = Median/MAD | 0 |
 | BaselineRangeEnabled | bool; 0 = Full trajectory, 1 = Custom or Timeline period | 0 |
@@ -1866,8 +1984,8 @@ must be rebuilt after loading/recomputing a trajectory.
 | BaselinePeriodId | uint32, persistent VIAMD period ID; 0 = unselected | 0 |
 | BaselineRangeBeginPs, BaselineRangeEndPs | float, inclusive reference bounds in ps | 0 |
 | BaselineRangeFirst, BaselineRangeLast | int, inclusive reference frame fallback bounds | 0 |
-| EventParameters | int (24-bit mask, bit k = Metric k: Buckle..Stagger, Tilt..Rise, grooves, Alpha..Epsilon − Zeta) | 16777215 |
-| EventParametersVersion | int; 1 preserves explicit 24-parameter selections, including an empty mask | 1 |
+| EventParameters | int (30-bit mask, bit k = Metric k: Buckle..Stagger, Tilt..Rise, grooves, X-displacement..Helical twist, Alpha..Epsilon − Zeta) | all except the six helical bits |
+| EventParametersVersion | int; 1 preserves explicit selections, including an empty mask | 1 |
 | EventMinFrames | int, 1-100000 | 3 |
 | EventMaxGap | int, 0-100000 | 0 |
 | EventMinTimePs | float, nonnegative ps; legacy -1 requests migration | 200 |
@@ -1897,12 +2015,34 @@ must be rebuilt after loading/recomputing a trajectory.
 
 If a workspace has no new keys, it loads with these defaults. Unversioned 12-bit
 `EventParameters` masks retain the legacy migration: keep their choices and add
-grooves and nucleotide parameters. New saves include `EventParametersVersion`
+grooves and nucleotide parameters. Workspaces without `MetricLayout` predate the
+local helical parameters, which were inserted after the grooves: their global
+parameter indices (`Metric`, `EventParameters`, `ExportParameters`,
+representative features) are shifted so nucleotide parameters stay selected,
+and saved selections are kept exactly, without adding helical parameters. A
+saved all-parameters `SelectedParameters` (1023) becomes all 14 step parameters. New saves include `EventParametersVersion`
 so deliberately selecting only pair/step parameters (or none) survives reload.
 Out-of-range or
 non-finite layout values are clamped or reset.
 `ShowHeatmap` is retained for legacy workspace compatibility; it does not hide
 the dedicated Parameter heatmap tab.
+
+Workflow choices (`WorkflowStateVersion`, `Profile*`, `Export*`,
+`Representative*`, `Comparison*`, `HeatmapReferenceMode`, `LandmarkMinOccupancy`)
+are keys of `[Lavery]`; per-item workflow state follows in repeated sections:
+
+| Section | Content |
+|---|---|
+| `[LaveryWorkflowReference]` | One per Sequence/Export/Ranking/Heatmap reference: source, method, interval, and external CSV path, fingerprint and member mapping |
+| `[LaveryComparisonCSV]` | Imported comparison CSV path and fingerprint |
+| `[LaveryComparisonSeries]`, `[LaveryProfileSeries]` | Overlay/profile series recipes, intervals and options |
+| `[LaveryExportDataset]` | Distribution/profile export datasets |
+| `[LaveryLandmark]` | Sequence landmarks (class, member, name, colour, identity) |
+
+They are restored after the trajectory analysis finishes. CSV files are re-read
+and their fingerprint is checked: a changed or missing file is reported, not
+silently replaced, and items that no longer match the structure are dropped
+with a log message. Keep the CSVs alongside the workspace for portability.
 
 ## 7. Implementation notes
 
@@ -1913,13 +2053,13 @@ depend on ImGui, OpenGL or `ApplicationState`:
 - `lavery_events_core.cpp`: event grouping/contributions, residence-qualified
   switches, shared time-range resolution and event/state CSVs;
 - `lavery_pairing_core.cpp`: directional contact evidence and pairing chemistry;
-- `lavery_axis_core.cpp`: connected midpoint axes and axis export;
+- `lavery_axis_core.cpp`: connected midpoint and local helical axes, and axis export;
 - `lavery_reference_core.cpp`: independent references, mapping, ranking and extraction.
 
 The public computational API includes:
 
 - `compute_statistics(out, values, count, angular, Baseline, state_metric)`;
-- `torsion`, `pseudorotation`, `compute_nucleotide`, `groove_widths`,
+- `torsion`, `pseudorotation`, `compute_nucleotide`, `compute_helical_step`, `groove_widths`,
   `helix_chains`, and the class helpers `class_first_metric`,
   `class_parameter_count`, `metric_class`, `metric_state*`;
 - `MemberStatistics::deviation`, `zscore` and `is_outlier`;
@@ -1959,10 +2099,16 @@ The public computational API includes:
   filter text are cached per event after detection, so filtering and sorting
   do not rebuild strings every frame. While any widget is active (e.g. a
   slider being dragged), changed settings set a pending flag and the previous
-  result is kept; detection runs once on release. Detection is synchronous: a
-  100k-frame synthetic benchmark takes about 0.1–0.2 s per run in Release.
-  Larger all-parameter searches can still block on edit release; these display
-  optimizations do not move scientific recomputation to a worker thread.
+  result is kept; recomputation starts once on release.
+- **Asynchronous recompute**: statistics and outlier counts/events are
+  recomputed by one pool task (`RecomputeJob`). `prepare_*` snapshots the inputs
+  on the main thread, `run_*` computes on the worker without touching
+  component state, and `update_results` publishes the finished job at the next
+  draw. The previous results stay displayed meanwhile; a superseded job is
+  cancelled and restarted with the latest settings. Only the first result
+  after an analysis is awaited, so views always have data. While a job runs,
+  the analysed values, pairs/steps, published statistics and external
+  reference are not modified.
 - **Pooled reference densities**: cached per conformational state, helix and
   statistics revision. Event selection and comparison pins do not invalidate
   the pooled reference; revisiting a cached state during playback does not
@@ -1974,16 +2120,22 @@ The public computational API includes:
 
 ## 8. Limitations
 
-- Events default to all 24 parameters. Many nucleotide torsions are tested per
-  member, so the chance level rises; untick the Nucl. column (or single torsions)
-  to focus on base-pair geometry.
+- Events default to all 24 non-helical parameters. Many nucleotide torsions are
+  tested per member, so the chance level rises; untick the Nucl. column (or
+  single torsions), or use **Multiple testing**, to focus on base-pair geometry.
+- Local helical parameters are ill-conditioned for nearly untwisted steps
+  (helical twist → 0); displacements then become large and noisy.
 - Nucleotides outside detected base pairs (overhangs, loops) are not analysed.
   Nucleotide distortion warnings are heuristic and do not certify a physically
   meaningful transition or automatically exclude finite geometry.
-- Groove widths follow 3DNA minus 5.8 Å; they are not Curves+ groove widths and
+- Groove widths follow the 3DNA refined definition minus 5.8 Å (direct P–P
+  where a flanking phosphate is missing); they are not Curves+ groove widths and
   are missing for the 2–3 steps nearest each helix end.
-- Changing the baseline method/range recomputes statistics synchronously on edit release, which can take a
-  moment on very long trajectories.
+- Recomputation is asynchronous, but the previous results remain shown until it
+  finishes, which can take a moment on very long trajectories.
+- Pair types are fixed from frame 0. Reverse G-C, G-C Hoogsteen and other
+  non-canonical families are not typed; reverse pairs use a flipped-axes
+  convention that differs from 3DNA.
 - The outlier count plot always uses the plotted class and parameter(s). Only the
   events use the Event parameters setting, so event bands can come from parameters
   that are not plotted.
@@ -2036,9 +2188,12 @@ Remaining scientific validation and possible analysis extensions:
 - Validate event thresholds, hierarchy and false-positive behaviour on
   representative trajectories. In particular, check background sub-events
   during broad changes; small parent regions give noisy background medians.
-- Compare groove widths using explicitly matched definitions. VIAMD's direct
-  phosphorus-distance widths are not Curves+ curvilinear widths, so equality
+- Compare groove widths using explicitly matched definitions. VIAMD's 3DNA
+  refined phosphorus widths are not Curves+ curvilinear widths, so equality
   cannot be assumed.
+- Validate the local helical parameters and refined grooves against 3DNA
+  output on the same structures; they are currently checked against exact
+  screw geometry and the A-form signature of the 1RNA fixture only.
 
 ### Analysis and performance
 

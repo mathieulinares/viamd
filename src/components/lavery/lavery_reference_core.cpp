@@ -296,6 +296,50 @@ std::vector<int> match_reference_members(const std::vector<ReferenceMember>& sou
     return mapping;
 }
 
+std::string reference_mapping_text(const ReferenceMapping& mapping, const ExternalReference& source, const MemberLabels& labels) {
+    std::string text;
+    for (int cls = 0; cls < Class_Count; ++cls) {
+        if (!labels[cls]) continue;
+        for (size_t m = 0; m < mapping[cls].size() && m < labels[cls]->size(); ++m) {
+            const int r = mapping[cls][m];
+            text += std::to_string(cls)+"\t"+(*labels[cls])[m]+"\t"+
+                (r>=0 && (size_t)r<source.members[cls].size() ? source.members[cls][r].label : std::string{})+"\n";
+        }
+    }
+    return text;
+}
+
+bool apply_reference_mapping_text(ReferenceMapping* mapping, const ExternalReference& source, const MemberLabels& labels,
+                                  const std::string& text) {
+    if (!mapping) return false;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines,line)) {
+        std::istringstream fields(line);
+        std::string class_text,current,label;
+        if (!std::getline(fields,class_text,'\t') || !std::getline(fields,current,'\t')) continue;
+        std::getline(fields,label);
+        for (int cls = 0; cls < Class_Count; ++cls) {
+            if (class_text!=std::to_string(cls) || !labels[cls]) continue;
+            auto& members = (*mapping)[cls];
+            for (size_t m = 0; m < labels[cls]->size() && m < members.size(); ++m) {
+                if ((*labels[cls])[m]!=current) continue;
+                members[m] = -1;
+                for (size_t r = 0; r < source.members[cls].size(); ++r)
+                    if (source.members[cls][r].label==label) members[m]=(int)r;
+            }
+        }
+    }
+    bool unique = true;
+    for (auto& members : *mapping) for (size_t m = 0; m < members.size(); ++m)
+        if (members[m]>=0 && std::count(members.begin(),members.end(),members[m])>1) {
+            const int duplicate = members[m];
+            for (auto& r : members) if (r==duplicate) r=-1;
+            unique = false;
+        }
+    return unique;
+}
+
 std::vector<float> pooled_external_samples(const ExternalReference& source, Metric metric) {
     std::vector<float> samples;
     for (const auto& member : source.members[metric_class(metric)]) {

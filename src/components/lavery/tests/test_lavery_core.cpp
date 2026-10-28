@@ -17,15 +17,51 @@
 #include "data/lavery_curves_reference.h"
 using namespace lavery;
 
+UTEST(lavery_core, step_parameter_groups_partition_existing_step_metrics_without_changing_masks) {
+    uint32_t combined=0;
+    for (const auto& group : STEP_PARAMETER_GROUPS) {
+        EXPECT_EQ(combined&group.mask(),0u);
+        for (int id=group.first;id<=(int)group.last;++id)
+            EXPECT_EQ(metric_class((Metric)id),Class_Step);
+        combined|=group.mask();
+    }
+    EXPECT_EQ(combined,class_all_parameters(Class_Step)<<class_first_metric(Class_Step));
+    EXPECT_EQ(STEP_PARAMETER_GROUPS[1].mask(),HELICAL_PARAMETERS);
+    EXPECT_EQ(STEP_PARAMETER_GROUPS[2].mask(),(1u<<MinorGroove)|(1u<<MajorGroove));
+    EXPECT_EQ(DEFAULT_EVENT_PARAMETERS&HELICAL_PARAMETERS,0u);
+    const uint32_t local_helical=HELICAL_PARAMETERS>>class_first_metric(Class_Step);
+    EXPECT_EQ((CLASS_LOCAL_ALL&~local_helical)|local_helical,CLASS_LOCAL_ALL);
+    EXPECT_EQ((ALL_METRIC_PARAMETERS&~HELICAL_PARAMETERS)|HELICAL_PARAMETERS,ALL_METRIC_PARAMETERS);
+}
+
 UTEST(lavery_core, workspace_event_mask_preserves_current_subsets_and_legacy_migration) {
     const uint32_t original_parameters = (1u << MinorGroove)-1u;
     for (uint32_t mask : {0u,1u << Roll,original_parameters,1u << Chi,ALL_METRIC_PARAMETERS}) {
         EXPECT_EQ(restore_event_parameters(mask,false),mask);
         const uint32_t expected = mask < (1u << MinorGroove)
-            ? mask | (ALL_METRIC_PARAMETERS & ~original_parameters) : mask;
+            ? mask | (DEFAULT_EVENT_PARAMETERS & ~original_parameters) : mask;
         EXPECT_EQ(restore_event_parameters(mask,true),expected);
     }
     EXPECT_EQ(restore_event_parameters(UINT32_MAX,false),ALL_METRIC_PARAMETERS);
+    EXPECT_EQ(DEFAULT_EVENT_PARAMETERS & HELICAL_PARAMETERS, 0u);
+}
+
+UTEST(lavery_core, metric_layout_migration_shifts_nucleotide_indices_past_helical_parameters) {
+    const int old_alpha = XDisplacement, old_chi = old_alpha + (Chi - Alpha);
+    EXPECT_EQ(migrate_metric(Twist, 0), (int)Twist);
+    EXPECT_EQ(migrate_metric(MajorGroove, 0), (int)MajorGroove);
+    EXPECT_EQ(migrate_metric(old_alpha, 0), (int)Alpha);
+    EXPECT_EQ(migrate_metric(old_chi, 0), (int)Chi);
+    EXPECT_EQ(migrate_metric(HelicalTwist, METRIC_LAYOUT), (int)HelicalTwist);
+    const uint32_t old_all = (1u << (XDisplacement + 10)) - 1u;
+    EXPECT_EQ(migrate_metric_mask(old_all, 0), ALL_METRIC_PARAMETERS & ~HELICAL_PARAMETERS);
+    EXPECT_EQ(migrate_metric_mask((1u << Roll) | (1u << old_chi), 0), (1u << Roll) | (1u << Chi));
+    EXPECT_EQ(migrate_metric_mask(1u << HelicalTwist, METRIC_LAYOUT), 1u << HelicalTwist);
+    EXPECT_STREQ(metric_path(HelicalTwist), "step/helical_twist");
+    EXPECT_EQ(metric_class(HelicalTwist), Class_Step);
+    EXPECT_EQ(class_first_metric(Class_Step) + class_parameter_count(Class_Step), (int)Alpha);
+    EXPECT_TRUE(metric_is_angular(Inclination));
+    EXPECT_FALSE(metric_is_angular(XDisplacement));
 }
 
 UTEST(lavery_core, workflow_time_ranges_match_detection_with_scaled_irregular_timestamps) {
@@ -106,6 +142,55 @@ UTEST(lavery_core, pairing_states_require_complete_directional_evidence_and_orie
     EXPECT_EQ(classify_pairing(ev, 77, -140, 0), Pairing_Other);
     ev.canonical = 2;
     EXPECT_EQ(classify_pairing(ev, -110, -140, 0), Pairing_Other);
+}
+
+static PairChemistry chemistry_with(std::initializer_list<std::pair<PairType, size_t>> sets, int purine_side = 0) {
+    PairChemistry chemistry;
+    chemistry.purine_side = purine_side;
+    for (const auto& [type, count] : sets) chemistry.sets[type].resize(count);
+    return chemistry;
+}
+
+UTEST(lavery_core, frame0_pair_type_prefers_formed_contacts_and_orientation) {
+    PairingEvidence ev;
+    const auto at = chemistry_with({{PairType_WatsonCrick, 2}, {PairType_Hoogsteen, 2}, {PairType_ReverseWatsonCrick, 2}});
+    EXPECT_EQ(identify_pair_type(at, ev, false), PairType_WatsonCrick);
+    ev.present[PairType_Hoogsteen] = 2;
+    EXPECT_EQ(identify_pair_type(at, ev, false), PairType_Hoogsteen);
+    ev.present[PairType_WatsonCrick] = 2;
+    EXPECT_EQ(identify_pair_type(at, ev, false), PairType_WatsonCrick);
+    EXPECT_EQ(identify_pair_type(at, ev, true), PairType_Count);
+    ev.present[PairType_ReverseWatsonCrick] = 2;
+    EXPECT_EQ(identify_pair_type(at, ev, true), PairType_ReverseWatsonCrick);
+    PairingEvidence none;
+    const auto gt = chemistry_with({{PairType_Wobble, 2}}, -1);
+    EXPECT_EQ(identify_pair_type(gt, none, false), PairType_Wobble);
+    EXPECT_EQ(identify_pair_type(gt, none, true), PairType_Count);
+    const auto gc = chemistry_with({{PairType_WatsonCrick, 3}}, -1);
+    EXPECT_EQ(identify_pair_type(gc, none, false), PairType_WatsonCrick);
+    EXPECT_EQ(identify_pair_type(chemistry_with({{PairType_WatsonCrick, 2}}, -1), none, false), PairType_Count);
+    EXPECT_EQ(identify_pair_type(PairChemistry{}, none, false), PairType_Count);
+}
+
+UTEST(lavery_core, wobble_and_reverse_states_require_native_contacts) {
+    PairingEvidence ev;
+    ev.complete = true;
+    ev.type = PairType_Wobble;
+    ev.expected = 2;
+    ev.native_expected = 2;
+    ev.native = 2;
+    EXPECT_EQ(classify_pairing(ev, -110, -95, 0), Pairing_Wobble);
+    EXPECT_EQ(classify_pairing(ev, 77, -95, 0), Pairing_Other);
+    ev.native = 1;
+    EXPECT_EQ(classify_pairing(ev, -110, -95, 0), Pairing_Other);
+    ev.native = 0;
+    EXPECT_EQ(classify_pairing(ev, -110, -95, Quality_Separation), Pairing_Unpaired);
+    ev.type = PairType_ReverseWatsonCrick;
+    ev.native = 2;
+    EXPECT_EQ(classify_pairing(ev, -110, -95, 0), Pairing_ReverseWatsonCrick);
+    EXPECT_EQ(classify_pairing(ev, -110, -95, Quality_MissingAtoms), Pairing_Unavailable);
+    EXPECT_STREQ(pairing_state_name(Pairing_PartnerSwitch), "Partner switch");
+    EXPECT_STREQ(pair_type_tag(PairType_WatsonCrick), "");
 }
 
 UTEST(lavery_core, pairing_csv_preserves_raw_runs_units_and_exact_residence_thresholds) {
@@ -658,6 +743,103 @@ UTEST(lavery_core, broken_fixed_pairs_are_missing_and_clear_stale_frames) {
     ASSERT_TRUE(compute_present_base_pair(&values, &pair, &quality, a, b));
     for (int k = 0; k < 6; ++k) EXPECT_TRUE(std::isfinite(values.metric[k]));
     EXPECT_EQ(quality, (uint16_t)Quality_Good);
+}
+
+UTEST(lavery_core, landmark_frames_follow_disrupted_pairs_without_relaxing_measurement_validity) {
+    std::vector<BaseFrame> frames = {
+        base(0,0,{0,0,0}), base(1,1,{5,0,0},{1,0,0},{0,-1,0},{0,0,-1}),
+        base(2,0,{0,0,3.4f}), base(3,1,{5,0,3.4f},{1,0,0},{0,-1,0},{0,0,-1}),
+    };
+    const std::vector<Pair> pairs = {{0,1},{2,3}};
+    const std::vector<StepIndex> steps = {{0,1}};
+    std::vector<BasePairFrame> pair_frames, step_frames;
+    ASSERT_TRUE(landmark_frames(pair_frames,step_frames,frames,pairs,steps));
+    Values values;
+    BasePairFrame measurement, midpoint;
+    uint16_t quality=0;
+    ASSERT_TRUE(compute_present_base_pair(&values,&measurement,&quality,frames[0],frames[1]));
+    ASSERT_TRUE(compute_step(&values,pair_frames[0],pair_frames[1],&midpoint));
+    EXPECT_NEAR(vec3_distance(midpoint.origin,step_frames[0].origin),0.0f,1e-5f);
+    EXPECT_NEAR(vec3_distance(midpoint.y,step_frames[0].y),0.0f,1e-5f);
+    for (float x : {12.0f,5.0f,14.0f,5.0f}) {
+        const bool disrupted=x>10;
+        frames[1].origin={x,0,disrupted ? 3.0f : 0.0f};
+        frames[1].center=frames[1].origin;
+        ASSERT_TRUE(landmark_frames(pair_frames,step_frames,frames,pairs,steps));
+        EXPECT_NEAR(pair_frames[0].origin.x,x*.5f,1e-5f);
+        EXPECT_NEAR(step_frames[0].origin.x,(x+5)*.25f,1e-5f);
+        EXPECT_NEAR(vec3_length(step_frames[0].y),1.0f,1e-5f);
+        EXPECT_EQ(compute_present_base_pair(&values,&measurement,&quality,frames[0],frames[1]),!disrupted);
+        EXPECT_EQ((quality&Quality_PlaneOffset)!=0,disrupted);
+        EXPECT_EQ(std::isnan(values.metric[Shear]),disrupted);
+    }
+    frames[1]={};
+    ASSERT_TRUE(landmark_frames(pair_frames,step_frames,frames,pairs,steps));
+    EXPECT_EQ(vec3_length(pair_frames[0].y),0.0f);
+    EXPECT_EQ(vec3_length(step_frames[0].y),0.0f);
+    EXPECT_NEAR(vec3_length(pair_frames[1].y),1.0f,1e-5f);
+}
+
+UTEST(lavery_core, landmark_frames_handle_periodic_images_reverse_pairs_and_invalid_topology) {
+    const auto cell=md_unitcell_from_extent(30,30,30);
+    std::vector<BaseFrame> frames = {
+        base(0,0,{29,0,29}), base(1,1,{4,0,29},{1,0,0},{0,-1,0},{0,0,-1}),
+        base(2,0,{29,0,2}), base(3,1,{4,0,2},{1,0,0},{0,-1,0},{0,0,-1}),
+    };
+    std::vector<Pair> pairs={{0,1},{2,3}};
+    const std::vector<StepIndex> steps={{0,1}};
+    std::vector<BasePairFrame> pair_frames,step_frames;
+    ASSERT_TRUE(landmark_frames(pair_frames,step_frames,frames,pairs,steps,&cell));
+    EXPECT_NEAR(pair_frames[0].origin.x,31.5f,1e-5f);
+    EXPECT_NEAR(step_frames[0].origin.z,30.5f,1e-5f);
+    pairs[0].reversed=true;
+    frames[1].x={-1,0,0}; frames[1].z={0,0,1};
+    ASSERT_TRUE(landmark_frames(pair_frames,step_frames,frames,pairs,steps,&cell));
+    EXPECT_NEAR(vec3_length(step_frames[0].y),1.0f,1e-5f);
+    frames[1].origin.x=NAN;
+    ASSERT_TRUE(landmark_frames(pair_frames,step_frames,frames,pairs,steps,&cell));
+    EXPECT_EQ(vec3_length(step_frames[0].y),0.0f);
+    EXPECT_FALSE(landmark_frames(pair_frames,step_frames,frames,{{0,99}},steps,&cell));
+    EXPECT_TRUE(pair_frames.empty());
+    EXPECT_TRUE(step_frames.empty());
+    EXPECT_FALSE(landmark_frames(pair_frames,step_frames,frames,pairs,{{0,99}},&cell));
+    EXPECT_TRUE(pair_frames.empty());
+    EXPECT_TRUE(step_frames.empty());
+}
+
+UTEST(lavery_core, reverse_pairs_use_flipped_x_y_convention) {
+    const BaseFrame a = base(0, 0, {0, 0, 0});
+    const BaseFrame b = base(1, 1, {0, 5, 0}, {-1, 0, 0}, {0, -1, 0}, {0, 0, 1});
+    Values values;
+    BasePairFrame frame;
+    ASSERT_TRUE(compute_base_pair(&values, &frame, a, b, true));
+    for (int k : {Buckle, Propeller, Opening}) EXPECT_NEAR(values.metric[k], 0.0f, 1.0e-3f);
+    EXPECT_NEAR(values.metric[Stretch], -5.0f, 1.0e-3f);
+    uint16_t quality = 0;
+    EXPECT_TRUE(compute_present_base_pair(&values, &frame, &quality, a, b, nullptr, true));
+    EXPECT_FALSE(compute_base_pair(&values, &frame, a, b));
+}
+
+UTEST(lavery_core, partner_switch_requires_both_tracked_pairs_broken) {
+    const BaseFrame flipped = base(0, 0, {0, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 0, -1});
+    std::vector<BaseFrame> frames = {base(0, 0, {0, 0, 0}), base(1, 1, {20, 0, 0}),
+        base(2, 0, {0, 0, 3.4f}), flipped};
+    frames[3].component = 3;
+    frames[3].strand = 1;
+    frames[3].origin = frames[3].center = {5, 0, 0};
+    const std::vector<Pair> pairs = {{0, 1}, {2, 3}};
+    auto geometry = [&]() {
+        return std::vector<uint16_t>{pair_quality(frames[0], frames[1]), pair_quality(frames[2], frames[3])};
+    };
+    std::vector<uint8_t> switched;
+    ASSERT_TRUE(detect_partner_switches(&switched, frames, pairs, geometry()));
+    EXPECT_EQ(switched[0], (uint8_t)1);
+    EXPECT_EQ(switched[1], (uint8_t)1);
+    frames[2].origin = frames[2].center = {10, 0, 0};
+    ASSERT_TRUE(detect_partner_switches(&switched, frames, pairs, geometry()));
+    EXPECT_EQ(switched[0], (uint8_t)0);
+    EXPECT_EQ(switched[1], (uint8_t)0);
+    EXPECT_FALSE(detect_partner_switches(&switched, frames, pairs, {0}));
 }
 
 UTEST(lavery_core, paired_evaluation_uses_periodic_images_and_excludes_loss_from_statistics) {
@@ -2526,7 +2708,12 @@ UTEST(lavery_core, groove_widths_use_3dna_phosphorus_indices) {
     }
     std::vector<float> minor(n - 1), major(n - 1);
     groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n);
-    auto d = [](int i, int j) { return std::sqrt((float)((i - j) * (i - j)) + 100.0f) - 5.8f; };
+    // Refined width: straight parallel backbones leave only the 10 A perpendicular component; direct P-P
+    // distance when a flanking phosphate (k - 1 or k + 1) is outside the helix.
+    auto d = [&](int i, int j) {
+        const bool refined = i > 1 && i < (int)n && j > 1 && j < (int)n;
+        return (refined ? 10.0f : std::sqrt((float)((i - j) * (i - j)) + 100.0f)) - 5.8f;
+    };
     // 1-based step i: minor needs i - 2 >= 1 and i + 3 <= n; major needs i - 1 >= 1 and i + 2 <= n.
     for (int i = 1; i <= (int)n - 1; ++i) {
         if (i >= 3 && i + 3 <= (int)n) EXPECT_NEAR(minor[i - 1], 0.5f * (d(i + 2, i - 2) + d(i + 3, i - 1)), 1e-4f);
@@ -2537,6 +2724,72 @@ UTEST(lavery_core, groove_widths_use_3dna_phosphorus_indices) {
     p2[3].x = std::numeric_limits<float>::quiet_NaN();
     groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n);
     EXPECT_TRUE(std::isnan(major[1])); // step 2 uses P2(4)
+}
+
+static vec3_t rodrigues(vec3_t v, vec3_t axis, float degrees) {
+    const float a = degrees * 3.14159265358979f / 180.0f, c = std::cos(a), s = std::sin(a);
+    return vec3_add(vec3_add(vec3_mul1(v, c), vec3_mul1(vec3_cross(axis, v), s)), vec3_mul1(axis, vec3_dot(axis, v) * (1 - c)));
+}
+
+// Pair k of an ideal helix about the global z axis: displaced by (dx, dy), tilted about a hinge in the
+// helical xy-plane, then screwed by k * twist and k * rise.
+static BasePairFrame ideal_helical_pair(int k, float dx, float dy, float inclination, float tip, float twist, float rise) {
+    const float tilt = std::sqrt(inclination * inclination + tip * tip);
+    const vec3_t hinge = tilt > 0 ? vec3_t{inclination / tilt, tip / tilt, 0} : vec3_t{1, 0, 0};
+    BasePairFrame f;
+    f.x = rodrigues(rodrigues({1, 0, 0}, hinge, tilt), {0, 0, 1}, k * twist);
+    f.y = rodrigues(rodrigues({0, 1, 0}, hinge, tilt), {0, 0, 1}, k * twist);
+    f.z = rodrigues(rodrigues({0, 0, 1}, hinge, tilt), {0, 0, 1}, k * twist);
+    f.origin = vec3_add(rodrigues({dx, dy, 0}, {0, 0, 1}, k * twist), {0, 0, k * rise});
+    return f;
+}
+
+UTEST(lavery_core, local_helical_parameters_recover_an_ideal_screw) {
+    for (float twist : {32.0f, -25.0f}) {
+        const auto a = ideal_helical_pair(0, -4.5f, 0.7f, 18.0f, -4.0f, twist, 2.8f);
+        const auto b = ideal_helical_pair(1, -4.5f, 0.7f, 18.0f, -4.0f, twist, 2.8f);
+        Values values;
+        BasePairFrame helical;
+        vec3_t ends[2];
+        ASSERT_TRUE(compute_helical_step(&values, a, b, &helical, ends));
+        EXPECT_NEAR(values.metric[XDisplacement], -4.5f, 1e-3f);
+        EXPECT_NEAR(values.metric[YDisplacement], 0.7f, 1e-3f);
+        EXPECT_NEAR(values.metric[HelicalRise], 2.8f, 1e-3f);
+        EXPECT_NEAR(values.metric[Inclination], 18.0f, 1e-2f);
+        EXPECT_NEAR(values.metric[Tip], -4.0f, 1e-2f);
+        EXPECT_NEAR(values.metric[HelicalTwist], twist, 1e-2f);
+        EXPECT_NEAR(helical.z.z, 1.0f, 1e-4f);
+        EXPECT_NEAR(ends[0].x, 0.0f, 1e-3f);
+        EXPECT_NEAR(ends[0].y, 0.0f, 1e-3f);
+        EXPECT_NEAR(ends[1].z, 2.8f, 1e-3f);
+        Values step;
+        ASSERT_TRUE(compute_step(&step, a, b));
+        EXPECT_NEAR(step.metric[HelicalTwist], twist, 1e-2f);
+    }
+    // Untwisted, untilted stack: helical and step parameters coincide.
+    const auto a = ideal_helical_pair(0, 0, 0, 0, 0, 0, 3.4f), b = ideal_helical_pair(1, 0, 0, 0, 0, 0, 3.4f);
+    Values values;
+    ASSERT_TRUE(compute_helical_step(&values, a, b));
+    EXPECT_NEAR(values.metric[HelicalRise], 3.4f, 1e-4f);
+    EXPECT_NEAR(values.metric[HelicalTwist], 0.0f, 1e-4f);
+    EXPECT_FALSE(compute_helical_step(&values, a, BasePairFrame{}));
+    EXPECT_TRUE(std::isnan(values.metric[HelicalRise]));
+}
+
+UTEST(lavery_core, helical_axis_follows_local_screw_axes_and_splits_gaps) {
+    std::vector<BasePairFrame> frames;
+    for (int k = 0; k < 6; ++k) frames.push_back(ideal_helical_pair(k, -4.5f, 0, 15, 0, 33, 2.6f));
+    const std::vector<StepIndex> steps = {{0, 1}, {1, 2}, {2, 3}, {4, 5}};
+    const auto axis = compute_helical_axis(frames, steps);
+    ASSERT_EQ(axis.offsets.size(), (size_t)3);
+    EXPECT_EQ(axis.offsets[1], (size_t)5); // two ends + three helical mid-step points
+    EXPECT_EQ(axis.offsets[2] - axis.offsets[1], (size_t)3);
+    for (size_t i = 0; i < axis.points.size(); ++i) {
+        EXPECT_NEAR(axis.points[i].x, 0.0f, 1e-3f);
+        EXPECT_NEAR(axis.points[i].y, 0.0f, 1e-3f);
+        EXPECT_NEAR(axis.tangents[i].z, 1.0f, 1e-4f);
+    }
+    EXPECT_NEAR(axis.points[1].z, 1.3f, 1e-3f);
 }
 
 UTEST(lavery_core, helix_chains_follow_steps) {
@@ -2798,4 +3051,37 @@ UTEST(lavery_core, pucker_amplitude_has_degree_units_without_circular_statistics
     CsvEventRow row;
     row.metric = Amplitude;
     EXPECT_NE(csv_event_row(row).find(",deg,"), std::string::npos);
+}
+
+UTEST(lavery_core, multiple_testing_corrections_set_frame_tolerance) {
+    EXPECT_NEAR(gaussian_sigma_for_probability(0.05), 1.95996f, 1e-4f);
+    EXPECT_NEAR(chance_outlier_probability(gaussian_sigma_for_probability(1e-4), 1), 1e-4, 1e-8);
+    EXPECT_TRUE(std::isnan(gaussian_sigma_for_probability(0.0)));
+
+    std::vector<float> none = {5.0f};
+    EXPECT_TRUE(std::isnan(corrected_sigma(MultipleTesting_None, 0.05, &none)));
+    EXPECT_TRUE(std::isnan(corrected_sigma(MultipleTesting_Bonferroni, 0.0, &none)));
+
+    // Bonferroni: 100 tests at alpha 0.05 -> per-test p 5e-4, independent of the observed values.
+    std::vector<float> quiet(100, 0.5f);
+    const float bonferroni = corrected_sigma(MultipleTesting_Bonferroni, 0.05, &quiet);
+    EXPECT_NEAR(bonferroni, 3.4808f, 1e-3f);
+
+    // Benjamini-Hochberg without any discovery falls back to the Bonferroni tolerance.
+    EXPECT_NEAR(corrected_sigma(MultipleTesting_BenjaminiHochberg, 0.05, &quiet), bonferroni, 1e-5f);
+
+    // Ten strong signals among 100 tests: BH rejects all ten (p ~ 2.7e-3 <= 10 * 0.05 / 100) although the weakest
+    // is below the Bonferroni tolerance, and the tolerance sits just below the weakest rejected |z|.
+    std::vector<float> signals(90, 0.5f);
+    for (int i = 0; i < 9; ++i) signals.push_back(6.0f);
+    signals.push_back(3.0f);
+    const float fdr = corrected_sigma(MultipleTesting_BenjaminiHochberg, 0.05, &signals);
+    EXPECT_LT(fdr, 3.0f);
+    EXPECT_GT(fdr, 2.999f);
+    EXPECT_LT(fdr, bonferroni);
+    MemberStatistics unit;
+    unit.count = 10;
+    unit.sd = 1.0;
+    EXPECT_TRUE(unit.is_outlier(3.0f, fdr));
+    EXPECT_FALSE(unit.is_outlier(0.5f, fdr));
 }

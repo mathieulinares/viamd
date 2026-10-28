@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <iterator>
 #include <limits>
 
@@ -178,7 +179,7 @@ std::vector<EventContribution> event_contributions(const std::vector<OutlierEven
 
 uint32_t restore_event_parameters(uint32_t mask, bool legacy) {
     if (legacy && mask < (1u << MinorGroove))
-        mask |= ALL_METRIC_PARAMETERS & ~((1u << MinorGroove) - 1u);
+        mask |= DEFAULT_EVENT_PARAMETERS & ~((1u << MinorGroove) - 1u);
     return mask & ALL_METRIC_PARAMETERS;
 }
 
@@ -606,6 +607,10 @@ std::string event_kind(const OutlierEvent& event) {
     case Rise: kind = positive ? "Unstacking" : "Compressed step"; break;
     case MinorGroove: kind = positive ? "Minor groove widening" : "Minor groove narrowing"; break;
     case MajorGroove: kind = positive ? "Major groove widening" : "Major groove narrowing"; break;
+    case XDisplacement: case YDisplacement: kind = "Helical displacement"; break;
+    case HelicalRise: kind = positive ? "Helical unstacking" : "Helical compression"; break;
+    case Inclination: case Tip: kind = "Base-pair inclination"; break;
+    case HelicalTwist: kind = positive ? "Helical overwinding" : "Helical unwinding"; break;
     case Phase: case Amplitude: case Delta: kind = "Sugar fluctuation"; break;
     case Epsilon: case Zeta: case EpsilonZeta: kind = "Epsilon / zeta fluctuation"; break;
     case Alpha: case Gamma: kind = "Alpha / gamma fluctuation"; break;
@@ -621,6 +626,43 @@ double chance_outlier_probability(float sigma, int parameters) {
     if (!std::isfinite(sigma) || parameters <= 0) return 0.0;
     const double single = std::erfc(std::max(0.0f, sigma) / std::sqrt(2.0));
     return 1.0 - std::pow(1.0 - single, (double)parameters);
+}
+
+const char* multiple_testing_name(MultipleTesting method) {
+    switch (method) {
+    case MultipleTesting_None: return "None";
+    case MultipleTesting_Bonferroni: return "Bonferroni";
+    case MultipleTesting_BenjaminiHochberg: return "Benjamini-Hochberg";
+    default: return "Unknown";
+    }
+}
+
+float gaussian_sigma_for_probability(double p) {
+    if (!(p > 0.0) || !(p < 1.0)) return std::numeric_limits<float>::quiet_NaN();
+    double lo = 0.0, hi = 40.0;
+    for (int i = 0; i < 200 && hi - lo > 1e-12; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        (std::erfc(mid / std::sqrt(2.0)) > p ? lo : hi) = mid;
+    }
+    return (float)(0.5 * (lo + hi));
+}
+
+float corrected_sigma(MultipleTesting method, double alpha, std::vector<float>* abs_z) {
+    const float missing = std::numeric_limits<float>::quiet_NaN();
+    if (!abs_z || !(alpha > 0.0) || !(alpha < 1.0) ||
+        (method != MultipleTesting_Bonferroni && method != MultipleTesting_BenjaminiHochberg)) return missing;
+    const size_t tests = std::max<size_t>(1, abs_z->size());
+    const float bonferroni = gaussian_sigma_for_probability(alpha / (double)tests);
+    if (method == MultipleTesting_Bonferroni || abs_z->empty()) return bonferroni;
+    std::sort(abs_z->begin(), abs_z->end(), std::greater<float>());
+    for (size_t i = tests; i-- > 0;) {
+        const double p = std::erfc((double)(*abs_z)[i] / std::sqrt(2.0));
+        if (p <= (double)(i + 1) * alpha / (double)tests) {
+            // Outliers are strictly above the tolerance, so stay just below the last rejected |z|.
+            return std::min(bonferroni, (*abs_z)[i] * (1.0f - 1e-6f));
+        }
+    }
+    return bonferroni;
 }
 
 const char* csv_event_header() {
