@@ -43,12 +43,16 @@ enum LoaderType_ {
     LoaderType_TREXIO,
     LoaderType_H5MD,    // H5MD (GROMACS mdrun -o traj.h5md, and others): a system and its trajectory in one file
 #endif
+#if MD_AMBER_NETCDF
+    LoaderType_AMBER_NETCDF, // Amber NetCDF trajectory; topology/structure comes from another file
+#endif
     LoaderType_ITP,     // GROMACS topology (.itp / .top), supplements a loaded system
     LoaderType_TPR,     // GROMACS run input, topology and coordinates
     LoaderType_EDR,     // GROMACS energy file, supplements a loaded trajectory
     LoaderType_XVG,     // xmgrace columns (GROMACS analysis output), a series along the loaded trajectory
     LoaderType_CSV,     // comma separated columns, a series along the loaded trajectory
     LoaderType_ASE_TRAJ, // ASE trajectory (.traj): a system and its trajectory in one file
+    LoaderType_AMBER_ENERGY, // Amber mdout or mden energies, supplemental to a loaded trajectory
     LoaderType_COUNT
 };
 

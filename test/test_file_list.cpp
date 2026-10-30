@@ -57,6 +57,7 @@ UTEST(viamd_file_list, a_file_on_its_own_takes_the_role_of_its_loader) {
     EXPECT_EQ(FileRole_Trajectory, file_role(loader::type_flags(LoaderType_XTC)));
     EXPECT_EQ(FileRole_Supplement, file_role(loader::type_flags(LoaderType_ITP)));
     EXPECT_EQ(FileRole_Series,     file_role(loader::type_flags(LoaderType_EDR)));
+    EXPECT_EQ(FileRole_Series,     file_role(loader::type_flags(LoaderType_AMBER_ENERGY)));
     EXPECT_EQ(FileRole_Series,     file_role(loader::type_flags(LoaderType_XVG)));
 }
 

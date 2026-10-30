@@ -2740,12 +2740,13 @@ void draw_load_dataset_window(ApplicationState* data) {
             state.path_changed = false;
             state.path_is_valid = md_path_is_valid(path) && !md_path_is_directory(path);
 
-            // Try to assign loader_idx from extension
-            state.loader_idx = 0;
-            str_t ext;
-            if (extract_ext(&ext, path)) {
-                state.loader_idx = (int)loader::type_from_ext(ext);
+            // Pick the loader the way a dropped file gets it: from the extension, and from the contents
+            // where the extension does not say (an Amber mdout/mden, a .out)
+            loader::LoaderState detected = {};
+            if (state.path_is_valid) {
+                loader::init(&detected, path, &data->mold.sys);
             }
+            state.loader_idx = (int)detected.type;
         }
 
         if (ImGui::BeginCombo("Loader", loader::type_name(state.loader_idx).ptr)) {

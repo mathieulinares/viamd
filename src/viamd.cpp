@@ -1806,6 +1806,7 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
                 state->script.compile_ir = true;
                 if (role == FileRole_Series) {
                     const char* hint = (load_state.type == LoaderType_EDR) ? "edr/<term>" :
+                                       (load_state.type == LoaderType_AMBER_ENERGY) ? "amber_energy/<term>" :
                                        (load_state.type == LoaderType_XVG) ? "xvg/<file>/<legend>" : "csv/<file>/<column>";
                     VIAMD_LOG_SUCCESS("Loaded '" STR_FMT "' into '" STR_FMT "'; plot it from System > Series, or read it in the script with attr(\"%s\")", STR_ARG(path_to_file), STR_ARG(run), hint);
                 } else {
@@ -6262,13 +6263,20 @@ void file_queue_push(FileQueue* queue, str_t path, FileFlags flags) {
     int prio = 5;
 
 
-    str_t ext;
-    if (extract_ext(&ext, path)) {
+    str_t ext = {};
+    extract_ext(&ext, path);
+    if (str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
+        prio = 1;
+    } else {
+        // The contents decide where the extension does not: an extensionless Amber mdout or mden
         LoaderType type = loader::type_from_ext(ext);
+        if (type == LoaderType_Undefined) {
+            loader::LoaderState detected = {};
+            loader::init(&detected, path);
+            type = detected.type;
+        }
         LoaderFlags loader_flags = loader::type_flags(type);
-        if (str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
-            prio = 1;
-        } else if (loader_flags & LoaderFlag_System) {
+        if (loader_flags & LoaderFlag_System) {
             prio = 2;
         } else if (loader_flags & LoaderFlag_Temporal) {
             // Joins the trajectory's run, so it goes after the trajectory when both are dropped
@@ -6279,9 +6287,6 @@ void file_queue_push(FileQueue* queue, str_t path, FileFlags flags) {
         } else {
             flags |= FileFlags_ShowDialogue;
         }
-    } else {
-        // Unknown extension
-        flags |= FileFlags_ShowDialogue;
     }
 
     uint32_t i = queue->head;

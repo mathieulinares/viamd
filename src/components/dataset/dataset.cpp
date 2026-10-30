@@ -1048,7 +1048,7 @@ struct Dataset : viamd::EventHandler {
         case FileRole_System:     return "Structure";
         case FileRole_Trajectory: return "Trajectory";
         case FileRole_Supplement: return e.type == LoaderType_ITP ? "Topology" : "Supplement";
-        case FileRole_Series:     return e.type == LoaderType_EDR ? "Energies" : "Series";
+        case FileRole_Series:     return (e.type == LoaderType_EDR || e.type == LoaderType_AMBER_ENERGY) ? "Energies" : "Series";
         default:                  return "";
         }
     }

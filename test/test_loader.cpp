@@ -5,6 +5,53 @@
 #include <core/md_str.h>
 #include <core/md_arena_allocator.h>
 #include <md_system.h>
+#include <core/md_os.h>
+
+#include <cstdio>
+#include <cstdlib>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
+#if MD_AMBER_NETCDF
+#include <netcdf.h>
+#include <cstdio>
+
+static bool write_amber_loader_fixture(const char* path) {
+    int ncid, frame_dim, atom_dim, spatial_dim, coordinates_var, spatial_var, time_var;
+    if (nc_create(path, NC_CLOBBER, &ncid) != NC_NOERR) {
+        return false;
+    }
+    const bool status =
+        nc_put_att_text(ncid, NC_GLOBAL, "Conventions", 5, "AMBER") == NC_NOERR &&
+        nc_put_att_text(ncid, NC_GLOBAL, "ConventionVersion", 3, "1.0") == NC_NOERR &&
+        nc_def_dim(ncid, "frame", 2, &frame_dim) == NC_NOERR &&
+        nc_def_dim(ncid, "atom", 1, &atom_dim) == NC_NOERR &&
+        nc_def_dim(ncid, "spatial", 3, &spatial_dim) == NC_NOERR &&
+        nc_def_var(ncid, "spatial", NC_CHAR, 1, &spatial_dim, &spatial_var) == NC_NOERR;
+    if (!status) {
+        nc_close(ncid);
+        return false;
+    }
+    const int coordinate_dims[3] = { frame_dim, atom_dim, spatial_dim };
+    const int frame_dims[1] = { frame_dim };
+    if (nc_def_var(ncid, "coordinates", NC_FLOAT, 3, coordinate_dims, &coordinates_var) != NC_NOERR ||
+        nc_put_att_text(ncid, coordinates_var, "units", 8, "angstrom") != NC_NOERR ||
+        nc_def_var(ncid, "time", NC_DOUBLE, 1, frame_dims, &time_var) != NC_NOERR ||
+        nc_put_att_text(ncid, time_var, "units", 10, "picosecond") != NC_NOERR ||
+        nc_enddef(ncid) != NC_NOERR) {
+        nc_close(ncid);
+        return false;
+    }
+    const float coordinates[6] = {1, 2, 3, 4, 5, 6};
+    const double times[2] = {0, 1};
+    const bool ok =
+        nc_put_var_text(ncid, spatial_var, "xyz") == NC_NOERR &&
+        nc_put_var_float(ncid, coordinates_var, coordinates) == NC_NOERR &&
+        nc_put_var_double(ncid, time_var, times) == NC_NOERR;
+    return nc_close(ncid) == NC_NOERR && ok;
+}
+#endif
 
 /* loader is the table that decides which reader gets a file. It is three parallel arrays indexed by
  * LoaderType plus a lookup, and the arrays are maintained by hand behind #if MD_HDF5 guards - so
@@ -54,7 +101,98 @@ UTEST(viamd_loader, extension_lookup_ignores_case_and_rejects_the_unknown) {
     /* A prefix of a real extension is not a match. */
     EXPECT_EQ((LoaderType)LoaderType_Undefined, loader::type_from_ext(STR_LIT("pd")));
     EXPECT_EQ((LoaderType)LoaderType_Undefined, loader::type_from_ext(STR_LIT("pdbx")));
+#if MD_AMBER_NETCDF
+    EXPECT_EQ((LoaderType)LoaderType_AMBER_NETCDF, loader::type_from_ext(STR_LIT("NC")));
+    EXPECT_EQ((LoaderType)LoaderType_AMBER_NETCDF, loader::type_from_ext(STR_LIT("netcdf")));
+    loader::LoaderState amber = {};
+    loader::init(&amber, STR_LIT(VIAMD_TEST_DATA_DIR "/not-an-amber-trajectory.nc"));
+    EXPECT_EQ((LoaderType)LoaderType_Undefined, amber.type);
+    EXPECT_NE(0u, amber.flags & LoaderFlag_RequiresDialogue);
+#endif
 }
+
+UTEST(viamd_loader, amber_mdout_is_detected_and_supplements_run_energy) {
+    const str_t path = STR_LIT(VIAMD_AMBER_ENERGY_TEST_DATA_DIR "/amber-mdout.out");
+    loader::LoaderState reader = {};
+    loader::init(&reader, path);
+    ASSERT_EQ((LoaderType)LoaderType_AMBER_ENERGY, reader.type);
+    EXPECT_NE(0u, reader.flags & LoaderFlag_Supplemental);
+    EXPECT_NE(0u, reader.flags & LoaderFlag_Temporal);
+
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    sys.attributes.alloc = alloc;
+    const double times[] = {0.0, 1.0, 2.0};
+    const md_attribute_desc_t time_desc = {
+        .path = STR_LIT("run/test/time"),
+        .format = {.type = MD_ATTRIBUTE_TYPE_F64, .components = 1, .rank = 1, .shape = {3}},
+        .flags = MD_ATTRIBUTE_FLAG_TEMPORAL,
+        .unit = md_unit_picosecond(),
+        .data = times,
+        .byte_size = sizeof(times),
+    };
+    ASSERT_NE(MD_ATTRIBUTE_INVALID, md_attributes_create(&sys.attributes, &time_desc));
+    ASSERT_TRUE(loader::load_supplemental(&sys, path, reader, STR_LIT("run/test")));
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("run/test/amber_energy/etot")) != nullptr);
+    md_system_free(&sys);
+}
+
+UTEST(viamd_loader, amber_mden_is_detected_and_supplements_run_energy) {
+    const str_t path = STR_LIT(VIAMD_AMBER_ENERGY_TEST_DATA_DIR "/amber-mden.mden");
+    EXPECT_EQ((LoaderType)LoaderType_AMBER_ENERGY, loader::type_from_ext(STR_LIT("mden")));
+    loader::LoaderState reader = {};
+    loader::init(&reader, path);
+    ASSERT_EQ((LoaderType)LoaderType_AMBER_ENERGY, reader.type);
+    EXPECT_NE(0u, reader.flags & LoaderFlag_Temporal);
+    EXPECT_EQ(0u, reader.flags & LoaderFlag_RequiresDialogue);
+
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    sys.attributes.alloc = alloc;
+    const double times[] = {0.0, 1.0, 2.0};
+    const md_attribute_desc_t time_desc = {
+        .path = STR_LIT("run/test/time"),
+        .format = {.type = MD_ATTRIBUTE_TYPE_F64, .components = 1, .rank = 1, .shape = {3}},
+        .flags = MD_ATTRIBUTE_FLAG_TEMPORAL,
+        .unit = md_unit_picosecond(),
+        .data = times,
+        .byte_size = sizeof(times),
+    };
+    ASSERT_NE(MD_ATTRIBUTE_INVALID, md_attributes_create(&sys.attributes, &time_desc));
+    ASSERT_TRUE(loader::load_supplemental(&sys, path, reader, STR_LIT("run/test")));
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("run/test/amber_energy/etot")) != nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("run/test/amber_energy/eptot")) != nullptr);
+    md_system_free(&sys);
+}
+
+#if !defined(_WIN32)
+UTEST(viamd_loader, extensionless_amber_energy_in_a_dotted_directory_is_detected) {
+    // Amber's default output names are "mdout" and "mden", often under a directory with a '.' in it
+    const str_t sources[] = {STR_LIT(VIAMD_AMBER_ENERGY_TEST_DATA_DIR "/amber-mden.mden"), STR_LIT(VIAMD_AMBER_ENERGY_TEST_DATA_DIR "/amber-mdout.out")};
+    const char* names[] = {"mden", "mdout"};
+    char dir[] = "/tmp/viamd.amber.XXXXXX";
+    ASSERT_TRUE(mkdtemp(dir) != nullptr);
+    for (int i = 0; i < 2; ++i) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        md_file_t src = {}, dst = {};
+        ASSERT_TRUE(md_file_open(&src, sources[i], MD_FILE_READ));
+        ASSERT_TRUE(md_file_open(&dst, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE));
+        char buf[8192];
+        size_t n;
+        while ((n = md_file_read(src, buf, sizeof(buf))) > 0) md_file_write(dst, buf, n);
+        md_file_close(&src);
+        md_file_close(&dst);
+
+        loader::LoaderState reader = {};
+        loader::init(&reader, str_from_cstr(path));
+        EXPECT_EQ((LoaderType)LoaderType_AMBER_ENERGY, reader.type);
+        EXPECT_EQ(0u, reader.flags & LoaderFlag_RequiresDialogue);
+        remove(path);
+    }
+    rmdir(dir);
+}
+#endif
 
 UTEST(viamd_loader, out_of_range_types_fall_back_rather_than_read_past_the_table) {
     /* type_name/type_ext/type_flags are handed values that came from a file or a saved workspace,
@@ -108,12 +246,56 @@ UTEST(viamd_loader, ase_trajectory_contains_a_system_and_a_run) {
 UTEST(viamd_loader, trajectory_only_formats_do_not_claim_to_be_systems) {
     /* A trajectory has no topology of its own, so offering one as a system would load atoms with no
      * elements or names. */
-    const LoaderType traj_only[] = { LoaderType_XTC, LoaderType_TRR, LoaderType_DCD, LoaderType_LAMMPSTRJ };
+    const LoaderType traj_only[] = {
+        LoaderType_XTC, LoaderType_TRR, LoaderType_DCD, LoaderType_LAMMPSTRJ
+#if MD_AMBER_NETCDF
+        , LoaderType_AMBER_NETCDF
+#endif
+    };
     for (size_t i = 0; i < ARRAY_SIZE(traj_only); ++i) {
         EXPECT_NE(0u, loader::type_flags(traj_only[i]) & LoaderFlag_Trajectory);
         EXPECT_EQ(0u, loader::type_flags(traj_only[i]) & LoaderFlag_System);
     }
 }
+
+#if MD_AMBER_NETCDF
+UTEST(viamd_loader, amber_netcdf_uses_the_run_publisher) {
+    const char* filename = "viamd_test_amber.nc";
+    std::remove(filename);
+    ASSERT_TRUE(write_amber_loader_fixture(filename));
+
+    const str_t path = str_from_cstr(filename);
+    loader::LoaderState reader = {};
+    loader::init(&reader, path);
+    ASSERT_EQ((LoaderType)LoaderType_AMBER_NETCDF, reader.type);
+    EXPECT_NE(0u, reader.flags & LoaderFlag_Trajectory);
+    EXPECT_NE(0u, reader.flags & LoaderFlag_MM);
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    ASSERT_TRUE(loader::publish_run(&sys, path, STR_LIT("run/amber_loader"), 0));
+    const md_attribute_t* pos = md_attributes_find(&sys.attributes, STR_LIT("run/amber_loader/atom/position"));
+    ASSERT_TRUE(pos != nullptr);
+    float xyz[3];
+    ASSERT_EQ(3u, md_attribute_extract_f32(xyz, ARRAY_SIZE(xyz), pos, md_attribute_slice_1(1), md_unit_angstrom()));
+    EXPECT_NEAR(4.0, xyz[0], 1.0e-6);
+    EXPECT_NEAR(6.0, xyz[2], 1.0e-6);
+
+    const str_t paths[] = { STR_LIT("atom/position"), STR_LIT("unitcell") };
+    md_system_extract_t* ex = md_system_extract_begin(&sys, STR_LIT("run/amber_loader"), paths, ARRAY_SIZE(paths), alloc);
+    ASSERT_TRUE(ex != nullptr);
+    md_system_state_t state = {.alloc = alloc};
+    ASSERT_TRUE(md_system_state_init(&state, 1));
+    ASSERT_TRUE(md_system_extract_frame(ex, 1, &state));
+    EXPECT_NEAR(4.0, state.xyz[0].x, 1.0e-6);
+    EXPECT_NEAR(6.0, state.xyz[0].z, 1.0e-6);
+    EXPECT_FALSE(md_system_state_has_unitcell(&state));
+    md_system_extract_end(ex);
+    md_system_state_free(&state);
+
+    md_system_free(&sys);
+    std::remove(filename);
+}
+#endif
 
 /* ---- init(), which is where the extension is only the first guess ---------------------------- */
 

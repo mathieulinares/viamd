@@ -17,6 +17,7 @@
 #include <md_molden.h>
 #include <md_itp.h>
 #include <md_edr.h>
+#include <md_amber_energy.h>
 #include <md_xvg.h>
 #include <md_csv.h>
 
@@ -24,6 +25,9 @@
 #include <md_vlx.h>
 #include <md_trexio.h>
 #include <md_h5md.h>
+#endif
+#if MD_AMBER_NETCDF
+#include <md_amber_netcdf.h>
 #endif
 
 namespace loader {
@@ -49,12 +53,16 @@ static const str_t loader_name[LoaderType_COUNT] = {
         STR_LIT("TREXIO (trexio)"),
         STR_INIT("H5MD (h5md)"),
 #endif
+#if MD_AMBER_NETCDF
+        STR_INIT("Amber NetCDF Trajectory (nc)"),
+#endif
         STR_LIT("Gromacs Topology (itp/top)"),
         STR_INIT("Gromacs Run Input (tpr)"),
         STR_INIT("Gromacs Energy (edr)"),
         STR_INIT("xmgrace columns (xvg)"),
         STR_INIT("Comma separated values (csv)"),
         STR_INIT("ASE Trajectory (traj)"),
+        STR_INIT("Amber Energy (mdout/mden)"),
 };
 
 static const str_t loader_ext[LoaderType_COUNT] = {
@@ -78,12 +86,16 @@ static const str_t loader_ext[LoaderType_COUNT] = {
         STR_LIT("trexio"),
         STR_INIT("h5md"),
 #endif
+#if MD_AMBER_NETCDF
+        STR_INIT("nc"),
+#endif
         STR_LIT("itp"),
         STR_INIT("tpr"),
         STR_INIT("edr"),
         STR_INIT("xvg"),
         STR_INIT("csv"),
         STR_INIT("traj"),
+        STR_INIT("mdout"),
 };
 
 static const LoaderFlags loader_flags[LoaderType_COUNT] = {
@@ -110,12 +122,16 @@ static const LoaderFlags loader_flags[LoaderType_COUNT] = {
         // them inferred, see load_data_from_file
         LoaderFlag_System | LoaderFlag_Trajectory | LoaderFlag_MM | LoaderFlag_Topology,  // H5MD
 #endif
+#if MD_AMBER_NETCDF
+        LoaderFlag_Trajectory | LoaderFlag_MM,                      // Amber NetCDF trajectory
+#endif
         LoaderFlag_Supplemental | LoaderFlag_MM,                    // GROMACS topology
         LoaderFlag_System | LoaderFlag_MM | LoaderFlag_Topology,    // GROMACS run input
         LoaderFlag_Supplemental | LoaderFlag_Temporal | LoaderFlag_MM, // GROMACS energy
         LoaderFlag_Supplemental | LoaderFlag_Temporal,                 // XVG
         LoaderFlag_Supplemental | LoaderFlag_Temporal,                 // CSV
         LoaderFlag_System | LoaderFlag_Trajectory | LoaderFlag_MM,     // ASE trajectory
+        LoaderFlag_Supplemental | LoaderFlag_Temporal | LoaderFlag_MM, // Amber energy output
 };
 
 void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
@@ -123,7 +139,16 @@ void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
 	*state = { 0 };
 
     str_t ext = {0};
-    if (extract_ext(&ext, filepath)) {
+    extract_ext(&ext, filepath);
+    // extract_ext looks for the last '.' in the whole path: for an extensionless file in a directory
+    // like ".../.config/mdout" what it finds is not an extension
+    for (size_t i = 0; i < ext.len; ++i) {
+        if (ext.ptr[i] == '/' || ext.ptr[i] == '\\') {
+            ext = {};
+            break;
+        }
+    }
+    if (ext.len) {
         state->type = type_from_ext(ext);
         if (state->type != LoaderType_Undefined) {
             state->flags = loader_flags[state->type];
@@ -154,6 +179,13 @@ void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
                 }
             }
 #endif
+#if MD_AMBER_NETCDF
+            if (state->type == LoaderType_AMBER_NETCDF && !md_amber_netcdf_file_is_trajectory(filepath)) {
+                state->type = LoaderType_Undefined;
+                state->flags = LoaderFlag_RequiresDialogue;
+                return;
+            }
+#endif
             return;
         }
     }
@@ -163,6 +195,14 @@ void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
     if (md_molden_file_is_molden(filepath)) {
         state->type  = LoaderType_MOLDEN;
         state->flags = loader_flags[LoaderType_MOLDEN];
+        return;
+    }
+
+    // Amber's conventional "mdout" and "mden" filenames have no extension, and .out/.log are shared by
+    // many unrelated formats, so claim them only when the contents are Amber energy output.
+    if ((str_empty(ext) || str_eq_ignore_case(ext, STR_LIT("out")) || str_eq_ignore_case(ext, STR_LIT("log"))) && md_amber_energy_file_is_energy(filepath)) {
+        state->type = LoaderType_AMBER_ENERGY;
+        state->flags = loader_flags[LoaderType_AMBER_ENERGY];
         return;
     }
 
@@ -206,6 +246,9 @@ bool load(md_system_t* out_sys, md_system_state_t* out_state, str_t filepath, co
         case LoaderType_LAMMPSTRJ:
         case LoaderType_XTC:
         case LoaderType_TRR:
+#if MD_AMBER_NETCDF
+        case LoaderType_AMBER_NETCDF:
+#endif
         case LoaderType_DCD:
             // A trajectory is not loaded into the system: it is published as a run (publish_run).
             MD_LOG_ERROR("'" STR_FMT "' is a trajectory; it is opened with publish_run, not loaded", STR_ARG(filepath));
@@ -239,6 +282,8 @@ bool load_supplemental(md_system_t* out_sys, str_t filepath, const LoaderState& 
             return md_itp_system_supplement_from_file(out_sys, filepath);
         case LoaderType_EDR:
             return md_edr_system_supplement_from_file(out_sys, filepath, run);
+        case LoaderType_AMBER_ENERGY:
+            return md_amber_energy_system_supplement_from_file(out_sys, filepath, run);
         case LoaderType_XVG:
             return md_xvg_system_supplement_from_file(out_sys, filepath, run);
         case LoaderType_CSV:
@@ -287,11 +332,22 @@ bool publish_run(md_system_t* sys, str_t filepath, str_t run, uint32_t flags) {
 #if MD_HDF5
     case LoaderType_H5MD:      return md_h5md_system_publish_run(sys, filepath, run, flags);
 #endif
+#if MD_AMBER_NETCDF
+    case LoaderType_AMBER_NETCDF: return md_amber_netcdf_system_publish_run(sys, filepath, run, flags);
+#endif
     default:                   return false;
     }
 }
 
 LoaderType type_from_ext(str_t ext) {
+#if MD_AMBER_NETCDF
+    if (str_eq_ignore_case(ext, STR_LIT("netcdf"))) {
+        return LoaderType_AMBER_NETCDF;
+    }
+#endif
+    if (str_eq_ignore_case(ext, STR_LIT("mden"))) {
+        return LoaderType_AMBER_ENERGY;
+    }
     // One loader, two extensions: a .top is an .itp with a [ molecules ] section
     if (str_eq_ignore_case(ext, STR_LIT("top"))) {
         return LoaderType_ITP;
