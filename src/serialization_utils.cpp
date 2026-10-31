@@ -11,6 +11,28 @@ namespace viamd {
 
 static const str_t esc = STR_INIT("\"\"\"");
 
+// Numbers are written with a '.' whatever the locale. A ',' in one is from a workspace written by a VIAMD that
+// followed a decimal comma locale, whose numbers cannot be told from the separators between them: the value is not
+// read rather than read wrong, and the log says why.
+static void log_decimal_comma(str_t arg) {
+	MD_LOG_ERROR("Workspace: '" STR_FMT "' is not read, its numbers were written with a decimal comma", STR_ARG(arg));
+}
+
+// "0,5" or "1,5e-07": a single ',' where a '.' makes it a number
+static bool is_decimal_comma_number(str_t arg) {
+	char buf[64];
+	if (arg.len == 0 || arg.len >= sizeof(buf)) return false;
+	size_t commas = 0;
+	for (size_t i = 0; i < arg.len; ++i) {
+		buf[i] = arg.ptr[i];
+		if (buf[i] == ',') {
+			buf[i] = '.';
+			commas += 1;
+		}
+	}
+	return commas == 1 && is_float(str_t{buf, arg.len});
+}
+
 static bool is_comment(str_t line) {
 	return str_begins_with(line, STR_LIT("#")) || str_begins_with(line, STR_LIT(";"));
 }
@@ -75,43 +97,43 @@ bool next_entry(str_t& ident, str_t& arg, deserialization_state_t& state) {
 }
 
 void write_section_header(serialization_state_t& state, str_t section) {
-	md_strb_fmt(&state.sb, "\n[" STR_FMT "]\n", STR_ARG(section));
+	md_str_writer_fmt(&state.sw, "\n[" STR_FMT "]\n", STR_ARG(section));
 }
 
 void write_int(serialization_state_t& state, str_t ident, int64_t val) {
-	md_strb_fmt(&state.sb, STR_FMT "=%lld\n", STR_ARG(ident), (long long)val);
+	md_str_writer_fmt(&state.sw, STR_FMT "=%lld\n", STR_ARG(ident), (long long)val);
 }
 
 void write_int_vec(serialization_state_t& state, str_t ident, const int* elem, size_t len) {
-	md_strb_fmt(&state.sb, STR_FMT "=", STR_ARG(ident));
+	md_str_writer_fmt(&state.sw, STR_FMT "=", STR_ARG(ident));
 	for (size_t i = 0; i < len; ++i) {
-		md_strb_fmt(&state.sb, "%i", elem[i]);
+		md_str_writer_fmt(&state.sw, "%i", elem[i]);
 		if (i < len - 1) {
-			md_strb_push_char(&state.sb, ',');
+			md_str_writer_push_char(&state.sw, ',');
 		}
 	}
-	md_strb_push_char(&state.sb, '\n');
+	md_str_writer_push_char(&state.sw, '\n');
 }
 
 // Shortest round trip is not on offer from printf; these digit counts are the ones that always
 // read back the same value (FLT_DECIMAL_DIG and DBL_DECIMAL_DIG). %f would print 1e-7 as 0.000000.
 void write_flt(serialization_state_t& state, str_t ident, float val) {
-	md_strb_fmt(&state.sb, STR_FMT "=%.9g\n", STR_ARG(ident), (double)val);
+	md_str_writer_fmt(&state.sw, STR_FMT "=%.9g\n", STR_ARG(ident), (double)val);
 }
 
 void write_dbl(serialization_state_t& state, str_t ident, double val) {
-	md_strb_fmt(&state.sb, STR_FMT "=%.17g\n", STR_ARG(ident), val);
+	md_str_writer_fmt(&state.sw, STR_FMT "=%.17g\n", STR_ARG(ident), val);
 }
 
 void write_flt_vec(serialization_state_t& state, str_t ident, const float* elem, size_t len) {
-	md_strb_fmt(&state.sb, STR_FMT "=", STR_ARG(ident));
+	md_str_writer_fmt(&state.sw, STR_FMT "=", STR_ARG(ident));
 	for (size_t i = 0; i < len; ++i) {
-		md_strb_fmt(&state.sb, "%.9g", (double)elem[i]);
+		md_str_writer_fmt(&state.sw, "%.9g", (double)elem[i]);
 		if (i < len - 1) {
-			md_strb_push_char(&state.sb, ',');
+			md_str_writer_push_char(&state.sw, ',');
 		}
 	}
-	md_strb_push_char(&state.sb, '\n');
+	md_str_writer_push_char(&state.sw, '\n');
 }
 
 void write_str(serialization_state_t& state, str_t ident, str_t str) {
@@ -124,9 +146,9 @@ void write_str(serialization_state_t& state, str_t ident, str_t str) {
 		if (str_find_str(NULL, str, esc)) {
 			MD_LOG_ERROR("Workspace: the value of '" STR_FMT "' contains \"\"\" and cannot be stored as it is", STR_ARG(ident));
 		}
-		md_strb_fmt(&state.sb, STR_FMT "=" STR_FMT STR_FMT STR_FMT "\n", STR_ARG(ident), STR_ARG(esc), STR_ARG(str), STR_ARG(esc));
+		md_str_writer_fmt(&state.sw, STR_FMT "=" STR_FMT STR_FMT STR_FMT "\n", STR_ARG(ident), STR_ARG(esc), STR_ARG(str), STR_ARG(esc));
 	} else {
-		md_strb_fmt(&state.sb, STR_FMT "=" STR_FMT "\n", STR_ARG(ident), STR_ARG(str));
+		md_str_writer_fmt(&state.sw, STR_FMT "=" STR_FMT "\n", STR_ARG(ident), STR_ARG(str));
 	}
 }
 
@@ -151,7 +173,7 @@ void write_bitset(serialization_state_t& state, str_t ident, const md_bitset_t* 
 			// next_entry() splits a line at its first '='. Without it the following entry is glued
 			// onto the end of this one and silently swallowed - which is how every group label
 			// after the first went missing from a saved workspace.
-			md_strb_fmt(&state.sb, STR_FMT "=###" STR_FMT "###\n", STR_ARG(ident), STR_ARG(base64));
+			md_str_writer_fmt(&state.sw, STR_FMT "=###" STR_FMT "###\n", STR_ARG(ident), STR_ARG(base64));
 		}
 	}
 }
@@ -193,15 +215,19 @@ bool extract_int64(int64_t& val, str_t arg) {
 }
 
 bool extract_int_vec(int* elem, size_t len, str_t arg) {
+	// Exactly len integers, or nothing is written
+	int tmp[16];
+	if (len > ARRAY_SIZE(tmp)) return false;
 	str_t tok;
 	size_t count = 0;
-	while (count < len && extract_token_delim(&tok, &arg, ',')) {
+	while (extract_token_delim(&tok, &arg, ',')) {
 		tok = str_trim(tok);
-		if (is_int(tok)) {
-			elem[count++] = (int)parse_int(tok);
-		}
+		if (count == len || !is_int(tok)) return false;
+		tmp[count++] = (int)parse_int(tok);
 	}
-	return count == len;
+	if (count != len) return false;
+	MEMCPY(elem, tmp, len * sizeof(int));
+	return true;
 }
 
 bool extract_dbl (double& val, str_t arg) {
@@ -209,6 +235,7 @@ bool extract_dbl (double& val, str_t arg) {
 		val = parse_float(arg);
 		return true;
 	}
+	if (is_decimal_comma_number(arg)) log_decimal_comma(arg);
 	return false;
 }
 
@@ -217,22 +244,31 @@ bool extract_flt (float& val, str_t arg) {
 		val = (float)parse_float(arg);
 		return true;
 	}
+	if (is_decimal_comma_number(arg)) log_decimal_comma(arg);
 	return false;
 }
 
 bool extract_flt_vec (float* elem, size_t len, str_t arg) {
-	// Parsed into a copy and written back only when every component was there
+	// Exactly len numbers, parsed into a copy and written back only then. More than len is not cut down to the
+	// first len: that is what a vector written with decimal commas looks like ("0,5,0,25,1,1" for 0.5 0.25 1 1),
+	// and its first len would be values nobody wrote.
 	float tmp[16];
 	if (len > ARRAY_SIZE(tmp)) return false;
+	const str_t all = arg;
 	str_t tok;
 	size_t count = 0;
-	while (count < len && extract_token_delim(&tok, &arg, ',')) {
+	size_t extra = 0;
+	while (extract_token_delim(&tok, &arg, ',')) {
 		tok = str_trim(tok);
-		if (is_float(tok) || is_int(tok)) {
+		if (!(is_float(tok) || is_int(tok))) return false;
+		if (count < len) {
 			tmp[count++] = (float)parse_float(tok);
+		} else {
+			extra += 1;
 		}
 	}
-	if (count != len) return false;
+	if (extra) log_decimal_comma(all);
+	if (count != len || extra) return false;
 	MEMCPY(elem, tmp, len * sizeof(float));
 	return true;
 }

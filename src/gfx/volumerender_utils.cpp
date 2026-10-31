@@ -18,14 +18,7 @@
 
 #include <shaders.inl>
 
-#define PUSH_GPU_SECTION(lbl)                                                                       \
-    {                                                                                               \
-        if (glPushDebugGroup) glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, GL_KHR_debug, -1, lbl); \
-    }
-#define POP_GPU_SECTION()                       \
-    {                                           \
-        if (glPopDebugGroup) glPopDebugGroup(); \
-    }
+#include <gfx/profiler.h>
 
 static constexpr str_t v_shader_src_fs_quad = STR_LIT(
     R"(
@@ -85,84 +78,6 @@ struct DvrUniformData {
 static_assert(sizeof(DvrUniformData) == 64 + 3 * 16, "DvrUniformData must match the std140 layout of DvrUniforms");
 
 // -----------------------------------------------------------------------------
-// GPU timings
-// -----------------------------------------------------------------------------
-
-// A redraw of the orbital grid alone issues three queries per panel, and they come back a few frames late
-static constexpr int    TIMER_QUERY_COUNT     = 256;
-static constexpr int    TIMER_PUBLISH_FRAMES  = 30;
-
-static struct {
-    struct {
-        GLuint id = 0;
-        int    stage = 0;
-        bool   pending = false;
-    } query[TIMER_QUERY_COUNT];
-
-    int    active = -1;     // the query recording right now: GL_TIME_ELAPSED queries cannot nest
-    double accum_ms[TimingStage_Count] = {};
-    int    accum_frames = 0;
-    GpuTimings published = {};
-} timing;
-
-static void timer_begin(TimingStage stage) {
-    if (timing.active != -1) return;
-    for (int i = 0; i < TIMER_QUERY_COUNT; ++i) {
-        if (timing.query[i].id && !timing.query[i].pending) {
-            timing.query[i].stage = stage;
-            timing.active = i;
-            glBeginQuery(GL_TIME_ELAPSED, timing.query[i].id);
-            return;
-        }
-    }
-}
-
-static void timer_end() {
-    if (timing.active == -1) return;
-    glEndQuery(GL_TIME_ELAPSED);
-    timing.query[timing.active].pending = true;
-    timing.active = -1;
-}
-
-void timings_new_frame() {
-    for (int i = 0; i < TIMER_QUERY_COUNT; ++i) {
-        if (!timing.query[i].pending) continue;
-        GLint available = 0;
-        glGetQueryObjectiv(timing.query[i].id, GL_QUERY_RESULT_AVAILABLE, &available);
-        if (!available) continue;
-        GLuint64 ns = 0;
-        glGetQueryObjectui64v(timing.query[i].id, GL_QUERY_RESULT, &ns);
-        timing.accum_ms[timing.query[i].stage] += (double)ns * 1.0e-6;
-        timing.query[i].pending = false;
-    }
-
-    timing.accum_frames += 1;
-    if (timing.accum_frames >= TIMER_PUBLISH_FRAMES) {
-        GpuTimings t = {};
-        for (int i = 0; i < TimingStage_Count; ++i) {
-            t.ms[i] = (float)(timing.accum_ms[i] / timing.accum_frames);
-            t.total_ms += t.ms[i];
-            timing.accum_ms[i] = 0.0;
-        }
-        timing.published = t;
-        timing.accum_frames = 0;
-    }
-}
-
-GpuTimings timings_get() {
-    return timing.published;
-}
-
-const char* timing_stage_name(TimingStage stage) {
-    switch (stage) {
-    case TimingStage_BlockMinMax: return "Block min/max";
-    case TimingStage_EntryExit:   return "Entry / exit";
-    case TimingStage_Raycast:     return "Raycast";
-    default: return "";
-    }
-}
-
-// -----------------------------------------------------------------------------
 // Isosurfaces
 // -----------------------------------------------------------------------------
 
@@ -206,6 +121,12 @@ struct IsoProgram {
     GLint  loc_tex_entry = -1;
     GLint  loc_tex_exit = -1;
     GLint  loc_tex_minmax = -1;
+    GLint  loc_isoline_count = -1;
+    GLint  loc_isoline_values = -1;
+    GLint  loc_isoline_hover = -1;
+    GLint  loc_isoline_hover_value = -1;
+    GLint  loc_isoline_width = -1;
+    GLint  loc_field_grad_scale = -1;
     GLint  block_index = -1;
 };
 
@@ -220,7 +141,7 @@ struct IsoUniformData {
     vec3_t clip_max;
     float  use_depth;
 
-    vec3_t env_radiance;
+    vec3_t sky_radiance;
     float  roughness;
     vec3_t dir_radiance;
     float  F0;
@@ -235,8 +156,16 @@ struct IsoUniformData {
     float  entry_from_near;
     float  use_blocks;
     float  pad;
+
+    vec3_t ground_radiance;
+    float  basic;           // 1: the basic model (postprocess_pipeline::ShadingMode_Basic)
+
+    float  basic_ambient;
+    float  basic_specular;
+    float  linear_colors;   // 1: postprocess_pipeline::ColorSpace_Linear
+    float  light_strength;
 };
-static_assert(sizeof(IsoUniformData) == 3 * 64 + 7 * 16, "IsoUniformData must match the std140 layout of IsoUniforms");
+static_assert(sizeof(IsoUniformData) == 3 * 64 + 9 * 16, "IsoUniformData must match the std140 layout of IsoUniforms");
 
 // Block min/max grids: what the isosurface rays skip empty space with. One per density volume, kept
 // here keyed by the volume's texture and rebuilt when notify_data_changed() says its texels changed.
@@ -317,6 +246,12 @@ static void iso_program_setup(IsoProgram* p, GLuint v_shader, str_t source, str_
     p->loc_tex_entry          = glGetUniformLocation(prog, "u_tex_entry");
     p->loc_tex_exit           = glGetUniformLocation(prog, "u_tex_exit");
     p->loc_tex_minmax         = glGetUniformLocation(prog, "u_tex_minmax");
+    p->loc_isoline_count       = glGetUniformLocation(prog, "u_isoline_count");
+    p->loc_isoline_values      = glGetUniformLocation(prog, "u_isoline_values");
+    p->loc_isoline_hover       = glGetUniformLocation(prog, "u_isoline_hover");
+    p->loc_isoline_hover_value = glGetUniformLocation(prog, "u_isoline_hover_value");
+    p->loc_isoline_width       = glGetUniformLocation(prog, "u_isoline_width");
+    p->loc_field_grad_scale    = glGetUniformLocation(prog, "u_field_grad_scale");
     p->block_index            = glGetUniformBlockIndex(prog, "IsoUniforms");
 }
 
@@ -507,7 +442,7 @@ static const BlockGrid* block_grid_update(GLuint volume, const int dim[3]) {
     glBindVertexArray(iso.vao);
 
     bool complete = true;
-    timer_begin(TimingStage_BlockMinMax);
+    PUSH_GPU_SECTION("Block min/max");
     for (int z = 0; z < bd[2]; ++z) {
         glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g->minmax, 0, z);
         if (z == 0) {
@@ -522,7 +457,7 @@ static const BlockGrid* block_grid_update(GLuint volume, const int dim[3]) {
         glUniform1i(iso.minmax.loc_layer, z);
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
-    timer_end();
+    POP_GPU_SECTION();
 
     glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0, 0);
     glBindVertexArray(0);
@@ -617,7 +552,7 @@ static bool proxy_render(const BlockGrid& g, const mat4_t& model_to_clip, vec3_t
     glUniform1i(iso.proxy.loc_iso_count, count);
     glBindVertexArray(iso.vao);
 
-    timer_begin(TimingStage_EntryExit);
+    PUSH_GPU_SECTION("Entry / exit");
     glClearDepth(1.0);
     glClear(GL_DEPTH_BUFFER_BIT);
     glDepthFunc(GL_LESS);
@@ -628,7 +563,7 @@ static bool proxy_render(const BlockGrid& g, const mat4_t& model_to_clip, vec3_t
     glClear(GL_DEPTH_BUFFER_BIT);
     glDepthFunc(GL_GREATER);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 14, instances);
-    timer_end();
+    POP_GPU_SECTION();
 
     glClearDepth(1.0);
     if (!depth_clamp) glDisable(GL_DEPTH_CLAMP);
@@ -780,16 +715,23 @@ bool render_isosurfaces(const IsoRenderDesc& desc) {
     data.block_size        = 1.0f;
     data.clip_max          = desc.clip_volume.max;
     data.use_depth         = desc.render_target.depth ? 1.0f : 0.0f;
-    data.env_radiance      = desc.shading.env_radiance;
+    const postprocess_pipeline::Lighting light = postprocess_pipeline::lighting(desc.shading.mode);    // as in compose_deferred
+    data.sky_radiance      = light.sky_radiance * MAX(desc.shading.environment, 0.0f);
     data.roughness         = desc.shading.roughness;
-    data.dir_radiance      = desc.shading.dir_radiance;
+    data.dir_radiance      = light.light_irradiance;
     data.F0                = powf((n1 - n2) / (n1 + n2), 2.0f);
-    data.light_dir         = vec3_normalize(vec3_set(1.0f, 1.0f, 1.0f));   // as in compose_deferred
+    data.light_dir         = light.light_dir;
+    data.ground_radiance   = light.ground_radiance * MAX(desc.shading.environment, 0.0f);
     data.field_beg         = desc.field.range_beg;
     data.inv_res           = {1.0f / (float)desc.render_target.width, 1.0f / (float)desc.render_target.height};
     data.field_inv_ext     = field_ext != 0.0f ? 1.0f / field_ext : 0.0f;
     data.optical_scale     = ISO_OPTICAL_SCALE;
     data.entry_from_near   = near_plane_cuts(model_to_clip, desc.clip_volume.min, desc.clip_volume.max) ? 1.0f : 0.0f;
+    data.basic             = desc.shading.mode == postprocess_pipeline::ShadingMode_Basic ? 1.0f : 0.0f;
+    data.basic_ambient     = CLAMP(desc.shading.ambient, 0.0f, 1.0f);
+    data.basic_specular    = MAX(desc.shading.specular, 0.0f);
+    data.linear_colors     = desc.shading.colors == postprocess_pipeline::ColorSpace_Linear ? 1.0f : 0.0f;
+    data.light_strength    = MAX(desc.shading.light, 0.0f);
 
     const SavedState saved = save_state();
 
@@ -863,6 +805,17 @@ bool render_isosurfaces(const IsoRenderDesc& desc) {
         glUniform4fv(p.loc_iso_colors, count, (const float*)colors);
         glUniform1fv(p.loc_iso_tau,    count, tau);
         glUniform1i (p.loc_iso_count,  count);
+        if (p.loc_isoline_count != -1) {
+            // Only the field variant has them; the field's gradient is taken over the normals' offsets, h apart
+            const bool lines = use_field && isolines_active(desc.isolines);
+            const GLint line_count = lines ? (GLint)MIN(desc.isolines.count, (uint32_t)ISOLINES_MAX) : 0;
+            glUniform1i(p.loc_isoline_count, line_count);
+            if (line_count > 0) glUniform1fv(p.loc_isoline_values, line_count, desc.isolines.values);
+            glUniform1i(p.loc_isoline_hover, lines && desc.isolines.hover ? 1 : 0);
+            glUniform1f(p.loc_isoline_hover_value, desc.isolines.hover_value);
+            glUniform1f(p.loc_isoline_width, MAX(desc.isolines.width, 0.0f));
+            glUniform1f(p.loc_field_grad_scale, 0.5f / h);
+        }
 
         // Premultiplied radiance over whatever is in the target
         glDisable(GL_DEPTH_TEST);
@@ -873,9 +826,9 @@ bool render_isosurfaces(const IsoRenderDesc& desc) {
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         glBindVertexArray(iso.vao);
-        timer_begin(TimingStage_Raycast);
+        PUSH_GPU_SECTION("Raycast");
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        timer_end();
+        POP_GPU_SECTION();
         glBindVertexArray(0);
         glUseProgram(0);
 
@@ -895,12 +848,6 @@ bool render_isosurfaces(const IsoRenderDesc& desc) {
 }
 
 void initialize() {
-    if (!timing.query[0].id) {
-        for (int i = 0; i < TIMER_QUERY_COUNT; ++i) {
-            glGenQueries(1, &timing.query[i].id);
-        }
-    }
-
     iso_initialize();
 
     glGetIntegerv(GL_MAJOR_VERSION, (GLint*)&gl.version.major);
@@ -1281,9 +1228,9 @@ void render_dvr(const DvrRenderDesc& desc) {
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
         glBindVertexArray(gl.vao);
-        timer_begin(TimingStage_Raycast);
+        PUSH_GPU_SECTION("Raycast");
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        timer_end();
+        POP_GPU_SECTION();
         glBindVertexArray(0);
         glUseProgram(0);
     }

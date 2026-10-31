@@ -31,7 +31,7 @@
 #include <core/md_simd.h>
 #include <core/md_os.h>
 #include <core/md_unit.h>
-#include <core/md_str_builder.h>
+#include <core/md_writer.h>
 #include <core/md_parse.h>
 #include <core/md_hash.h>
 
@@ -42,11 +42,15 @@
 #include <gfx/immediate_draw_utils.h>
 #include <gfx/postprocessing_utils.h>
 #include <gfx/volumerender_utils.h>
+#include <gfx/isomesh_utils.h>
+#include <iso_meshes.h>
+#include <md_gto_iso.h>
 
 #include <resource_path.h>
 #include <app_settings.h>
 #include <display_units.h>
 #include <imgui_widgets.h>
+#include <property_grid.h>
 #include <implot_widgets.h>
 #include <task_system.h>
 #include <color_utils.h>
@@ -63,6 +67,8 @@
 #include <string>
 
 #include <viamd.h>
+#include <representation.h>
+#include <timeline_periods_ui.h>
 #include <script_reference.h>
 #include <viamd_event.h>
 #include <event.h>
@@ -79,6 +85,9 @@ static md_allocator_i* frame_alloc = 0; // Linear allocator for scratch data whi
 static md_allocator_i* persistent_alloc = 0;
 
 static bool use_gfx = false;
+
+// The main view's isosurface meshes (IsosurfaceRendering_Mesh): the running mean of their frames
+static isomesh::Target iso_mesh_target;
 
 constexpr str_t shader_output_snippet = STR_LIT(R"(
 layout(location = 0) out vec4 out_color;
@@ -123,6 +132,144 @@ void write_fragment(vec3 view_coord, vec3 view_vel, vec3 view_normal, vec4 color
 }
 )");
 
+
+// What Evaluate would do with the script as it is in the editor (md_script_eval_plan): how each of its properties
+// stands against what is evaluated, and so how what is shown stands against what the script now says
+struct ScriptPlan {
+    bool valid = false;         // the editor's script compiles, and there are frames to evaluate
+    bool running = false;       // an evaluation is running
+    bool same = false;          // the editor's script is the one evaluated
+    bool changes = false;       // Evaluate would change which properties there are, or what they are called
+    const md_script_eval_plan_t* props = nullptr;   // one per property of the editor's script
+    const str_t* names = nullptr;
+    size_t   num_props = 0;
+    uint32_t num_frames = 0;
+    uint32_t num_pending = 0;   // the frames Evaluate would evaluate
+};
+
+static ScriptPlan script_plan(const ApplicationState& state, md_allocator_i* alloc) {
+    ScriptPlan plan;
+    const md_script_ir_t* ir = state.script.ir;
+    plan.num_frames = (uint32_t)run_num_frames(&state);
+    plan.valid = md_script_ir_valid(ir) && plan.num_frames > 0;
+    plan.running = task_system::task_is_running(state.tasks.evaluate);
+    if (!plan.valid) return plan;
+
+    plan.same = state.script.eval && ir == state.script.eval_ir;
+    plan.num_props = md_script_ir_property_count(ir);
+    plan.names = md_script_ir_property_names(ir);
+    md_script_eval_plan_t* props = (md_script_eval_plan_t*)md_alloc(alloc, MAX(plan.num_props, 1) * sizeof(md_script_eval_plan_t));
+    md_bitset_t pending = md_bitset_empty_set();
+    if (!md_script_eval_plan(props, plan.num_props, &pending, state.script.eval, ir, plan.num_frames, alloc)) {
+        plan.valid = false;
+        return plan;
+    }
+    plan.props = props;
+    plan.num_pending = (uint32_t)md_bitset_count(pending);
+
+    // A property gone, or renamed, changes what is shown without anything to evaluate
+    const size_t num_evaluated = state.script.eval ? md_script_eval_property_count(state.script.eval) : 0;
+    plan.changes = num_evaluated != plan.num_props;
+    for (size_t i = 0; i < plan.num_props; ++i) {
+        plan.changes |= props[i].status != MD_SCRIPT_EVAL_STATUS_HELD || !str_eq(props[i].from, plan.names[i]);
+    }
+    return plan;
+}
+
+// How property i of the plan stands, as a line of text
+static void script_plan_describe(char* buf, size_t cap, const ScriptPlan& plan, size_t i) {
+    const md_script_eval_plan_t& p = plan.props[i];
+    const str_t name = plan.names[i];
+    switch (p.status) {
+    case MD_SCRIPT_EVAL_STATUS_NEW:
+        snprintf(buf, cap, STR_FMT ": not evaluated yet, %u frames to evaluate", STR_ARG(name), p.num_pending);
+        break;
+    case MD_SCRIPT_EVAL_STATUS_CHANGED:
+        snprintf(buf, cap, STR_FMT ": changed since it was evaluated, %u frames to evaluate", STR_ARG(name), p.num_pending);
+        break;
+    case MD_SCRIPT_EVAL_STATUS_HELD: {
+        char from[96] = "";
+        if (!str_eq(p.from, name)) snprintf(from, sizeof(from), ", computed as " STR_FMT " was", STR_ARG(p.from));
+        if (p.num_pending == 0) {
+            snprintf(buf, cap, STR_FMT ": up to date%s", STR_ARG(name), from);
+        } else if (p.num_frames < plan.num_frames) {
+            snprintf(buf, cap, STR_FMT ": %u of %u frames evaluated%s", STR_ARG(name), p.num_frames, plan.num_frames, from);
+        } else {
+            snprintf(buf, cap, STR_FMT ": %u frames to add or take out over periods%s", STR_ARG(name), p.num_pending, from);
+        }
+        break;
+    }
+    }
+}
+
+// A mark beside the line a property is named on: how it stands. It is also a handle on the property, which is dragged
+// from it into the window which shows its kind.
+struct ScriptGutterMark {
+    int line;
+    md_script_eval_status_t status;
+    float done;                 // the fraction of what it needs which it holds
+    char text[160];
+    char ident[64];
+    uint32_t kinds;             // MD_SCRIPT_PROPERTY_FLAG_*
+};
+
+static void draw_script_gutter_mark(ApplicationState* app, const TextEditor::Decorator& d, const ScriptGutterMark& m) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 c  = p0 + ImVec2(d.width * 0.5f, d.height * 0.5f);
+    const float  r  = d.glyphSize.y * 0.26f;
+    const ImU32 green = IM_COL32(90, 200, 110, 255);
+    const ImU32 amber = IM_COL32(240, 170, 60, 255);
+    const ImU32 gray  = IM_COL32(150, 150, 150, 255);
+    switch (m.status) {
+    case MD_SCRIPT_EVAL_STATUS_NEW:
+        dl->AddCircle(c, r, gray, 0, 1.5f);
+        break;
+    case MD_SCRIPT_EVAL_STATUS_CHANGED:
+        dl->AddCircleFilled(c, r, amber);
+        break;
+    case MD_SCRIPT_EVAL_STATUS_HELD:
+        if (m.done >= 1.0f) {
+            dl->AddCircleFilled(c, r, green);
+        } else {
+            // How much of it there is, as a slice
+            dl->AddCircle(c, r, green, 0, 1.5f);
+            if (m.done > 0.0f) {
+                dl->PathLineTo(c);
+                dl->PathArcTo(c, r, -IM_PI * 0.5f, -IM_PI * 0.5f + 2.0f * IM_PI * m.done);
+                dl->PathFillConvex(green);
+            }
+        }
+        break;
+    }
+
+    // A temporal property goes to a timeline (which a distribution takes as well), a distribution to a distribution,
+    // a volume to the density volume
+    const char* dnd_type = nullptr;
+    const char* hint = "";
+    if (m.kinds & MD_SCRIPT_PROPERTY_FLAG_TEMPORAL) {
+        dnd_type = TIMELINE_SERIES_DND;
+        hint = "Drag into a Timelines or Distributions subplot";
+    } else if (m.kinds & MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION) {
+        dnd_type = DISTRIBUTION_SERIES_DND;
+        hint = "Drag into a Distributions subplot";
+    } else if (m.kinds & MD_SCRIPT_PROPERTY_FLAG_VOLUME) {
+        dnd_type = VOLUME_SERIES_DND;
+        hint = "Drag into the Density Volume";
+    }
+    ImGui::InvisibleButton("##mark", ImVec2(d.width, d.height));
+    if (dnd_type && ImGui::BeginDragDropSource()) {
+        char path[SERIES_PATH_CAP];
+        snprintf(path, sizeof(path), "script/%s", m.ident);
+        const SeriesKey key = series_key(SeriesSource_Script, str_from_cstr(path));
+        char label[96];
+        series_label(label, sizeof(label), app, key);
+        series_set_drag_payload(dnd_type, key, -1, label, series_default_color(app, key));
+        ImGui::EndDragDropSource();
+    } else if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s%s%s", m.text, hint[0] ? "\n" : "", hint);
+    }
+}
 
 static double frame_to_time(double frame, const ApplicationState& data) {
     const int64_t num_frames = md_array_size(data.timeline.x_values);
@@ -174,9 +321,101 @@ static double time_to_frame(double time, const md_array(float) frame_times) {
 
 static void update_view_param(ApplicationState* state);
 
+// The lowest render scale offered: below half, too little of the detail is left to rebuild
+static constexpr float RENDER_SCALE_MIN = 0.5f;
+
+// The G-buffer's size for an image shown of out_w x out_h: the render scale of each side, at least a pixel
+static void render_size(const ApplicationState* state, uint32_t out_w, uint32_t out_h, uint32_t* w, uint32_t* h) {
+    const float s = CLAMP(state->settings.render_scale, RENDER_SCALE_MIN, 1.0f);
+    *w = MAX((uint32_t)(out_w * s + 0.5f), 1U);
+    *h = MAX((uint32_t)(out_h * s + 0.5f), 1U);
+}
+
+// The jitter's positions: JITTER_SEQUENCE_SIZE at the full resolution, and as many per pixel shown when a pixel of
+// the G-buffer covers several (1 / scale^2 of them), up to JITTER_SEQUENCE_MAX
+static uint32_t jitter_count(const ApplicationState* state) {
+    const float sx = (float)state->gbuffer.width  / (float)MAX(state->gbuffer.out_width, 1U);
+    const float sy = (float)state->gbuffer.height / (float)MAX(state->gbuffer.out_height, 1U);
+    const float n  = (float)JITTER_SEQUENCE_SIZE / MAX(sx * sy, 1.0e-3f);
+    return CLAMP((uint32_t)ceilf(n), (uint32_t)JITTER_SEQUENCE_SIZE, (uint32_t)JITTER_SEQUENCE_MAX);
+}
+
+// Which anti-aliasing passes run: the switch and the mode. Temporal carries more than the smoothing (the jitter,
+// motion blur, sharpening, the samples a screenshot gathers), all of it off with it.
+static inline bool fxaa_active(const ApplicationState* state) {
+    const auto& aa = state->visuals.anti_aliasing;
+    return aa.enabled && aa.mode == AntiAliasingMode::FXAA;
+}
+static inline bool taa_active(const ApplicationState* state) {
+    const auto& aa = state->visuals.anti_aliasing;
+    return aa.enabled && aa.mode == AntiAliasingMode::TAA;
+}
+
+static ViewRegion main_view_uncovered_region(const ApplicationState& state, const ImGuiWindow* canvas);
+
 //static void update_density_volume_texture(ApplicationState* state);
 
 static void render(ApplicationState* state);
+
+// The geometry pass by the kind of what it draws: a profiler section each (gfx/profiler.h), around one md_gl_draw of
+// all the ops of that kind. The cartoon, the ribbons and the tubes include the evaluation of their spline, which
+// md_gl_draw does for each call that draws one.
+enum GeometryStage {
+    GeometryStage_SpaceFill,
+    GeometryStage_Licorice,
+    GeometryStage_BallAndStick,
+    GeometryStage_Ribbons,
+    GeometryStage_Cartoon,
+    GeometryStage_GlyphSpheres,     // Of the cartoon of lipids and nucleic acids: heads
+    GeometryStage_GlyphTubes,       // Tails, sterol skeletons, nucleic backbones
+    GeometryStage_GlyphSlabs,       // Sugars, bases, the sticks between them
+    GeometryStage_Other,
+    GeometryStage_Highlight,        // The passes of the selected and highlighted atoms, drawn again over the rest
+    GeometryStage_Count
+};
+
+static const char* geometry_stage_name[GeometryStage_Count] = {
+    "Space fill", "Licorice", "Ball and stick", "Ribbons", "Cartoon", "Heads", "Tubes", "Slabs", "Other", "Selection, highlight",
+};
+
+static GeometryStage geometry_stage(md_gl_rep_type_t type, bool glyphs) {
+    if (glyphs) {
+        switch (type) {
+        case MD_GL_REP_SPACE_FILL: return GeometryStage_GlyphSpheres;
+        case MD_GL_REP_TUBES:      return GeometryStage_GlyphTubes;
+        case MD_GL_REP_SLABS:      return GeometryStage_GlyphSlabs;
+        default:                   return GeometryStage_Other;
+        }
+    }
+    switch (type) {
+    case MD_GL_REP_SPACE_FILL:     return GeometryStage_SpaceFill;
+    case MD_GL_REP_LICORICE:       return GeometryStage_Licorice;
+    case MD_GL_REP_BALL_AND_STICK: return GeometryStage_BallAndStick;
+    case MD_GL_REP_RIBBONS:        return GeometryStage_Ribbons;
+    case MD_GL_REP_CARTOON:        return GeometryStage_Cartoon;
+    default:                       return GeometryStage_Other;
+    }
+}
+
+// Draws ops a kind at a time, in the order the kinds first appear, each a profiler section
+static void draw_ops_timed(md_gl_draw_args_t args, const md_gl_draw_op_t* ops, size_t count, bool glyphs, md_allocator_i* alloc) {
+    bool done[16] = {};
+    md_array(md_gl_draw_op_t) group = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t type = (uint32_t)ops[i].type;
+        if (type < ARRAY_SIZE(done) && done[type]) continue;
+        md_array_shrink(group, 0);
+        for (size_t k = i; k < count; ++k) {
+            if (ops[k].type == ops[i].type) md_array_push(group, ops[k], alloc);
+        }
+        if (type < ARRAY_SIZE(done)) done[type] = true;
+        args.draw_operations = { .count = (uint32_t)md_array_size(group), .ops = group };
+        PUSH_GPU_SECTION(geometry_stage_name[geometry_stage(ops[i].type, glyphs)]);
+        md_gl_draw(&args);
+        POP_GPU_SECTION();
+    }
+}
+
 static void draw_representations_opaque(ApplicationState* state);
 static void draw_representations_opaque_lean_and_mean(ApplicationState* state, uint32_t mask = 0xFFFFFFFFU);
 // Returns true if anything was drawn into gbuffer.tex.transparency_hdr this frame
@@ -188,7 +427,6 @@ static void draw_context_popup(ApplicationState* state, const PickingHit& hit);
 static void draw_selection_query_window(ApplicationState* state);
 static void draw_selection_grow_window(ApplicationState* state);
 static void draw_animation_window(ApplicationState* state);
-static void draw_representations_window(ApplicationState* state);
 static void draw_timeline_window(ApplicationState* state);
 static void draw_distribution_window(ApplicationState* state);
 static void draw_async_task_window(ApplicationState* state);
@@ -196,9 +434,9 @@ static void draw_script_editor_window(ApplicationState* state);
 static void draw_script_reference_window(ApplicationState* state);
 static void open_script_reference(ApplicationState* state, str_t topic, bool take_focus = true);
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current);
-static void draw_color_legend_windows(const ApplicationState& state);
 
 static void draw_debug_window(ApplicationState* state);
+static void draw_profiler_window(ApplicationState* state);
 static void draw_property_export_window(ApplicationState* state);
 static void draw_structure_export_window(ApplicationState* state);
 static void draw_notifications_window();
@@ -234,6 +472,38 @@ static void apply_font_size(void* user_data) {
     ImGuiStyle& style = ImGui::GetStyle();
     style.FontSizeBase = state->settings.font_size;
     style._NextFrameFontSizeBase = style.FontSizeBase;  // From the demo, seems like a temporary fix
+}
+
+// The look of the Visuals menu a session starts with (settings.look) and the session's own (visuals): a workspace
+// sets the latter, Save as Default copies it to the former, which the .ini keeps
+static void visual_look_save(ApplicationState* state) {
+    state->settings.look.background  = state->visuals.background;
+    state->settings.look.shading     = state->visuals.shading;
+    state->settings.look.tonemapping = state->visuals.tonemapping;
+    state->settings.look.dof         = state->visuals.dof;
+    app_settings::mark_dirty();
+}
+
+static void visual_look_restore(ApplicationState* state) {
+    state->visuals.background  = state->settings.look.background;
+    state->visuals.shading     = state->settings.look.shading;
+    state->visuals.tonemapping = state->settings.look.tonemapping;
+    state->visuals.dof         = state->settings.look.dof;
+}
+
+// Once the .ini is read: its enums within their ranges (a file can hold anything), and the session in the look saved
+static void apply_visual_settings(void* user_data) {
+    ApplicationState* state = (ApplicationState*)user_data;
+    const decltype(state->visuals) factory = {};
+    auto& v    = state->visuals;
+    auto& look = state->settings.look;
+    if (!(0 <= (int)v.ssao.mode && (int)v.ssao.mode < postprocess_pipeline::SsaoMode_Count)) v.ssao.mode = factory.ssao.mode;
+    if (!(0 <= (int)v.anti_aliasing.mode && (int)v.anti_aliasing.mode < (int)AntiAliasingMode::Count)) v.anti_aliasing.mode = factory.anti_aliasing.mode;
+    state->settings.render_scale = CLAMP(state->settings.render_scale, RENDER_SCALE_MIN, 1.0f);
+    if (!(0 <= (int)look.shading.mode && (int)look.shading.mode < postprocess_pipeline::ShadingMode_Count)) look.shading.mode = factory.shading.mode;
+    if (!(0 <= (int)look.shading.colors && (int)look.shading.colors < postprocess_pipeline::ColorSpace_Count)) look.shading.colors = factory.shading.colors;
+    if (!(0 <= (int)look.tonemapping.tonemapper && (int)look.tonemapping.tonemapper < postprocess_pipeline::Tonemapper_Count)) look.tonemapping.tonemapper = factory.tonemapping.tonemapper;
+    visual_look_restore(state);
 }
 
 // timeline.x_values and view_range are stored in display units, so a change to the time preference
@@ -369,8 +639,44 @@ int main(int argc, char** argv) {
     // reads the file, so the bound values are current by the time the loop starts.
     app_settings::bind(STR_LIT("keep_representations"), &state.settings.keep_representations);
     app_settings::bind(STR_LIT("exact_isosurfaces"), &state.settings.exact_isosurfaces);
+    app_settings::bind(STR_LIT("isosurface_rendering"), &state.settings.isosurface_rendering);
+    app_settings::bind(STR_LIT("focus_in_free_space"), &state.settings.focus_in_free_space);
     app_settings::bind(STR_LIT("font_size"), &state.settings.font_size);
     app_settings::on_apply(apply_font_size, &state);
+    // What the computer can handle, not what a figure looks like: kept per user as it is, never in a workspace
+    state.app.window.vsync = true;
+    app_settings::bind(STR_LIT("vsync"), &state.app.window.vsync);
+    app_settings::bind(STR_LIT("render_scale"), &state.settings.render_scale);
+    app_settings::bind(STR_LIT("ssao"), &state.visuals.ssao.enabled);
+    app_settings::bind_enum(STR_LIT("ssao_mode"), &state.visuals.ssao.mode);
+    app_settings::bind(STR_LIT("ssao_intensity"), &state.visuals.ssao.intensity);
+    app_settings::bind(STR_LIT("ssao_temporal"), &state.visuals.ssao.temporal);
+    app_settings::bind(STR_LIT("anti_aliasing"), &state.visuals.anti_aliasing.enabled);
+    app_settings::bind_enum(STR_LIT("anti_aliasing_mode"), &state.visuals.anti_aliasing.mode);
+    app_settings::bind(STR_LIT("taa_history_min"), &state.visuals.temporal_aa.feedback_min);
+    app_settings::bind(STR_LIT("taa_history_max"), &state.visuals.temporal_aa.feedback_max);
+    app_settings::bind(STR_LIT("motion_blur"), &state.visuals.temporal_aa.motion_blur.enabled);
+    app_settings::bind(STR_LIT("motion_blur_strength"), &state.visuals.temporal_aa.motion_blur.motion_scale);
+    app_settings::bind(STR_LIT("sharpen"), &state.visuals.sharpen.enabled);
+    app_settings::bind(STR_LIT("sharpen_strength"), &state.visuals.sharpen.weight);
+    // The look a session starts with (Visuals > Save as Default)
+    {
+        auto& look = state.settings.look;
+        app_settings::bind(STR_LIT("look_background"), look.background.color.elem, 3);
+        app_settings::bind_enum(STR_LIT("look_shading"), &look.shading.mode);
+        app_settings::bind_enum(STR_LIT("look_colors"), &look.shading.colors);
+        app_settings::bind(STR_LIT("look_light"), &look.shading.light);
+        app_settings::bind(STR_LIT("look_environment"), &look.shading.environment);
+        app_settings::bind(STR_LIT("look_ambient"), &look.shading.ambient);
+        app_settings::bind(STR_LIT("look_specular"), &look.shading.specular);
+        app_settings::bind(STR_LIT("look_tonemapping"), &look.tonemapping.enabled);
+        app_settings::bind_enum(STR_LIT("look_tonemapper"), &look.tonemapping.tonemapper);
+        app_settings::bind(STR_LIT("look_exposure"), &look.tonemapping.exposure);
+        app_settings::bind(STR_LIT("look_gamma"), &look.tonemapping.gamma);
+        app_settings::bind(STR_LIT("look_dof"), &look.dof.enabled);
+        app_settings::bind(STR_LIT("look_dof_strength"), &look.dof.aperture);
+    }
+    app_settings::on_apply(apply_visual_settings, &state);
     display_units::register_settings();
     app_settings::initialize();
 
@@ -402,10 +708,11 @@ int main(int argc, char** argv) {
         // Potentials (surface fields). Kernels are made on first use, so this costs nothing until a
         // surface is coloured by one.
         md_gto_int_gpu_initialize(state.gpu_device);
+        // Isosurface meshes (the mesh rendering mode): kernels made on the first extraction
+        md_gto_iso_gpu_initialize(state.gpu_device);
     }
 #endif
 
-    state.app.window.vsync = true;
     state.app.file_drop.user_data = &state;
     state.app.file_drop.callback = [](size_t num_files, const str_t file_paths[], void* user_data) {
         ApplicationState* state = (ApplicationState*)user_data;
@@ -435,9 +742,10 @@ int main(int argc, char** argv) {
 
     VIAMD_LOG_DEBUG("Initializing post processing...");
 
-    postprocess_pipeline::initialize(state.gbuffer.width, state.gbuffer.height);
+    postprocess_pipeline::initialize(state.gbuffer.width, state.gbuffer.height, state.gbuffer.out_width, state.gbuffer.out_height);
     VIAMD_LOG_DEBUG("Initializing volume...");
     volume::initialize();
+    isomesh::initialize();
     VIAMD_LOG_DEBUG("Initializing task system...");
     md_os_sys_info_t sys_info = {0};
 	md_os_sys_info_query(&sys_info);
@@ -468,12 +776,14 @@ int main(int argc, char** argv) {
     state.editor.SetLanguage(script_editor::language());
     state.editor.SetPalette(TextEditor::GetDarkPalette());
     state.editor.SetInsertSpacesOnTabs(true);
+    // The marks of how each property stands, left of the line numbers (see draw_script_gutter_mark)
+    state.editor.SetDecorationsBeforeLineNumbers(true);
     script_editor::enable_autocomplete(state.editor, &state.mold.sys);
 
     {
 #ifdef VIAMD_DEFAULT_DATASET
         {
-            md_strb_t sb = md_strb_create(frame_alloc);
+            md_str_writer_t sb = md_str_writer_create(frame_alloc);
             str_t path = viamd::resource_path(&sb, STR_LIT(VIAMD_DEFAULT_DATASET));
             if (md_path_is_valid(path)) {
                 // @NOTE: We want explicitly to disable writing of cache files for the default dataset
@@ -506,6 +816,10 @@ int main(int argc, char** argv) {
 
     // Main loop
     while (!state.app.window.should_close) {
+        // The frame for the profiler, in sections: the start (events, ImGui's new frame, files, components' frame
+        // ticks), the windows, the main viewport's input, the update of the state, its upload, the rendering
+        profiler::frame_begin();
+        PUSH_GPU_SECTION("Start");
         application::update(&state.app);
         
         // This needs to happen first (in imgui events) to enable docking of imgui windows
@@ -536,7 +850,10 @@ int main(int argc, char** argv) {
 
         viamd::event_system_broadcast_event(viamd::EventType_ViamdFrameTick, viamd::EventPayloadType_ApplicationState, &state);
 
+        POP_GPU_SECTION();
+
         // GUI
+        PUSH_GPU_SECTION("Windows");
         if (state.show_script_window) draw_script_editor_window(&state);
         if (state.show_script_reference_window) draw_script_reference_window(&state);
         if (state.load_dataset.show_window) draw_load_dataset_window(&state);
@@ -549,6 +866,7 @@ int main(int argc, char** argv) {
         if (state.show_property_export_window) draw_property_export_window(&state);
         if (state.structure_export.show_window) draw_structure_export_window(&state);
         if (state.show_debug_window) draw_debug_window(&state);
+        if (state.show_profiler_window) draw_profiler_window(&state);
         if (state.animation.show_window) draw_animation_window(&state);
 
         draw_async_task_window(&state);
@@ -558,9 +876,12 @@ int main(int argc, char** argv) {
         //ImGui::ShowDemoWindow();
 
         draw_coordinate_system_widget_window(&state.view.target, state.view.camera);
-        draw_color_legend_windows(state);
-            
+        draw_representation_legends(state);
+        POP_GPU_SECTION();
+
+        PUSH_GPU_SECTION("Viewport");
         ImGui::BeginCanvas("Main interaction window", true);
+        const ImGuiWindow* canvas_window = ImGui::GetCurrentWindow();
         ImVec2 view_size = ImGui::GetContentRegionAvail();
         InteractionSurfaceState surface_state = interaction_surface(interaction_surface_main, vec_cast(view_size));
         ImGui::EndCanvas();
@@ -578,6 +899,7 @@ int main(int argc, char** argv) {
                 .width = state.gbuffer.width,
                 .height = state.gbuffer.height,
                 .clip_to_world = clip_to_world,
+                .pixel_scale = (float)state.gbuffer.width / (float)MAX(state.app.framebuffer.width, 1),
             };
 
             interaction_surface_hit_extract(&hit, surface_state, args);
@@ -625,17 +947,20 @@ int main(int argc, char** argv) {
         InteractionSurfaceViewTransformArgs view_args = {
             .camera = state.view.camera,
             .trackball_param = state.view.trackball_param,
+            .view_shift = state.view.shift,
         };
 
         InteractionSurfaceViewTransformResult view_result = interaction_surface_view_transform_apply(&state.view.target, surface_state, view_args);
         if (view_result.reset_requested) {
+            // What is focused on is seen in the middle of what the windows leave in view, rather than behind them
+            state.view.region = state.settings.focus_in_free_space ? main_view_uncovered_region(state, canvas_window) : ViewRegion{};
             ViewTransform reset_transform = {};
             if (hit.depth < 1.0f) {
                 reset_transform.distance = state.view.target.distance;
                 reset_transform.orientation = state.view.camera.orientation;
                 reset_transform.position = hit.world_pos + state.view.camera.orientation * vec3_set(0, 0, state.view.target.distance);
             } else {
-                reset_view(&reset_transform, state.mold.state, &state.representation.visibility_mask);
+                reset_view(&reset_transform, state.mold.state, &state.representation.visibility_mask, state.view.camera.fov_y, state.view.region);
             }
             state.view.target = reset_transform;
         }
@@ -643,12 +968,16 @@ int main(int argc, char** argv) {
         draw_context_popup(&state, hit);
 
         camera_animate(&state.view.camera, state.view.target, state.app.timing.delta_s);
+        camera_animate_shift(&state.view.shift, view_region_center(state.view.region), state.app.timing.delta_s);
         state.visuals.dof.focus_depth = state.view.camera.distance;
 
         ImGuiWindow* win = ImGui::GetCurrentContext()->HoveredWindow;
         if (win && strcmp(win->Name, "Main interaction window") == 0) {
             script_set_hovered_property(&state,  STR_LIT(""));
         }
+        POP_GPU_SECTION();
+
+        PUSH_GPU_SECTION("Update");
 
         // Capture non-window specific keyboard events
         if (!ImGui::GetIO().WantCaptureKeyboard) {
@@ -658,8 +987,9 @@ int main(int argc, char** argv) {
 
             if (ImGui::IsKeyPressed(KEY_RECOMPILE_SHADERS)) {
                 VIAMD_LOG_INFO("Recompiling shaders and re-initializing volume");
-                postprocess_pipeline::initialize(state.gbuffer.width, state.gbuffer.height);
+                postprocess_pipeline::initialize(state.gbuffer.width, state.gbuffer.height, state.gbuffer.out_width, state.gbuffer.out_height);
                 volume::initialize();
+                isomesh::initialize();
                 md_gl_shaders_destroy(state.gl.shaders);
                 state.gl.shaders = md_gl_shaders_create(shader_output_snippet);
             }
@@ -714,40 +1044,25 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (state.timeline.filter.temporal_window.enabled) {
-            // The script's filter frame set follows (see the evaluation below)
-            const double half_window_ext = state.timeline.filter.temporal_window.extent_in_frames * 0.5;
-            state.timeline.filter.beg_frame = CLAMP(round(state.animation.frame - half_window_ext), 0.0, max_frame);
-            state.timeline.filter.end_frame = CLAMP(round(state.animation.frame + half_window_ext), 0.0, max_frame);
-        }
-
-        if (state.timeline.filter.enabled) {
-            static auto prev_filter_beg = state.timeline.filter.beg_frame;
-            static auto prev_filter_end = state.timeline.filter.end_frame;
-            if (state.timeline.filter.beg_frame != prev_filter_beg || state.timeline.filter.end_frame != prev_filter_end) {
-                prev_filter_beg = state.timeline.filter.beg_frame;
-                prev_filter_end = state.timeline.filter.end_frame;
-                state.timeline.filter.fingerprint = generate_fingerprint();
-            }
-        }
-
         if (time_changed) {
             state.mold.interpolate_system_state = true;
             time_stopped = false;
 
             PUSH_CPU_SECTION("Flag dynamic representations for update")
-            for (size_t i = 0; i < md_array_size(state.representation.reps); ++i) {
-                auto& rep = state.representation.reps[i];
-                if (rep.enabled && (rep.dynamic_evaluation || rep.color_mapping == ColorMapping::SecondaryStructure)) {
-					flag_representation_as_dirty(&rep);
-                }
-            }
+            flag_dynamic_representations_as_dirty(&state);
             POP_CPU_SECTION()
         } else {
             if (!time_stopped) {
                 time_stopped = true;
                 state.mold.dirty_gpu_buffers |= MolBit_DirtyPosition;
             }
+        }
+
+        // The stride only applies while playing: starting or stopping playback, like changing the stride, changes
+        // the frames the displayed state is made from without changing the time. Stopped, it is the trajectory's own.
+        if (playback_stride(&state) != state.mold.last_interpolated_stride) {
+            state.mold.interpolate_system_state = true;
+            state.mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
         }
 
         if (state.mold.interpolate_system_state) {
@@ -801,10 +1116,9 @@ int main(int argc, char** argv) {
                     str_t cwd = {};
                     if (state.files.workspace[0] != '\0') {
                         extract_folder_path(&cwd, str_from_cstr(state.files.workspace));
-                    } else if (state.files.trajectory[0] != '\0') {
-                        extract_folder_path(&cwd, str_from_cstr(state.files.trajectory));
-                    } else if (state.files.molecule[0] != '\0') {
-                        extract_folder_path(&cwd, str_from_cstr(state.files.molecule));
+                    } else if (const FileEntry* run_file = file_list_run_file(&state.files.list)) {
+                        // The trajectory's folder, else the structure's
+                        extract_folder_path(&cwd, str_from_cstr(run_file->path));
                     }
                     if (!str_empty(cwd)) {
                         md_path_set_cwd(cwd);
@@ -868,25 +1182,27 @@ int main(int argc, char** argv) {
                 } else {
                     state.script.eval_init = false;
 
-                    // Not remade below if the last compilation failed (in the same frame as the request)
-                    if (state.script.eval) {
-                        md_script_eval_free(state.script.eval);
-                        state.script.eval = nullptr;
-                    }
+                    // The new evaluation takes over from the previous one: every property computed from the
+                    // same thing keeps its values and is not evaluated again (md_script_eval_create_from).
+                    // Not remade if the last compilation failed (in the same frame as the request).
+                    md_script_eval_t* prev = state.script.eval;
+                    state.script.eval = nullptr;
 
                     if (md_script_ir_valid(state.script.ir)) {
                         state.script.eval_ir = state.script.ir;
-                        // Every frame, and the timeline filter's: none yet, it is applied below
-                        md_bitset_t none = md_bitset_empty_set();
-                        const md_bitset_t* sets[SCRIPT_FRAME_SET_COUNT] = { nullptr, &none };
-                        const md_script_eval_desc_t desc = { .num_frames = num_frames, .num_frame_sets = SCRIPT_FRAME_SET_COUNT, .frame_sets = sets };
-                        state.script.eval = md_script_eval_create_desc(state.script.eval_ir, &desc, state.allocator.persistent);
-                        state.script.filter_frames = {};
+                        // The slots over periods come along, and what they hold where their property is taken over
+                        const md_script_eval_desc_t desc = { .num_frames = num_frames };
+                        state.script.eval = md_script_eval_create_from(prev, state.script.eval_ir, &desc, state.allocator.persistent);
                     }
 
-                    // The evaluation's tables were freed and new ones allocated, possibly in the
-                    // same place: nothing derived from the old ones may be taken for the new.
-                    series_cache_free(&state);
+                    if (prev) {
+                        // The versions of the new evaluation carry on from the previous one's, so nothing derived
+                        // from those can be taken for these: the caches stay
+                        md_script_eval_free(prev);
+                    } else {
+                        // Its versions start over, in tables possibly allocated where earlier ones were
+                        series_cache_free(&state);
+                    }
 
                     state.script.evaluate = true;
                 }
@@ -895,32 +1211,19 @@ int main(int argc, char** argv) {
             if (state.script.eval && md_script_ir_valid(state.script.eval_ir) &&
                 md_script_eval_ir_fingerprint(state.script.eval) == md_script_ir_fingerprint(state.script.eval_ir))
             {
-                // The filter frame set follows the timeline filter, and is empty while there is none
-                ScriptFilterFrames filter = {};
-                if (state.timeline.filter.enabled) {
-                    const uint32_t frames = (uint32_t)num_frames;
-                    filter.enabled = true;
-                    filter.beg = CLAMP((uint32_t)state.timeline.filter.beg_frame, 0, frames - 1);
-                    filter.end = CLAMP((uint32_t)state.timeline.filter.end_frame + 1, filter.beg + 1, frames);
-                }
-                const ScriptFilterFrames& applied = state.script.filter_frames;
-                const bool filter_changed = filter.enabled != applied.enabled || filter.beg != applied.beg || filter.end != applied.end;
-
-                if (state.script.evaluate || filter_changed) {
+                // The slots over periods follow their periods at once, also while evaluating (series_resolve_histogram).
+                // Nothing is evaluated for them until Evaluate is pressed: what needs evaluation only starts when
+                // asked to. A distribution needs none, it is kept per frame.
+                if (state.script.evaluate) {
                     if (task_system::task_is_running(state.tasks.evaluate)) {
-                        // Started again once it has stopped. Nothing it has done is lost: only the frames
-                        // the sets have not added yet are evaluated.
+                        // Started again once it has stopped, over the frames which remain then. Nothing it has
+                        // done is lost.
                         md_script_eval_interrupt(state.script.eval);
                     } else {
                         state.script.evaluate = false;
-                        if (filter_changed) {
-                            const md_bitset_t frames = filter.enabled ? md_bitset_range(filter.beg, filter.end) : md_bitset_empty_set();
-                            md_script_eval_set_frame_set(state.script.eval, SCRIPT_FRAME_SET_FILTER, &frames);
-                            state.script.filter_frames = filter;
-                        }
                         md_script_eval_reset_interrupt(state.script.eval);
 
-                        // What is left to do, over the union of the sets
+                        // What is left to do, for the properties and the slots
                         const md_bitset_t pending = md_script_eval_pending_frames(state.script.eval, frame_alloc);
                         const size_t count = md_bitset_count(pending);
                         if (count > 0) {
@@ -1076,7 +1379,7 @@ int main(int argc, char** argv) {
                 state.view.target.position = mat4_mul_vec3(state.mold.unitcell_transform, state.view.target.position, 1.0f);
             }
             else {
-                reset_view(&state.view.target, state.mold.state);
+                reset_view(&state.view.target, state.mold.state, (const md_bitset_t*)nullptr, state.view.camera.fov_y, state.view.region);
             }
         }
 
@@ -1095,9 +1398,9 @@ int main(int argc, char** argv) {
         uint64_t r_hash = md_array_size(state.representation.reps);
         for (size_t i = 0; i < md_array_size(state.representation.reps); ++i) {
             const Representation& rep = state.representation.reps[i];
-            const uint32_t kind[3] = { (uint32_t)rep.type, (uint32_t)rep.color_mapping, (uint32_t)rep.enabled };
+            const uint32_t kind[3] = { (uint32_t)rep.type, (uint32_t)rep.color_mapping, (uint32_t)representation_shown(state, rep) };
             r_hash = md_hash64(kind, sizeof(kind), r_hash);
-            const str_t filt = str_from_cstrn(rep.filt, sizeof(rep.filt));
+            const str_t filt = str_from_cstrn(rep.filter.text, sizeof(rep.filter.text));
             r_hash = md_hash64(filt.ptr, filt.len, r_hash);
             r_hash = md_bitset_hash64(rep.atom_mask, r_hash);
         }
@@ -1139,12 +1442,21 @@ int main(int argc, char** argv) {
         // re-interpolates mold.state from the trajectory before it is ever uploaded.
         viamd::event_system_process_event_queue();
 
+        POP_GPU_SECTION();
+
+        PUSH_GPU_SECTION("Upload");
         update_md_buffers(&state);
         update_timeline_time_unit(&state);
+        POP_GPU_SECTION();
 
+        PUSH_GPU_SECTION("Render");
         render(&state);
+        POP_GPU_SECTION();
 
+        PUSH_GPU_SECTION("Main thread tasks");
         task_system::execute_main_task_queue();
+        POP_GPU_SECTION();
+        profiler::frame_end();
 
         // Reset frame allocator
         md_vm_arena_reset(frame_alloc);
@@ -1168,10 +1480,16 @@ int main(int argc, char** argv) {
     state.gfx.world = nullptr;
     state.gfx.overlay = nullptr;
 
+    profiler::shutdown();
     VIAMD_LOG_DEBUG("Shutting down post processing...");
     postprocess_pipeline::shutdown();
     VIAMD_LOG_DEBUG("Shutting down volume...");
     volume::shutdown();
+    isomesh::target_free(&iso_mesh_target);
+    for (size_t i = 0; i < md_array_size(state.representation.reps); ++i) {
+        electronic_structure_mesh_free(&state, &state.representation.reps[i].electronic_structure);
+    }
+    isomesh::shutdown();
     VIAMD_LOG_DEBUG("Shutting down task system...");
     task_system::shutdown();
 
@@ -1183,6 +1501,7 @@ int main(int argc, char** argv) {
         gpu_volume_jobs_drain(&state);
         system_gpu_data_free(&state);
         md_gto_int_gpu_shutdown();
+        md_gto_iso_gpu_shutdown();
 
         md_gpu_free(state.gpu_stream, state.gpu_coeff);
         md_gpu_texture_destroy(state.gpu_volume);
@@ -1218,9 +1537,9 @@ static void update_view_param(ApplicationState* data) {
     const float f = data->view.camera.far_plane;
     const float aspect_ratio = (float)data->gbuffer.width / (float)data->gbuffer.height;
 
-    if (data->visuals.temporal_aa.enabled && data->visuals.temporal_aa.jitter) {
+    if (taa_active(data) && data->visuals.temporal_aa.jitter) {
         static uint32_t i = 0;
-        i = (i+1) % (uint32_t)ARRAY_SIZE(data->view.jitter.sequence);
+        i = (i+1) % jitter_count(data);
         param.jitter.curr = data->view.jitter.sequence[i] - 0.5f;
         if (data->view.mode == CameraMode::Perspective) {
             const vec2_t j = param.jitter.curr;
@@ -1251,7 +1570,40 @@ static void update_view_param(ApplicationState* data) {
         param.matrix.curr.proj_no_jitter = param.matrix.curr.proj;
     }
 
+    // What the view is focused on is seen where the windows leave it uncovered (see ViewRegion): the picture is moved
+    // over in clip space. Not in a screenshot without the windows, which shows it in the middle.
+    const bool windows_shown = str_empty(data->screenshot.path_to_file) || !data->screenshot.hide_gui;
+    const vec2_t shift = windows_shown ? data->view.shift : vec2_t{0, 0};
+    if (shift != vec2_t{0, 0}) {
+        const mat4_t to_shifted   = mat4_translate( shift.x,  shift.y, 0.0f);
+        const mat4_t from_shifted = mat4_translate(-shift.x, -shift.y, 0.0f);
+        param.matrix.curr.proj           = to_shifted * param.matrix.curr.proj;
+        param.matrix.curr.proj_no_jitter = to_shifted * param.matrix.curr.proj_no_jitter;
+        param.matrix.inv.proj            = param.matrix.inv.proj * from_shifted;
+    }
+
     param.matrix.curr.norm = mat4_transpose(param.matrix.inv.view);
+}
+
+// The part of the main view that the windows leave in view, as a region of it: the main view is drawn over all of
+// the main viewport, behind the windows. All of it when they leave too little to show anything in.
+static ViewRegion main_view_uncovered_region(const ApplicationState& state, const ImGuiWindow* canvas) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImRect bounds = ImRect(viewport->Pos, viewport->Pos + viewport->Size);
+    const ImRect rect = ImGui::LargestUncoveredRect(bounds, canvas);
+
+    ViewRegion region = {.aspect_ratio = (float)state.gbuffer.width / (float)state.gbuffer.height};
+
+    // Smallest side, relative to that of the viewport, that is still worth fitting into
+    const float MIN_SIDE = 0.25f;
+    if (ImMin(rect.GetWidth(), rect.GetHeight()) >= MIN_SIDE * ImMin(bounds.GetWidth(), bounds.GetHeight())) {
+        // Normalized device coordinates have y up
+        const ImVec2 p0 = (rect.Min - bounds.Min) / bounds.GetSize();
+        const ImVec2 p1 = (rect.Max - bounds.Min) / bounds.GetSize();
+        region.min = {p0.x * 2.0f - 1.0f, 1.0f - p1.y * 2.0f};
+        region.max = {p1.x * 2.0f - 1.0f, 1.0f - p0.y * 2.0f};
+    }
+    return region;
 }
 
 // ### DRAW WINDOWS ###
@@ -1309,144 +1661,282 @@ static void draw_main_menu(ApplicationState* data) {
         }
         */
         if (ImGui::BeginMenu("Visuals")) {
-            if (ImGui::Button("Reset View")) {
-                reset_view(&data->view.target, data->mold.state, &data->representation.visibility_mask);
-            }
-            ImGui::Separator();
-            ImGui::Checkbox("VSync", &data->app.window.vsync);
-            ImGui::SetItemTooltip("Limit the frame rate to the display's refresh rate");
-            ImGui::Separator();
+            const bool basic_shading = data->visuals.shading.mode == postprocess_pipeline::ShadingMode_Basic;
+            const float gap = ImGui::GetStyle().ItemInnerSpacing.x;
+            char ms_text[32];
 
-            ImGui::BeginGroup();
-            ImGui::Text("Camera");
-            {
-                ImGui::Combo("Mode", (int*)(&data->view.mode), "Perspective\0Orthographic\0");
+            // A menu sizes itself to what is in it, and the rows fill what there is: the width is set here
+            ImGui::Dummy(ImVec2(ImGui::GetFontSize() * 26.0f, 0.0f));
+
+            // The display first, then sections in the order the image is made: what is seen, how it is lit, what the camera
+            // does with the light, how the result is smoothed; then how isosurfaces are drawn. The effects that
+            // can be turned off have the switch on their header, and their settings only while they are on.
+            prop::begin("visuals");
+
+            // The computer's settings (VSync, the ambient occlusion and the anti-aliasing here; Isosurfaces marks its own)
+            // are kept as they are set: the .ini
+            bool machine_dirty = false;
+
+            if (prop::section("Display")) {
+                prop::row("vsync", "Limit the frame rate to the display's refresh rate");
+                machine_dirty |= ImGui::Checkbox("##vsync", &data->app.window.vsync);
+
+                // A fraction of each side, in steps of 5 %, and the size it renders at beside it
+                prop::row("resolution", "Render the scene at this fraction of the display's resolution and upscale it.\n"
+                                        "TAA rebuilds the detail over frames: a still view comes close to the full resolution, a moving one is softer.\n"
+                                        "FXAA, or no anti-aliasing, upscales each frame on its own: softer.\n"
+                                        "Screenshots are rendered at the full resolution.");
+                uint32_t rw = 0, rh = 0;
+                render_size(data, data->app.framebuffer.width, data->app.framebuffer.height, &rw, &rh);
+                char size_text[32];
+                snprintf(size_text, sizeof(size_text), "%u x %u", rw, rh);
+                ImGui::SetNextItemWidth(prop::control_width_before(size_text));
+                float percent = data->settings.render_scale * 100.0f;
+                if (ImGui::SliderFloat("##resolution", &percent, RENDER_SCALE_MIN * 100.0f, 100.0f, "%.0f %%")) {
+                    data->settings.render_scale = CLAMP(roundf(percent / 5.0f) * 0.05f, RENDER_SCALE_MIN, 1.0f);
+                    machine_dirty = true;
+                }
+                ImGui::SameLine(0.0f, 2.0f * gap);
+                ImGui::TextDisabled("%s", size_text);
+                prop::section_end();
+            }
+
+            if (prop::section("View")) {
+                prop::row("camera");
+                const char* reset_label = "reset";
+                const float reset_w = ImGui::CalcTextSize(reset_label).x + 2.0f * ImGui::GetStyle().FramePadding.x;
+                ImGui::SetNextItemWidth(MAX(prop::control_width() - reset_w - gap, 1.0f));
+                ImGui::Combo("##camera", (int*)(&data->view.mode), "Perspective\0Orthographic\0");
+                ImGui::SameLine(0.0f, gap);
+                if (ImGui::Button(reset_label)) {
+                    reset_view(&data->view.target, data->mold.state, &data->representation.visibility_mask, data->view.camera.fov_y, data->view.region);
+                }
+                ImGui::SetItemTooltip("Frame what is shown again, from the default direction");
                 if (data->view.mode == CameraMode::Perspective) {
                     float fov = RAD_TO_DEG(data->view.camera.fov_y);
-                    if (ImGui::SliderFloat("Field of View", &fov, 12.5f, 80.0f, "%.1f deg")) {
+                    prop::row("field of view");
+                    if (ImGui::SliderFloat("##fov", &fov, 12.5f, 80.0f, (const char*)u8"%.1f°")) {
                         data->view.camera.fov_y = DEG_TO_RAD(fov);
                     }
                 }
+                if (md_unitcell_flags(&data->mold.state.unitcell) != 0) {
+                    prop::row("periodic images", "The scene again in the neighboring cells, this many each way along a, b and c:\n"
+                                                 "1 1 1 shows the 26 cells around it. A representation can leave itself out\n"
+                                                 "(its periodic images, under Representations).");
+                    ImGui::SliderInt3("##periodic_images", data->view.periodic_images, 0, PERIODIC_IMAGES_MAX, "%d", ImGuiSliderFlags_AlwaysClamp);
+                }
+                prop::section_end();
             }
-            ImGui::EndGroup();
 
-            ImGui::BeginGroup();
-            ImGui::Text("Background");
-            ImGui::ColorEdit3Minimal("Color", data->visuals.background.color.elem);
-            ImGui::SameLine();
-            ImGui::SliderFloat("##Intensity", &data->visuals.background.intensity, 0.f, 100.f);
-            ImGui::SetItemTooltip("Background brightness");
-            ImGui::EndGroup();
-            ImGui::Separator();
-            ImGui::Checkbox("Anti-Aliasing (FXAA)", &data->visuals.fxaa.enabled);
-            ImGui::SetItemTooltip("Smooth jagged edges in the rendered image");
-            {
+            // How the scene is lit, how its colors are read, and what it is shown over
+            if (prop::section("Shading")) {
+                const char* modes[postprocess_pipeline::ShadingMode_Count] = {"Physically Based", "Basic"};
+                int mode = (int)data->visuals.shading.mode;
+                prop::row("mode", "Physically Based: lit as a plastic-like material by a light and its surroundings, then tone mapped.\n"
+                                  "Basic: the colors as they are picked where a surface faces the light, darker away from it. No tone mapping.");
+                if (ImGui::Combo("##mode", &mode, modes, IM_ARRAYSIZE(modes))) {
+                    data->visuals.shading.mode = (postprocess_pipeline::ShadingMode)mode;
+                }
+                prop::row("light", "Strength of the directional light, relative to the default (1).\n"
+                                   "More makes the shapes stand out more, and the scene brighter. 0 leaves the surroundings only.");
+                ImGui::SliderFloat("##light", &data->visuals.shading.light, 0.0f, 4.0f, (const char*)u8"%.2f×");
+                if (!basic_shading) {
+                    prop::row("environment", "Strength of the light from all around (a sky a little brighter than the ground), relative to the default (1).\n"
+                                             "More softens the shading and brightens the side away from the light; the ambient occlusion darkens it in creases.\n"
+                                             "At 1 for both, a color facing the viewer shows close to as picked (with sRGB colors and the Neutral curve);\n"
+                                             "Exposure (Tone Mapping) scales all of the light.");
+                    ImGui::SliderFloat("##environment", &data->visuals.shading.environment, 0.0f, 4.0f, (const char*)u8"%.2f×");
+                } else {
+                    prop::row("ambient", "How much of the color is left on the side facing away from the light");
+                    ImGui::SliderFloat("##ambient", &data->visuals.shading.ambient, 0.0f, 1.0f, "%.2f");
+                    prop::row("specular", "Strength of the white highlight, 0 for none");
+                    ImGui::SliderFloat("##specular", &data->visuals.shading.specular, 0.0f, 1.0f, "%.2f");
+                }
+                const char* color_spaces[postprocess_pipeline::ColorSpace_Count] = {"sRGB", "Linear"};
+                int colors = (int)data->visuals.shading.colors;
+                prop::row("colors", "How the colors of atoms, cartoons and surfaces are read.\n"
+                                    "sRGB: as picked and seen; a color in full light shows as its swatch.\n"
+                                    "Linear: as the fraction of the light reflected per channel; lighter and paler than the swatch.\n"
+                                    "The background always shows as picked.");
+                if (ImGui::Combo("##colors", &colors, color_spaces, IM_ARRAYSIZE(color_spaces))) {
+                    data->visuals.shading.colors = (postprocess_pipeline::ColorSpace)colors;
+                }
+                prop::row("background", "Shown as picked, whatever the shading and tone mapping. It does not light the scene.");
+                prop::color("##background", data->visuals.background.color.elem);
+                prop::section_end();
+            }
+
+            bool toggled = false;
+
+            if (prop::section_toggle("Ambient Occlusion", &data->visuals.ssao.enabled, &toggled, false,
+                                     "Darken creases and cavities, where less of the surroundings' light reaches (SSAO)")) {
+                const char* modes[postprocess_pipeline::SsaoMode_Count] = {"Performance", "Quality"};
+                int mode = (int)data->visuals.ssao.mode;
+                // Its GPU time in the main view (the component windows' have their own)
+                const float ao_ms = profiler::gpu_ms("SSAO", "Render");
+                ms_text[0] = '\0';
+                if (ao_ms > 0.0f) snprintf(ms_text, sizeof(ms_text), "%.2f ms", ao_ms);
+                prop::row("mode", "Performance: point samples.\nQuality: screen-space slices with a visibility bitmask, finds creases and cavities more reliably and avoids halos behind small atoms.");
+                ImGui::SetNextItemWidth(prop::control_width_before(ms_text));
+                if (ImGui::Combo("##mode", &mode, modes, IM_ARRAYSIZE(modes))) {
+                    data->visuals.ssao.mode = (postprocess_pipeline::SsaoMode)mode;
+                    machine_dirty = true;
+                }
+                if (ms_text[0]) {
+                    ImGui::SameLine(0.0f, 2.0f * gap);
+                    ImGui::TextDisabled("%s", ms_text);
+                    ImGui::SetItemTooltip("GPU time per frame\nEstimator: %.3f ms\nTotal (with filtering): %.3f ms", profiler::gpu_ms("AO", "Render"), ao_ms);
+                }
+                prop::row("intensity");
+                machine_dirty |= ImGui::SliderFloat("##intensity", &data->visuals.ssao.intensity, 0.0f, 8.f, "%.2f");
+                prop::row("temporal filter", "Accumulate the occlusion over frames: removes the flicker in crevasses and allows a sharper result.\nOff gives a fixed sample pattern instead.");
+                machine_dirty |= ImGui::Checkbox("##temporal", &data->visuals.ssao.temporal);
+                prop::section_end();
+            }
+            machine_dirty |= toggled;
+#if EXPERIMENTAL_CONE_TRACED_AO == 1
+            if (prop::section_toggle("Cone Traced AO", &data->visuals.cone_traced_ao.enabled)) {
+                prop::row("intensity");
+                ImGui::SliderFloat("##intensity", &data->visuals.cone_traced_ao.intensity, 0.01f, 5.f);
+                prop::row("step scale");
+                ImGui::SliderFloat("##step_scale", &data->visuals.cone_traced_ao.step_scale, 0.25f, 8.f);
+                prop::section_end();
+            }
+#endif
+
+            // What the camera and the display do with the light. Basic shading has none of it: shown, but not to be set.
+            ImGui::BeginDisabled(basic_shading);
+            if (prop::section_toggle("Tone Mapping", &data->visuals.tonemapping.enabled, nullptr, false,
+                                     basic_shading ? "Not used by Basic shading, which shows the colors as they are picked"
+                                                   : "Map the lighting into the colors a display can show.\nOff: no curve, what is brighter than white is clipped.")) {
+                // ACES first: it is the default, the look the shading had before. Exposure Gamma is the same as None
+                // (exposure and gamma apply to every curve), and shows as it.
+                static const postprocess_pipeline::Tonemapper tonemappers[] = {
+                    postprocess_pipeline::Tonemapper_ACES,
+                    postprocess_pipeline::Tonemapper_Neutral,
+                    postprocess_pipeline::Tonemapper_Filmic,
+                    postprocess_pipeline::Tonemapper_Passthrough,
+                };
+                static const char* tonemapper_names[] = {"ACES", "Neutral", "Filmic", "None"};
+                int idx = (int)ARRAY_SIZE(tonemappers) - 1;
+                for (int i = 0; i < (int)ARRAY_SIZE(tonemappers); ++i) {
+                    if (tonemappers[i] == data->visuals.tonemapping.tonemapper) idx = i;
+                }
+                prop::row("curve", "ACES: a filmic curve with more contrast, which shifts and desaturates the colors.\n"
+                                   "Neutral: the colors as they are, only the highlights are compressed (Khronos PBR Neutral).\n"
+                                   "Filmic: John Hable's Uncharted 2 curve.\n"
+                                   "None: no curve, what is brighter than white is clipped.");
+                if (ImGui::Combo("##curve", &idx, tonemapper_names, IM_ARRAYSIZE(tonemapper_names))) {
+                    data->visuals.tonemapping.tonemapper = tonemappers[idx];
+                }
+                prop::row("exposure", "Scales the light reaching the camera. At 1 a color on a surface facing the viewer shows close to as picked (Neutral)");
+                ImGui::SliderFloat("##exposure", &data->visuals.tonemapping.exposure, 0.01f, 10.f, "%.2f");
+                prop::row("gamma", "An adjustment of the sRGB curve: 2.2 is the sRGB curve itself");
+                ImGui::SliderFloat("##gamma", &data->visuals.tonemapping.gamma, 1.0f, 3.0f, "%.2f");
+                prop::section_end();
+            }
+            ImGui::EndDisabled();
+
+            if (prop::section_toggle("Depth of Field", &data->visuals.dof.enabled, nullptr, false, "Blur what lies away from the focus")) {
+                prop::row("blur", "Blur of distant objects, in percent of the view height. Independent of zoom level");
+                ImGui::SliderFloat("##blur", &data->visuals.dof.aperture, 0.0f, 4.0f, "%.2f %%");
+                prop::section_end();
+            }
+
+            // The switch on the header, as the other effects', and the mode within; folded, as the switch is what is
+            // mostly wanted, the mode and the temporal resolve's settings seldom
+            bool aa_toggled = false;
+            if (prop::section_toggle("Anti-Aliasing", &data->visuals.anti_aliasing.enabled, &aa_toggled, false,
+                                     "Smooth jagged edges.\nOff: screenshots are a single sample.")) {
+                const char* modes[(int)AntiAliasingMode::Count] = {"TAA", "FXAA"};
+                int mode = (int)data->visuals.anti_aliasing.mode;
+                prop::row("mode", "TAA: each frame blended with the ones before, rendered from slightly shifted views. The smoothest still image; screenshots gather a sample per shift.\n"
+                                  "FXAA: one pass over each frame on its own. Nothing is carried over from frame to frame, but edges crawl in motion and detail finer than a pixel flickers.");
+                if (ImGui::Combo("##mode", &mode, modes, IM_ARRAYSIZE(modes))) {
+                    data->visuals.anti_aliasing.mode = (AntiAliasingMode)mode;
+                    machine_dirty = true;
+                }
+                if (taa_active(data)) {
+                    // The temporal resolve's settings
+                    prop::row("history min", "How much of the previous frames is kept where the image changes: lower is sharper in motion, higher is smoother");
+                    machine_dirty |= ImGui::SliderFloat("##history_min", &data->visuals.temporal_aa.feedback_min, 0.5f, 1.0f, "%.2f");
+                    prop::row("history max", "How much of the previous frames is kept where the image is still");
+                    machine_dirty |= ImGui::SliderFloat("##history_max", &data->visuals.temporal_aa.feedback_max, 0.5f, 1.0f, "%.2f");
+                    // On, and how much, on one row each: the amount means nothing while off
+                    prop::row("motion blur");
+                    machine_dirty |= ImGui::Checkbox("##motion_blur", &data->visuals.temporal_aa.motion_blur.enabled);
+                    if (data->visuals.temporal_aa.motion_blur.enabled) {
+                        ImGui::SameLine(0.0f, gap);
+                        ImGui::SetNextItemWidth(-FLT_MIN);
+                        machine_dirty |= ImGui::SliderFloat("##motion_blur_strength", &data->visuals.temporal_aa.motion_blur.motion_scale, 0.f, 2.0f, "strength %.2f");
+                    }
+                    prop::row("sharpen");
+                    machine_dirty |= ImGui::Checkbox("##sharpen", &data->visuals.sharpen.enabled);
+                    if (data->visuals.sharpen.enabled) {
+                        ImGui::SameLine(0.0f, gap);
+                        ImGui::SetNextItemWidth(-FLT_MIN);
+                        machine_dirty |= ImGui::SliderFloat("##sharpen_strength", &data->visuals.sharpen.weight, 0.0f, 4.0f, "strength %.2f");
+                    }
+                }
+                prop::section_end();
+            }
+            machine_dirty |= aa_toggled;
+
+            if (prop::section("Isosurfaces", false)) {
+                int rendering = CLAMP(data->settings.isosurface_rendering, 0, 1);
+                prop::row("rendering", "Ray Casting: the surfaces are found in the evaluated volume, ray by ray, every frame.\n"
+                                       "Mesh: the surfaces of orbitals and densities are extracted as triangle meshes from the\n"
+                                       "field itself rather than from the volume, at a spacing set by the representation's resolution,\n"
+                                       "and drawn with stochastic transparency that is refined over the frames while the view\n"
+                                       "is still. Extraction runs when the surface changes (an isovalue, an orbital, a frame);\n"
+                                       "drawing is cheap. Volumes from scripts are always ray cast.");
+                if (ImGui::Combo("##rendering", &rendering, "Ray Casting\0Mesh\0")) {
+                    data->settings.isosurface_rendering = rendering;
+                    app_settings::mark_dirty();
+                    // Their volumes are evaluated only when something draws from them
+                    for (size_t i = 0; i < md_array_size(data->representation.reps); ++i) {
+                        if (data->representation.reps[i].type == RepresentationType::ElectronicStructure) {
+                            flag_representation_as_dirty(&data->representation.reps[i]);
+                        }
+                    }
+                }
+                // Also for the volumes that are ray cast in either mode (from scripts)
                 int iso_mode = data->settings.exact_isosurfaces ? 1 : 0;
-                if (ImGui::Combo("Isosurfaces", &iso_mode, "Fast\0Exact\0")) {
+                prop::row("intersection", "How ray cast isosurfaces are found (with Mesh rendering: only those of volumes from scripts).\n"
+                                          "Fast: samples the volume once per voxel along each ray. Parts of a surface thinner than\n"
+                                          "about a voxel can be missed, and up close or at grazing angles the sampling can show;\n"
+                                          "a finer volume resolution makes both smaller.\n"
+                                          "Exact: intersects every cell a ray passes through, so nothing is missed and the surfaces\n"
+                                          "do not depend on any sampling. Roughly twice the GPU time of Fast.");
+                if (ImGui::Combo("##intersection", &iso_mode, "Fast\0Exact\0")) {
                     data->settings.exact_isosurfaces = iso_mode == 1;
                     app_settings::mark_dirty();
                 }
-                ImGui::SetItemTooltip("Fast: samples the volume once per voxel along each ray. Parts of a surface thinner than\n"
-                                      "about a voxel can be missed, and up close or at grazing angles the sampling can show;\n"
-                                      "a finer volume resolution makes both smaller.\n"
-                                      "Exact: intersects every cell a ray passes through, so nothing is missed and the surfaces\n"
-                                      "do not depend on any sampling. Roughly twice the GPU time of Fast.");
+                prop::section_end();
             }
-            // Temporal
-            ImGui::BeginGroup();
-            {
-                ImGui::Checkbox("Temporal Anti-Aliasing", &data->visuals.temporal_aa.enabled);
-                ImGui::SetItemTooltip("Smooth edges by blending each frame with the previous ones");
-                if (data->visuals.temporal_aa.enabled) {
-                    // ImGui::Checkbox("Jitter Samples", &data->visuals.temporal_reprojection.jitter);
-                    ImGui::SliderFloat("History Min", &data->visuals.temporal_aa.feedback_min, 0.5f, 1.0f);
-                    ImGui::SetItemTooltip("How much of the previous frames is kept where the image changes: lower is sharper in motion, higher is smoother");
-                    ImGui::SliderFloat("History Max", &data->visuals.temporal_aa.feedback_max, 0.5f, 1.0f);
-                    ImGui::SetItemTooltip("How much of the previous frames is kept where the image is still");
-                    ImGui::Checkbox("Motion Blur", &data->visuals.temporal_aa.motion_blur.enabled);
-                    if (data->visuals.temporal_aa.motion_blur.enabled) {
-                        ImGui::SliderFloat("Motion Blur Strength", &data->visuals.temporal_aa.motion_blur.motion_scale, 0.f, 2.0f);
-                    }
-                    ImGui::Checkbox("Sharpen", &data->visuals.sharpen.enabled);
-                    if (data->visuals.sharpen.enabled) {
-                        ImGui::SliderFloat("Sharpen Strength", &data->visuals.sharpen.weight, 0.0f, 4.0f);
-                    }
-                }
-            }
-            ImGui::EndGroup();
-            ImGui::Separator();
 
-            // SSAO
-            ImGui::BeginGroup();
-            ImGui::PushID("SSAO");
-            ImGui::Checkbox("Ambient Occlusion", &data->visuals.ssao.enabled);
-            ImGui::SetItemTooltip("Darken creases and cavities, where less light reaches (SSAO)");
-            if (data->visuals.ssao.enabled) {
-                const char* modes[postprocess_pipeline::SsaoMode_Count] = {"Performance", "Quality"};
-                int mode = (int)data->visuals.ssao.mode;
-                if (ImGui::Combo("Mode", &mode, modes, IM_ARRAYSIZE(modes))) {
-                    data->visuals.ssao.mode = (postprocess_pipeline::SsaoMode)mode;
-                }
-                ImGui::SetItemTooltip("Performance: point samples.\nQuality: screen-space slices with a visibility bitmask, finds creases and cavities more reliably and avoids halos behind small atoms.");
-                const postprocess_pipeline::SsaoTimings t = postprocess_pipeline::ssao_timings();
-                if (t.total_ms > 0.0f) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%.2f ms", t.total_ms);
-                    ImGui::SetItemTooltip("GPU time per frame\nEstimator: %.3f ms\nTotal (with filtering): %.3f ms", t.estimator_ms, t.total_ms);
-                }
-                ImGui::SliderFloat("Intensity", &data->visuals.ssao.intensity, 0.0f, 8.f);
-                ImGui::Checkbox("Temporal Filter", &data->visuals.ssao.temporal);
-                ImGui::SetItemTooltip("Accumulate the occlusion over frames: removes the flicker in crevasses and allows a sharper result.\nOff gives a fixed sample pattern instead.");
+            prop::end();
+            if (machine_dirty) {
+                app_settings::mark_dirty();
             }
+
+            // The look (View to Depth of Field but the camera, and the ambient occlusion) is the workspace's: a new
+            // session starts with the one saved here
+            ImGui::Separator();
+            ImGui::PushID("Defaults");
+            const float half_w = 0.5f * (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x);
+            if (ImGui::Button("save as default", ImVec2(half_w, 0))) {
+                visual_look_save(data);
+            }
+            ImGui::SetItemTooltip("Start new sessions with this look: the shading, the background, the tone mapping and\n"
+                                  "the depth of field. A workspace keeps its own and loads it. The rest of this menu is\n"
+                                  "this computer's, kept as it is set.");
+            ImGui::SameLine();
+            if (ImGui::Button("reset to default", ImVec2(-FLT_MIN, 0))) {
+                visual_look_restore(data);
+            }
+            ImGui::SetItemTooltip("Back to the look saved as default");
             ImGui::PopID();
-            ImGui::EndGroup();
-            ImGui::Separator();
-
-#if EXPERIMENTAL_CONE_TRACED_AO == 1
-            // Cone Trace
-            ImGui::BeginGroup();
-            ImGui::PushID("Cone Trace");
-            ImGui::Checkbox("Cone Traced AO", &data->visuals.cone_traced_ao.enabled);
-            if (data->visuals.cone_traced_ao.enabled) {
-                ImGui::SliderFloat("Intensity", &data->visuals.cone_traced_ao.intensity, 0.01f, 5.f);
-                ImGui::SliderFloat("Step Scale", &data->visuals.cone_traced_ao.step_scale, 0.25f, 8.f);
-            }
-            ImGui::PopID();
-            ImGui::EndGroup();
-            ImGui::Separator();
-#endif
-
-            // DOF
-            ImGui::BeginGroup();
-            ImGui::Checkbox("Depth of Field", &data->visuals.dof.enabled);
-            if (data->visuals.dof.enabled) {
-                // ImGui::SliderFloat("Focus Point", &data->visuals.dof.focus_depth, 0.001f, 200.f);
-                ImGui::SliderFloat("Blur Strength", &data->visuals.dof.aperture, 0.0f, 4.0f, "%.2f %%");
-                ImGui::SetItemTooltip("Blur of distant objects, in percent of the view height. Independent of zoom level");
-            }
-            ImGui::EndGroup();
-            ImGui::Separator();
-
-            // Tonemapping
-            ImGui::BeginGroup();
-            ImGui::Checkbox("Tone Mapping", &data->visuals.tonemapping.enabled);
-            ImGui::SetItemTooltip("Map the lighting into the colors a display can show");
-            if (data->visuals.tonemapping.enabled) {
-                // ImGui::Combo("Function", &data->visuals.tonemapping.tonemapper, "Passthrough\0Exposure Gamma\0Filmic\0\0");
-                ImGui::SliderFloat("Exposure", &data->visuals.tonemapping.exposure, 0.01f, 10.f);
-                ImGui::SliderFloat("Gamma", &data->visuals.tonemapping.gamma, 1.0f, 3.0f);
-            }
-            ImGui::EndGroup();
-            ImGui::Separator();
-
-            ImGui::BeginGroup();
-            ImGui::Checkbox("Simulation Box", &data->simulation_box.enabled);
-            ImGui::SetItemTooltip("Draw the outline of the periodic box");
-            if (data->simulation_box.enabled) {
-                ImGui::SameLine();
-                ImGui::ColorEdit4Minimal("##Box-Color", data->simulation_box.color.elem);
-            }
-            ImGui::EndGroup();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Windows")) {
@@ -1457,6 +1947,7 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::Checkbox("Timelines", &data->timeline.show_window);
             ImGui::Checkbox("Distributions", &data->distributions.show_window);
             ImGui::Checkbox("Structure Export", &data->structure_export.show_window);
+            ImGui::Checkbox("Profiler", &data->show_profiler_window);
 
             viamd::event_system_broadcast_event(viamd::EventType_ViamdWindowDrawMenu);
 
@@ -1560,8 +2051,8 @@ static void draw_main_menu(ApplicationState* data) {
 
                 switch (data->screenshot.resolution) {
                 case ScreenshotResolution::Window:
-                    data->screenshot.res_x = data->gbuffer.width;
-                    data->screenshot.res_y = data->gbuffer.height;
+                    data->screenshot.res_x = data->app.framebuffer.width;
+                    data->screenshot.res_y = data->app.framebuffer.height;
                     break;
                 case ScreenshotResolution::FHD:
                     data->screenshot.res_x = 1920;
@@ -1590,8 +2081,8 @@ static void draw_main_menu(ApplicationState* data) {
                     ASSERT(false);
                 }
             } else {
-                data->screenshot.res_x = data->gbuffer.width;
-                data->screenshot.res_y = data->gbuffer.height;
+                data->screenshot.res_x = data->app.framebuffer.width;
+                data->screenshot.res_y = data->app.framebuffer.height;
             }
             if (ImGui::MenuItem("Take Screenshot")) {
                 if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, STR_LIT("jpg,png,bmp"))) {
@@ -1603,7 +2094,7 @@ static void draw_main_menu(ApplicationState* data) {
                     }
                     if (str_eq_cstr_ignore_case(ext, "jpg") || str_eq_cstr_ignore_case(ext, "png") || str_eq_cstr_ignore_case(ext, "bmp")) {
                         data->screenshot.path_to_file = str_copy({path_buf, path_len}, persistent_alloc);
-                        if (data->visuals.temporal_aa.enabled) {
+                        if (taa_active(data)) {
                             data->screenshot.sample_target = JITTER_SEQUENCE_SIZE;
                         } else {
                             data->screenshot.sample_target = 1;
@@ -1694,7 +2185,7 @@ static void draw_main_menu(ApplicationState* data) {
                 if (data->operations.recenter_query.enabled) {
                     auto& recenter_query = data->operations.recenter_query;
                     ImGui::SameLine();
-                    if (ImGui::InputQuery("##recenter-query", recenter_query.query, sizeof(recenter_query.query), recenter_query.valid, recenter_query.error)) {
+                    if (filter_input("##recenter-query", &recenter_query.filter, filter_context(data))) {
                         recenter_mark_query_dirty(data);
                     }
                 }
@@ -1772,6 +2263,15 @@ static void draw_main_menu(ApplicationState* data) {
             }
             ImGui::SetItemTooltip("Keep representations when loading new topology (does not apply for workspaces)\n");
 
+            if (ImGui::Checkbox("Focus in Free Space", &data->settings.focus_in_free_space)) {
+                if (!data->settings.focus_in_free_space) {
+                    // Back to the middle of the whole view
+                    data->view.region = {};
+                }
+                app_settings::mark_dirty();
+            }
+            ImGui::SetItemTooltip("Double clicking the view frames what it focuses on in the largest part of the view\nthat no window covers, rather than in the middle of the whole view");
+
             // Font
             int font_size_idx = nearest_font_size_index(data->settings.font_size);
             if (ImGui::Combo("Font Size", &font_size_idx, font_size_names, (int)ARRAY_SIZE(font_size_names))) {
@@ -1809,18 +2309,9 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - w);
             ImGui::Text("%s", fps_buf);
             if (ImGui::IsItemHovered()) {
-                // GPU time of the volume passes, all views together (main viewport and component windows)
-                const volume::GpuTimings t = volume::timings_get();
+                // Where the frame goes, on the GPU and the CPU (all of it: Windows > Profiler)
                 ImGui::BeginTooltip();
-                ImGui::Text("Volume rendering, GPU per frame: %.3f ms", t.total_ms);
-                for (int i = 0; i < volume::TimingStage_Count; ++i) {
-                    ImGui::Text("  %-14s %.3f ms", volume::timing_stage_name((volume::TimingStage)i), t.ms[i]);
-                }
-                if (data->visuals.ssao.enabled) {
-                    const postprocess_pipeline::SsaoTimings ao = postprocess_pipeline::ssao_timings();
-                    ImGui::Text("Ambient occlusion, GPU per frame: %.3f ms", ao.total_ms);
-                    ImGui::Text("  %-14s %.3f ms", "Estimator", ao.estimator_ms);
-                }
+                profiler::draw_summary();
                 ImGui::EndTooltip();
             }
         }
@@ -1905,14 +2396,6 @@ void draw_load_dataset_window(ApplicationState* data) {
         LoaderFlags flags = loader::type_flags(type);
 
         // Draw Options
-        bool show_cg = state.path_is_valid && (flags & LoaderFlag_System);
-        if (show_cg) {
-            ImGui::Checkbox("Coarse Grained", &state.coarse_grained);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Enable if the data should be interpreted as coarse grained particles");
-            }
-        }
-
         bool show_lammps_atom_format = state.path_is_valid && (type == LoaderType_LAMMPSDATA);
         if (show_lammps_atom_format) {
             const char** atom_format_names = md_lammps_atom_format_names();
@@ -1984,18 +2467,24 @@ void draw_load_dataset_window(ApplicationState* data) {
             loader::LoaderState load_state = {};
             load_state.type = type;
             load_state.flags = flags;
-            load_state.flags |= state.coarse_grained ? LoaderFlag_CoarseGrained : 0;
             if (type == LoaderType_LAMMPSDATA) {
                 load_state.arg = state.atom_format_buf;
             }
+            // A loader other than the extension would pick has to be stored with the file in a workspace
+            str_t ext = {};
+            extract_ext(&ext, path);
+            if (type != loader::type_from_ext(ext)) {
+                load_state.flags |= LoaderFlag_ExplicitType;
+            }
 
-            if (load_data_from_file(data, path, load_state)) {
-                if ((flags & LoaderFlag_System) && !data->settings.keep_representations) {
+            const LoadResult result = load_data_from_file(data, path, load_state);
+            if (result == LoadResult_System || result == LoadResult_Trajectory) {
+                if (result == LoadResult_System && !data->settings.keep_representations) {
                     remove_all_representations(data);
                     create_default_representations(data);
                 }
                 data->animation = {};
-                reset_view(&data->view.target, data->mold.state, &data->representation.visibility_mask);
+                reset_view(&data->view.target, data->mold.state, &data->representation.visibility_mask, data->view.camera.fov_y, data->view.region);
             }
             [[fallthrough]];
         }
@@ -2080,10 +2569,10 @@ void apply_atom_elem_mappings(ApplicationState* data) {
 
 // Create a textual script describing a selection from a bitfield with respect to some reference index
 // @TODO(Robin): Clean this up, it is a mess. Just provide complete suggestions based on bitfield and molecule input.
-static void write_script_range(md_strb_t& sb, const int* indices, size_t num_indices, int ref_idx = 0) {
+static void write_script_range(md_str_writer_t& sb, const int* indices, size_t num_indices, int ref_idx = 0) {
     if (num_indices == 0) return;
     if (num_indices == 1) {
-        md_strb_fmt(&sb, "%i", indices[0] - ref_idx + 1);
+        md_str_writer_fmt(&sb, "%i", indices[0] - ref_idx + 1);
         return;
     }
     
@@ -2125,10 +2614,10 @@ static void write_script_range(md_strb_t& sb, const int* indices, size_t num_ind
     for (int64_t i = 0; i < num_items; ++i) {
         md_irange_t item = items[i];
         if (item.beg == item.end) {
-            md_strb_fmt(&sb, "%i", item.beg);
+            md_str_writer_fmt(&sb, "%i", item.beg);
         }
         else {
-            md_strb_fmt(&sb, "%i:%i", item.beg, item.end);
+            md_str_writer_fmt(&sb, "%i:%i", item.beg, item.end);
         }
         if (i < num_items - 1) {
             sb += ',';
@@ -2173,10 +2662,10 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
     
     const size_t popcount = md_bitset_count(*bf);
     
-    md_strb_t sb = md_strb_create(frame_alloc);
-    defer { md_strb_free(&sb); };
+    md_str_writer_t sb = md_str_writer_create(frame_alloc);
+    defer { md_str_writer_free(&sb); };
 
-    auto write_atom_remainder = [](md_strb_t& sb, const md_bitset_t* bf, int ref_idx = 0) {
+    auto write_atom_remainder = [](md_str_writer_t& sb, const md_bitset_t* bf, int ref_idx = 0) {
         // Add any remainder
         const uint64_t remainder = md_bitset_count(*bf);
         if (remainder) {
@@ -2193,16 +2682,16 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
     if (comp_idx != -1 && within_same_comp) {
         const md_urange_t range = md_component_atom_range(&sys->component, comp_idx);
         if (popcount != range.end - range.beg) {
-            md_strb_reset(&sb);
+            md_str_writer_reset(&sb);
             sb += ident;
             sb += " = ";
 
             // Subset of residue is selected
             write_atom_remainder(sb, bf, range.beg);
-            if (md_strb_len(sb) < 512) {
+            if (md_str_writer_len(&sb) < 512) {
                 str_t resname = md_component_name(&sys->component, comp_idx);
-                md_strb_fmt(&sb, " in resname(\"" STR_FMT "\");", STR_ARG(resname));
-                md_array_push(suggestions, str_copy(md_strb_to_str(sb), frame_alloc), frame_alloc);
+                md_str_writer_fmt(&sb, " in resname(\"" STR_FMT "\");", STR_ARG(resname));
+                md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
             }
         }
     }
@@ -2210,16 +2699,16 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
     else if (inst_idx != -1 && within_same_inst) {
         const md_urange_t range = md_system_instance_atom_range(sys, inst_idx);
         if (popcount != range.end - range.beg) {
-            md_strb_reset(&sb);
+            md_str_writer_reset(&sb);
             sb += ident;
             sb += " = ";
 
             // Subset of chain is selected
             write_atom_remainder(sb, bf, range.beg);
-            if (md_strb_len(sb) < 512) {
+            if (md_str_writer_len(&sb) < 512) {
 				str_t inst_id = md_instance_id(&sys->instance, inst_idx);
-				md_strb_fmt(&sb, " in chain(\"" STR_FMT "\");", STR_ARG(inst_id));
-                md_array_push(suggestions, str_copy(md_strb_to_str(sb), frame_alloc), frame_alloc);
+				md_str_writer_fmt(&sb, " in chain(\"" STR_FMT "\");", STR_ARG(inst_id));
+                md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
             }
         }
     }
@@ -2258,7 +2747,7 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
     const md_bitset_t tmp_bf = md_bitmask_view(&remainder);
     
     if (complete_chains) {
-        md_strb_reset(&sb);
+        md_str_writer_reset(&sb);
         sb += ident;
         sb += " = chain(";
         write_script_range(sb, complete_chains, md_array_size(complete_chains));
@@ -2275,22 +2764,22 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
             write_atom_remainder(sb, &tmp_bf);
         }
         
-        if (md_strb_len(sb) < 512) {
-            md_strb_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_strb_to_str(sb), frame_alloc), frame_alloc);
+        if (md_str_writer_len(&sb) < 512) {
+            md_str_writer_push_char(&sb, ';');
+            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
         }
         
-        md_strb_reset(&sb);
+        md_str_writer_reset(&sb);
         sb += ident;
         sb += " = residue(";
         for (size_t i = 0; i < md_array_size(complete_chains); ++i) {
             md_urange_t range = md_instance_component_range(&sys->instance, complete_chains[i]);
-            md_strb_fmt(&sb, "%i:%i,", range.beg + 1, range.end);
+            md_str_writer_fmt(&sb, "%i:%i,", range.beg + 1, range.end);
         }
         if (complete_residues) {
             write_script_range(sb, complete_residues, md_array_size(complete_residues));
         } else {
-            md_strb_pop(&sb, 1);
+            md_str_writer_pop(&sb, 1);
         }
         sb += ")";
 
@@ -2299,14 +2788,14 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
             write_atom_remainder(sb, &tmp_bf);
         }
         
-        if (md_strb_len(sb) < 512) {
-            md_strb_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_strb_to_str(sb), frame_alloc), frame_alloc);
+        if (md_str_writer_len(&sb) < 512) {
+            md_str_writer_push_char(&sb, ';');
+            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
         }
     }
 
     if (complete_residues) {
-        md_strb_reset(&sb);
+        md_str_writer_reset(&sb);
         sb += ident;
         sb += " = residue(";
         write_script_range(sb, complete_residues, md_array_size(complete_residues));
@@ -2317,20 +2806,20 @@ static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bit
             write_atom_remainder(sb, &tmp_bf);
         }
 
-        if (md_strb_len(sb) < 512) {
-            md_strb_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_strb_to_str(sb), frame_alloc), frame_alloc);
+        if (md_str_writer_len(&sb) < 512) {
+            md_str_writer_push_char(&sb, ';');
+            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
         }
     }
 
     if (popcount) {
-        md_strb_reset(&sb);
+        md_str_writer_reset(&sb);
         sb += ident;
         sb += " = ";
         write_atom_remainder(sb, bf);
-        if (md_strb_len(sb) < 512) {
-            md_strb_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_strb_to_str(sb), frame_alloc), frame_alloc);
+        if (md_str_writer_len(&sb) < 512) {
+            md_str_writer_push_char(&sb, ';');
+            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
         }
     }
     
@@ -2747,19 +3236,24 @@ static void draw_selection_query_window(ApplicationState* data) {
     ImGui::SetNextWindowSize(ImVec2(300,100), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Selection Query", &data->selection.query.show_window, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            data->selection.query.show_window = false;
-            return;
+        auto& query = data->selection.query;
+        // Escape closes the window, unless it closes the suggestions of the query
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !filter_completions_open()) {
+            query.show_window = false;
         }
 
         static double query_frame = 0.0;
 
         ImGui::PushItemWidth(-1);
-        bool apply = ImGui::InputQuery("##query", data->selection.query.buf, sizeof(data->selection.query.buf), data->selection.query.query_ok, data->selection.query.error, ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue);
+        bool apply = false;
+        if (filter_input("##query", &query.filter, filter_context(data), ImGuiInputTextFlags_AutoSelectAll, &apply)) {
+            query.query_invalid = true;
+        }
         ImGui::PopItemWidth();
 
-        if (ImGui::IsItemEdited() || data->animation.frame != query_frame) {
-            data->selection.query.query_invalid = true;
+        // What depends on the coordinates is picked again in another frame
+        if (query.filter.result.is_dynamic && data->animation.frame != query_frame) {
+            query.query_invalid = true;
         }
         bool preview = ImGui::IsItemFocused() || ImGui::IsItemHovered();
 
@@ -2767,27 +3261,27 @@ static void draw_selection_query_window(ApplicationState* data) {
             ImGui::SetKeyboardFocusHere(-1);
         }
 
-        if (!data->selection.query.query_ok) ImGui::PushDisabled();
+        if (!query.filter.result.success) ImGui::PushDisabled();
         apply |= ImGui::Button("Apply");
-        if (!data->selection.query.query_ok) ImGui::PopDisabled();
+        if (!query.filter.result.success) ImGui::PopDisabled();
 
         preview |= ImGui::IsItemHovered();
 
-        if (data->selection.query.query_invalid) {
-            data->selection.query.query_invalid = false;
+        if (query.query_invalid) {
+            query.query_invalid = false;
             md_bitset_t result = md_bitset_empty_set();
-            data->selection.query.query_ok = md_filter(&result, str_from_cstr(data->selection.query.buf), &data->mold.sys, &data->mold.state, data->script.ir, NULL, data->selection.query.error, sizeof(data->selection.query.error), frame_alloc);
+            filter_evaluate(&query.filter, &result, filter_context(data), frame_alloc);
             query_frame = data->animation.frame;
 
-            md_bitmask_assign(&data->selection.query.mask, data->selection.query.query_ok ? result : md_bitset_empty_set());
-            grow_mask_by_selection_granularity(&data->selection.query.mask, data->selection.granularity, data->mold.sys);
+            md_bitmask_assign(&query.mask, query.filter.result.success ? result : md_bitset_empty_set());
+            grow_mask_by_selection_granularity(&query.mask, data->selection.granularity, data->mold.sys);
         }
 
         if (preview) {
-            md_bitmask_assign(&data->selection.highlight_mask, md_bitmask_view(&data->selection.query.mask));
+            md_bitmask_assign(&data->selection.highlight_mask, md_bitmask_view(&query.mask));
         }
 
-        if (apply && data->selection.query.query_ok) {
+        if (apply && query.filter.result.success) {
             md_bitmask_assign(&data->selection.selection_mask, md_bitmask_view(&data->selection.query.mask));
             data->selection.query.show_window = false;
         }
@@ -2822,12 +3316,21 @@ static void draw_animation_window(ApplicationState* data) {
         const float item_width = MAX(ImGui::GetContentRegionAvail().x - w, 100.f);
         ImGui::PushItemWidth(item_width);
         if (ImGui::BeginCombo("Interp.", interpolation_mode_str[(int)data->animation.interpolation])) {
+            static const char* mode_tooltip[(int)InterpolationMode::Count] = {
+                "The nearest frame, as it is",
+                "Straight from frame to frame, through each of them",
+                "Smooth (C1) from frame to frame, through each of them",
+                "Smoother (C2), and damps the jitter from frame to frame,\n"
+                "but passes through none of the frames but the first and the last:\n"
+                "the coordinates shown are never a frame's own, not even when stopped on one",
+            };
             for (int i = 0; i < (int)InterpolationMode::Count; ++i) {
                 if (ImGui::Selectable(interpolation_mode_str[i], (int)data->animation.interpolation == i)) {
                     data->animation.interpolation = (InterpolationMode)i;
 					data->mold.interpolate_system_state = true;
                     data->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
                 }
+                ImGui::SetItemTooltip("%s", mode_tooltip[i]);
             }
             ImGui::EndCombo();
         }
@@ -2840,6 +3343,22 @@ static void draw_animation_window(ApplicationState* data) {
         ImGui::SliderFloat("Speed", &data->animation.fps, -200.0f, 200.f, "%.2f", ImGuiSliderFlags_Logarithmic);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Animation Speed in Frames Per Second");
+        }
+        {
+            // animation.stride: while playing, only every Nth frame is kept and the motion between them is interpolated.
+            // Not called keyframes: that name is kept for the keyframes of animations to come.
+            // The slider covers up to 10 (or the last frame, beyond which a larger stride changes nothing), a larger one is
+            // typed in (Ctrl+click): only the lower bound is enforced.
+            const int max_stride = (int)CLAMP((int64_t)num_frames - 1, (int64_t)2, (int64_t)10);
+            const char* fmt = data->animation.stride == 1 ? "every frame" : "every %d frames";
+            ImGui::SliderInt("Stride", &data->animation.stride, 1, max_stride, fmt);
+            data->animation.stride = MAX(1, data->animation.stride);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("While playing, interpolate between every Nth frame only: smoother motion\n"
+                                  "at the expense of the frames in between (and the usual interpolation artifacts).\n"
+                                  "The speed is unchanged. A stopped animation shows the trajectory's own frames.\n"
+                                  "Ctrl+click to type a value beyond the slider's range.");
+            }
         }
         if (data->animation.interpolation == InterpolationMode::CubicSpline) {
             ImGui::SliderFloat("Tension", &data->animation.tension, 0.0f, 1.0f, "%.2f");
@@ -2870,815 +3389,6 @@ static void draw_animation_window(ApplicationState* data) {
     }
     ImGui::End();
 }
-
-// How the isosurfaces of an electronic structure representation are coloured. The atoms' colours
-// are not offered for a density property; a field is offered whenever the dataset has what one is
-// made from.
-static bool draw_surface_coloring(ElectronicStructureRepresentation& es, const md_system_t& sys, bool advanced, bool allow_atom_colors) {
-    bool update_rep = false;
-
-    bool any_field = false;
-    for (int k = 0; k < (int)SurfaceFieldKind::Count; ++k) {
-        any_field |= surface_field_available((SurfaceFieldKind)k, sys);
-    }
-
-    if (ImGui::BeginCombo("coloring", surface_coloring_str[(int)es.coloring])) {
-        for (int i = 0; i < (int)SurfaceColoring::Count; ++i) {
-            const SurfaceColoring c = (SurfaceColoring)i;
-            const bool enabled = (c == SurfaceColoring::AtomColors) ? allow_atom_colors :
-                                 (c == SurfaceColoring::Field)      ? any_field : true;
-            ImGui::BeginDisabled(!enabled);
-            if (ImGui::Selectable(surface_coloring_str[i], es.coloring == c)) {
-                es.coloring = c;
-                // A field this dataset can make, if the one the representation names is not
-                if (c == SurfaceColoring::Field && !surface_field_available(es.field_kind, sys)) {
-                    es.field_kind = surface_field_first_available(sys);
-                }
-                update_rep = true;
-            }
-            ImGui::EndDisabled();
-            if (!enabled && c == SurfaceColoring::Field) {
-                ImGui::SetItemTooltip("Nothing in this dataset to make a field from:\n"
-                                      "the electrostatic potential needs a basis, a ground state density and the QM atoms' nuclear charges,\n"
-                                      "the embedding potential classical charges (atom/charge) on atoms outside the QM region");
-            }
-        }
-        ImGui::EndCombo();
-    }
-
-    if (es.coloring == SurfaceColoring::AtomColors && advanced) {
-        const double min_power = 2.0;
-        const double max_power = 20.0;
-        update_rep |= ImGui::SliderScalar("gaussian power", ImGuiDataType_Double, &es.gaussian_splatting_power, &min_power, &max_power, "%.2f");
-    }
-
-    if (es.coloring != SurfaceColoring::Field) {
-        return update_rep;
-    }
-
-    if (ImGui::BeginCombo("field", surface_field_kind_str[(int)es.field_kind])) {
-        for (int k = 0; k < (int)SurfaceFieldKind::Count; ++k) {
-            const SurfaceFieldKind kind = (SurfaceFieldKind)k;
-            ImGui::BeginDisabled(!surface_field_available(kind, sys));
-            if (ImGui::Selectable(surface_field_kind_str[k], es.field_kind == kind)) {
-                es.field_kind = kind;
-                update_rep = true;
-            }
-            ImGui::EndDisabled();
-        }
-        ImGui::EndCombo();
-    }
-    if (es.field_kind == SurfaceFieldKind::EmbeddingPotential) {
-        ImGui::SetItemTooltip("The electrostatic potential of the environment's classical multipoles on the surface: the charges,\n"
-                              "and the dipoles and quadrupoles where the potential has them.\n"
-                              "The QM region is left out, whatever charges a topology gives its atoms.\n"
-                              "For a polarizable embedding this is the potential of its PERMANENT multipoles:\n"
-                              "the induced dipoles are solved for during the calculation and not stored.");
-    } else if (es.field_kind == SurfaceFieldKind::ElectrostaticPotential) {
-        ImGui::SetItemTooltip("The electrostatic potential of the QM region on the surface: its nuclei and its ground state\n"
-                              "electron density, exact over the basis. Negative (red) where the electrons dominate - lone pairs,\n"
-                              "pi systems, where an electrophile is drawn - and positive (blue) where the nuclei are less screened.\n"
-                              "Mapped onto an isodensity surface (0.001-0.002 au) it is the molecular electrostatic potential.\n"
-                              "An embedding's environment is not part of it.");
-    }
-
-    // The colours are applied per pixel as the surface is shaded, so a change to the scale needs
-    // nothing re-evaluated: it is not an update of the representation
-    const SurfaceFieldVolume& vol = es.field_vol;
-    color_scale_draw_controls(&es.field_map, surface_field_span(vol), surface_field_unit(es.field_kind),
-                              "on surface", "its 1st to 99th percentile on the surface");
-    if (advanced && vol.num_surface_samples > 0) {
-        ImGui::TextDisabled("%zu of %zu voxels (%dx%dx%d) evaluated on the %s", vol.num_evaluated, vol.num_voxels,
-                            vol.grid.dim[0], vol.grid.dim[1], vol.grid.dim[2], vol.on_gpu ? "GPU" : "CPU");
-    }
-
-    return update_rep;
-}
-
-static bool draw_representations_window_electronic_structure(ApplicationState* state, Representation& rep) {
-    ImGuiComboFlags flags = 0;
-    ElectronicStructureRepresentation& es = rep.electronic_structure;
-
-    // The key is an opaque hash now, so it is no longer worth showing beside the label: a property
-    // with no label is named by its path's last segment already, which is the readable thing.
-    auto density_property_combo_label = [](char* buf, size_t buf_cap, const DensityProperty* prop) {
-        ASSERT(buf);
-        ASSERT(buf_cap > 0);
-        if (!prop || str_empty(prop->label)) {
-            snprintf(buf, buf_cap, "None");
-            return;
-        }
-        snprintf(buf, buf_cap, "%.*s", (int)prop->label.len, prop->label.ptr);
-    };
-
-    bool advanced = state->representation.advanced_mode;
-    bool update_rep = false;
-
-    const ElectronicStructureSourceFlags source_mask = es_source_mask(state->mold.sys);
-
-    if (ImGui::BeginCombo("volume src", electronic_structure_source_str[(int)es.source], flags)) {
-        for (int n = 0; n < (int)ElectronicStructureSource::Count; n++) {
-            ElectronicStructureSource source = (ElectronicStructureSource)n;
-            bool is_selected = (es.source == source);
-            bool disabled = !electronic_structure_source_supported(source_mask, source);
-
-            if (disabled) ImGui::PushDisabled();
-            if (ImGui::Selectable(electronic_structure_source_str[n], is_selected)) {
-                es.source = source;
-                electronic_structure_set_source_defaults(&es);
-                update_rep = true;
-            }
-            if (disabled) ImGui::PopDisabled();
-
-            if (is_selected) {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (advanced) {
-        if (ImGui::Combo("volume res", (int*)&es.resolution, volume_resolution_str, IM_ARRAYSIZE(volume_resolution_str))) {
-            update_rep = true;
-        }
-    }
-
-    if (electronic_structure_is_density_property(es)) {
-        // Gathered here rather than kept in a list somewhere: it is a handful of entries borrowed
-        // from the attribute table, and a stored copy would be one more thing to invalidate on load.
-        DensityProperty density_props[64];
-        const int num_density_props = (int)MIN(density_properties_gather(density_props, ARRAY_SIZE(density_props), state->mold.sys), ARRAY_SIZE(density_props));
-        if (num_density_props > 0) {
-            // A key that names nothing in the current list - a fresh representation, or a workspace
-            // saved against a file whose properties differ - falls back to the first one rather
-            // than drawing nothing.
-            const DensityProperty* selected = nullptr;
-            for (int n = 0; n < num_density_props; ++n) {
-                if (density_props[n].key == es.density_property_key) {
-                    selected = &density_props[n];
-                    break;
-                }
-            }
-            if (!selected) {
-                selected = &density_props[0];
-                es.density_property_key = selected->key;
-                update_rep = true;
-            }
-
-            char preview[256];
-            density_property_combo_label(preview, sizeof(preview), selected);
-            if (ImGui::BeginCombo("property", preview)) {
-                for (int n = 0; n < num_density_props; ++n) {
-                    char label[256];
-                    density_property_combo_label(label, sizeof(label), &density_props[n]);
-                    const bool is_selected = (es.density_property_key == density_props[n].key);
-                    if (ImGui::Selectable(label, is_selected)) {
-                        if (es.density_property_key != density_props[n].key) {
-                            es.density_property_key = density_props[n].key;
-                            update_rep = true;
-                        }
-                    }
-
-                    if (is_selected) {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        } else {
-            ImGui::LabelText("property", "No density properties available");
-        }
-    }
-
-    const bool show_spin = electronic_structure_uses_spin(es);
-    if (show_spin) {
-        // Asked of the table: a second, DISTINCT set of coefficients. This used to be true for a
-        // restricted file too, because beta is published there as an alias of alpha and the fan-in
-        // only checked that the column existed - so the selector appeared and toggled between two
-        // names for one datum.
-        const bool has_beta = es_has_distinct_beta_orbitals(state->mold.sys);
-        if (es.source == ElectronicStructureSource::MolecularOrbital) {
-            if (es.spin != ElectronicStructureSpin::Alpha && es.spin != ElectronicStructureSpin::Beta) {
-                es.spin = ElectronicStructureSpin::Alpha;
-                update_rep = true;
-            }
-            if (has_beta) {
-                const char* spin_options[] = { "Alpha", "Beta" };
-                int spin_idx = es.spin == ElectronicStructureSpin::Beta ? 1 : 0;
-                if (ImGui::Combo("spin", &spin_idx, spin_options, IM_ARRAYSIZE(spin_options))) {
-                    es.spin = spin_idx == 1 ? ElectronicStructureSpin::Beta : ElectronicStructureSpin::Alpha;
-                    update_rep = true;
-                }
-            }
-        }
-        else if (es.source == ElectronicStructureSource::ElectronDensity) {
-            if (has_beta) {
-                const ElectronicStructureSpin spin_options[] = {
-                    ElectronicStructureSpin::Total,
-                    ElectronicStructureSpin::Alpha,
-                    ElectronicStructureSpin::Beta,
-                    ElectronicStructureSpin::Difference,
-                };
-                const char* spin_labels[] = { "Total", "Alpha", "Beta", "Difference" };
-                int spin_idx = 0;
-                for (int i = 0; i < (int)IM_ARRAYSIZE(spin_options); ++i) {
-                    if (es.spin == spin_options[i]) {
-                        spin_idx = i;
-                        break;
-                    }
-                }
-                if (es.spin != spin_options[spin_idx]) {
-                    es.spin = spin_options[spin_idx];
-                    update_rep = true;
-                }
-                if (ImGui::Combo("spin", &spin_idx, spin_labels, IM_ARRAYSIZE(spin_labels))) {
-                    es.spin = spin_options[spin_idx];
-                    if (es.spin != ElectronicStructureSpin::Difference) {
-                        es.use_magnitude = false;
-                    }
-                    update_rep = true;
-                }
-            } else if (es.spin != ElectronicStructureSpin::Total) {
-                es.spin = ElectronicStructureSpin::Total;
-                es.use_magnitude = false;
-                update_rep = true;
-            }
-        }
-    }
-
-    if (es.source == ElectronicStructureSource::NaturalTransitionOrbital) {
-        if (ImGui::Combo("component", (int*)&es.nto_component, electronic_structure_nto_component_str, IM_ARRAYSIZE(electronic_structure_nto_component_str))) {
-            update_rep = true;
-        }
-    }
-
-    if (es.source == ElectronicStructureSource::TransitionDensity) {
-        if (ImGui::Combo("component", (int*)&es.transition_density_component, electronic_structure_transition_density_component_str, IM_ARRAYSIZE(electronic_structure_transition_density_component_str))) {
-            update_rep = true;
-        }
-    }
-
-    const bool show_molecular_orbitals = electronic_structure_uses_orbital_idx(es);
-    const bool show_exited_states = electronic_structure_uses_excited_state_idx(es);
-    const bool show_lambdas = electronic_structure_uses_nto_lambda_idx(es);
-
-    if (show_molecular_orbitals) {
-        // The (homo)/(lumo) markers sit at different indices for the two spins in an unrestricted
-        // calculation, and the rendered volume already follows es.spin - so the frontier has to
-        // follow it too, or the entry marked (homo) under spin=Beta is alpha's HOMO index.
-        //
-        // Formatted here rather than read out of a precomputed list: it is an index, an energy and
-        // two markers, and a copy of it would be one more thing to keep in step with the table.
-        const bool use_beta = (es.spin == ElectronicStructureSpin::Beta) && es_has_distinct_beta_orbitals(state->mold.sys);
-
-        size_t num_orbitals = 0;
-        OrbitalFrontier frontier = {};
-        if (es_orbital_extent(state->mold.sys, &num_orbitals, nullptr) && num_orbitals > 0) {
-            es_orbital_frontier(&frontier, state->mold.sys, use_beta ? es_path::beta_occupation : es_path::alpha_occupation);
-
-            // Energies alongside the index, so the list can be read as an orbital diagram. A column
-            // that does not span the orbital set is not one to index with, so it is dropped whole
-            // rather than bounds checked per row - the list then falls back to bare indices.
-            size_t num_energies = 0;
-            const double* energy = es_orbital_energies(&num_energies, state->mold.sys, use_beta ? es_path::beta_energy : es_path::alpha_energy);
-            if (num_energies != num_orbitals) energy = nullptr;
-
-            // The UI font is monospaced (Dejavu Sans Mono), so a fixed field width per column is all
-            // the alignment this needs: right aligned index, then a fixed number of decimals, which
-            // puts every decimal point of the list on one column. Widths are passed in rather than
-            // baked into the format so the preview - a single line, nothing to align against - can
-            // ask for the same text unpadded.
-            int idx_width = 1;
-            for (size_t m = num_orbitals; m >= 10; m /= 10) idx_width++;
-
-            auto orbital_label = [&](char* buf, size_t cap, int n, int idx_w, int ene_w) {
-                const char* mark = (n == frontier.homo_idx) ? " (homo)" : (n == frontier.lumo_idx) ? " (lumo)" : "";
-                if (energy) {
-                    snprintf(buf, cap, "%*i  %*.4f%s", idx_w, n + 1, ene_w, energy[n], mark);
-                } else {
-                    snprintf(buf, cap, "%*i%s", idx_w, n + 1, mark);
-                }
-            };
-
-            es.orbital_idx = CLAMP(es.orbital_idx, 0, (int)num_orbitals - 1);
-
-            char preview[48];
-            orbital_label(preview, sizeof(preview), es.orbital_idx, 0, 0);
-            if (ImGui::BeginCombo("orbital idx", preview)) {
-                // Highest index first, so the lowest lying orbital sits at the bottom - the
-                // conventional orbital diagram, and the same order the Molecular Orbitals table
-                // defaults to. Canonical MOs come out of the SCF in ascending energy, so descending
-                // index IS descending energy; sorting on the energies instead would only differ for
-                // a non-aufbau set, and would then disagree with that table.
-                for (int n = (int)num_orbitals - 1; n >= 0; n--) {
-                    bool is_selected = (es.orbital_idx == n);
-                    char label[48];
-                    orbital_label(label, sizeof(label), n, idx_width, 10);
-                    if (ImGui::Selectable(label, is_selected)) {
-                        if (es.orbital_idx != n) {
-                            update_rep = true;
-                        }
-                        es.orbital_idx = n;
-                    }
-
-                    if (is_selected) {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        }
-    }
-
-    if (show_exited_states) {
-        const int num_excited_states = (int)es_excited_state_count(state->mold.sys);
-        if (num_excited_states > 0) {
-            es.excited_state_idx = CLAMP(es.excited_state_idx, 0, num_excited_states - 1);
-            char preview[16];
-            snprintf(preview, sizeof(preview), "%i", es.excited_state_idx + 1);
-            if (ImGui::BeginCombo("state idx", preview)) {
-                for (int n = 0; n < num_excited_states; n++) {
-                    const bool is_selected = (es.excited_state_idx == n);
-                    char label[16];
-                    snprintf(label, sizeof(label), "%i", n + 1);
-                    if (ImGui::Selectable(label, is_selected)) {
-                        if (es.excited_state_idx != n) {
-                            update_rep = true;
-                        }
-                        es.excited_state_idx = n;
-                    }
-
-                    if (is_selected) {
-                        ImGui::SetItemDefaultFocus();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            if (show_lambdas) {
-                // The same 1e-3 the rest of the tree stops at, and the same place the zero padded
-                // tail of the ragged lambda axis stops it.
-                const double LAMBDA_CUTOFF = 1.0e-3;
-                double lambdas[32];
-                const int num_lambdas = (int)es_nto_lambdas(lambdas, ARRAY_SIZE(lambdas), state->mold.sys,
-                                                            (size_t)es.excited_state_idx, LAMBDA_CUTOFF);
-                if (num_lambdas > 0) {
-                    es.nto_lambda_idx = CLAMP(es.nto_lambda_idx, 0, num_lambdas - 1);
-
-                    auto lambda_label = [&lambdas](char* buf, size_t cap, int n) {
-                        // The bytes rather than a u8 literal: u8"" is const char8_t* in C++20 and
-                        // a format string has to be a plain char array. \xce\xbb is U+03BB, lambda.
-                        snprintf(buf, cap, "\xce\xbb[%i] (%.3f)", n + 1, lambdas[n]);
-                    };
-
-                    char preview[32];
-                    lambda_label(preview, sizeof(preview), es.nto_lambda_idx);
-                    if (ImGui::BeginCombo("lambda idx", preview)) {
-                        for (int n = 0; n < num_lambdas; n++) {
-                            const bool is_selected = (es.nto_lambda_idx == n);
-                            char label[32];
-                            lambda_label(label, sizeof(label), n);
-                            if (ImGui::Selectable(label, is_selected)) {
-                                if (es.nto_lambda_idx != n) {
-                                    update_rep = true;
-                                }
-                                es.nto_lambda_idx = n;
-                            }
-
-                            if (is_selected) {
-                                ImGui::SetItemDefaultFocus();
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                }
-            }
-        }
-    }
-    if (electronic_structure_uses_magnitude_toggle(es)) {
-        const char* magnitude_label = es.source == ElectronicStructureSource::ElectronDensity ? (const char*)u8"magnitude |ρ|" : (const char*)u8"magnitude |Ψ|";
-        if (ImGui::Checkbox(magnitude_label, &es.use_magnitude)) {
-            update_rep = true;
-        }
-    }
-    
-    const double min_tau = 0.0;
-    const double max_tau = 1.0;
-    
-    const double iso_min = 1.0e-2;
-    const double iso_max = 5.0;
-
-    if (electronic_structure_is_density_property(es)) {
-        int num_isos = CLAMP(es.density_property.num_isos, 1, (int)ARRAY_SIZE(es.density_property.values));
-        if (num_isos != es.density_property.num_isos) {
-            es.density_property.num_isos = num_isos;
-            update_rep = true;
-        }
-
-        if (ImGui::SliderInt("iso count", &num_isos, 1, (int)ARRAY_SIZE(es.density_property.values))) {
-            es.density_property.num_isos = num_isos;
-            update_rep = true;
-        }
-
-        for (int i = 0; i < es.density_property.num_isos; ++i) {
-            char value_label[32];
-            char color_label[32];
-            snprintf(value_label, sizeof(value_label), "iso %d value", i + 1);
-            snprintf(color_label, sizeof(color_label), "iso %d color", i + 1);
-            update_rep |= ImGui::DragScalar(value_label, ImGuiDataType_Double, &es.density_property.values[i], 0.001f, NULL, NULL, "%.8f");
-            update_rep |= ImGui::ColorEdit4(color_label, es.density_property.colors[i].elem);
-        }
-
-        if (advanced) {
-            ImGui::SliderScalar((const char*)u8"iso τ", ImGuiDataType_Double, &es.iso_optical_density, &min_tau, &max_tau, "%.4f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SetItemTooltip("Optical density shared by all custom isosurfaces");
-        }
-
-        update_rep |= draw_surface_coloring(es, state->mold.sys, advanced, false);
-
-        return update_rep;
-    }
-    
-    const char* iso_label = electronic_structure_iso_value_label();
-    
-    if (electronic_structure_is_signed(es)) {
-        // The band a field is evaluated in follows the isovalue
-        update_rep |= ImGui::SliderScalar(iso_label, ImGuiDataType_Double, &rep.electronic_structure.iso_value, &iso_min, &iso_max, "%.8f", ImGuiSliderFlags_Logarithmic) && rep.electronic_structure.coloring == SurfaceColoring::Field;
-        ImGui::SetItemTooltip("%s", electronic_structure_iso_value_tooltip(rep.electronic_structure));
-        if (advanced) {
-            ImGui::SliderScalar((const char*)u8"iso τ", ImGuiDataType_Double, &rep.electronic_structure.iso_optical_density, &min_tau, &max_tau, "%.4f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SetItemTooltip("Optical density of the isosurfaces");
-        }
-        update_rep |= draw_surface_coloring(rep.electronic_structure, state->mold.sys, advanced, true);
-        if (rep.electronic_structure.coloring != SurfaceColoring::Uniform) {
-            ImGui::ColorEdit4("tint positive", rep.electronic_structure.tint_psi_pos.elem);
-            ImGui::ColorEdit4("tint negative", rep.electronic_structure.tint_psi_neg.elem);
-        } else {
-            ImGui::ColorEdit4("color positive", rep.electronic_structure.col_psi_pos.elem);
-            ImGui::ColorEdit4("color negative", rep.electronic_structure.col_psi_neg.elem);
-        }
-    }
-    else {
-        // The band a field is evaluated in follows the isovalue
-        update_rep |= ImGui::SliderScalar(iso_label, ImGuiDataType_Double, &rep.electronic_structure.iso_value, &iso_min, &iso_max, "%.8f", ImGuiSliderFlags_Logarithmic) && rep.electronic_structure.coloring == SurfaceColoring::Field;
-        ImGui::SetItemTooltip("%s", electronic_structure_iso_value_tooltip(rep.electronic_structure));
-        if (advanced) {
-            ImGui::SliderScalar((const char*)u8"iso τ", ImGuiDataType_Double, &rep.electronic_structure.iso_optical_density, &min_tau, &max_tau, "%.4f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SetItemTooltip("Optical density of the isosurfaces");
-        }
-        update_rep |= draw_surface_coloring(rep.electronic_structure, state->mold.sys, advanced, true);
-        if (rep.electronic_structure.coloring != SurfaceColoring::Uniform) {
-            if (es.source == ElectronicStructureSource::TransitionDensity && es.transition_density_component == ElectronicStructureTransitionDensityComponent::Attachment) {
-                ImGui::ColorEdit4("tint attachment", rep.electronic_structure.tint_att.elem);
-            }
-            else if (es.source == ElectronicStructureSource::TransitionDensity && es.transition_density_component == ElectronicStructureTransitionDensityComponent::Detachment) {
-                ImGui::ColorEdit4("tint detachment", rep.electronic_structure.tint_det.elem);
-            } else {
-                ImGui::ColorEdit4("tint density", rep.electronic_structure.tint_den.elem);
-            }
-        } else {
-            if (es.source == ElectronicStructureSource::TransitionDensity && es.transition_density_component == ElectronicStructureTransitionDensityComponent::Attachment) {
-                ImGui::ColorEdit4("color attachment", rep.electronic_structure.col_att.elem);
-            }
-            else if (es.source == ElectronicStructureSource::TransitionDensity && es.transition_density_component == ElectronicStructureTransitionDensityComponent::Detachment) {
-                ImGui::ColorEdit4("color detachment", rep.electronic_structure.col_det.elem);
-            } else {
-                ImGui::ColorEdit4("color density",  rep.electronic_structure.col_den.elem);
-            }
-        }
-    }
-
-    return update_rep;
-}
-
-static void draw_representations_window(ApplicationState* state) {
-    if (!state->representation.show_window) return;
-
-    ImGui::SetNextWindowSize({300,200}, ImGuiCond_FirstUseEver);
-    ImGui::Begin("Representations", &state->representation.show_window, ImGuiWindowFlags_NoFocusOnAppearing);
-    if (ImGui::Button("create new")) {
-        create_representation(state);
-    }
-    ImGui::SameLine();
-    if (ImGui::DeleteButton("remove all")) {
-        remove_all_representations(state);
-    }
-    ImGui::SameLine();
-
-    const char* advanced_label = ICON_FA_SLIDERS;
-    const float checkbox_width =
-        ImGui::GetFrameHeight() +
-        ImGui::GetStyle().ItemInnerSpacing.x +
-        ImGui::CalcTextSize(advanced_label).x;
-    ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - checkbox_width);
-    ImGui::Checkbox(advanced_label, &state->representation.advanced_mode);
-    ImGui::SetItemTooltip("Advanced mode (show all representation settings)");
-
-    bool advanced = state->representation.advanced_mode;
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    for (int rep_idx = 0; rep_idx < (int)md_array_size(state->representation.reps); rep_idx++) {
-        bool update_rep = false;
-        Representation& rep = state->representation.reps[rep_idx];
-
-        char label[128];
-        snprintf(label, sizeof(label), "%s###ID", rep.name);
-
-        ImGui::PushID(rep_idx);
-        
-        const float pad = 3.0f;
-        const float size = ImGui::GetFontSize() + pad * 2;
-        const float spacing = 2.f;
-        const float total_button_size = (size + 1) * 3;
-
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, pad));
-        bool draw_content = ImGui::TreeNodeEx("##label", ImGuiTreeNodeFlags_FramePadding);
-        ImGui::PopStyleVar();
-
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - total_button_size);
-        ImGui::InputText("##name", rep.name, sizeof(rep.name));
-
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - total_button_size, spacing);
-        const char* eye_icon = rep.enabled ? ICON_FA_EYE : ICON_FA_EYE_SLASH;
-        
-        const ImVec2 btn_size = {size, size};
-        if (ImGui::Button(eye_icon, btn_size)) {
-            rep.enabled = !rep.enabled;
-            state->representation.atom_visibility_mask_dirty = true;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Show/Hide");
-        }
-        ImGui::SameLine(0, spacing);
-        if (ImGui::Button(ICON_FA_COPY, btn_size)) {
-            clone_representation(state, rep);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Duplicate");
-        }
-        ImGui::SameLine(0, spacing);
-        if (ImGui::DeleteButton(ICON_FA_XMARK, btn_size)) {
-            remove_representation(state, rep_idx);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Remove");
-        }
-
-        if (draw_content) {
-            ImVec4 sub_group_color = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-            sub_group_color.w = 0.5f;
-
-            const float inner_item_width = MAX(ImGui::GetContentRegionAvail().x - ImGui::GetStyle().IndentSpacing - ImGui::CalcTextSize("helix scale").x, 100.f);
-            ImGui::PushItemWidth(inner_item_width);
-
-            // @TODO: Only display the representations which can be used for the current dataset
-            if (!rep.type_is_valid) ImGui::PushInvalid();
-            if (ImGui::BeginCombo("type", representation_type_str[(int)rep.type])) {
-                for (int i = 0; i < (int)RepresentationType::Count; ++i) {
-                    if (i == (int)RepresentationType::ElectronicStructure) {
-                        // Enlisted when the system carries ANY electronic structure source - orbitals are
-                        // one, and a file without an SCF block can still carry density properties
-                        if (es_source_mask(state->mold.sys) == 0) continue;
-                    }
-                    if (ImGui::Selectable(representation_type_str[(int)i], i == (int)rep.type)) {
-                        rep.type = (RepresentationType)i;
-                        if (rep.type == RepresentationType::ElectronicStructure) {
-                            // The default source is orbitals, which this system may not have
-                            electronic_structure_select_available_source(&rep.electronic_structure, state->mold.sys);
-                        }
-                        update_rep = true;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            if (!rep.type_is_valid) ImGui::PopInvalid();
-
-			const double dipole_min = 0.01;
-			const double dipole_max = 100.0;
-
-            switch (rep.type) {
-            case RepresentationType::ElectronicStructure:
-                update_rep |= draw_representations_window_electronic_structure(state, rep);
-                break;
-            case RepresentationType::DipoleMoment:
-            {
-                // The combo lists GROUPS, which is what the file publishes. A group holding one
-                // moment per excited state is then picked apart by the index widget below, rather
-                // than flattening every (group, element) pair into one list nobody can scan.
-                DipoleGroup groups[16];
-                const size_t num_groups = MIN(dipole_groups_gather(groups, ARRAY_SIZE(groups), state->mold.sys), ARRAY_SIZE(groups));
-
-                // Asked of the key the representation holds, not searched for in the list: a key
-                // that names nothing - a workspace pointed at a file without that group - simply
-                // leaves the preview empty and the index widget away.
-                DipoleGroup selected = {};
-                const bool has_selection = dipole_group_from_key(&selected, state->mold.sys, rep.dipole.dipole_key);
-
-                // A group can come back shorter than it was (fewer excited states), which would
-                // otherwise leave the representation pointing past its end.
-                if (has_selection && rep.dipole.dipole_index >= selected.count) {
-                    rep.dipole.dipole_index = 0;
-                    update_rep = true;
-                }
-
-                char preview[64] = "";
-                if (has_selection) dipole_label_pretty(preview, sizeof(preview), selected.label);
-
-                if (ImGui::BeginCombo("dipole", preview)) {
-                    for (size_t i = 0; i < num_groups; ++i) {
-                        char lbl[64];
-                        dipole_label_pretty(lbl, sizeof(lbl), groups[i].label);
-                        const bool is_selected = groups[i].key == rep.dipole.dipole_key;
-                        if (ImGui::Selectable(lbl, is_selected)) {
-                            if (!is_selected) {
-                                rep.dipole.dipole_key   = groups[i].key;
-                                rep.dipole.dipole_index = 0;   // a different group; the old element means nothing in it
-                                update_rep = true;
-                            }
-                        }
-                        if (is_selected) {
-                            ImGui::SetItemDefaultFocus();
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-
-                // Only an array of moments has an index to choose. One moment is addressed by the
-                // group alone, and a slider from 1 to 1 is a control that cannot do anything.
-                if (has_selection && selected.count > 1) {
-                    int index = (int)rep.dipole.dipole_index + 1;
-                    if (ImGui::SliderInt("index", &index, 1, (int)selected.count)) {
-                        rep.dipole.dipole_index = (uint32_t)CLAMP(index - 1, 0, (int)selected.count - 1);
-                        update_rep = true;
-                    }
-                }
-            }
-            ImGui::ColorEdit4("color", rep.dipole.color.elem);
-				ImGui::SliderScalar("scale", ImGuiDataType_Double, &rep.dipole.scale, &dipole_min, &dipole_max, "%.3f");
-				ImGui::SliderFloat("radius", &rep.dipole.radius, 0.01f, 0.5f);
-				ImGui::DragFloat3("offset", rep.dipole.offset.elem, 0.01f, -100.0f, 100.0f);
-                break;
-			default:
-                if (ImGui::InputQuery("filter", rep.filt, sizeof(rep.filt), rep.filt_is_valid, rep.filt_error)) {
-                    rep.filt_is_dirty = true;
-                    update_rep = true;
-                }
-                break;
-            }
-
-            if (representation_uses_atom_colors(rep)) {
-                if (ImGui::Combo("atom color", (int*)(&rep.color_mapping), color_mapping_str, IM_ARRAYSIZE(color_mapping_str))) {
-                    update_rep = true;
-                }
-
-                if (rep.color_mapping == ColorMapping::Attribute) {
-                    // The list of per atom fields IS the system's attribute table under atom/.
-                    // Queried here rather than cached anywhere, so it cannot disagree with the data.
-                    md_attribute_id_t prop_ids[64];
-                    size_t num_props = MIN(atom_attribute_query(prop_ids, ARRAY_SIZE(prop_ids), state->mold.sys), ARRAY_SIZE(prop_ids));
-
-                    const md_attributes_t& attributes = state->mold.sys.attributes;
-                    const md_attribute_t* selected_prop = md_attributes_get(&attributes, rep.atom_attribute.key);
-
-                    // A key the table no longer holds - a reload which dropped that field - falls
-                    // back to the first available rather than leaving the representation blank.
-                    if (!selected_prop && num_props > 0) {
-                        atom_attribute_select(&rep.atom_attribute, prop_ids[0], state->mold.sys);
-                        selected_prop = md_attributes_get(&attributes, rep.atom_attribute.key);
-                        update_rep = true;
-                    }
-
-                    if (num_props > 0 && selected_prop) {
-                        if (ImGui::BeginCombo("attribute", atom_attribute_label(selected_prop).ptr)) {
-                            for (size_t i = 0; i < num_props; ++i) {
-                                const md_attribute_t* attr = md_attributes_get(&attributes, prop_ids[i]);
-                                if (!attr) continue;
-                                bool selected = prop_ids[i] == rep.atom_attribute.key;
-                                if (ImGui::Selectable(atom_attribute_label(attr).ptr, selected)) {
-                                    atom_attribute_select(&rep.atom_attribute, prop_ids[i], state->mold.sys);
-                                    update_rep = true;
-                                }
-                            }
-                            ImGui::EndCombo();
-                        }
-
-                        const int num_variants = atom_attribute_variant_count(selected_prop);
-                        if (num_variants > 1) {
-                            int idx = rep.atom_attribute.variant_idx + 1;
-                            const int min = 1;
-                            const int max = num_variants;
-                            if (ImGui::SliderInt("index", &idx, min, max)) {
-                                update_rep = true;
-                            }
-                            rep.atom_attribute.variant_idx = CLAMP(idx - 1, 0, num_variants - 1);
-                        }
-                        
-                        // The same scale an isosurface coloured by a field has. Its span is what
-                        // the colours were last made from, the atoms of this representation.
-                        const bool multiple = num_variants > 1;
-                        update_rep |= color_scale_draw_controls(&rep.atom_attribute.scale, rep.atom_attribute.span, selected_prop->unit, "shown atoms",
-                                                                multiple ? "the smallest to the largest value of the atoms shown, at every index"
-                                                                         : "the smallest to the largest value of the atoms shown");
-                    } else {
-                        ImGui::TextDisabled("no per atom attributes in this dataset");
-                    }
-                }
-                if (rep.filt_is_dynamic || rep.color_mapping == ColorMapping::Attribute) {
-                    if (advanced) {
-                        update_rep |= ImGui::Checkbox("auto-update", &rep.dynamic_evaluation);
-                        if (!rep.dynamic_evaluation) {
-                            ImGui::SameLine();
-                            if (ImGui::Button("update")) {
-                                rep.filt_is_dirty = true;
-                                update_rep = true;
-                            }
-                        }
-                    }
-                } else {
-                    rep.dynamic_evaluation = false;
-                }
-
-                if (rep.color_mapping == ColorMapping::Uniform) {
-                    update_rep |= ImGui::ColorEdit3("##atom_base_color", rep.base_color.elem);
-                }
-
-                if (advanced) {
-                    if (rep.type == RepresentationType::Licorice || rep.type == RepresentationType::BallAndStick) {
-                        update_rep |= ImGui::Checkbox("bond orders", &rep.bond_orders);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Double and triple bonds as two and three sticks, aromatic and delocalized bonds with a dashed line");
-                        }
-                        // Draw options for how bonds should be colored
-					    update_rep |= ImGui::Combo("bond color", (int*)(&rep.bond_color), bond_color_mode_str, IM_ARRAYSIZE(bond_color_mode_str));
-                        if (rep.bond_color == BondColorMode::SmoothAtom) {
-                            ImGui::SliderFloat("sharpness", &rep.bond_sharpness, 0.0f, 1.0f);
-                        } else if (rep.bond_color == BondColorMode::Uniform) {
-                            ImGui::ColorEdit3("##bond_base_color", rep.bond_base_color.elem);
-					    }
-                    }
-                }
-            }
-
-            if (advanced && representation_uses_atom_colors(rep)) {
-                if (rep.type != RepresentationType::ElectronicStructure) {
-                    ImGui::Spacing();
-                    ImGui::TextColored(sub_group_color, "Geometric Scaling");
-                    switch (rep.type) {
-                    case RepresentationType::SpaceFill:
-                        update_rep |= ImGui::SliderFloat("radius scale", &rep.scale[0], 0.1f, 4.f);
-                        break;
-                    case RepresentationType::Licorice:
-                        update_rep |= ImGui::SliderFloat("radius scale", &rep.scale[0], 0.1f, 4.0f);
-                        break;
-                    case RepresentationType::BallAndStick:
-                        update_rep |= ImGui::SliderFloat("ball scale",   &rep.scale[0], 0.1f, 4.f);
-                        update_rep |= ImGui::SliderFloat("bond scale",   &rep.scale[1], 0.1f, 4.f);
-                        break;
-                    case RepresentationType::Ribbons:
-                        update_rep |= ImGui::SliderFloat("width",        &rep.scale[0], 0.1f, 3.f);
-                        update_rep |= ImGui::SliderFloat("thickness",    &rep.scale[1], 0.1f, 3.f);
-                        break;
-                    case RepresentationType::Cartoon:
-                        update_rep |= ImGui::SliderFloat("coil",   &rep.scale[0], 0.1f, 3.f);
-                        update_rep |= ImGui::SliderFloat("sheet",  &rep.scale[1], 0.1f, 3.f);
-                        update_rep |= ImGui::SliderFloat("helix",  &rep.scale[2], 0.1f, 3.f);
-                        break;
-                    default:
-                        break;
-                    }
-                }
-                if (rep.color_mapping == ColorMapping::SecondaryStructure) {
-                    ImGui::Spacing();
-                    ImGui::TextColored(sub_group_color, "Secondary Structure Color");
-                    update_rep |= ImGui::ColorEdit3("unknown", rep.secondary_structure.color_unknown.elem);
-                    update_rep |= ImGui::ColorEdit3("coil",    rep.secondary_structure.color_coil.elem);
-                    update_rep |= ImGui::ColorEdit3("helix",   rep.secondary_structure.color_helix.elem);
-                    update_rep |= ImGui::ColorEdit3("sheet",   rep.secondary_structure.color_sheet.elem);
-                }
-                ImGui::Spacing();
-
-                ImGui::TextColored(sub_group_color, "Post-Processing");
-                update_rep |= ImGui::ColorEdit3("tint color", rep.tint_color.elem, ImGuiColorEditFlags_PickerHueWheel);
-                update_rep |= ImGui::SliderFloat("tint scale", &rep.tint_scale, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
-                update_rep |= ImGui::SliderFloat("saturation", &rep.saturation, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
-            }
-
-            ImGui::PopItemWidth();
-            ImGui::Spacing();
-            ImGui::TreePop();
-        }
-
-        ImGui::PopID();
-
-        if (update_rep) {
-            flag_representation_as_dirty(&rep);
-        }
-    }
-
-    ImGui::End();
-}
-
-
 
 static void draw_async_task_window(ApplicationState* data) {
     constexpr float WIDTH = 300.f;
@@ -4235,16 +3945,8 @@ static void draw_timeline_window(ApplicationState* data) {
                 draw_timeline_properties_menu(data);
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Filter")) {
-                ImGui::Checkbox("Enabled", &data->timeline.filter.enabled);
-                if (data->timeline.filter.enabled) {
-                    ImGui::Checkbox("Temporal Window", &data->timeline.filter.temporal_window.enabled);
-                    if (data->timeline.filter.temporal_window.enabled) {
-                        const double extent_min = 1.0;
-                        const double extent_max = num_x_values / 2.0;
-                        ImGui::SliderScalar("Extent (frames)", ImGuiDataType_Double, &data->timeline.filter.temporal_window.extent_in_frames, &extent_min, &extent_max, "%1.0f");
-                    }
-                }
+            if (ImGui::BeginMenu("Periods")) {
+                timeline_periods_menu(&data->timeline.periods);
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Subplots")) {
@@ -4268,30 +3970,19 @@ static void draw_timeline_window(ApplicationState* data) {
             ImPlotInputMap old_map = ImPlot::GetInputMap();
 
             static bool is_dragging  = false;
-            static bool is_selecting = false;
 
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 is_dragging = false;
-                is_selecting = false;
             }
             if (!ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
                 is_dragging = false;
             }
-            if (!ImGui::IsKeyDown(ImGuiKey_LeftShift)) {
-                is_selecting = false;
+
+            // Shift-drag marks a period and ctrl-drag moves the current frame: neither may pan the plots
+            // meanwhile, and nor may a period being dragged in the lane
+            if (ImGui::GetIO().KeyShift || ImGui::GetIO().KeyCtrl || timeline_periods_dragging()) {
+                ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
             }
-
-            // Create a temporary 'time' representation of the filters min and max value
-            // The visualization uses time units while we store 'frame' units
-            double filter_beg = frame_to_time(data->timeline.filter.beg_frame, *data);
-            double filter_end = frame_to_time(data->timeline.filter.end_frame, *data);
-            double time = frame_to_time(data->animation.frame, *data);
-
-            ImPlot::BeginSubplots("##Temporal", num_subplots, 1, ImVec2(-1,-1));
-
-            const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoFrame;
-            const ImPlotAxisFlags axis_flags   = ImPlotAxisFlags_NoSideSwitch;
-            const ImPlotAxisFlags axis_flags_y = axis_flags | ImPlotAxisFlags_Opposite | ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit;
 
             char x_label[64] = "Frame";
             char x_unit_str[32] = "";
@@ -4300,6 +3991,24 @@ static void draw_timeline_window(ApplicationState* data) {
                 md_unit_print(x_unit_str, sizeof(x_unit_str), x_unit);
                 snprintf(x_label, sizeof(x_label), "Time (%s)", x_unit_str);
             }
+
+            // The periods, above the plots and on their time axis
+            TimelinePeriodAxis range_axis;
+            range_axis.frame_times = x_values;
+            range_axis.num_frames  = num_x_values;
+            range_axis.view_beg    = &data->timeline.view_range.beg_x;
+            range_axis.view_end    = &data->timeline.view_range.end_x;
+            range_axis.time_unit   = x_unit_str;
+            timeline_periods_lane(&data->timeline.periods, range_axis, &data->animation.frame);
+
+            // After the lane, which ctrl-drag in it may have moved
+            double time = frame_to_time(data->animation.frame, *data);
+
+            ImPlot::BeginSubplots("##Temporal", num_subplots, 1, ImVec2(-1,-1));
+
+            const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoFrame;
+            const ImPlotAxisFlags axis_flags   = ImPlotAxisFlags_NoSideSwitch;
+            const ImPlotAxisFlags axis_flags_y = axis_flags | ImPlotAxisFlags_Opposite | ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit;
 
             for (int i = 0; i < num_subplots; ++i) {
                 PlotSubplot& sp = data->timeline.subplots[i];
@@ -4343,16 +4052,8 @@ static void draw_timeline_window(ApplicationState* data) {
                     ImPlot::SetupAxes(x_label, y_label, axis_flags_x, axis_flags_y);
                     ImPlot::SetupFinish();
 
-                    if (data->timeline.filter.enabled) {
-                        bool disabled = data->timeline.filter.temporal_window.enabled;
-                        ImPlotDragRangeFlags flags = ImPlotDragToolFlags_NoFit;
-                        if (i < num_subplots - 1) {
-                            flags |= ImPlotDragRangeFlags_NoBar;
-                        }
-                        if (disabled) ImGui::PushDisabled();
-                        ImPlot::DragRangeX("Time Filter", &filter_beg, &filter_end, min_x_value, max_x_value, flags);
-                        if (disabled) ImGui::PopDisabled();
-                    }
+                    // The periods shaded below the series, and shift-press marking a new one
+                    timeline_periods_plot(&data->timeline.periods, range_axis, data->animation.frame);
 
                     // The entry, and the member of its population, under the mouse
                     int  hovered_idx      = -1;
@@ -4482,16 +4183,8 @@ static void draw_timeline_window(ApplicationState* data) {
 
                     if (is_dragging) {
                         time = ImPlot::GetPlotMousePos().x;
-                    } else if (is_selecting) {
-                        filter_end = MAX(ImPlot::GetPlotMousePos().x, filter_beg);
-                        filter_beg = MIN(filter_beg, filter_end);
-                    } else if (ImPlot::IsPlotHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                        if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
-                            is_dragging = true;
-                        } else if (ImGui::IsKeyDown(ImGuiKey_LeftShift)) {
-                            filter_beg = ImPlot::GetPlotMousePos().x;
-                            is_selecting = true;
-                        }
+                    } else if (ImPlot::IsPlotHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+                        is_dragging = true;
                     }
 
                     for (int j = 0; j < sp.count; ++j) {
@@ -4505,6 +4198,10 @@ static void draw_timeline_window(ApplicationState* data) {
                             }
                             if (!resolved[j]) {
                                 ImGui::SetTooltip("Nothing to plot at '%s' right now", s.key.path);
+                            } else if (v.state.status != SeriesStatus_Current) {
+                                char text[160];
+                                series_state_describe(text, sizeof(text), v.state);
+                                ImGui::SetTooltip("%s", text);
                             }
                             hovered_idx = j;
                             hovered_pop_idx = -1;
@@ -4552,6 +4249,10 @@ static void draw_timeline_window(ApplicationState* data) {
                             const int population_size = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             auto plot = [&](int k) {
                                 ImVec4 color = plot_series_member_color(s, k, population_size);
+                                if (v.state.status >= SeriesStatus_Outdated) {
+                                    // Not what the script says any more: shown, faintly, until it is evaluated
+                                    color.w *= 0.35f;
+                                }
                                 ImVec4 marker_line_color = {};
                                 float  marker_line_weight = 0;
                                 float  fill_alpha = 1.0f;
@@ -4624,7 +4325,8 @@ static void draw_timeline_window(ApplicationState* data) {
                         ImPlot::EndDragDropTarget();
                     }
 
-                    if (print_timeline_tooltip) {
+                    // A period being marked or dragged has a tooltip of its own
+                    if (print_timeline_tooltip && !timeline_periods_dragging()) {
                         ImPlotPoint plot_pos = ImPlot::GetPlotMousePos();
                         ImVec2 screen_pos = ImPlot::PlotToPixels(plot_pos);
                         ImVec2 p0 = {screen_pos.x, ImPlot::GetPlotPos().y};
@@ -4652,13 +4354,8 @@ static void draw_timeline_window(ApplicationState* data) {
 
             ImPlot::EndSubplots();
 
-            time       = CLAMP(time, (double)min_x_value, (double)max_x_value);
-            filter_beg = CLAMP(filter_beg, min_x_value, max_x_value);
-            filter_end = CLAMP(filter_end, min_x_value, max_x_value);
-
+            time = CLAMP(time, (double)min_x_value, (double)max_x_value);
             data->animation.frame = time_to_frame(time, data->timeline.x_values);
-            data->timeline.filter.beg_frame = time_to_frame(filter_beg, data->timeline.x_values);
-            data->timeline.filter.end_frame = time_to_frame(filter_end, data->timeline.x_values);
 
             ImPlot::GetInputMap() = old_map;
         }
@@ -4696,15 +4393,186 @@ static ImPlotPoint histogram_getter_zero(int i, void* payload) {
     return ImPlotPoint(series_histogram_point(*p->view, i, p->k).x, 0.0);
 }
 
+// A polyline drawn dashed, carrying the dashes on across its corners and from one call to the next through phase
+static void dashed_polyline(ImDrawList* dl, const ImVec2* pts, int count, ImU32 col, float* phase) {
+    const float dash = 6.0f, gap = 4.0f;
+    for (int i = 1; i < count; ++i) {
+        const ImVec2 prev = pts[i - 1];
+        const ImVec2 d = pts[i] - prev;
+        const float len = sqrtf(d.x * d.x + d.y * d.y);
+        if (len <= 0.0f) continue;
+        const ImVec2 u = d / len;
+        float t = 0.0f;
+        while (t < len) {
+            const float in_cycle = fmodf(*phase + t, dash + gap);
+            const float step = in_cycle < dash ? MIN(dash - in_cycle, len - t) : MIN(dash + gap - in_cycle, len - t);
+            if (in_cycle < dash) dl->AddLine(prev + u * t, prev + u * (t + step), col, 1.5f);
+            t += MAX(step, 0.01f);
+        }
+        *phase = fmodf(*phase + len, dash + gap);
+    }
+}
+
+// A histogram member over the plot as a preview, not a curve of the plot's own: drawn as the series is (a line, an area
+// or bars), with a dashed outline and, for an area or bars, a faint fill
+static void plot_histogram_preview(const SeriesHistogramView& v, int k, ImVec4 color, const PlotSeries& s) {
+    if (v.num_bins <= 0) return;
+    ImDrawList* dl = ImPlot::GetPlotDrawList();
+    ImPlot::PushPlotClipRect();
+    const ImU32 line_col = ImGui::ColorConvertFloat4ToU32(color);
+    const ImU32 fill_col = ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, color.w * 0.25f));
+    // Fills which meet edge to edge, without the seams anti-aliasing would leave between them
+    const ImDrawListFlags flags = dl->Flags;
+    float phase = 0.0f;
+
+    if (s.plot_type == PlotType_Bars) {
+        const double half = series_histogram_bin_width(v) * s.bar_width * 0.5;
+        const bool joined = s.bar_width >= 0.999f;
+        md_temp_scope_t temp = md_temp_begin();
+        // Joined, the outline is one step along the tops of the bars; apart, each bar has its own
+        ImVec2* outline = md_temp_alloc_array(temp, ImVec2, (size_t)v.num_bins * 2 + 2);
+        int n = 0;
+        dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+        for (int i = 0; i < v.num_bins; ++i) {
+            const ImPlotPoint p = series_histogram_point(v, i, k);
+            const ImVec2 a = ImPlot::PlotToPixels(p.x - half, 0.0);
+            const ImVec2 b = ImPlot::PlotToPixels(p.x + half, p.y);
+            dl->AddRectFilled(ImVec2(MIN(a.x, b.x), MIN(a.y, b.y)), ImVec2(MAX(a.x, b.x), MAX(a.y, b.y)), fill_col);
+            if (joined) {
+                if (n == 0) outline[n++] = a;
+                outline[n++] = ImVec2(a.x, b.y);
+                outline[n++] = b;
+            } else {
+                const ImVec2 bar[4] = { a, ImVec2(a.x, b.y), b, ImVec2(b.x, a.y) };
+                dashed_polyline(dl, bar, 4, line_col, &phase);
+            }
+        }
+        dl->Flags = flags;
+        if (joined && n > 0) {
+            outline[n] = ImVec2(outline[n - 1].x, outline[0].y);
+            dashed_polyline(dl, outline, n + 1, line_col, &phase);
+        }
+        md_temp_end(temp);
+    } else {
+        md_temp_scope_t temp = md_temp_begin();
+        ImVec2* pts = md_temp_alloc_array(temp, ImVec2, (size_t)v.num_bins);
+        for (int i = 0; i < v.num_bins; ++i) {
+            pts[i] = ImPlot::PlotToPixels(series_histogram_point(v, i, k));
+        }
+        if (s.plot_type == PlotType_Area) {
+            // Down to zero, one quad per stretch between two bins
+            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            for (int i = 1; i < v.num_bins; ++i) {
+                const ImVec2 base0 = ImPlot::PlotToPixels(series_histogram_point(v, i - 1, k).x, 0.0);
+                const ImVec2 base1 = ImPlot::PlotToPixels(series_histogram_point(v, i, k).x, 0.0);
+                dl->AddQuadFilled(pts[i - 1], pts[i], base1, base0, fill_col);
+            }
+            dl->Flags = flags;
+        }
+        dashed_polyline(dl, pts, v.num_bins, line_col, &phase);
+        md_temp_end(temp);
+    }
+    ImPlot::PopPlotClipRect();
+}
+
+// Over periods: every period's value at the bin, beside its frames, the hovered one first among equals
+static void plot_periods_tooltip(const SeriesHistogramView& v, const PlotSeries& s, int bin, int hovered) {
+    ImGui::BeginTooltip();
+    const ImPlotPoint at = series_histogram_point(v, bin, 0);
+    ImGui::Text("%s at %.4g %s", v.label, at.x, v.x_unit_str);
+    if (ImGui::BeginTable("##periods", 3, ImGuiTableFlags_SizingFixedFit)) {
+        for (int k = 0; k < v.num_periods; ++k) {
+            const SeriesPeriodInfo& p = v.periods[k];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const ImVec4 color = p.own_color ? p.color : s.color;
+            ImGui::ColorButton("##c", ImVec4(color.x, color.y, color.z, 1.0f), ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                ImVec2(ImGui::GetTextLineHeight(), ImGui::GetTextLineHeight()));
+            ImGui::SameLine();
+            if (k == hovered) ImGui::TextUnformatted(p.name);
+            else              ImGui::TextDisabled("%s", p.name);
+            ImGui::TableNextColumn();
+            if (p.valid) ImGui::Text("%.4g", series_histogram_point(v, bin, k).y);
+            else         ImGui::TextDisabled("-");
+            ImGui::TableNextColumn();
+            if (p.num_frames < p.num_wanted) ImGui::TextDisabled("%u of %u frames", p.num_frames, p.num_wanted);
+            else                             ImGui::TextDisabled("%u frames", p.num_frames);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndTooltip();
+}
+
+// The part of a script series' legend popup which says over which periods it is shown, one curve each
+static void plot_periods_popup(ApplicationState* data, PlotSeries& s, bool* refit) {
+    ImGui::SeparatorText("Periods");
+    const TimelinePeriods& rs = data->timeline.periods;
+    auto item = [&](uint32_t id, const char* name, const ImVec4* color, const char* frames) {
+        bool on = plot_series_has_period(s, id);
+        const bool last = on && s.num_periods == 1;
+        const bool full = !on && s.num_periods >= PLOT_MAX_PERIODS;
+        ImGui::PushID((int)id);
+        if (last || full) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("##on", &on)) {
+            if (on) plot_series_add_period(s, id);
+            else    plot_series_remove_period(s, id);
+            *refit = true;
+        }
+        if (last || full) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (color) {
+            ImGui::ColorButton("##c", *color, ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                ImVec2(ImGui::GetTextLineHeight(), ImGui::GetTextLineHeight()));
+            ImGui::SameLine();
+        }
+        ImGui::TextUnformatted(name);
+        if (frames[0]) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", frames);
+        }
+        const uint32_t period = id != 0 ? id : s.key.period;
+        if (period != 0 && ImGui::IsItemHovered()) timeline_periods_highlight(period);
+        ImGui::PopID();
+    };
+
+    // The key's own frames first, in the series' colour: every frame, or its period's
+    const int num_frames = (int)run_num_frames(data);
+    auto frames_of = [&](char* buf, size_t cap, const TimelinePeriod& r) {
+        int beg, end;
+        if (timeline_period_frames(&beg, &end, r, data->animation.frame, num_frames)) snprintf(buf, cap, "%d to %d", beg, end);
+    };
+    {
+        char frames[48] = "";
+        const TimelinePeriod* own = timeline_periods_find(&rs, s.key.period);
+        if (own) frames_of(frames, sizeof(frames), *own);
+        item(0, s.key.period != 0 ? series_period_name(data, s.key.period) : "All frames", nullptr, frames);
+    }
+    for (int i = 0; i < rs.count; ++i) {
+        const TimelinePeriod& r = rs.items[i];
+        if (r.id == s.key.period) continue;
+        char frames[48] = "";
+        frames_of(frames, sizeof(frames), r);
+        const ImVec4 color(r.color.x, r.color.y, r.color.z, 1.0f);
+        item(r.id, r.name, &color, frames);
+    }
+    if (rs.count == 0) {
+        ImGui::TextDisabled("Mark periods in the timeline to compare it over them");
+    } else {
+        ImGui::TextDisabled("Or pull a period out of the timeline onto the plot");
+    }
+}
+
 static void draw_distribution_properties_menu(ApplicationState* data) {
     PlotSubplot& first = data->distributions.subplots[0];
     const uint32_t kinds = MD_SCRIPT_PROPERTY_FLAG_TEMPORAL | MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION;
 
     // A temporal property is binned over its frames, a distribution is shown as evaluated. Over the
-    // timeline filter's frames too, while there is a filter.
-    auto script_section = [&](SeriesSource source) -> int {
+    // frames of a timeline period too: "r (Production)".
+    auto script_section = [&](uint32_t period) -> int {
         int num_listed = 0;
-        series_for_each_script_property(data, source, kinds, [&](const SeriesKey& key) {
+        series_for_each_script_property(data, SeriesSource_Script, kinds, [&](const SeriesKey& over_all) {
+            SeriesKey key = over_all;
+            key.period = period;
             plot_series_list_item(data, DISTRIBUTION_SERIES_DND, first, key);
             num_listed += 1;
             const bool temporal = md_script_ir_property_flags(data->script.eval_ir, series_script_ident(key)) & MD_SCRIPT_PROPERTY_FLAG_TEMPORAL;
@@ -4720,12 +4588,22 @@ static void draw_distribution_properties_menu(ApplicationState* data) {
     };
 
     ImGui::SeparatorText("Script");
-    if (script_section(SeriesSource_Script) == 0) {
+    if (script_section(0) == 0) {
         ImGui::TextDisabled("No temporal or distribution properties, define and evaluate them in the script editor");
-    }
-    if (data->timeline.filter.enabled) {
-        ImGui::SeparatorText("Script, over the timeline filter");
-        script_section(SeriesSource_ScriptFiltered);
+    } else if (data->timeline.periods.count > 0) {
+        ImGui::SeparatorText("Script, over a period");
+        const TimelinePeriods& rs = data->timeline.periods;
+        for (int i = 0; i < rs.count; ++i) {
+            const TimelinePeriod& r = rs.items[i];
+            char label[TIMELINE_PERIOD_NAME_CAP + 16];
+            snprintf(label, sizeof(label), "%s###period%u", r.name, r.id);
+            const bool open = ImGui::BeginMenu(label);
+            if (ImGui::IsItemHovered()) timeline_periods_highlight(r.id);
+            if (open) {
+                script_section(r.id);
+                ImGui::EndMenu();
+            }
+        }
     }
 
     ImGui::SeparatorText("Loaded along the run");
@@ -4771,8 +4649,28 @@ static void draw_distribution_window(ApplicationState* data) {
                 SeriesHistogramView views[PLOT_MAX_SERIES_PER_SUBPLOT];
                 bool resolved[PLOT_MAX_SERIES_PER_SUBPLOT] = {};
                 for (int j = 0; j < sp.count; ++j) {
-                    resolved[j] = series_resolve_histogram(&views[j], data, sp.series[j].key, sp.series[j].num_bins);
+                    PlotSeries& s = sp.series[j];
+                    // A period removed takes its curve along
+                    for (int p = s.num_periods - 1; p >= 0; --p) {
+                        if (s.periods[p] != 0 && !timeline_periods_find(&data->timeline.periods, s.periods[p])) {
+                            if (s.num_periods > 1) plot_series_remove_period(s, s.periods[p]);
+                            else s.periods[0] = 0;
+                        }
+                    }
+                    resolved[j] = series_resolve_histogram_periods(&views[j], data, s.key, s.num_bins, s.periods, s.num_periods);
                 }
+
+                // More to show than before (a workspace loaded before anything was evaluated, an evaluation which
+                // came through): fitted to it
+                static int num_resolved[PLOT_MAX_SUBPLOTS] = {};
+                int resolved_now = 0;
+                for (int j = 0; j < sp.count; ++j) resolved_now += resolved[j] ? 1 : 0;
+                if (resolved_now > num_resolved[i]) fit_subplot[i] = true;
+                num_resolved[i] = resolved_now;
+
+                // A period under the pointer in the timeline: each series over it too, as a preview
+                const uint32_t preview_id = timeline_periods_hovered();
+                const TimelinePeriod* preview_range = timeline_periods_find(&data->timeline.periods, preview_id);
 
                 int remove_idx = -1;
 
@@ -4803,6 +4701,7 @@ static void draw_distribution_window(ApplicationState* data) {
 
                     int  hovered_idx       = -1;
                     int  hovered_pop_idx   = -1;
+                    int  hovered_bin       = -1;
                     char hovered_label[128] = "";
 
                     if (ImPlot::IsPlotHovered()) {
@@ -4836,7 +4735,7 @@ static void draw_distribution_window(ApplicationState* data) {
 
                             const int dim = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             for (int k = 0; k < dim; ++k) {
-                                if (dim > 1 && !s.population_mask.test(k)) continue;
+                                if (v.num_periods > 0 ? !v.periods[k].valid : (dim > 1 && !s.population_mask.test(k))) continue;
                                 HistogramGetterPayload payload = { &v, k };
                                 // Later entries lie on top: prefer them a little when two are equally near
                                 const double layer = j + k / (double)(PLOT_MAX_POPULATION - 1);
@@ -4887,8 +4786,11 @@ static void draw_distribution_window(ApplicationState* data) {
                                     min_dist = d;
                                     const ImPlotPoint pt = histogram_getter(xn, &payload);
                                     hovered_idx = j;
-                                    hovered_pop_idx = dim > 1 ? k : -1;
-                                    if (dim > 1) {
+                                    hovered_pop_idx = (dim > 1 || v.num_periods > 0) ? k : -1;
+                                    hovered_bin = xn;
+                                    if (v.num_periods > 0) {
+                                        snprintf(hovered_label, sizeof(hovered_label), "%s, %s: %.4g at %.4g %s", v.label, v.periods[k].name, pt.y, pt.x, v.x_unit_str);
+                                    } else if (dim > 1) {
                                         snprintf(hovered_label, sizeof(hovered_label), "%s[%i]: %.4g at %.4g %s", v.label, k + 1, pt.y, pt.x, v.x_unit_str);
                                     } else {
                                         snprintf(hovered_label, sizeof(hovered_label), "%s: %.4g at %.4g %s", v.label, pt.y, pt.x, v.x_unit_str);
@@ -4899,11 +4801,18 @@ static void draw_distribution_window(ApplicationState* data) {
 
                         if (hovered_idx != -1) {
                             const SeriesHistogramView& v = views[hovered_idx];
+                            // A period is not a member of a population: the property as a whole is what is shown
+                            const int member = v.num_periods > 0 ? -1 : hovered_pop_idx;
                             if (v.script_ident[0] != '\0') {
-                                script_set_hovered_property(data, str_from_cstr(v.script_ident), hovered_pop_idx);
-                                script_visualize_ref(data, v.vis_ref, hovered_pop_idx, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+                                script_set_hovered_property(data, str_from_cstr(v.script_ident), member);
+                                script_visualize_ref(data, v.vis_ref, member, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
                             }
-                            if (hovered_label[0] != '\0') {
+                            if (v.num_periods > 0 && hovered_bin >= 0) {
+                                if (hovered_pop_idx >= 0 && v.periods[hovered_pop_idx].id != 0) {
+                                    timeline_periods_highlight(v.periods[hovered_pop_idx].id);
+                                }
+                                plot_periods_tooltip(v, sp.series[hovered_idx], hovered_bin, hovered_pop_idx);
+                            } else if (hovered_label[0] != '\0') {
                                 ImGui::SetTooltip("%s", hovered_label);
                             }
                         }
@@ -4912,7 +4821,8 @@ static void draw_distribution_window(ApplicationState* data) {
                             if (!resolved[j]) continue;
                             if (strcmp(data->hovered_property_label, views[j].script_ident) == 0) {
                                 hovered_idx = j;
-                                hovered_pop_idx = data->hovered_property_pop_idx;
+                                // A member of a population elsewhere is not a period here
+                                hovered_pop_idx = views[j].num_periods > 0 ? -1 : data->hovered_property_pop_idx;
                                 break;
                             }
                         }
@@ -4929,6 +4839,10 @@ static void draw_distribution_window(ApplicationState* data) {
                             }
                             if (!resolved[j]) {
                                 ImGui::SetTooltip("Nothing to show for '%s' right now", s.key.path);
+                            } else if (v.state.status != SeriesStatus_Current) {
+                                char text[160];
+                                series_state_describe(text, sizeof(text), v.state);
+                                ImGui::SetTooltip("%s", text);
                             }
                             hovered_idx = j;
                             hovered_pop_idx = -1;
@@ -4966,10 +4880,13 @@ static void draw_distribution_window(ApplicationState* data) {
                             }
 
                             int popup_hovered_pop = -1;
-                            plot_series_style_popup(data, s, resolved[j] ? v.dim : 1, v.script_ident, v.vis_ref, &popup_hovered_pop);
+                            plot_series_style_popup(data, s, resolved[j] && v.num_periods == 0 ? v.dim : 1, v.script_ident, v.vis_ref, &popup_hovered_pop);
                             if (popup_hovered_pop != -1) {
                                 hovered_idx = j;
                                 hovered_pop_idx = popup_hovered_pop;
+                            }
+                            if (v.script_ident[0] != '\0') {
+                                plot_periods_popup(data, s, &fit_subplot[i]);
                             }
                             ImPlot::EndLegendPopup();
                         }
@@ -4979,7 +4896,12 @@ static void draw_distribution_window(ApplicationState* data) {
                         } else {
                             const int population_size = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             auto plot = [&](int k) {
-                                ImVec4 color = plot_series_member_color(s, k, population_size);
+                                // A period in its own colour, so that it reads with the timeline
+                                ImVec4 color = v.num_periods > 0 && v.periods[k].own_color ? v.periods[k].color : plot_series_member_color(s, k, population_size);
+                                if (v.state.status >= SeriesStatus_Outdated) {
+                                    // Not what the script says any more: shown, faintly, until it is evaluated
+                                    color.w *= 0.35f;
+                                }
                                 float  fill_alpha = 1.0f;
                                 float  weight = 1.0f;
                                 if (hovered_idx == j) {
@@ -5010,7 +4932,7 @@ static void draw_distribution_window(ApplicationState* data) {
                             };
 
                             for (int k = 0; k < population_size; ++k) {
-                                if (population_size > 1 && !s.population_mask.test(k)) continue;
+                                if (v.num_periods > 0 ? !v.periods[k].valid : (population_size > 1 && !s.population_mask.test(k))) continue;
                                 if (hovered_idx == j && hovered_pop_idx == k) continue;
                                 plot(k);
                             }
@@ -5019,10 +4941,34 @@ static void draw_distribution_window(ApplicationState* data) {
                             }
                         }
 
+                        // The period under the pointer in the timeline, drawn as the series is but dashed, unless the series is
+                        // shown over it already
+                        if (preview_range && v.script_ident[0] != '\0' && !plot_series_has_period(s, preview_id)) {
+                            SeriesHistogramView pv;
+                            if (series_resolve_histogram_periods(&pv, data, s.key, s.num_bins, &preview_id, 1) && pv.num_bins > 0 && pv.periods[0].valid) {
+                                const vec4_t rc = preview_range->color;
+                                plot_histogram_preview(pv, 0, ImVec4(rc.x, rc.y, rc.z, 1.0f), s);
+                            }
+                        }
+
                         if (ImPlot::BeginDragDropSourceItem(v.plot_id)) {
                             series_set_drag_payload(DISTRIBUTION_SERIES_DND, s.key, i, v.label, s.color);
                             ImPlot::EndDragDropSource();
                         }
+                    }
+
+                    // A period pulled out of the timeline, dropped on a legend entry: that series over it too
+                    if (ImPlot::BeginDragDropTargetLegend()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(TIMELINE_PERIOD_DND)) {
+                            ASSERT(payload->DataSize == sizeof(uint32_t));
+                            const uint32_t id = *(const uint32_t*)payload->Data;
+                            for (int j = 0; j < sp.count; ++j) {
+                                if (ImPlot::IsLegendEntryHovered(views[j].plot_id) && views[j].script_ident[0] != '\0') {
+                                    plot_series_add_period(sp.series[j], id);
+                                }
+                            }
+                        }
+                        ImPlot::EndDragDropTarget();
                     }
 
                     if (ImPlot::BeginDragDropTargetPlot()) {
@@ -5035,6 +4981,15 @@ static void draw_distribution_window(ApplicationState* data) {
                                 plot_add_series(data, sp, dnd->key);
                             }
                             fit_subplot[i] = true;
+                        } else if (const ImGuiPayload* range_payload = ImGui::AcceptDragDropPayload(TIMELINE_PERIOD_DND)) {
+                            // A period pulled out of the timeline: every script series here over it too
+                            ASSERT(range_payload->DataSize == sizeof(uint32_t));
+                            const uint32_t id = *(const uint32_t*)range_payload->Data;
+                            for (int j = 0; j < sp.count; ++j) {
+                                if (views[j].script_ident[0] != '\0') {
+                                    plot_series_add_period(sp.series[j], id);
+                                }
+                            }
                         } else if (const ImGuiPayload* tl_payload = ImGui::AcceptDragDropPayload(TIMELINE_SERIES_DND)) {
                             // Something plotted over time, dropped here: the distribution of its
                             // values, whichever view of them (a mean, a spread) was dragged
@@ -5078,6 +5033,86 @@ static void draw_distribution_window(ApplicationState* data) {
                 }
             }
         }
+    }
+    ImGui::End();
+}
+
+// What the profiler's times were measured at, a line each, for the head of an export (profiler::write_csv)
+static void profiler_export_info(md_str_writer_t* sw, const ApplicationState* state) {
+    md_str_writer_fmt(sw, "framebuffer: %u x %u\n", (unsigned)state->app.framebuffer.width, (unsigned)state->app.framebuffer.height);
+    md_str_writer_fmt(sw, "viewport: %u x %u shown, render scale %.3f, %u x %u rendered\n",
+                      (unsigned)state->gbuffer.out_width, (unsigned)state->gbuffer.out_height, state->settings.render_scale,
+                      (unsigned)state->gbuffer.width, (unsigned)state->gbuffer.height);
+    if (iso_mesh_target.width) {
+        md_str_writer_fmt(sw, "isosurface meshes: %u x %u, %llu triangles, ", iso_mesh_target.width,
+                          iso_mesh_target.height, (unsigned long long)iso_mesh_target.triangles);
+        if (state->profiler_keep_isomeshes) {
+            md_str_writer_fmt(sw, "drawn every frame, %u frames since the view or the scene changed\n", iso_mesh_target.frame);
+        } else {
+            md_str_writer_fmt(sw, "%u of %u frames in the mean\n", iso_mesh_target.frame, isomesh::MAX_FRAMES);
+        }
+    }
+}
+
+// The profiler's times (profiler::write_csv) as a CSV file
+static void profiler_export_csv(const ApplicationState* state, str_t path) {
+    md_file_t file = {};
+    if (!md_file_open(&file, path, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+        VIAMD_LOG_ERROR("Failed to open '" STR_FMT "' to write the profiler's times", STR_ARG(path));
+        return;
+    }
+    md_temp_scope_t temp = md_temp_begin();
+    defer { md_temp_end(temp); };
+    md_str_writer_t info = md_str_writer_create(md_temp_allocator(temp));
+    profiler_export_info(&info, state);
+
+    md_file_writer_t fw = md_file_writer_create(file, NULL, 0);
+    profiler::write_csv(&fw.w, md_str_writer_to_cstr(&info));
+    const bool ok = md_file_writer_close(&fw);
+    md_file_close(&file);
+    if (ok) {
+        VIAMD_LOG_INFO("Exported the profiler's times to '" STR_FMT "'", STR_ARG(path));
+    } else {
+        VIAMD_LOG_ERROR("Failed to write the profiler's times to '" STR_FMT "'", STR_ARG(path));
+    }
+}
+
+// The frame's sections and their times (gfx/profiler.h)
+static void draw_profiler_window(ApplicationState* data) {
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 36.0f, ImGui::GetFontSize() * 32.0f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Profiler", &data->show_profiler_window)) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("Per frame, averaged over 30 frames. GPU: the work a section issued; CPU: from its start to its "
+                            "end. The wait for vsync is outside the frame.");
+        ImGui::PopTextWrapPos();
+
+        // The table as it is shown, with what it was measured at
+        ImGui::BeginDisabled(profiler::frame_cpu_ms() <= 0.0f);
+        if (ImGui::Button("Export...")) {
+            char path_buf[2048] = {};
+            if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, STR_LIT("csv"))) {
+                profiler_export_csv(data, str_from_cstr(path_buf));
+            }
+        }
+        ImGui::SetItemTooltip("The times as CSV, with the renderer and the sizes they were measured at");
+        ImGui::SameLine();
+        if (ImGui::Button("Copy")) {
+            md_temp_scope_t temp = md_temp_begin();
+            md_str_writer_t info = md_str_writer_create(md_temp_allocator(temp));
+            profiler_export_info(&info, data);
+            md_str_writer_t csv = md_str_writer_create(md_temp_allocator(temp));
+            profiler::write_csv(&csv.w, md_str_writer_to_cstr(&info));
+            ImGui::SetClipboardText(md_str_writer_to_cstr(&csv));
+            md_temp_end(temp);
+        }
+        ImGui::SetItemTooltip("The same, to the clipboard");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::Checkbox("Isosurface meshes every frame", &data->profiler_keep_isomeshes);
+        ImGui::SetItemTooltip("Their passes run every frame, also once the image has settled: times to compare with the "
+                              "view kept still");
+
+        profiler::draw_table();
     }
     ImGui::End();
 }
@@ -5239,9 +5274,60 @@ static void draw_script_editor_window(ApplicationState* state) {
             ImGui::EndMenuBar();
         }
 
+        // What Evaluate would do. It says so, and does nothing when there is nothing to do.
+        const ScriptPlan plan = script_plan(*state, frame_alloc);
+        char btn_text[96];
+        bool can_eval = false;
+        if (!plan.valid) {
+            snprintf(btn_text, sizeof(btn_text), "Evaluate###evaluate");
+        } else if (plan.running && plan.same) {
+            snprintf(btn_text, sizeof(btn_text), "Evaluating, %u frames left###evaluate", plan.num_pending);
+        } else if (plan.num_pending > 0) {
+            snprintf(btn_text, sizeof(btn_text), "Evaluate %u frames###evaluate", plan.num_pending);
+            can_eval = true;
+        } else if (plan.changes) {
+            snprintf(btn_text, sizeof(btn_text), "Evaluate###evaluate");
+            can_eval = true;
+        } else {
+            snprintf(btn_text, sizeof(btn_text), "Up to date###evaluate");
+        }
+
+        // How each property stands, beside the line it is named on
+        md_array(ScriptGutterMark) marks = nullptr;
+        if (plan.valid) {
+            const uint32_t* line_offsets = state->editor_markers.line_offsets;
+            const size_t num_lines = md_array_size(line_offsets);
+            for (size_t i = 0; i < plan.num_props; ++i) {
+                const md_script_range_marker_t range = md_script_ir_property_range(state->script.ir, plan.names[i]);
+                if (range.end <= range.beg || num_lines == 0) continue;
+                // The last line which begins at or before it
+                size_t lo = 0, hi = num_lines;
+                while (hi - lo > 1) {
+                    const size_t mid = (lo + hi) / 2;
+                    if (line_offsets[mid] <= (uint32_t)range.beg) lo = mid; else hi = mid;
+                }
+                const md_script_eval_plan_t& p = plan.props[i];
+                ScriptGutterMark mark = { (int)lo, p.status, 0.0f, "", "", 0 };
+                str_copy_to_char_buf(mark.ident, sizeof(mark.ident), plan.names[i]);
+                mark.kinds = (uint32_t)md_script_ir_property_flags(state->script.ir, plan.names[i]);
+                const uint32_t needed = p.num_frames + p.num_pending;
+                mark.done = p.num_pending == 0 ? 1.0f : needed ? (float)p.num_frames / (float)needed : 0.0f;
+                script_plan_describe(mark.text, sizeof(mark.text), plan, i);
+                md_array_push(marks, mark, frame_alloc);
+            }
+        }
+        const size_t num_marks = md_array_size(marks);
+        state->editor.SetLineDecorator(1, [state, marks, num_marks](TextEditor::Decorator& d) {
+            for (size_t i = 0; i < num_marks; ++i) {
+                if ((size_t)marks[i].line == d.line) {
+                    draw_script_gutter_mark(state, d, marks[i]);
+                    break;
+                }
+            }
+        });
+
         const ImVec2 content_size = ImGui::GetContentRegionAvail();
-        const char* btn_text = "Evaluate";
-        const ImVec2 label_size = ImGui::CalcTextSize(btn_text, NULL, true) * ImVec2(1.4, 1.0);
+        const ImVec2 label_size = ImGui::CalcTextSize(btn_text, NULL, true) * ImVec2(1.2, 1.0);
         const ImVec2 btn_size = ImGui::CalcItemSize(ImVec2(0,0), label_size.x + ImGui::GetStyle().FramePadding.x * 2.0f, label_size.y + ImGui::GetStyle().FramePadding.y * 2.0f);
         const ImVec2 text_size(content_size - ImVec2(0, btn_size.y + ImGui::GetStyle().ItemSpacing.y));
 
@@ -5284,15 +5370,40 @@ static void draw_script_editor_window(ApplicationState* state) {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + content_size.x - btn_size.x);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetStyle().ItemSpacing.y);
 
-        const bool valid = md_script_ir_valid(state->script.ir) && run_num_frames(state) > 0;  
-        if (!valid) ImGui::PushDisabled();
+        if (!can_eval) ImGui::PushDisabled();
         if (ImGui::Button(btn_text, btn_size)) {
             eval = true;
         }
-        if (!valid) ImGui::PopDisabled();
+        if (!can_eval) ImGui::PopDisabled();
+        if (plan.valid && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_DelayShort)) {
+            ImGui::BeginTooltip();
+            char line[160];
+            for (size_t i = 0; i < plan.num_props; ++i) {
+                script_plan_describe(line, sizeof(line), plan, i);
+                ImGui::TextUnformatted(line);
+            }
+            // What is shown which the script no longer has
+            if (state->script.eval_ir && !plan.same) {
+                const str_t* evaluated = md_script_ir_property_names(state->script.eval_ir);
+                for (size_t j = 0; j < md_script_ir_property_count(state->script.eval_ir); ++j) {
+                    bool kept = false;
+                    for (size_t i = 0; i < plan.num_props && !kept; ++i) {
+                        kept = str_eq(plan.names[i], evaluated[j]) || (plan.props[i].status == MD_SCRIPT_EVAL_STATUS_HELD && str_eq(plan.props[i].from, evaluated[j]));
+                    }
+                    if (!kept) ImGui::TextDisabled(STR_FMT ": no longer in the script", STR_ARG(evaluated[j]));
+                }
+            }
+            ImGui::EndTooltip();
+        }
 
-        if (eval && valid) {
-            state->script.eval_init = true;
+        if (eval && can_eval) {
+            // The script as it was evaluated: what remains of it. Otherwise a new evaluation, which takes over what
+            // it can from this one.
+            if (plan.same) {
+                state->script.evaluate = true;
+            } else {
+                state->script.eval_init = true;
+            }
         }
 
         if (editor_hovered) {
@@ -5438,11 +5549,12 @@ static bool export_csv(const float* column_data[], const char* column_labels[], 
     return true;
 }
 
-static bool export_cube(const ApplicationState& data, const md_attribute_t* attr, md_script_vis_ref_t vis_ref, str_t filename) {
+static bool export_cube(const ApplicationState& data, const SeriesVolumeView& volume, str_t filename) {
     // @NOTE: First we need to extract some meta data for the cube format, we need the atom indices/bits for any SDF
     // And the origin + extent of the volume in spatial coordinates (Ångström)
 
-    const float* volume_values = (const float*)md_attribute_view(attr, MD_ATTRIBUTE_TYPE_F32, 1, 3);
+    const float* volume_values = volume.data;
+    const md_script_vis_ref_t vis_ref = volume.vis_ref;
     if (!volume_values) {
         VIAMD_LOG_ERROR("Export Cube: The property to be exported did not exist");
         return false;
@@ -5493,7 +5605,7 @@ static bool export_cube(const ApplicationState& data, const md_attribute_t* attr
             mat4_t M = vis.sdf.matrices[0];
             const md_bitset_t* bf = &vis.sdf.structures[0];
             const int num_atoms = (int)md_bitset_count(*bf);
-            const int vol_dim[3] = {(int)attr->format.shape[0], (int)attr->format.shape[1], (int)attr->format.shape[2]};
+            const int vol_dim[3] = {(int)volume.dim[0], (int)volume.dim[1], (int)volume.dim[2]};
             const float* values = volume_values;
             const double extent = vis.sdf.extent * 2.0 * angstrom_to_bohr;
             const double voxel_ext[3] = {
@@ -5597,8 +5709,10 @@ static void draw_property_export_window(ApplicationState* data) {
                 kind == ExportKind_Temporal     ? (uint32_t)MD_SCRIPT_PROPERTY_FLAG_TEMPORAL :
                 kind == ExportKind_Distribution ? (uint32_t)(MD_SCRIPT_PROPERTY_FLAG_TEMPORAL | MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION) :
                                                   (uint32_t)MD_SCRIPT_PROPERTY_FLAG_VOLUME;
-            auto push_script = [&](SeriesSource source) {
-                series_for_each_script_property(data, source, script_kinds, [&](const SeriesKey& key) {
+            auto push_script = [&](uint32_t period) {
+                series_for_each_script_property(data, SeriesSource_Script, script_kinds, [&](const SeriesKey& over_all) {
+                    SeriesKey key = over_all;
+                    key.period = period;
                     md_array_push(candidates, key, alloc);
                     const bool temporal = md_script_ir_property_flags(data->script.eval_ir, series_script_ident(key)) & MD_SCRIPT_PROPERTY_FLAG_TEMPORAL;
                     if (kind == ExportKind_Distribution && temporal && script_property_population(data, key) > 1) {
@@ -5608,9 +5722,12 @@ static void draw_property_export_window(ApplicationState* data) {
                     }
                 });
             };
-            push_script(SeriesSource_Script);
-            if (data->timeline.filter.enabled && kind != ExportKind_Temporal) {
-                push_script(SeriesSource_ScriptFiltered);
+            // Over each period too, "r (Production)": what is over time is the same over a period
+            push_script(0);
+            if (kind != ExportKind_Temporal) {
+                for (int i = 0; i < data->timeline.periods.count; ++i) {
+                    push_script(data->timeline.periods.items[i].id);
+                }
             }
             if (kind != ExportKind_Volume) {
                 str_t groups[64];
@@ -5706,7 +5823,7 @@ static void draw_property_export_window(ApplicationState* data) {
                 SeriesVolumeView view;
                 if (!series_resolve_volume(&view, data, selected)) {
                     VIAMD_LOG_ERROR("'%s' has no volume to export", label);
-                } else if (str_eq(file_extension, STR_LIT("cube")) && export_cube(*data, view.attr, view.vis_ref, path)) {
+                } else if (str_eq(file_extension, STR_LIT("cube")) && export_cube(*data, view, path)) {
                     VIAMD_LOG_SUCCESS("Successfully exported property '%s' to '" STR_FMT "'", label, STR_ARG(path));
                 }
             } else {
@@ -5834,7 +5951,6 @@ void draw_structure_export_window(ApplicationState* data) {
         static const char* frame_mask_options[] = {
             "All Frames",
             "Current Frame",
-            "Active Frame Range"
         };
 
         static const char* file_formats[] = {
@@ -5849,28 +5965,11 @@ void draw_structure_export_window(ApplicationState* data) {
 
         if (struct_exp.selected_atom_filter == 2) { // Query
             auto& query = struct_exp.query;
-            bool valid = query.is_valid;
-
-
-            if (!valid) ImGui::PushInvalid();
-            ImGui::InputQuery("Query", query.buf, sizeof(query.buf), query.is_valid, query.error);
-            if (!valid) ImGui::PopInvalid();
-            
-            query.requires_evaluation |= ImGui::IsItemEdited();
+            query.requires_evaluation |= filter_input("Query", &query.filter, filter_context(data));
             bool preview = ImGui::IsItemFocused() || ImGui::IsItemHovered();
-            
+
             if (query.requires_evaluation) {
-                md_bitset_free(&query.mask, persistent_alloc);
-                query.is_valid = md_filter(
-                    &query.mask,
-                    str_from_cstr(query.buf),
-                    &data->mold.sys,
-                    &data->mold.state,
-                    data->script.ir,
-                    &query.is_dynamic,
-                    query.error,
-                    sizeof(query.error), persistent_alloc
-                );
+                filter_evaluate(&query.filter, &query.mask, filter_context(data), persistent_alloc);
                 query.requires_evaluation = false;
             }
 
@@ -5879,14 +5978,35 @@ void draw_structure_export_window(ApplicationState* data) {
                 md_bitmask_clear(&data->selection.highlight_mask);
             }
 
-            if (query.is_valid && preview) {
+            if (query.filter.result.success && preview) {
                 md_bitmask_assign(&data->selection.highlight_mask, query.mask);
             }
         }
 
+        // Every frame, the current one, or those of a timeline period
+        const TimelinePeriod* traj_period = timeline_periods_find(&data->timeline.periods, struct_exp.selected_traj_period);
+        struct_exp.selected_traj_filter = CLAMP(struct_exp.selected_traj_filter, 0, 2);
+        if (struct_exp.selected_traj_filter == 2 && !traj_period) struct_exp.selected_traj_filter = 0;
         if (traj) {
-            struct_exp.selected_traj_filter = CLAMP(struct_exp.selected_traj_filter, 0, (int)ARRAY_SIZE(frame_mask_options) - 1);
-            ImGui::Combo("Frames to Export", &struct_exp.selected_traj_filter, frame_mask_options, (int)ARRAY_SIZE(frame_mask_options));
+            const char* preview = struct_exp.selected_traj_filter == 2 ? traj_period->name : frame_mask_options[struct_exp.selected_traj_filter];
+            if (ImGui::BeginCombo("Frames to Export", preview)) {
+                for (int i = 0; i < (int)ARRAY_SIZE(frame_mask_options); ++i) {
+                    if (ImGui::Selectable(frame_mask_options[i], struct_exp.selected_traj_filter == i)) struct_exp.selected_traj_filter = i;
+                }
+                const TimelinePeriods& rs = data->timeline.periods;
+                if (rs.count > 0) ImGui::SeparatorText("Period");
+                for (int i = 0; i < rs.count; ++i) {
+                    const TimelinePeriod& r = rs.items[i];
+                    char label[TIMELINE_PERIOD_NAME_CAP + 16];
+                    snprintf(label, sizeof(label), "%s###period%u", r.name, r.id);
+                    if (ImGui::Selectable(label, struct_exp.selected_traj_filter == 2 && r.id == struct_exp.selected_traj_period)) {
+                        struct_exp.selected_traj_filter = 2;
+                        struct_exp.selected_traj_period = r.id;
+                    }
+                    if (ImGui::IsItemHovered()) timeline_periods_highlight(r.id);
+                }
+                ImGui::EndCombo();
+            }
         }
 
         struct_exp.selected_file_format = CLAMP(struct_exp.selected_file_format, 0, (int)ARRAY_SIZE(file_formats) - 1);
@@ -5903,26 +6023,19 @@ void draw_structure_export_window(ApplicationState* data) {
                     return md_bitset_iter_extract_indices(out_atom_indices, atom_index_cap, md_bitmask_iter(&data->representation.visibility_mask));
                 } break;
                 case 2: { // Query
-                    if (data->structure_export.query.is_dynamic) {
-                        // IMPORTANT: Clear the previous mask before re-evaluating a dynamic query.
-                        // Otherwise atoms that drop out in subsequent frames remain set from earlier frames.
-                        md_bitset_free(&data->structure_export.query.mask, persistent_alloc);
-                        data->structure_export.query.is_valid = md_filter(
-                            &data->structure_export.query.mask,
-                            str_from_cstr(data->structure_export.query.buf),
-                            &data->mold.sys,
-                            state,
-                            data->script.ir,
-                            &data->structure_export.query.is_dynamic,
-                            data->structure_export.query.error,
-                            sizeof(data->structure_export.query.error), persistent_alloc
-                        );
+                    auto& query = data->structure_export.query;
+                    if (query.filter.result.is_dynamic) {
+                        // What it picks depends on the coordinates: picked again in each frame exported (md_filter
+                        // replaces what the mask held, so nothing of the previous frame stays)
+                        md_filter_context_t ctx = filter_context(data);
+                        ctx.state = state;
+                        filter_evaluate(&query.filter, &query.mask, ctx, persistent_alloc);
                     }
-                    if (!data->structure_export.query.is_valid) {
-                        VIAMD_LOG_ERROR("Cannot export structure, the query expression is invalid: " STR_FMT, STR_ARG(str_from_cstr(data->structure_export.query.error)));
+                    if (!query.filter.result.success) {
+                        VIAMD_LOG_ERROR("Cannot export structure, the query expression is invalid: %s", query.filter.result.error);
                         return 0;
                     } else {
-                        return md_bitset_iter_extract_indices(out_atom_indices, atom_index_cap, md_bitset_iter(data->structure_export.query.mask));
+                        return md_bitset_iter_extract_indices(out_atom_indices, atom_index_cap, md_bitset_iter(query.mask));
                     }
                 } break;
                 case 3: { // All Atoms
@@ -5952,9 +6065,12 @@ void draw_structure_export_window(ApplicationState* data) {
                     int32_t current_frame = (int)(data->animation.frame + 0.5); // Round to nearest
                     md_array_push(frame_indices, current_frame, frame_alloc);
                 } break;
-                case 2: { // Active Frame Range
-                    int beg = data->timeline.filter.beg_frame;
-                    int end = data->timeline.filter.end_frame;
+                case 2: { // A timeline period
+                    int beg = 0, end = -1;
+                    if (!traj_period || !timeline_period_frames(&beg, &end, *traj_period, data->animation.frame, (int)run_num_frames(data))) {
+                        beg = 0;
+                        end = -1;
+                    }
                     for (int i = beg; i <= end; ++i) {
                         md_array_push(frame_indices, (int32_t)i, frame_alloc);
                     }
@@ -6073,6 +6189,11 @@ static void update_md_buffers(ApplicationState* data) {
         data->mold.gpu_buffers_version += 1;
     }
 
+    if (data->mold.dirty_gpu_buffers & (MolBit_DirtyPosition | MolBit_ClearVelocity)) {
+        // Derived from the positions and velocities of the atoms below, when a cartoon shows them
+        data->mold.cartoon_glyphs.positions_valid = false;
+    }
+
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyPosition) {
         vec3_t pbc_ext = { 0 };
         md_unitcell_diag_extract_float(pbc_ext.elem, &state.unitcell);
@@ -6092,6 +6213,9 @@ static void update_md_buffers(ApplicationState* data) {
 
     if (data->mold.dirty_gpu_buffers & MolBit_ResetBackboneHistory) {
         md_gl_mol_reset_backbone_history(data->mold.gl_mol);
+        if (cartoon_glyphs_valid(data->mold.cartoon_glyphs)) {
+            md_gl_mol_reset_backbone_history(data->mold.cartoon_glyphs.gl_mol);
+        }
     }
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyRadius) {
@@ -6136,11 +6260,26 @@ static void update_md_buffers(ApplicationState* data) {
             }
         }
         md_gl_mol_set_atom_flags(data->mold.gl_mol, 0, (uint32_t)sys.atom.count, flags, 0);
+        cartoon_glyphs_update_flags(data->mold.cartoon_glyphs, flags, sys.atom.count);
     }
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyBonds) {
         md_gl_mol_set_bonds(data->mold.gl_mol, 0, (uint32_t)sys.bond.count, sys.bond.pairs, sizeof(md_atom_pair_t));
         md_gl_mol_set_bond_orders(data->mold.gl_mol, &sys);
+    }
+
+    // The glyphs of the cartoon of the lipids and nucleic acids are derived on the GPU from the positions and velocities
+    // of the atoms, set above: only while a cartoon shows them
+    CartoonGlyphs& glyphs = data->mold.cartoon_glyphs;
+    if (cartoon_glyphs_valid(glyphs) && !glyphs.positions_valid) {
+        bool shown = false;
+        for (size_t i = 0; i < md_array_size(data->representation.reps) && !shown; ++i) {
+            const Representation& rep = data->representation.reps[i];
+            shown = representation_shown(*data, rep) && rep.type == RepresentationType::Cartoon && rep.glyph_rep.id && rep.glyphs_shown;
+        }
+        if (shown) {
+            cartoon_glyphs_update_positions(&glyphs, state);
+        }
     }
 
     data->mold.dirty_gpu_buffers = 0;
@@ -6237,54 +6376,32 @@ static void draw_coordinate_system_widget_window(ViewTransform* target, const Vi
     ImGui::End();
 }
 
-// The legends of the representations that colour by a value: the field of an isosurface, or the
-// attribute of its atoms. One per representation at most, since one representation colours by one
-// thing, and only while what it shows exists - a legend of nothing would mislead.
-static void draw_color_legend_windows(const ApplicationState& state) {
-    const size_t num_reps = md_array_size(state.representation.reps);
-    int slot = 0;
-    for (size_t i = 0; i < num_reps; ++i) {
-        const Representation& rep = state.representation.reps[i];
-        if (!rep.enabled) continue;
-
-        if (rep.type == RepresentationType::ElectronicStructure) {
-            const ElectronicStructureRepresentation& es = rep.electronic_structure;
-            if (es.coloring == SurfaceColoring::Field && es.field_map.show_legend && es.field_vol.tex_id) {
-                color_scale_draw_legend(es.field_map, surface_field_unit(es.field_kind), surface_field_kind_str[(int)es.field_kind], rep.name, (int)i, slot++);
-                continue;
-            }
-        }
-
-        if (representation_uses_atom_colors(rep) && rep.color_mapping == ColorMapping::Attribute && rep.atom_attribute.scale.show_legend) {
-            const md_attribute_t* attr = md_attributes_get(&state.mold.sys.attributes, rep.atom_attribute.key);
-            if (!attr) continue;
-            char label[128];
-            atom_attribute_legend_label(label, sizeof(label), attr, rep.atom_attribute.variant_idx);
-            color_scale_draw_legend(rep.atom_attribute.scale, attr->unit, label, rep.name, (int)i, slot++);
-        }
-    }
-}
-
 static void render(ApplicationState* state) {
     bool do_screenshot = !str_empty(state->screenshot.path_to_file);
 
-    uint32_t gbuffer_target_width  = state->app.framebuffer.width;
-    uint32_t gbuffer_target_height = state->app.framebuffer.height;
+    // The image shown, and the G-buffer it is made from: the render scale of it, upscaled in post-processing.
+    // A screenshot is at its own resolution, in full.
+    uint32_t out_width  = state->app.framebuffer.width;
+    uint32_t out_height = state->app.framebuffer.height;
+    uint32_t gbuffer_target_width  = out_width;
+    uint32_t gbuffer_target_height = out_height;
     if (do_screenshot) {
-        gbuffer_target_width  = state->screenshot.res_x;
-        gbuffer_target_height = state->screenshot.res_y;
+        out_width  = gbuffer_target_width  = state->screenshot.res_x;
+        out_height = gbuffer_target_height = state->screenshot.res_y;
+    } else {
+        render_size(state, out_width, out_height, &gbuffer_target_width, &gbuffer_target_height);
     }
 
     // Resize Framebuffer
-    if ((state->gbuffer.width != gbuffer_target_width || state->gbuffer.height != gbuffer_target_height) &&
-        (gbuffer_target_width != 0 && gbuffer_target_height != 0)) {
-        gbuffer_init(&state->gbuffer, gbuffer_target_width, gbuffer_target_height);
-        postprocess_pipeline::initialize(state->gbuffer.width, state->gbuffer.height);
+    if ((state->gbuffer.width != gbuffer_target_width || state->gbuffer.height != gbuffer_target_height ||
+         state->gbuffer.out_width != out_width || state->gbuffer.out_height != out_height) &&
+        (gbuffer_target_width != 0 && gbuffer_target_height != 0 && out_width != 0 && out_height != 0)) {
+        gbuffer_init(&state->gbuffer, gbuffer_target_width, gbuffer_target_height, out_width, out_height);
+        postprocess_pipeline::initialize(state->gbuffer.width, state->gbuffer.height, out_width, out_height);
     }
 
     update_view_param(state);
 
-    volume::timings_new_frame();
 
     gbuffer_clear(&state->gbuffer);
 
@@ -6302,14 +6419,6 @@ static void render(ApplicationState* state) {
     glDrawBuffers((int)ARRAY_SIZE(draw_buffers_opaque), draw_buffers_opaque);
 
     PUSH_GPU_SECTION("G-Buffer fill")
-
-    if (state->simulation_box.enabled && state->mold.state.unitcell.flags != 0) {
-        mat3_t A = { 0 };
-		md_unitcell_A_extract_float(A.elem, &state->mold.state.unitcell);
-        immediate::Scope scope(state->gfx.world, "simulation box");
-        // Through the turn the coordinates carry, if the orientation is kept: the cell itself cannot hold one
-        immediate::box_wireframe(scope, {0,0,0}, {1,1,1}, state->operations.state_rotation * mat4_from_mat3(A), convert_color(state->simulation_box.color));
-    }
 
     {
         immediate::Scope vis_scope(state->gfx.overlay, "visualization");
@@ -6541,7 +6650,14 @@ static void render(ApplicationState* state) {
     postprocess_pipeline::Settings settings = {};
     postprocess_pipeline::Inputs inputs = {};
 
-    settings.background_color = state->visuals.background.color * state->visuals.background.intensity;
+    settings.background_color = state->visuals.background.color;
+
+    settings.shading.mode = state->visuals.shading.mode;
+    settings.shading.ambient = state->visuals.shading.ambient;
+    settings.shading.specular = state->visuals.shading.specular;
+    settings.shading.colors = state->visuals.shading.colors;
+    settings.shading.light = state->visuals.shading.light;
+    settings.shading.environment = state->visuals.shading.environment;
 
     settings.ssao.enabled = state->visuals.ssao.enabled;
     settings.ssao.intensity = state->visuals.ssao.intensity;
@@ -6557,20 +6673,25 @@ static void render(ApplicationState* state) {
     settings.dof.focus_depth = state->visuals.dof.focus_depth;
     settings.dof.aperture = state->visuals.dof.aperture * 0.01f;
 
-    settings.fxaa.enabled = state->visuals.fxaa.enabled;
+    settings.fxaa.enabled = fxaa_active(state);
 
     constexpr float MOTION_BLUR_REFERENCE_DT = 1.0f / 60.0f;
     const float dt_compensation = MOTION_BLUR_REFERENCE_DT / (float)state->app.timing.delta_s;
     const float motion_scale = state->visuals.temporal_aa.motion_blur.motion_scale * dt_compensation;
-    settings.taa.enabled = state->visuals.temporal_aa.enabled;
+    settings.taa.enabled = taa_active(state);
     settings.taa.feedback_min = state->visuals.temporal_aa.feedback_min;
     settings.taa.feedback_max = state->visuals.temporal_aa.feedback_max;
     settings.taa.motion_blur.enabled = state->visuals.temporal_aa.motion_blur.enabled;
     settings.taa.motion_blur.motion_scale = motion_scale;
 
-    settings.sharpen.enabled = state->visuals.temporal_aa.enabled && state->visuals.sharpen.enabled;
+    settings.sharpen.enabled = taa_active(state) && state->visuals.sharpen.enabled;
     settings.sharpen.weight = state->visuals.sharpen.weight;
 
+    // Upscaled from the G-buffer's size to the viewport's (a screenshot is made at its size)
+    if (!do_screenshot) {
+        inputs.width  = (int)state->gbuffer.width;
+        inputs.height = (int)state->gbuffer.height;
+    }
     inputs.depth = state->gbuffer.tex.depth;
     inputs.color = state->gbuffer.tex.color;
     inputs.normal = state->gbuffer.tex.normal;
@@ -6629,6 +6750,142 @@ static void render(ApplicationState* state) {
     }
 }
 
+// The draws of the glyphs of a Cartoon (the lipids and nucleic acids, see cartoon_glyphs.h): their spheres, tubes and
+// capsules, thickened by the w of the scale of the representation
+static void cartoon_glyph_draw_ops(md_array(md_gl_draw_op_t)* ops, const ApplicationState& state, const Representation& rep, md_allocator_i* alloc) {
+    if (!cartoon_glyphs_valid(state.mold.cartoon_glyphs) || !rep.glyph_rep.id || !rep.glyphs_shown || !state.mold.cartoon_glyphs.positions_valid) return;
+    const float scale = rep.scale.w > 0.0f ? rep.scale.w : 1.0f;
+
+    // The heads; the other points (control points, corners of slabs) have no sphere, and nucleic acids none at all
+    if (state.mold.cartoon_glyphs.num_spheres > 0) {
+        md_gl_draw_op_t spheres = {
+            .type = MD_GL_REP_SPACE_FILL,
+            .args = {},
+            .rep = rep.glyph_rep,
+            .model_matrix = NULL,
+        };
+        spheres.args.space_fill.radius_scale = scale;
+        md_array_push(*ops, spheres, alloc);
+    }
+
+    if (state.mold.cartoon_glyphs.num_tubes > 0) {
+        md_gl_draw_op_t tubes = {
+            .type = MD_GL_REP_TUBES,
+            .args = {},
+            .rep = rep.glyph_rep,
+            .model_matrix = NULL,
+        };
+        tubes.args.tubes.radius_scale = scale;
+        // The bands of the nucleic acids are made with the default radius, a representation has its own
+        tubes.args.tubes.band_scale = MAX(rep.nucleic_band_radius, 0.01f) / CARTOON_NUCLEIC_BAND_RADIUS;
+        md_array_push(*ops, tubes, alloc);
+    }
+
+    if (state.mold.cartoon_glyphs.num_slabs > 0) {
+        md_gl_draw_op_t slabs = {
+            .type = MD_GL_REP_SLABS,
+            .args = {},
+            .rep = rep.glyph_rep,
+            .model_matrix = NULL,
+        };
+        // The rims (and the sticks, slabs of two corners) of the radius of the representation, the plate within a rim
+        // recessed to 60% of its thickness
+        slabs.args.slabs.radius = MAX(rep.nucleic_ring_radius, 0.01f) * scale;
+        slabs.args.slabs.plate  = 0.6f;
+        md_array_push(*ops, slabs, alloc);
+    }
+}
+
+// The periodic images shown (view.periodic_images): the translations of the scene into the neighboring cells, all but its
+// own, through the turn the coordinates carry if the orientation is kept (as the box). None without a cell.
+static md_array(mat4_t) periodic_images(const ApplicationState& state, md_allocator_i* alloc) {
+    md_array(mat4_t) images = 0;
+    const md_unitcell_t& cell = state.mold.state.unitcell;
+    const int* n = state.view.periodic_images;
+    if (md_unitcell_flags(&cell) == 0 || (n[0] | n[1] | n[2]) == 0) return images;
+
+    mat3_t A = {0};
+    md_unitcell_A_extract_float(A.elem, &cell);
+    const mat4_t M = state.operations.state_rotation * mat4_from_mat3(A);
+    for (int k = -n[2]; k <= n[2]; ++k) {
+        for (int j = -n[1]; j <= n[1]; ++j) {
+            for (int i = -n[0]; i <= n[0]; ++i) {
+                if (i == 0 && j == 0 && k == 0) continue;
+                const vec3_t t = vec3_from_vec4(mat4_mul_vec4(M, vec4_set((float)i, (float)j, (float)k, 0.0f)));
+                md_array_push(images, mat4_translate(t.x, t.y, t.z), alloc);
+            }
+        }
+    }
+    return images;
+}
+
+// The ops from beg on again, once in each periodic image (their model matrix: md_gl takes it into the transforms, the
+// culling and level of detail of the backbone, and the velocities). The images must outlive the draw.
+static void push_periodic_images(md_array(md_gl_draw_op_t)* ops, size_t beg, const mat4_t* images, size_t num_images, md_allocator_i* alloc) {
+    const size_t end = md_array_size(*ops);
+    for (size_t m = 0; m < num_images; ++m) {
+        for (size_t i = beg; i < end; ++i) {
+            md_gl_draw_op_t op = (*ops)[i];
+            op.model_matrix = &images[m].elem[0][0];
+            md_array_push(*ops, op, alloc);
+        }
+    }
+}
+
+// The edges of the unit cell of the frame shown (a SimulationBox representation), through the turn the coordinates
+// carry if the orientation is kept (the cell itself cannot hold one). Capsules of the thickness, shaded as the rest of
+// the scene (the world queue writes the G-buffer), never thinner than a pixel where they are, so a box seen from afar
+// does not break up; or lines of a pixel. With axes, the edges along a, b and c from the origin red, green and blue.
+static void draw_simulation_box(ApplicationState* state, const Representation& rep, const mat4_t* images, size_t num_images) {
+    const md_unitcell_t& cell = state->mold.state.unitcell;
+    if (md_unitcell_flags(&cell) == 0) return;
+
+    mat3_t A = {0};
+    md_unitcell_A_extract_float(A.elem, &cell);
+    const mat4_t M = state->operations.state_rotation * mat4_from_mat3(A);
+    const uint32_t color = convert_color(vec4_set(rep.box.color.x, rep.box.color.y, rep.box.color.z, 1.0f));
+    const uint32_t axis_color[3] = { convert_color(vec4_set(0.85f, 0.15f, 0.15f, 1.0f)), convert_color(vec4_set(0.15f, 0.70f, 0.15f, 1.0f)), convert_color(vec4_set(0.15f, 0.30f, 0.90f, 1.0f)) };
+
+    immediate::Scope scope(state->gfx.world, "simulation box");
+
+    // The corners: bit k of i is the coordinate along cell vector k
+    vec3_t corner[8];
+    for (int i = 0; i < 8; ++i) {
+        corner[i] = vec3_from_vec4(mat4_mul_vec4(M, vec4_set((float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1), 1.0f)));
+    }
+
+    // A pixel at the depth d of view space: 2 d / (P11 h) in a perspective, 2 / (P11 h) in an orthographic projection
+    const mat4_t& V = state->view.param.matrix.curr.view;
+    const mat4_t& P = state->view.param.matrix.curr.proj;
+    const float   h = (float)MAX(state->gbuffer.out_height, 1U);    // the pixels shown, whatever the render scale
+    const bool    ortho = P.elem[3][3] == 1.0f;
+    const float   px_per_depth = 2.0f / (P.elem[1][1] * h);
+
+    // Its own cell, then those of the periodic images (whose shared edges are drawn twice); the axes in its own only
+    const size_t num_cells = 1 + (rep.periodic_images ? num_images : 0);
+    for (size_t c = 0; c < num_cells; ++c) {
+        const vec3_t t = c == 0 ? vec3_t{0, 0, 0} : vec3_from_vec4(images[c - 1].col[3]);
+        for (int i = 0; i < 8; ++i) {
+            for (int k = 0; k < 3; ++k) {
+                const int bit = 1 << k;
+                if (i & bit) continue;
+                const int j = i | bit;
+                const uint32_t col = (rep.box.axes && c == 0 && i == 0) ? axis_color[k] : color;
+                const vec3_t p0 = corner[i] + t;
+                const vec3_t p1 = corner[j] + t;
+                if (rep.box.thickness > 0.0f) {
+                    const vec3_t mid  = (p0 + p1) * 0.5f;
+                    const float depth = ortho ? 1.0f : MAX(-vec3_from_vec4(mat4_mul_vec4(V, vec4_from_vec3(mid, 1.0f))).z, 0.0f);
+                    const float radius = MAX(0.5f * rep.box.thickness, 0.6f * px_per_depth * depth);
+                    immediate::capsule(scope, p0, p1, radius, col);
+                } else {
+                    immediate::line(scope, p0, p1, col);
+                }
+            }
+        }
+    }
+}
+
 static void draw_representations_opaque(ApplicationState* state) {
     ASSERT(state);
 
@@ -6658,7 +6915,7 @@ static void draw_representations_opaque(ApplicationState* state) {
 
         md_gfx_draw_op_t* draw_ops = 0;
         for (int64_t i = 0; i < md_array_size(state->representation.reps); ++i) {
-            if (state->representation.reps[i].enabled) {
+            if (representation_shown(*state, state->representation.reps[i])) {
                 md_gfx_draw_op_t op;
                 op.structure = state->mold.gfx_structure;
                 op.representation = state->representation.reps[i].gfx_rep;
@@ -6685,11 +6942,23 @@ static void draw_representations_opaque(ApplicationState* state) {
 		glEnable(GL_DEPTH_TEST);
 
         md_array(md_gl_draw_op_t) draw_ops = 0;
+        // The glyphs of the cartoon of the lipids and nucleic acids, a molecule of their own with picking of their own
+        md_array(md_gl_draw_op_t) glyph_ops = 0;
+        const md_array(mat4_t) images = periodic_images(*state, frame_alloc);
+        const size_t num_images = md_array_size(images);
         for (size_t i = 0; i < num_representations; ++i) {
             const Representation& rep = state->representation.reps[i];
 
+            if (rep.type == RepresentationType::Cartoon && representation_shown(*state, rep) && rep.type_is_valid) {
+                const size_t beg = md_array_size(glyph_ops);
+                cartoon_glyph_draw_ops(&glyph_ops, *state, rep, frame_alloc);
+                if (rep.periodic_images) push_periodic_images(&glyph_ops, beg, images, num_images, frame_alloc);
+                // The cartoon of the proteins needs a protein backbone to draw
+                if (state->mold.sys.protein_backbone.range.count == 0) continue;
+            }
+
             if (RepresentationType::SpaceFill <= rep.type && rep.type <= RepresentationType::Cartoon) {
-                if (rep.enabled && rep.type_is_valid) {
+                if (representation_shown(*state, rep) && rep.type_is_valid) {
                     md_gl_draw_op_t op = {
                         .type = (md_gl_rep_type_t)rep.type,
                         .args = {},
@@ -6706,6 +6975,7 @@ static void draw_representations_opaque(ApplicationState* state) {
                         op.args.licorice.sharpness = rep.bond_sharpness;
                         op.args.licorice.uniform_color = convert_color(rep.bond_base_color);
                         op.args.licorice.bond_orders = rep.bond_orders;
+                        op.args.licorice.chain_gaps = rep.chain_gaps;
                         if (rep.tint_scale > 0.0f || rep.saturation < 1.0f) {
                             tint_colors(&op.args.licorice.uniform_color, 1, convert_color(rep.tint_color), rep.tint_scale, rep.saturation);
                         }
@@ -6717,6 +6987,7 @@ static void draw_representations_opaque(ApplicationState* state) {
                         op.args.ball_and_stick.sharpness = rep.bond_sharpness;
                         op.args.ball_and_stick.uniform_color = convert_color(rep.bond_base_color);
                         op.args.ball_and_stick.bond_orders = rep.bond_orders;
+                        op.args.ball_and_stick.chain_gaps = rep.chain_gaps;
                         if (rep.tint_scale > 0.0f || rep.saturation < 1.0f) {
                             tint_colors(&op.args.ball_and_stick.uniform_color, 1, convert_color(rep.tint_color), rep.tint_scale, rep.saturation);
                         }
@@ -6724,19 +6995,23 @@ static void draw_representations_opaque(ApplicationState* state) {
                     case RepresentationType::Ribbons:
                         op.args.ribbons.width_scale = rep.scale.x;
                         op.args.ribbons.thickness_scale = rep.scale.y;
+                        op.args.ribbons.chain_gaps = rep.chain_gaps;
                         break;
                     case RepresentationType::Cartoon:
                         op.args.cartoon.coil_scale = rep.scale.x;
                         op.args.cartoon.sheet_scale = rep.scale.y;
                         op.args.cartoon.helix_scale = rep.scale.z;
+                        op.args.cartoon.chain_gaps = rep.chain_gaps;
                         break;
                     default:
                         break;
                     }
+                    const size_t beg = md_array_size(draw_ops);
                     md_array_push(draw_ops, op, frame_alloc);
+                    if (rep.periodic_images) push_periodic_images(&draw_ops, beg, images, num_images, frame_alloc);
                 }
             } else if (rep.type == RepresentationType::DipoleMoment) {
-                if (rep.enabled) {
+                if (representation_shown(*state, rep)) {
                     // immediate draw of dipole moment as arrow
                     vec3_t dipole_vec = { 0, 0, 0 };
                     vec3_t dipole_org = { 0, 0, 0 };
@@ -6773,6 +7048,10 @@ static void draw_representations_opaque(ApplicationState* state) {
                         immediate::cone(scope, cyl_end, arrow_end, head_radius, color_u32, picking_idx);
                     }
                 }
+            } else if (rep.type == RepresentationType::SimulationBox) {
+                if (representation_shown(*state, rep) && rep.type_is_valid) {
+                    draw_simulation_box(state, rep, images, num_images);
+                }
             }
         }
 
@@ -6806,10 +7085,137 @@ static void draw_representations_opaque(ApplicationState* state) {
             .max_bond_length = max_bond_length,
         };
 
-        md_gl_draw(&args);
+        draw_ops_timed(args, draw_ops, md_array_size(draw_ops), false, frame_alloc);
+
+        if (md_array_size(glyph_ops) > 0) {
+            args.picking_offset = gl_picking_offset_glyphs(*state);
+            draw_ops_timed(args, glyph_ops, md_array_size(glyph_ops), true, frame_alloc);
+        }
 #if EXPERIMENTAL_GFX_API
     }
 #endif
+}
+
+// What the opaque image under the isosurfaces depends on, as far as the mesh mode's accumulation is concerned:
+// the depth of what the representations draw (draw_representations_opaque)
+static uint64_t opaque_scene_hash(const ApplicationState* state) {
+    uint64_t h = md_hash64(&state->mold.gpu_buffers_version, sizeof(state->mold.gpu_buffers_version), state->representation.gl_version);
+    h = md_hash64(&state->animation.frame, sizeof(state->animation.frame), h);
+    h = md_hash64(state->view.periodic_images, sizeof(state->view.periodic_images), h);
+    for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
+        const Representation& rep = state->representation.reps[i];
+        const bool shown = representation_shown(*state, rep) && rep.type_is_valid;
+        h = md_hash64(&shown, sizeof(shown), h);
+        if (!shown) continue;
+        h = md_hash64(&rep.type, sizeof(rep.type), h);
+        h = md_hash64(&rep.md_rep, sizeof(rep.md_rep), h);
+        h = md_hash64(&rep.scale, sizeof(rep.scale), h);
+        h = md_hash64(&rep.bond_orders, sizeof(rep.bond_orders), h);
+        h = md_hash64(&rep.chain_gaps, sizeof(rep.chain_gaps), h);
+        h = md_hash64(&rep.periodic_images, sizeof(rep.periodic_images), h);
+        if (rep.type == RepresentationType::Cartoon) {
+            h = md_hash64(&rep.two_head_spheres, sizeof(rep.two_head_spheres), h);
+            h = md_hash64(&rep.nucleic_band_radius, sizeof(rep.nucleic_band_radius), h);
+            h = md_hash64(&rep.nucleic_ring_radius, sizeof(rep.nucleic_ring_radius), h);
+        }
+        if (rep.type == RepresentationType::SimulationBox) {
+            h = md_hash64(&rep.box.thickness, sizeof(rep.box.thickness), h);
+            h = md_hash64(&rep.box.axes, sizeof(rep.box.axes), h);
+        }
+        if (rep.type == RepresentationType::DipoleMoment) {
+            h = md_hash64(&rep.dipole.dipole_key, sizeof(rep.dipole.dipole_key), h);
+            h = md_hash64(&rep.dipole.dipole_index, sizeof(rep.dipole.dipole_index), h);
+            h = md_hash64(&rep.dipole.offset, sizeof(rep.dipole.offset), h);
+            h = md_hash64(&rep.dipole.scale, sizeof(rep.dipole.scale), h);
+            h = md_hash64(&rep.dipole.radius, sizeof(rep.dipole.radius), h);
+        }
+    }
+    return h;
+}
+
+// Pixels of the render target to a point of the UI, for what is sized in points over the view (the width of an
+// isoline): the framebuffer scale, and in a screenshot at another resolution as much larger as it is
+static float isoline_px_per_point(const ApplicationState* state) {
+    const float h = ImGui::GetIO().DisplaySize.y;
+    return h > 0.0f ? (float)state->gbuffer.height / h : 1.0f;
+}
+
+// The isosurfaces of every electronic structure representation as meshes, in one composite
+static bool draw_representations_transparent_mesh(ApplicationState* state) {
+    static constexpr size_t MAX_SURFACES = 256;
+    isomesh::Surface surfaces[MAX_SURFACES];
+    size_t num_surfaces = 0;
+    uint64_t scene_hash = opaque_scene_hash(state);
+
+    for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
+        Representation& rep = state->representation.reps[i];
+        if (rep.type != RepresentationType::ElectronicStructure || !representation_shown(*state, rep) || !rep.type_is_valid) continue;
+        ElectronicStructureRepresentation& es = rep.electronic_structure;
+
+        IsoDesc iso;
+        electronic_structure_iso_desc_init(&iso, es);
+        const size_t n = electronic_structure_mesh_surfaces(surfaces + num_surfaces, MAX_SURFACES - num_surfaces, state, &rep, iso);
+
+        // A field is evaluated at the vertices (Coloring_VertexField, set by electronic_structure_mesh_surfaces);
+        // the colour volume spans the box of the density volume
+        const mat4_t world_to_volume = mat4_inverse(es.density_vol.texture_to_world);
+        const bool use_field  = es.coloring == SurfaceColoring::Field;
+        const bool use_colors = es.coloring == SurfaceColoring::AtomColors && es.color_vol.tex_id;
+        const uint32_t colormap = use_field ? surface_field_colormap_texture(&es.field_vol, es.field_map.colormap) : 0;
+        const IsolineDesc isolines = color_scale_isoline_desc(es.field_isolines, isoline_px_per_point(state));
+        for (size_t j = num_surfaces; j < num_surfaces + n; ++j) {
+            isomesh::Surface& s = surfaces[j];
+            s.world_to_volume = world_to_volume;
+            if (s.coloring == isomesh::Coloring_VertexField) {
+                s.field_colormap = colormap;
+                s.field_range_beg = es.field_map.range_beg;
+                s.field_range_end = es.field_map.range_end;
+                s.isolines = isolines;
+            } else if (use_colors) {
+                s.coloring = isomesh::Coloring_ColorVolume;
+                s.color_volume = es.color_vol.tex_id;
+            }
+        }
+        // The contents of the colour volume (the vertex values are in the mesh's version)
+        if (use_colors) {
+            scene_hash = md_hash64(&es.col_hash, sizeof(es.col_hash), scene_hash);
+        }
+        num_surfaces += n;
+    }
+
+    const isomesh::RenderDesc desc = {
+        .render_target = {
+            .depth = state->gbuffer.tex.depth,
+            .color = state->gbuffer.tex.transparency_hdr,
+            .width = state->gbuffer.width,
+            .height = state->gbuffer.height,
+            .clear_color = true,
+        },
+        .matrix = {
+            .view = state->view.param.matrix.curr.view,
+            .proj = state->view.param.matrix.curr.proj,
+            .proj_no_jitter = state->view.param.matrix.curr.proj_no_jitter,
+        },
+        .surfaces = surfaces,
+        .num_surfaces = num_surfaces,
+        .shading = {
+            .roughness = 0.3f,
+            .ior = 1.5f,
+            .mode = state->visuals.shading.mode,
+            .ambient = state->visuals.shading.ambient,
+            .specular = state->visuals.shading.specular,
+            .colors = state->visuals.shading.colors,
+            .light = state->visuals.shading.light,
+            .environment = state->visuals.shading.environment,
+        },
+        .scene_hash = scene_hash,
+        .keep_drawing = state->profiler_keep_isomeshes,
+    };
+    if (num_surfaces == 0) {
+        isomesh::target_free(&iso_mesh_target);
+        return false;
+    }
+    return isomesh::render(&iso_mesh_target, desc);
 }
 
 static bool draw_representations_transparent(ApplicationState* state) {
@@ -6819,11 +7225,16 @@ static bool draw_representations_transparent(ApplicationState* state) {
     const size_t num_representations = md_array_size(state->representation.reps);
     if (num_representations == 0) return false;
 
+    if (state->settings.isosurface_rendering == IsosurfaceRendering_Mesh) {
+        return draw_representations_transparent_mesh(state);
+    }
+    isomesh::target_free(&iso_mesh_target);
+
     bool written = false;
 
     for (size_t i = 0; i < num_representations; ++i) {
         Representation& rep = state->representation.reps[i];
-        if (!rep.enabled) continue;
+        if (!representation_shown(*state, rep)) continue;
         if (rep.type == RepresentationType::ElectronicStructure) {
             const bool use_field = rep.electronic_structure.coloring == SurfaceColoring::Field && rep.electronic_structure.field_vol.tex_id;
             IsoDesc iso;
@@ -6870,11 +7281,16 @@ static bool draw_representations_transparent(ApplicationState* state) {
                     .range_beg = rep.electronic_structure.field_map.range_beg,
                     .range_end = rep.electronic_structure.field_map.range_end,
                 },
+                .isolines = use_field ? color_scale_isoline_desc(rep.electronic_structure.field_isolines, isoline_px_per_point(state)) : IsolineDesc{},
                 .shading = {
-                    .env_radiance = state->visuals.background.color * state->visuals.background.intensity * 0.25,
                     .roughness = 0.3f,
-                    .dir_radiance = {10,10,10},
                     .ior = 1.5f,
+                    .mode = state->visuals.shading.mode,
+                    .ambient = state->visuals.shading.ambient,
+                    .specular = state->visuals.shading.specular,
+                    .colors = state->visuals.shading.colors,
+                    .light = state->visuals.shading.light,
+                    .environment = state->visuals.shading.environment,
                 },
             };
 
@@ -6895,12 +7311,22 @@ static bool draw_representations_transparent(ApplicationState* state) {
 
 static void draw_representations_opaque_lean_and_mean(ApplicationState* data, uint32_t mask) {
     md_gl_draw_op_t* draw_ops = 0;
+    md_gl_draw_op_t* glyph_ops = 0;
+    // The periodic images as the opaque pass draws them, so the selected and highlighted atoms show in them too
+    const md_array(mat4_t) images = periodic_images(*data, frame_alloc);
+    const size_t num_images = md_array_size(images);
     for (size_t i = 0; i < md_array_size(data->representation.reps); ++i) {
         const Representation& rep = data->representation.reps[i];
 
         if (rep.type > RepresentationType::Cartoon) continue;
+        if (rep.type == RepresentationType::Cartoon && representation_shown(*data, rep) && rep.type_is_valid) {
+            const size_t beg = md_array_size(glyph_ops);
+            cartoon_glyph_draw_ops(&glyph_ops, *data, rep, frame_alloc);
+            if (rep.periodic_images) push_periodic_images(&glyph_ops, beg, images, num_images, frame_alloc);
+            if (data->mold.sys.protein_backbone.range.count == 0) continue;
+        }
 
-        if (rep.enabled && rep.type_is_valid) {
+        if (representation_shown(*data, rep) && rep.type_is_valid) {
             md_gl_draw_op_t op = {
                 .type = (md_gl_rep_type_t)rep.type,
                 .args = {},
@@ -6912,10 +7338,18 @@ static void draw_representations_opaque_lean_and_mean(ApplicationState* data, ui
             MEMCPY(&op.args, &rep.scale, MIN(sizeof(op.args), sizeof(rep.scale)));
             if (rep.type == RepresentationType::Licorice) {
                 op.args.licorice.bond_orders = rep.bond_orders;
+                op.args.licorice.chain_gaps = rep.chain_gaps;
             } else if (rep.type == RepresentationType::BallAndStick) {
                 op.args.ball_and_stick.bond_orders = rep.bond_orders;
+                op.args.ball_and_stick.chain_gaps = rep.chain_gaps;
+            } else if (rep.type == RepresentationType::Ribbons) {
+                op.args.ribbons.chain_gaps = rep.chain_gaps;
+            } else if (rep.type == RepresentationType::Cartoon) {
+                op.args.cartoon.chain_gaps = rep.chain_gaps;
             }
+            const size_t beg = md_array_size(draw_ops);
             md_array_push(draw_ops, op, frame_alloc);
+            if (rep.periodic_images) push_periodic_images(&draw_ops, beg, images, num_images, frame_alloc);
         }
     }
 
@@ -6950,5 +7384,13 @@ static void draw_representations_opaque_lean_and_mean(ApplicationState* data, ui
 		.max_bond_length = max_bond_length,
     };
 
+    PUSH_GPU_SECTION(geometry_stage_name[GeometryStage_Highlight]);
     md_gl_draw(&args);
+
+    if (md_array_size(glyph_ops) > 0) {
+        args.draw_operations = { .count = md_array_size(glyph_ops), .ops = glyph_ops };
+        args.picking_offset = gl_picking_offset_glyphs(*data);
+        md_gl_draw(&args);
+    }
+    POP_GPU_SECTION();
 }

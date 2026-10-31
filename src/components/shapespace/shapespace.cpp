@@ -19,6 +19,7 @@
 #include <event.h>
 
 #include <serialization_utils.h>
+#include <timeline_periods_ui.h>
 #include <imgui_widgets.h>
 #include <implot_internal.h>
 
@@ -43,10 +44,9 @@ static const char* colormode_lbl[] = {
 */
 
 struct Shapespace : viamd::EventHandler {
-    char input[256] = "all";
-    char error[256] = "";
+    // The structures: one for each set the filter gives
+    AtomFilter filter = {"all"};
 
-    bool input_valid = false;
     bool show_window = false;
 
     //md_system_state_t app_state = {0};
@@ -70,6 +70,7 @@ struct Shapespace : viamd::EventHandler {
     ColorMode mode = ColorMode_Colormap;
     ImPlotColormap colormap = 0;
     ImVec4 color = {0.5f,1.0f,0.5f,1.0f};
+    uint32_t frames_period = 0;  // the timeline period whose frames are shown, by id, 0 for every frame
 
     task_system::ID evaluate_task = 0;
 
@@ -90,9 +91,14 @@ struct Shapespace : viamd::EventHandler {
                 break;
             }
             case viamd::EventType_ViamdDeserializeBegin:
-                str_copy_to_char_buf(input, sizeof(input), STR_LIT("all"));
+                str_copy_to_char_buf(filter.text, sizeof(filter.text), STR_LIT("all"));
                 marker_size = 1.5f;
                 use_mass = true;
+                frames_period = 0;
+                break;
+            case viamd::EventType_ViamdDeserializeEnd:
+                // Over the timeline filter, from before there were periods: over the period it followed
+                if (frames_period == 0) frames_period = app_state->timeline.periods.legacy_filter_id;
                 break;
             case viamd::EventType_ViamdShutdown:
                 task_system::task_interrupt_and_wait_for(evaluate_task);
@@ -110,13 +116,16 @@ struct Shapespace : viamd::EventHandler {
                     str_t ident, arg;
                     while (viamd::next_entry(ident, arg, state)) {
                         if (str_eq(ident, STR_LIT("Filter"))) {
-                            str_t filter;
-                            viamd::extract_str(filter, arg);
-                            str_copy_to_char_buf(input, sizeof(input), filter);
+                            str_t text;
+                            viamd::extract_str(text, arg);
+                            str_copy_to_char_buf(filter.text, sizeof(filter.text), text);
                         } else if (str_eq(ident, STR_LIT("MarkerSize"))) {
                             viamd::extract_flt(marker_size, arg);
                         } else if (str_eq(ident, STR_LIT("UseMass"))) {
                             viamd::extract_bool(use_mass, arg);
+                        } else if (str_eq(ident, STR_LIT("Period"))) {
+                            int id = 0;
+                            if (viamd::extract_int(id, arg)) frames_period = (uint32_t)MAX(id, 0);
                         }
                     }
                 }
@@ -125,9 +134,12 @@ struct Shapespace : viamd::EventHandler {
             case viamd::EventType_ViamdSerialize: {
                 viamd::serialization_state_t& state = *(viamd::serialization_state_t*)e.payload;
                 viamd::write_section_header(state, STR_LIT("ShapeSpace"));
-                viamd::write_str(state, STR_LIT("Filter"), str_from_cstr(input));
+                viamd::write_str(state, STR_LIT("Filter"), str_from_cstr(filter.text));
                 viamd::write_flt(state, STR_LIT("MarkerSize"), marker_size);
                 viamd::write_bool(state, STR_LIT("UseMass"), use_mass);
+                if (frames_period != 0) {
+                    viamd::write_int(state, STR_LIT("Period"), (int)frames_period);
+                }
                 break;
             }
             default:
@@ -174,6 +186,20 @@ struct Shapespace : viamd::EventHandler {
 #endif
                     ImGui::SliderFloat("Marker Size", &marker_size, marker_min_size, marker_max_size);
                     ImGui::Checkbox("Use Mass", &use_mass);
+
+                    // Every frame, or those of a timeline period
+                    const TimelinePeriods& rs = app_state->timeline.periods;
+                    const TimelinePeriod* cur = timeline_periods_find(&rs, frames_period);
+                    if (ImGui::BeginCombo("Frames", cur ? cur->name : "All frames")) {
+                        if (ImGui::Selectable("All frames", cur == nullptr)) frames_period = 0;
+                        for (int r = 0; r < rs.count; ++r) {
+                            char label[TIMELINE_PERIOD_NAME_CAP + 16];
+                            snprintf(label, sizeof(label), "%s###period%u", rs.items[r].name, rs.items[r].id);
+                            if (ImGui::Selectable(label, rs.items[r].id == frames_period)) frames_period = rs.items[r].id;
+                            if (ImGui::IsItemHovered()) timeline_periods_highlight(rs.items[r].id);
+                        }
+                        ImGui::EndCombo();
+                    }
                     ImGui::EndMenu();
                 }
                 ImGui::EndMenuBar();
@@ -181,14 +207,10 @@ struct Shapespace : viamd::EventHandler {
 
             const float item_width = MAX(ImGui::GetContentRegionAvail().x, 150.f);
             ImGui::PushItemWidth(item_width);
-            ImGui::InputQuery("##input", input, sizeof(input), input_valid);
+            filter_input("##input", &filter, filter_context(app_state));
             ImGui::PopItemWidth();
-            if (ImGui::IsItemHovered()) {
-                if (input_valid) {
-                    md_bitmask_assign(&app_state->selection.highlight_mask, joined_bitfield);
-                } else if (error[0] != '\0') {
-                    ImGui::SetTooltip("%s", error);
-                }
+            if (ImGui::IsItemHovered() && filter.result.success) {
+                md_bitmask_assign(&app_state->selection.highlight_mask, joined_bitfield);
             }
 
             ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, ImVec2(2,2));
@@ -261,15 +283,24 @@ struct Shapespace : viamd::EventHandler {
                 const float scl = (float)lim.X.Max - (float)lim.X.Min;
                 const float MAX_D2 = 0.0001f * scl * scl;
 
+                // The frames shown: every frame, or those of the period where it is now
+                int frame_beg = 0;
+                int frame_count = (int)num_frames;
+                if (const TimelinePeriod* r = timeline_periods_find(&app_state->timeline.periods, frames_period)) {
+                    int beg, end;
+                    if (timeline_period_frames(&beg, &end, *r, app_state->animation.frame, (int)num_frames)) {
+                        frame_beg = beg;
+                        frame_count = end - beg + 1;
+                    } else {
+                        frame_count = 0;
+                    }
+                }
+
                 ImPlot::PushStyleVar(ImPlotStyleVar_MarkerSize, marker_size);
                 ImPlot::PushStyleVar(ImPlotStyleVar_Marker, ImPlotMarker_Square);
                 for (int i = 0; i < (int)num_structures; ++i) {
-                    int offset = (int)num_frames * i;
-                    int count  = (int)num_frames;
-                    if (app_state->timeline.filter.enabled) {
-                        offset += (int)app_state->timeline.filter.beg_frame;
-                        count = (int)MAX(app_state->timeline.filter.end_frame - app_state->timeline.filter.beg_frame, 0);
-                    }
+                    const int offset = (int)num_frames * i + frame_beg;
+                    const int count  = frame_count;
                     vec2_t* coordinates = coords + offset;
                     char buf[32] = "";
                     if (num_structures == 1) {
@@ -308,12 +339,8 @@ struct Shapespace : viamd::EventHandler {
                 ImPlot::PushStyleVar(ImPlotStyleVar_MarkerSize, marker_size * 1.1f);
                 ImPlot::PushStyleColor(ImPlotCol_MarkerOutline, ImVec4(1,1,1,1));
                 if (hovered_structure_idx != -1) {
-                    int offset = (int)num_frames * hovered_structure_idx;
-                    int count  = (int)num_frames;
-                    if (app_state->timeline.filter.enabled) {
-                        offset += (int)app_state->timeline.filter.beg_frame;
-                        count   = MAX((int)(app_state->timeline.filter.end_frame - app_state->timeline.filter.beg_frame), 0);
-                    }
+                    const int offset = (int)num_frames * hovered_structure_idx + frame_beg;
+                    const int count  = frame_count;
                     vec2_t* coordinates = coords + offset;
                     ImPlot::PlotScatterG("##hovered structure", getter, coordinates, count);
                     if (hovered_structure_idx < (int)md_array_size(bitfields)) {
@@ -351,7 +378,7 @@ struct Shapespace : viamd::EventHandler {
         ImGui::End();
 
         // Create a hash from everything which dictates the app_state of an evaluation to compare against
-        uint64_t hash = md_hash64(input, sizeof(input), app_state->script.ir_fingerprint ^ (1ULL << (uint64_t)use_mass));
+        uint64_t hash = md_hash64(filter.text, sizeof(filter.text), app_state->script.ir_fingerprint ^ (1ULL << (uint64_t)use_mass));
         if (hash != eval_hash) {
             if (task_system::task_is_running(evaluate_task)) {
                 task_system::task_interrupt (evaluate_task);
@@ -364,12 +391,9 @@ struct Shapespace : viamd::EventHandler {
                 md_arena_allocator_reset(arena);
                 joined_bitfield = md_bitset_empty_set();
 
-                input_valid = false;
-                MEMSET(error, 0, sizeof(error));
-                if (md_filter_evaluate(&bitfields, str_from_cstr(input), &app_state->mold.sys, &app_state->mold.state, app_state->script.ir, NULL, error, sizeof(error), arena)) {
-                    eval_hash = hash;
-
-                    input_valid = true;                    
+                // Not again until something changes, whether it picked atoms or not
+                eval_hash = hash;
+                if (filter_evaluate_sets(&filter, &bitfields, filter_context(app_state), arena)) {
                     num_structures = md_array_size(bitfields);
                     if (!num_structures) {
                         MD_LOG_ERROR("No structures present when attempting to populate shape space");

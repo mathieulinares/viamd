@@ -1,6 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.15)
-
-project(viamd_test VERSION 0.1 LANGUAGES C CXX)
+﻿project(viamd_test VERSION 0.1 LANGUAGES C CXX)
 
 # viamd is one executable with no library to link against, so the translation units under test are
 # compiled into the test binary directly. Only units which are free of ImGui, OpenGL and
@@ -14,8 +12,12 @@ set(UNIT_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/serialization_utils.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/event.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/task_system.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/timeline_periods.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/representation_tree.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/loader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/file_list.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/gfx/camera_utils.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/cartoon_glyphs.cpp
 )
 
 # Every .cpp in this folder is a test for the application's own units. Dropping one in is all it

@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 #include <core/md_str.h>
-#include <core/md_str_builder.h>
+#include <core/md_writer.h>
 #include <core/md_vec_math.h>
 
 struct md_bitset_t;
@@ -23,6 +23,10 @@ struct md_bitset_t;
 // Readers are forgiving and writers are exact: numbers are written with the digits it takes to read
 // back the same value, an extract_* that cannot parse its argument returns false and leaves the
 // destination untouched, and an entry nobody reads is skipped.
+//
+// The decimal point is '.', in every locale. A vector is read only when it has exactly the components
+// asked for: one written with decimal commas has more, and is logged and left unread rather than
+// read as other values.
 
 namespace viamd {
 
@@ -34,7 +38,7 @@ struct deserialization_state_t {
 
 struct serialization_state_t {
 	str_t filename;
-	md_strb_t sb;
+	md_str_writer_t sw;
 };
 
 // Advances to the next section header, skipping whatever the current section's reader left unread.

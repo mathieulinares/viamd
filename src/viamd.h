@@ -4,7 +4,7 @@
 #include <core/md_os.h>
 #include <core/md_lru_cache.inl>
 #include <core/md_hash.h>
-#include <core/md_str_builder.h>
+#include <core/md_array.h>
 
 #include <md_system.h>
 #include <md_gto.h>
@@ -27,9 +27,14 @@
 
 #include <task_system.h>
 #include <surface_field.h>
+#include <cartoon_glyphs.h>
 #include <loader.h>
+#include <file_list.h>
 #include <event.h>
 #include <plot_series.h>
+#include <timeline_periods.h>
+#include <filter_input.h>
+#include <representation_tree.h>
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 
@@ -41,9 +46,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define JITTER_SEQUENCE_SIZE 8  // Number of samples for temporal AA
+#define JITTER_SEQUENCE_SIZE 8  // Number of samples for temporal AA (at the full resolution: a screenshot's)
+#define JITTER_SEQUENCE_MAX 32  // Upscaling: a pixel of the G-buffer covers several shown, so more positions (jitter_count)
 #define DEFAULT_COLORMAP 5      // This corresponds to plasma colormap (Do not want to include implot.h just for this)
 #define FRAME_CACHE_SIZE 4      // Number of frames used in the frame cache
+#define PERIODIC_IMAGES_MAX 3   // Periodic images each way along a cell vector: (2 n + 1)^3 - 1 copies of the scene at most
 
 #if FRAME_CACHE_SIZE == 4
 #define FRAME_CACHE_LRU_TYPE md_lru_cache4_t
@@ -53,13 +60,11 @@
 #error "Unsupported frame cache size"
 #endif
 
-// For cpu profiling
-#define PUSH_CPU_SECTION(lbl) {};
-#define POP_CPU_SECTION() {};
-
-// For gpu profiling
-#define PUSH_GPU_SECTION(lbl) { if (glPushDebugGroup) glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, GL_KHR_debug, -1, lbl); }
-#define POP_GPU_SECTION()     { if (glPopDebugGroup) glPopDebugGroup(); }
+// Profiling: PUSH_GPU_SECTION / POP_GPU_SECTION / PROFILE_SCOPE (gfx/profiler.h). A section is a debug group and is
+// timed on the GPU and the CPU; one that issues no GL work is timed on the CPU only, in effect.
+#include <gfx/profiler.h>
+#define PUSH_CPU_SECTION(lbl) PUSH_GPU_SECTION(lbl)
+#define POP_CPU_SECTION()     POP_GPU_SECTION()
 
 // For logging
 #define VIAMD_LOG_INFO  MD_LOG_INFO
@@ -97,6 +102,23 @@ constexpr PickingDomainID PickingDomain_Dipole = HASH_STR_LIT64("picking domain 
 // A protein backbone segment (md_system_t::protein_backbone.segment): what the cartoon and ribbons pick as. They are
 // drawn per segment, not per atom, so a hit names the segment and resolves to the component it stems from.
 constexpr PickingDomainID PickingDomain_BackboneSegment = HASH_STR_LIT64("picking domain backbone segment");
+// A ring of the system (md_system_t::ring): what the circle of an aromatic ring picks as (licorice, ball and stick with
+// bond orders). A hit names the ring, ring(local_idx + 1) in the script, and resolves to its atoms.
+constexpr PickingDomainID PickingDomain_Ring = HASH_STR_LIT64("picking domain ring");
+// A point of the cartoon of the lipids and nucleic acids (CartoonGlyphs): a head, a point along a tail or a backbone, or
+// the part of a tube around a control point. A hit names the point (cartoon_glyphs_picked_point) and resolves to the
+// component it stands for.
+constexpr PickingDomainID PickingDomain_CartoonGlyph = HASH_STR_LIT64("picking domain cartoon glyph");
+// The gap of a chain over a break (md_gl_mol_set_chain_gaps): the dashed line where residues are missing. A hit names
+// the component before the break (MD_COMPONENT_FLAG_BREAK_AFTER) and resolves to it and the one after it.
+constexpr PickingDomainID PickingDomain_ChainGap = HASH_STR_LIT64("picking domain chain gap");
+
+// The domains whose hits stand for atoms of the system: hovering one highlights them, and a click commits the highlight
+// to the selection
+static inline bool picking_domain_resolves_to_atoms(PickingDomainID domain) {
+    return domain == PickingDomain_Atom || domain == PickingDomain_Bond || domain == PickingDomain_BackboneSegment || domain == PickingDomain_Ring ||
+           domain == PickingDomain_CartoonGlyph || domain == PickingDomain_ChainGap;
+}
 
 constexpr uint64_t interaction_surface_main = HASH_STR_LIT64("interaction surface main"); // This is the main interaction surface which corresponds to the main interaction window, but we want to keep it separate from the picking source and domain ids as we may want to have different picking sources/domains for different interaction surfaces in the future
 
@@ -105,7 +127,9 @@ enum class SelectionGranularity { Atom, Component, Instance, Count };
 enum class SelectionOperator { Or, And, AndNot, Set, Clear, Count };
 enum class SelectionGrowthMode { CovalentBond, Radial, Count };
 enum class CameraMode { Perspective, Orthographic, Count };
-enum class InterpolationMode { Nearest, Linear, CubicSpline, Count };
+enum class InterpolationMode { Nearest, Linear, CubicSpline, BSpline, Count };
+// TAA: each frame blended with the ones before; FXAA: each frame on its own (nothing carried over time)
+enum class AntiAliasingMode { TAA, FXAA, Count };
 
 enum class ColorMapping {
     Uniform,
@@ -186,6 +210,7 @@ enum class RepresentationType {
     Cartoon = MD_GL_REP_CARTOON,
     ElectronicStructure,
     DipoleMoment,
+    SimulationBox,
     Count
 };
 
@@ -199,6 +224,7 @@ inline const char* interpolation_mode_str[(int)InterpolationMode::Count] = {
     "Nearest",
     "Linear",
     "Cubic Spline",
+    "B-Spline",
 };
 
 inline const char* representation_type_str[(int)RepresentationType::Count] = {
@@ -208,7 +234,8 @@ inline const char* representation_type_str[(int)RepresentationType::Count] = {
     "Ribbons",
     "Cartoon",
     "Electronic Structure",
-    "Dipole Moment"
+    "Dipole Moment",
+    "Simulation Box",
 };
 
 inline const char* color_mapping_str[(int)ColorMapping::Count] = {
@@ -296,7 +323,6 @@ struct LoadDatasetWindowState {
     bool path_changed = false;
     bool load_topology = false;
     bool load_trajectory = false;
-    bool coarse_grained = false;
     bool show_window = false;
     bool show_file_dialog = false;
     bool atom_format_valid = false;
@@ -308,7 +334,6 @@ struct LoadDatasetWindowState {
 enum {
     FileFlags_None = 0,
     FileFlags_ShowDialogue = 1,
-    FileFlags_CoarseGrained = 2,
     FileFlags_DisableCacheWrite = 4,
 };
 
@@ -479,6 +504,15 @@ struct Volume {
 // the world. Defined in viamd.cpp because it is the half that touches GL.
 void init_volume(Volume* vol, const md_grid_t& grid, GLenum format = GL_R16F);
 
+// How the isosurfaces of the electronic structure are drawn (Settings::isosurface_rendering)
+enum IsosurfaceRendering {
+    IsosurfaceRendering_Raycast = 0,    // through the evaluated volume (volume::render_isosurfaces)
+    IsosurfaceRendering_Mesh    = 1,    // meshes extracted from the field itself (iso_meshes.h, isomesh::render)
+};
+
+// The meshes of an electronic structure representation (iso_meshes.cpp)
+struct EsIsoMesh;
+
 // Descriptor for handling iso surfaces
 struct IsoDesc {
     size_t count;
@@ -490,6 +524,7 @@ struct IsoDesc {
 struct ElectronicStructureRepresentation {
     Volume density_vol = {};
     Volume color_vol   = {};
+    EsIsoMesh* iso_mesh = nullptr;     // owned: the mesh rendering mode's surfaces, made on first use
     VolumeResolution resolution = VolumeResolution::Mid;
 
     // Shared for all electronic structure representations
@@ -526,6 +561,7 @@ struct ElectronicStructureRepresentation {
     // density_vol - evaluated only around the isosurfaces this representation draws
     SurfaceFieldKind    field_kind = SurfaceFieldKind::EmbeddingPotential;
     ColorScale          field_map  = surface_field_default_scale();
+    ColorScaleIsolines  field_isolines = {};    // lines on the surfaces where the field takes given values
     SurfaceFieldVolume  field_vol  = {};
 
     // The grid density_vol was evaluated on (bohr), kept for what is evaluated on the same grid
@@ -857,26 +893,40 @@ struct DipoleRepresentation {
 	float radius = 0.05f;
 };
 
+// The edges of the unit cell, of the frame shown (it may change with it)
+struct BoxRepresentation {
+    vec4_t color = { 0.25f, 0.25f, 0.25f, 1.0f };
+    float thickness = 0.2f;     // Å, the diameter of the edges (capsules, lit), never thinner than a pixel; 0 for lines of
+                                // a pixel, unlit
+    bool axes = false;          // The edges along a, b and c from the origin of the cell red, green and blue
+};
+
+// The representations, the groups they can be put in and everything done with them is in representation.h.
 struct Representation {
+    RepresentationNode node = {};   // where it is in the Representations window, see representation_tree.h
+
     char name[64] = "rep";
-    char filt[256] = "all";
-    char filt_error[256] = "";
+    // Evaluated within the context of the groups it is in (see RepresentationGroup). Its result says whether what it
+    // picks depends on the frame, through that context too.
+    AtomFilter filter = {"all"};
 
     RepresentationType type = RepresentationType::BallAndStick;
     ColorMapping color_mapping = ColorMapping::Type;
     md_bitset_t atom_mask = {};
     md_gl_rep_t md_rep = {};
+    // The representation of the cartoon of the lipids and nucleic acids (CartoonGlyphs), drawn by a Cartoon, and whether
+    // it shows any of them (a cartoon of proteins alone draws none)
+    md_gl_rep_t glyph_rep = {};
+    bool glyphs_shown = false;
 #if EXPERIMENTAL_GFX_API
     md_gfx_handle_t gfx_rep = {};
 #endif
 
-    bool enabled = true;
+    bool enabled = true;            // its own switch: it is shown when every group around it is too (representation_shown)
 	bool needs_update = true;
     bool type_is_valid = false;
     bool filt_is_dirty = true;
-    bool filt_is_valid = false;
-    bool filt_is_dynamic = false;
-    bool dynamic_evaluation = true;
+    bool dynamic_evaluation = true; // follow the frame when what the filter picks depends on it ("auto-update")
 
     // User defined base color used in uniform mode
     vec4_t base_color = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -893,17 +943,44 @@ struct Representation {
     float tint_scale = 0.0f;
     float saturation = 1.0f;
 
-    // scaling parameter (radius, width, height, etc depending on type)
+    // scaling parameter (radius, width, height, etc depending on type). Cartoon: coil, sheet, helix, and the thickness of
+    // the lipids and nucleic acids (w)
     vec4_t scale = {1.0f, 1.0f, 1.0f, 1.0f};
 
 	BondColorMode bond_color = BondColorMode::NearestAtom;
     float  bond_sharpness = 0.5f; // 0 = sharper, 1 = smoother
 	vec4_t bond_base_color = { 1.0f, 1.0f, 1.0f, 1.0f };
     bool   bond_orders = true;    // Licorice, ball and stick: double and triple bonds, aromatic and delocalized bonds (md_gl_mol_set_bond_orders)
+    bool   chain_gaps = true;     // Cartoon, ribbons, licorice, ball and stick: a dashed line over each break of a chain (md_gl_mol_set_chain_gaps)
+    bool   two_head_spheres = false;  // Cartoon: the head of a phospholipid as its head group and its backbone (CartoonGlyphs)
+    // Cartoon of nucleic acids, Å (before the scale of the lipids and nucleic acids): the radius of the band of the
+    // backbone, half its thickness, and that of the rims of the rings of the sugars and bases and of the sticks between them
+    float  nucleic_band_radius = CARTOON_NUCLEIC_BAND_RADIUS;
+    float  nucleic_ring_radius = CARTOON_NUCLEIC_RING_RADIUS;
 
     ElectronicStructureRepresentation electronic_structure = {};
     AtomAttributeColoring atom_attribute = {};
 	DipoleRepresentation dipole = {};
+    BoxRepresentation box = {};
+    bool periodic_images = true;    // Repeated in the periodic images of the view (view.periodic_images), as they are shown
+};
+
+// A group of representations. What it holds is shown only while the group is, and its filter, when it has one, is the
+// context of everything within it: their filters are evaluated within the atoms it picks, as the left hand side of 'in'
+// is within its right in a script - residue(1) is the first residue of the group, all is the group. A group within a
+// group has its filter evaluated within the outer one's in turn. Without a filter a group only groups, and what is in
+// it sees whatever context the group itself is in.
+struct RepresentationGroup {
+    RepresentationNode node = {0, 0, 0, true};
+
+    char name[64] = "group";
+    // Empty for no context of its own. Its result says whether the context is valid and whether it depends on the
+    // frame, the context it is evaluated in included.
+    AtomFilter filter = {};
+
+    bool enabled = true;
+    bool filt_is_dirty = true;
+    md_bitset_t atom_mask = {};     // what the filter picks within its context, empty without a filter
 };
 
 struct FrameCache {
@@ -988,19 +1065,10 @@ struct PickingReadbackRequest {
     mat4_t clip_to_world = MD_MAT4_IDENT_INIT;
 };
 
-// The frame sets of the script evaluation (md_script_eval_desc_t): every frame, and the timeline filter's
-enum {
-    SCRIPT_FRAME_SET_ALL = 0,
-    SCRIPT_FRAME_SET_FILTER,
-    SCRIPT_FRAME_SET_COUNT,
-};
-
-// The timeline filter as applied to SCRIPT_FRAME_SET_FILTER: frames [beg, end[, none while not enabled
-struct ScriptFilterFrames {
-    bool     enabled = false;
-    uint32_t beg = 0;
-    uint32_t end = 0;
-};
+// The key of the script evaluation's slot of a distribution or a volume over a timeline period, by its id
+// (md_script_eval_slot_request): asked for by what is shown over the period (series_resolve_histogram,
+// series_resolve_volume)
+#define SCRIPT_SLOT_PERIOD(id) (((uint64_t)1 << 32) | (uint64_t)(id))
 
 // What the script visualization is to show this frame (script_visualize_ref, script_visualize_str)
 struct ScriptVisTarget {
@@ -1062,13 +1130,12 @@ struct ApplicationState {
     LoadDatasetWindowState load_dataset;
 
     // --- FILES ---
-    // for keeping track of open files
     struct {
-        char molecule[1024]   = {0};
-        char trajectory[1024] = {0};
-        char workspace[1024]  = {0};
-
-        bool coarse_grained = false;
+        // The files the loaded system is built from, in the order they were loaded (see file_list.h).
+        // Kept by load_data_from_file, and by what frees the data they loaded (free_system_data,
+        // free_trajectory_data). A workspace stores this list and loads it again in the same order.
+        FileList list;
+        char workspace[1024] = {0};
     } files;
 
     // The idea for the file load queue is to fill it with files that are dropped onto the application
@@ -1084,10 +1151,20 @@ struct ApplicationState {
         CameraMode mode = CameraMode::Perspective;
 
         struct {
-            vec2_t sequence[JITTER_SEQUENCE_SIZE] {};
+            vec2_t sequence[JITTER_SEQUENCE_MAX] {};
         } jitter;
 
 		ViewTransform target = {};
+
+        // The part of the view that what the view is reset to is framed in: what the windows left uncovered when
+        // it was last focused with a double click (with settings.focus_in_free_space), or all of it. The projection is shifted so that the camera's
+        // look-at point is seen at its center (see ViewRegion); shift is where it is seen, animated like the camera.
+        ViewRegion region = {};
+        vec2_t shift = {0, 0};
+
+        // The periodic images shown: the scene again in the neighboring cells, this many each way along a, b and c, of
+        // the representations which have periodic_images (all, unless they opt out). The figure's: in the workspace.
+        int periodic_images[3] = {0, 0, 0};
     } view;
 
     struct {
@@ -1114,6 +1191,9 @@ struct ApplicationState {
         // computed where it is produced and uploaded straight away (upload_secondary_structure_weights,
         // interpolate_system_state), never read back and kept nowhere else.
         md_gl_mol_t         gl_mol = {};
+        // The spheres, tubes and capsules of the cartoon of the lipids and nucleic acids, built from sys beside gl_mol
+        // and derived from its atoms on the GPU (see cartoon_glyphs.h)
+        CartoonGlyphs       cartoon_glyphs = {};
 #if EXPERIMENTAL_GFX_API
         md_gfx_handle_t     gfx_structure = {};
 #endif
@@ -1151,6 +1231,10 @@ struct ApplicationState {
         // The (fractional) frame last interpolated, negative when there is none. A jump away from it
         // resets the temporal coherence of the backbone orientation (MolBit_ResetBackboneHistory).
         double              last_interpolated_frame = -1.0;
+        // The stride of the frames the displayed state was last interpolated between (playback_stride).
+        // Starting or stopping playback changes it without changing the time, so it is compared
+        // against to know when the displayed state has to be made again.
+        int                 last_interpolated_stride = 1;
         uint32_t            dirty_gpu_buffers = 0;
         uint64_t            gpu_buffers_version = 0;    // bumped whenever gl_mol is updated, for views that cache what they render from it
 
@@ -1210,10 +1294,8 @@ struct ApplicationState {
         } color;
 
         struct {
-            char buf[256] = "";
-            char error[256] = "";
+            AtomFilter filter;
             md_bitmask_t mask = {};
-            bool query_ok = false;
             bool query_invalid = true;
             bool show_window = false;
         } query;
@@ -1242,6 +1324,9 @@ struct ApplicationState {
     PickingRange   picking_range_atom {};   // Reserved picking range for atoms
     PickingRange   picking_range_bond {};   // Reserved picking range for bonds
     PickingRange   picking_range_backbone {};   // Reserved picking range for protein backbone segments (cartoon, ribbons)
+    PickingRange   picking_range_ring {};   // Reserved picking range for rings (circles of aromatic rings)
+    PickingRange   picking_range_glyph {};  // Reserved picking range for the points of the cartoon of lipids and nucleic acids
+    PickingRange   picking_range_gap {};    // Reserved picking range for the gaps of the chains, one index per component
 
     PickingHandler picking_handler {};      // Handler for managing picking interactions
 
@@ -1250,6 +1335,10 @@ struct ApplicationState {
         double frame = 0.0;  // double precision for long trajectories
         float fps = 10.f;
         float tension = 0.0f;
+        // While playing, the displayed state is interpolated between every stride:th frame only (0, stride,
+        // 2*stride, ... and the last), which smooths the motion out at the cost of fidelity to the frames
+        // skipped. A stopped animation always shows the trajectory itself. See playback_stride.
+        int stride = 1;
         InterpolationMode interpolation = InterpolationMode::CubicSpline;
         PlaybackMode mode = PlaybackMode::Stopped;
 
@@ -1258,18 +1347,8 @@ struct ApplicationState {
 
     // --- TIMELINE---
     struct {
-        struct {
-            bool enabled = false;
-            double beg_frame = 0;
-            double end_frame = 1;
-
-            struct {
-                bool enabled = false;
-                double extent_in_frames = 10;
-            } temporal_window;
-
-            uint64_t fingerprint = 0;
-        } filter;
+        // The named periods and markers along the timeline (see timeline_periods.h)
+        TimelinePeriods periods;
 
         struct {
             double beg_x = 0;
@@ -1297,10 +1376,6 @@ struct ApplicationState {
 
     // --- DISTRIBUTIONS ---
     struct {
-        struct {
-            bool enabled = false;
-        } filter;
-
         // What each subplot draws, by attribute path (see plot_series.h)
         PlotSubplot subplots[PLOT_MAX_SUBPLOTS];
         int num_subplots = 1;
@@ -1311,9 +1386,17 @@ struct ApplicationState {
     // --- VISUALS ---
     struct {
         struct {
-            vec3_t color = {1, 1, 1};
-            float intensity = 24.0f;
+            vec3_t color = {1, 1, 1};   // shown as picked: the scene is put over it after the display transform
         } background;
+
+        struct {
+            postprocess_pipeline::ShadingMode mode = postprocess_pipeline::ShadingMode_PhysicallyBased;
+            postprocess_pipeline::ColorSpace colors = postprocess_pipeline::ColorSpace_Linear;   // the look the colours had before
+            float light = 1.0f;         // strength of the directional light
+            float environment = 1.0f;   // strength of the light from the surroundings (physically based)
+            float ambient = 0.3f;       // basic
+            float specular = 0.25f;     // basic
+        } shading;
 
         struct { 
             bool enabled = true;
@@ -1332,7 +1415,7 @@ struct ApplicationState {
 
         struct {
             bool enabled = true;
-            postprocess_pipeline::Tonemapper tonemapper = postprocess_pipeline::Tonemapper_ACES;
+            postprocess_pipeline::Tonemapper tonemapper = postprocess_pipeline::Tonemapper_ACES;   // the look the shading had before
             float exposure = 1.0f;
             float gamma = 2.2f;
         } tonemapping;
@@ -1343,12 +1426,15 @@ struct ApplicationState {
             float aperture = 1.0f;      // percent of the view height (CoC of an object at infinity)
         } dof;
 
+        // Whether jagged edges are smoothed, and how: the mode is kept while off. Every mode smooths, so there is no
+        // being on with nothing applied. fxaa_active() and taa_active() say which pass runs.
         struct {
             bool enabled = true;
-        } fxaa;
+            AntiAliasingMode mode = AntiAliasingMode::TAA;
+        } anti_aliasing;
 
+        // The temporal resolve's settings, used in TAA mode
         struct {
-            bool enabled = true;
             bool jitter = true;
             float feedback_min = 0.80f;
             float feedback_max = 0.95f;
@@ -1370,20 +1456,19 @@ struct ApplicationState {
         } spline;
     } visuals;
 
-    struct {
-        bool enabled = false;
-        vec4_t color = {0, 0, 0, 0.5f};
-    } simulation_box;
-
     // --- REPRESENTATIONS ---
     struct {
+        // Both in the order the window lists them. Where each one is in the tree of groups is on the
+        // representation or group itself (representation_tree.h).
         md_array(Representation) reps = 0;
-        md_bitmask_t visibility_mask = {};     // the union of the masks of the enabled representations
+        md_array(RepresentationGroup) groups = 0;
+        uint32_t next_rep_id = 1;
+        uint32_t next_group_id = 1;
+        md_bitmask_t visibility_mask = {};     // the union of the masks of the shown representations
         uint64_t visibility_mask_hash = 0;
         bool atom_visibility_mask_dirty = false;
+        uint64_t gl_version = 0;    // bumped whenever what a representation draws is uploaded, for views that cache their image
         bool show_window = false;
-        bool needs_update = false;
-        bool advanced_mode = false;
     } representation;
 
     struct {
@@ -1408,11 +1493,8 @@ struct ApplicationState {
         mat4_t state_rotation = MD_MAT4_IDENT_INIT;
 
         struct {
-            char query[256] = "";
-            char error[256] = "";
-            bool valid = false;
+            AtomFilter filter;    // whether it depends on the frame (and is evaluated again in every one) is its result's
             bool enabled = false;
-            bool dynamic = false; // represents whether the query needs to be re-evaluated per frame.
             uint64_t version = 1;
             uint64_t evaluated_version = 0;
             uint64_t ir_fingerprint = 0;
@@ -1446,7 +1528,21 @@ struct ApplicationState {
     struct {
         bool keep_representations = false;
         bool exact_isosurfaces = false;     // volume::IsoRenderDesc::iso.exact for every isosurface view
+        // The look a session starts with (Visuals > Save as Default), as the factory sets it until saved. A workspace
+        // has its own, and loading one leaves these be. What depends on the computer rather than on the figure
+        // (ambient occlusion, anti-aliasing, VSync) is bound to the .ini as it is, in visuals.
+        struct {
+            decltype(visuals.background)  background;
+            decltype(visuals.shading)     shading;
+            decltype(visuals.tonemapping) tonemapping;
+            decltype(visuals.dof)         dof;
+        } look;
+        int  isosurface_rendering = 0;      // IsosurfaceRendering: raycast volumes or meshes of the fields (iso_meshes.h)
+        bool focus_in_free_space = true;    // A double click frames in what the windows leave of the view (view.region)
         float font_size = 18.0f;    // Matches the size the default font is baked at.
+        // The scene rendered at this fraction of the display's resolution (each side) and upscaled to it: by the TAA,
+        // which rebuilds the detail over frames, else a frame on its own. Screenshots are at the full resolution.
+        float render_scale = 1.0f;
     } settings;
 
     // Views onto the temporal attributes, plus the one array still owned here.
@@ -1495,10 +1591,9 @@ struct ApplicationState {
         // Every IR made (script_ir_create), freed by script_ir_collect once nothing can be using it
         md_array(md_script_ir_t*) all_irs = nullptr;
 
-        // One evaluation, over the frame sets SCRIPT_FRAME_SET_*: temporal properties once for every frame,
-        // distributions and volumes over each set's own frames
+        // One evaluation: every property over every frame, and the distributions and volumes shown over timeline
+        // periods in slots over their frames (SCRIPT_SLOT_PERIOD)
         md_script_eval_t* eval = nullptr;
-        ScriptFilterFrames filter_frames = {};      // as applied to SCRIPT_FRAME_SET_FILTER
         md_array(uint32_t) eval_frames = nullptr;   // what the running evaluation task works through
         // The visualization: the target is set anew every frame, the job computes it off the main thread, and
         // what is shown is the last result while it is still for the target (see script_vis_update)
@@ -1521,14 +1616,12 @@ struct ApplicationState {
     struct {
         bool show_window = false;
         int selected_atom_filter = 0;
-        int selected_traj_filter = 0;
+        int selected_traj_filter = 0;       // all frames, the current frame, or the frames of selected_traj_period
+        uint32_t selected_traj_period = 0;   // a timeline period, by id
         int selected_file_format = 0;
         struct {
-            char buf[256] = "";
-            char error[256] = "";
+            AtomFilter filter;
             md_bitset_t mask = {0};
-            bool is_valid = false;
-            bool is_dynamic = false;
             bool requires_evaluation = false;
         } query;
     } structure_export;
@@ -1536,6 +1629,8 @@ struct ApplicationState {
     bool show_script_window = true;
     bool show_script_reference_window = false;
     bool show_debug_window = false;
+    bool show_profiler_window = false;
+    bool profiler_keep_isomeshes = false;   // Windows > Profiler: the isosurface meshes drawn every frame (isomesh::RenderDesc::keep_drawing)
     bool show_property_export_window = false;
 
     TextEditor editor = {};
@@ -1740,6 +1835,21 @@ static inline void mask_set_component_by_selection_granularity(md_bitmask_t* mas
     mask_set_atom_by_selection_granularity(mask, range.beg, granularity, sys);
 }
 
+// Sets the bits of the atoms of a ring (md_system_t::ring), each grown by the granularity, for a hit on the circle of an
+// aromatic ring: at Atom granularity the ring itself, at coarser ones what its atoms are in
+static inline void mask_set_ring_by_selection_granularity(md_bitmask_t* mask, size_t ring_idx, SelectionGranularity granularity, const md_system_t& sys) {
+    ASSERT(mask);
+    if (ring_idx >= md_index_data_num_ranges(&sys.ring)) return;
+
+    const int32_t* beg = md_index_range_beg(&sys.ring, ring_idx);
+    const int32_t* end = md_index_range_end(&sys.ring, ring_idx);
+    for (const int32_t* it = beg; it != end; ++it) {
+        if (*it >= 0 && (size_t)*it < sys.atom.count) {
+            mask_set_atom_by_selection_granularity(mask, (size_t)*it, granularity, sys);
+        }
+    }
+}
+
 static inline void single_selection_sequence_clear(SingleSelectionSequence* seq) {
     ASSERT(seq);
     MEMSET(seq->idx, -1, sizeof(seq->idx));
@@ -1815,12 +1925,28 @@ void draw_picking_tooltip_window(const PickingHit& hit, const ApplicationState& 
 void interrupt_async_tasks(ApplicationState* state);
 
 // Dataset loading
-bool load_data_from_file(ApplicationState* app, str_t filepath, const loader::LoaderState& load_state);
+
+// What load_data_from_file made of a file
+enum LoadResult {
+    LoadResult_Failed = 0,
+    LoadResult_System,      // A new system, with its run when the file holds several frames
+    LoadResult_Trajectory,  // A new run for the loaded system
+    LoadResult_Supplement,  // Added to the loaded system, or along its run: the system and the run are as they were
+};
+
+// Loads a file in the given role (see file_list.h): FileRole_System replaces the system, FileRole_Trajectory
+// the run, a supplement adds to the system and a series to the run. opens_own_run: a system file of several
+// frames opens them as the run too. A file that loads is recorded in files.list.
+LoadResult load_data(ApplicationState* app, str_t filepath, const loader::LoaderState& load_state, FileRole role, bool opens_own_run = false);
+
+// Loads a file on its own, as one dropped on the window or opened from the menu: in the role its loader flags
+// give it (file_role), and a system file opens its own frames as the run.
+LoadResult load_data_from_file(ApplicationState* app, str_t filepath, const loader::LoaderState& load_state);
 void init_system_data(ApplicationState* app);
-// Publishes the trajectory as the loaded run and sets up everything that follows it. The trajectory
-// is files.trajectory, or the structure file itself when that holds several frames. traj_flags
+// Publishes the trajectory in run_file as the loaded run and sets up everything that follows it.
+// run_file is the trajectory, or the structure file itself when that holds several frames. traj_flags
 // takes MD_RUN_FLAG_DISABLE_CACHE_WRITE to leave no index beside the file.
-void init_trajectory_data(ApplicationState* app, uint32_t traj_flags = 0);
+void init_trajectory_data(ApplicationState* app, str_t run_file, uint32_t traj_flags = 0);
 
 // The loaded run's frame axis ("<run>/time"): its frame count, its times (resident, F64) and their
 // unit, which is none when the file does not know time and the values are frame ordinals. NULL,
@@ -1856,6 +1982,10 @@ void clear_system_frame_cache(ApplicationState* app);
 // Interpolate state
 void interpolate_system_state(ApplicationState* app);
 
+// The stride of the frames the displayed state is interpolated between: animation.stride while playing,
+// every frame otherwise.
+int playback_stride(const ApplicationState* app);
+
 // Workspace
 // See #workspace in viamd.cpp for what a workspace holds and the order it is loaded in
 void load_workspace(ApplicationState* app, str_t file);
@@ -1868,25 +1998,17 @@ bool save_workspace(ApplicationState* app, str_t file);
 void workspace_register_window(const char* name, bool* show);
 
 // Selections
+// What filters are evaluated and completed against: the system as it is shown, and the names of the script in the editor
+static inline md_filter_context_t filter_context(const ApplicationState* app) {
+    return md_filter_context_t{&app->mold.sys, &app->mold.state, app->script.ir};
+}
+
 // The selection keeps its own copy of atom_mask
 Selection* create_selection(ApplicationState* app, str_t name, md_bitset_t atom_mask = {});
 void remove_selection(ApplicationState* app, size_t idx);
 void remove_all_selections(ApplicationState* app);
 
-// Representations
-Representation* create_representation(ApplicationState* app, RepresentationType type = RepresentationType::SpaceFill, ColorMapping color_mapping = ColorMapping::Type, str_t filter = STR_LIT("all"));
-Representation* clone_representation(ApplicationState* app, const Representation& rep);
-void remove_representation(ApplicationState* app, size_t idx);
-void update_representation(ApplicationState* app, Representation* rep);
-void update_all_representations(ApplicationState* app);
-bool representation_uses_atom_colors(const Representation& rep);
-
-void flag_representation_as_dirty(Representation* rep);
-void flag_all_representations_as_dirty(ApplicationState* app);
-
-void remove_all_representations(ApplicationState* app);
-void create_default_representations(ApplicationState* app);
-void recompute_atom_visibility_mask(ApplicationState* app);
+// Representations and their groups: representation.h
 
 // Enumerates the complete dipole GROUPS in the system's attribute table, in name order - a handful
 // of entries, and no values are read. Returns the total number found and writes at most cap, so
@@ -1924,6 +2046,11 @@ ElectronicStructureSourceFlags es_source_mask(const md_system_t& sys);
 // until the representation's window has been drawn. Returns false when the system carries no
 // electronic structure at all, and leaves the representation untouched.
 bool electronic_structure_select_available_source(ElectronicStructureRepresentation* es, const md_system_t& sys);
+
+// Brings what an electronic structure representation draws up to date: its volume, evaluated again only
+// when what it is evaluated from changed (the frame among it), and the colours of its surfaces - from
+// atom_colors, the colours of the atoms as the representation has them, or from the field it is coloured by.
+void electronic_structure_representation_update(ApplicationState* state, Representation* rep, const uint32_t* atom_colors);
 
 
 // Turns a dipole group name into something presentable: "ground_state" -> "Ground State".
@@ -2291,6 +2418,20 @@ static inline md_gl_picking_offset_t gl_picking_offset(const ApplicationState& s
         .atom_base     = state.picking_range_atom.beg,
         .bond_base     = state.picking_range_bond.beg,
         .backbone_base = state.picking_range_backbone.beg,
+        .ring_base     = state.picking_range_ring.beg,
+        .gap_base      = state.picking_range_gap.beg,
+    };
+}
+
+// The picking offsets for drawing the glyphs of the cartoon of the lipids and nucleic acids (CartoonGlyphs), a molecule of
+// their own: their spheres and capsules write the index of a point, their tubes that of a control point after the points,
+// their slabs their index after those (cartoon_glyphs_picked_point)
+static inline md_gl_picking_offset_t gl_picking_offset_glyphs(const ApplicationState& state) {
+    return {
+        .atom_base     = state.picking_range_glyph.beg,
+        .bond_base     = state.picking_range_glyph.beg,
+        .backbone_base = state.picking_range_glyph.beg + state.mold.cartoon_glyphs.num_points,
+        .ring_base     = state.picking_range_glyph.beg + state.mold.cartoon_glyphs.num_points + state.mold.cartoon_glyphs.num_tube_points,
     };
 }
 
@@ -2341,6 +2482,7 @@ struct InteractionSurfaceHitArgs {
     uint32_t width;
     uint32_t height;
     const mat4_t& clip_to_world;
+    float pixel_scale = 1.0f;   // the fbo's pixels per framebuffer pixel: the render scale, where it is upscaled
 };
 
 bool interaction_surface_hit_extract(PickingHit* out_hit, const InteractionSurfaceState& state, const InteractionSurfaceHitArgs& args);
@@ -2348,6 +2490,7 @@ bool interaction_surface_hit_extract(PickingHit* out_hit, const InteractionSurfa
 struct InteractionSurfaceViewTransformArgs {
     const Camera& camera;
     const TrackballControllerParam& trackball_param = {};
+    vec2_t view_shift = {0, 0};     // Where the projection is shifted to (see ViewRegion)
 };
 
 struct InteractionSurfaceViewTransformResult {
@@ -2431,10 +2574,12 @@ FileQueue::Entry file_queue_pop(FileQueue* queue);
 void file_queue_process(ApplicationState* state);
 
 // view
-void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask = nullptr);
-static inline void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitmask_t* mask) {
+// A good view of the atoms in mask (all of them when null), framed in region of the view (see ViewRegion and
+// camera_compute_default_view). fov_y is that of the camera that looks through it.
+void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask = nullptr, float fov_y = Camera().fov_y, const ViewRegion& region = {});
+static inline void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitmask_t* mask, float fov_y = Camera().fov_y, const ViewRegion& region = {}) {
     const md_bitset_t members = md_bitmask_view(mask);
-    reset_view(transform, state, &members);
+    reset_view(transform, state, &members, fov_y, region);
 }
 
 // Script IR lifetime

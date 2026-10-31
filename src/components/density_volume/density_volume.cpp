@@ -29,6 +29,7 @@ struct DensityVolume : viamd::EventHandler {
 
     // The volume property shown, by path; empty for none. One at a time.
     SeriesKey volume_key = {};
+    ApplicationState* app = nullptr;
 
     md_allocator_i* arena = nullptr;
 
@@ -83,6 +84,10 @@ struct DensityVolume : viamd::EventHandler {
 
     bool dirty_rep = false;
     bool dirty_vol = false;
+
+    // How the volume shown stands against the script (series_state), and what it is called, as of the last update
+    SeriesState volume_state = {};
+    char volume_label[64] = "";
 
     struct {
         RepresentationType type = RepresentationType::BallAndStick;
@@ -152,6 +157,9 @@ struct DensityVolume : viamd::EventHandler {
         if (volume_key.path[0] != '\0') {
             viamd::write_str(state, STR_LIT("PropertySource"), str_from_cstr(series_source_name(volume_key.source)));
             viamd::write_str(state, STR_LIT("PropertyPath"), str_from_cstr(volume_key.path));
+            if (volume_key.period != 0) {
+                viamd::write_int(state, STR_LIT("PropertyPeriod"), (int)volume_key.period);
+            }
         }
         viamd::write_bool(state, STR_LIT("DvrEnabled"), dvr.enabled);
         viamd::write_int (state, STR_LIT("DvrColormap"), dvr.tf.colormap);
@@ -187,16 +195,19 @@ struct DensityVolume : viamd::EventHandler {
 
     void deserialize(viamd::deserialization_state_t& state) {
         SeriesSource source = SeriesSource_Script;
+        uint32_t period = 0;
+        str_t path = {};
         str_t ident, arg;
         while (viamd::next_entry(ident, arg, state)) {
             if (str_eq_cstr(ident, "PropertySource")) {
                 str_t name;
                 viamd::extract_str(name, arg);
-                series_source_from_name(&source, name);
+                series_source_from_name(&source, name, &period);
+            } else if (str_eq_cstr(ident, "PropertyPeriod")) {
+                int i = 0;
+                if (viamd::extract_int(i, arg)) period = (uint32_t)MAX(i, 0);
             } else if (str_eq_cstr(ident, "PropertyPath")) {
-                str_t path;
                 viamd::extract_str(path, arg);
-                volume_key = series_key(source, path);
             } else if (str_eq_cstr(ident, "DvrEnabled")) {
                 viamd::extract_bool(dvr.enabled, arg);
             } else if (str_eq_cstr(ident, "DvrColormap")) {
@@ -253,6 +264,9 @@ struct DensityVolume : viamd::EventHandler {
                 }
             }
         }
+        if (!str_empty(path)) {
+            volume_key = series_key(source, path, SeriesVariant_Values, period);
+        }
         // Workspaces from before the two were exclusive can have both on: DVR wins, as it did by default
         if (dvr.enabled && iso.enabled) {
             iso.enabled = false;
@@ -278,7 +292,10 @@ struct DensityVolume : viamd::EventHandler {
         SeriesVolumeView vol_view = {};
         const bool resolved = selected && series_resolve_volume(&vol_view, state, volume_key);
 
-        const md_attribute_t* prop_attr = resolved ? vol_view.attr : NULL;
+        const float* vol_data = resolved ? vol_view.data : NULL;
+        const uint32_t* vol_dim = vol_view.dim;
+        volume_state = resolved ? vol_view.state : SeriesState{};
+        str_copy_to_char_buf(volume_label, sizeof(volume_label), str_from_cstr(vol_view.label));
         const md_script_vis_ref_t vis_ref = vol_view.vis_ref;
         const uint64_t data_version = vol_view.version;
 
@@ -316,7 +333,7 @@ struct DensityVolume : viamd::EventHandler {
         }
 
         if (dirty_rep) {
-            if (prop_attr && !md_script_vis_ref_empty(vis_ref)) {
+            if (vol_data && !md_script_vis_ref_empty(vis_ref)) {
                 dirty_rep = false;
                 size_t num_reps = 0;
                 bool result = false;
@@ -338,8 +355,7 @@ struct DensityVolume : viamd::EventHandler {
                         vec3_t min_aabb = vec3_set1(-s);
                         vec3_t max_aabb = vec3_set1( s);
                         model_mat = volume::compute_model_to_world_matrix(min_aabb, max_aabb);
-                        const uint32_t* dim = prop_attr->format.shape;
-                        voxel_spacing = vec3_t{2*s / dim[0], 2*s / dim[1], 2*s / dim[2]};
+                        voxel_spacing = vec3_t{2*s / vol_dim[0], 2*s / vol_dim[1], 2*s / vol_dim[2]};
                         default_view = compute_optimal_view((min_aabb + max_aabb) * 0.5f, (max_aabb - min_aabb) * 0.5f);
                         if (reset_view) {
                             target = default_view;
@@ -417,14 +433,14 @@ struct DensityVolume : viamd::EventHandler {
         }
 
         if (dirty_vol) {
-            if (prop_attr) {
+            if (vol_data) {
                 dirty_vol = false;
                 if (!volume_texture.id) {
-                    int dim[3] = { (int)prop_attr->format.shape[0], (int)prop_attr->format.shape[1], (int)prop_attr->format.shape[2] };
+                    int dim[3] = { (int)vol_dim[0], (int)vol_dim[1], (int)vol_dim[2] };
                     gl::init_texture_3D(&volume_texture.id, dim[0], dim[1], dim[2], GL_R16F);
                     MEMCPY(volume_texture.dim, dim, sizeof(dim));
                 }
-                gl::set_texture_3D_data(volume_texture.id, 0, prop_attr->data, GL_R32F);
+                gl::set_texture_3D_data(volume_texture.id, 0, vol_data, GL_R32F);
                 volume::notify_data_changed(volume_texture.id);
             }
         }
@@ -449,12 +465,14 @@ struct DensityVolume : viamd::EventHandler {
                 if (ImGui::BeginMenu("Property")) {
                     // One volume at a time: picking one replaces the other, picking it again hides it
                     int candidate_count = 0;
-                    auto list = [&](SeriesSource source) {
-                        series_for_each_script_property(state, source, MD_SCRIPT_PROPERTY_FLAG_VOLUME, [&](const SeriesKey& key) {
+                    auto list = [&](uint32_t period) {
+                        series_for_each_script_property(state, SeriesSource_Script, MD_SCRIPT_PROPERTY_FLAG_VOLUME, [&](const SeriesKey& over_all) {
+                            SeriesKey key = over_all;
+                            key.period = period;
                             char label[96];
                             series_label(label, sizeof(label), state, key);
                             const bool is_selected = series_key_equal(key, volume_key);
-                            ImGui::PushID(key.source);
+                            ImGui::PushID((int)period);
                             ImPlot::ItemIcon(series_default_color(state, key)); ImGui::SameLine();
                             if (ImGui::Selectable(label, is_selected)) {
                                 volume_key = is_selected ? SeriesKey{} : key;
@@ -468,9 +486,11 @@ struct DensityVolume : viamd::EventHandler {
                             candidate_count += 1;
                         });
                     };
-                    list(SeriesSource_Script);
-                    if (state->timeline.filter.enabled) {
-                        list(SeriesSource_ScriptFiltered);
+                    // Over every frame, and over each timeline period: "v (Production)"
+                    list(0);
+                    for (int i = 0; i < state->timeline.periods.count && candidate_count > 0; ++i) {
+                        if (i == 0) ImGui::SeparatorText("Over a period");
+                        list(state->timeline.periods.items[i].id);
                     }
 
                     if (candidate_count == 0) {
@@ -668,6 +688,14 @@ struct DensityVolume : viamd::EventHandler {
             const ImRect canvas_rect = ImRect(canvas_p0, canvas_p1);
             PickingHit hit = {};
 
+            // A volume dragged here (from its mark in the script editor) is the one shown
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(VOLUME_SERIES_DND)) {
+                    volume_key = ((const SeriesDragPayload*)payload->Data)->key;
+                }
+                ImGui::EndDragDropTarget();
+            }
+
             if (surface_state.hovered) {
                 InteractionSurfaceHitArgs args = {
                     .picking_surface = &picking_surface,
@@ -734,6 +762,23 @@ struct DensityVolume : viamd::EventHandler {
             ImDrawList* draw_list = ImGui::GetWindowDrawList();
             draw_list->AddImage((ImTextureID)(intptr_t)gbuf.tex.transparency, canvas_p0, canvas_p1, { 0,1 }, { 1,0 });
             draw_list->AddRect(canvas_p0, canvas_p1, IM_COL32(50, 50, 50, 255));
+
+            if (volume_state.status != SeriesStatus_Current) {
+                // What is shown is not all of what the script says: how it stands, in the corner
+                char suffix[32], text[128], tip[160];
+                series_state_suffix(suffix, sizeof(suffix), volume_state);
+                snprintf(text, sizeof(text), "%s%s", volume_label, suffix);
+                const ImVec2 pad = ImGui::GetStyle().FramePadding;
+                const ImVec2 p0 = canvas_p0 + pad;
+                const ImVec2 p1 = p0 + ImGui::CalcTextSize(text) + pad * 2.0f;
+                const bool outdated = volume_state.status >= SeriesStatus_Outdated;
+                draw_list->AddRectFilled(p0, p1, outdated ? IM_COL32(120, 80, 20, 220) : IM_COL32(40, 40, 40, 200), ImGui::GetStyle().FrameRounding);
+                draw_list->AddText(p0 + pad, IM_COL32(255, 255, 255, 255), text);
+                if (ImGui::IsMouseHoveringRect(p0, p1)) {
+                    series_state_describe(tip, sizeof(tip), volume_state);
+                    ImGui::SetTooltip("%s", tip);
+                }
+            }
 
             if (dvr.enabled && legend.enabled) {
                 ImVec2 canvas_ext = canvas_p1 - canvas_p0;
@@ -914,12 +959,15 @@ struct DensityVolume : viamd::EventHandler {
                             .colors = iso.colors,
                             .exact = state->settings.exact_isosurfaces,
                         },
-                        // Lit like the compose pass lights the reference structures: env = background / 4
                         .shading = {
-                            .env_radiance = state->visuals.background.color * state->visuals.background.intensity * 0.25f,
                             .roughness = 0.3f,
-                            .dir_radiance = {10,10,10},
                             .ior = 1.5f,
+                            .mode = state->visuals.shading.mode,
+                            .ambient = state->visuals.shading.ambient,
+                            .specular = state->visuals.shading.specular,
+                            .colors = state->visuals.shading.colors,
+                            .light = state->visuals.shading.light,
+                            .environment = state->visuals.shading.environment,
                         },
                     };
                     iso_written = volume::render_isosurfaces(vol_desc);
@@ -961,7 +1009,13 @@ struct DensityVolume : viamd::EventHandler {
             postprocess_pipeline::Settings postprocess_settings = {};
             postprocess_pipeline::Inputs postprocess_inputs = {};
 
-            postprocess_settings.background_color = state->visuals.background.color * state->visuals.background.intensity;
+            postprocess_settings.background_color = state->visuals.background.color;
+            postprocess_settings.shading.mode = state->visuals.shading.mode;
+            postprocess_settings.shading.ambient = state->visuals.shading.ambient;
+            postprocess_settings.shading.specular = state->visuals.shading.specular;
+            postprocess_settings.shading.colors = state->visuals.shading.colors;
+            postprocess_settings.shading.light = state->visuals.shading.light;
+            postprocess_settings.shading.environment = state->visuals.shading.environment;
             postprocess_settings.tonemap.enabled = state->visuals.tonemapping.enabled;
             postprocess_settings.tonemap.mode = state->visuals.tonemapping.tonemapper;
             postprocess_settings.tonemap.exposure = state->visuals.tonemapping.exposure;
@@ -1018,6 +1072,7 @@ struct DensityVolume : viamd::EventHandler {
                 // Initialize component
                 ASSERT(e.payload_type == viamd::EventPayloadType_ApplicationState);
                 ApplicationState* state = (ApplicationState*)e.payload;
+                app = state;
                 arena = md_arena_allocator_create(state->allocator.persistent, MEGABYTES(1));
                 picking_surface_init(&picking_surface, interaction_surface_density_vol);
                 workspace_register_window("DensityVolume", &show_window);
@@ -1036,6 +1091,10 @@ struct DensityVolume : viamd::EventHandler {
                 }
                 break;
             }
+            case viamd::EventType_ViamdDeserializeEnd:
+                // Over the timeline filter, from before there were periods: over the period it followed
+                if (app) volume_key.period = series_legacy_period(app, volume_key.period);
+                break;
             case viamd::EventType_ViamdShutdown: {
                 // Cleanup component
                 md_arena_allocator_destroy(arena);
