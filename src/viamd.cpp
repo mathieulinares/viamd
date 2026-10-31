@@ -2,6 +2,9 @@
 #include <md_util.h>
 #include <md_dssp.h>
 #include <md_qm.h>
+#if MD_AMBER_NETCDF
+#include <md_amber_netcdf.h>
+#endif
 
 #include <stdarg.h>
 
@@ -1729,7 +1732,24 @@ static FileEntry file_entry(str_t path, const loader::LoaderState& load_state) {
     e.type = load_state.type;
     e.explicit_type = (load_state.flags & LoaderFlag_ExplicitType) != 0;
     str_copy_to_char_buf(e.arg, sizeof(e.arg), str_from_cstr(load_state.arg));
+    if (load_state.coordinates) {
+        md_temp_scope_t temp = md_temp_begin();
+        const str_t coordinates = md_path_make_canonical(str_from_cstr(load_state.coordinates), md_temp_allocator(temp));
+        str_copy_to_char_buf(e.coordinates, sizeof(e.coordinates), coordinates);
+        md_temp_end(temp);
+    }
     return e;
+}
+
+static void file_queue_remove_path(FileQueue* queue, str_t path, md_allocator_i* alloc) {
+    uint32_t write = queue->tail;
+    for (uint32_t read = queue->tail; read != queue->head; read = (read + 1) % ARRAY_SIZE(queue->arr)) {
+        const FileQueue::Entry entry = queue->arr[read];
+        if (str_eq(md_path_make_canonical(entry.path, alloc), path)) continue;
+        queue->arr[write] = entry;
+        write = (write + 1) % ARRAY_SIZE(queue->arr);
+    }
+    queue->head = write;
 }
 
 // Opens the run in path for the loaded system, replacing the one it has (one run per system for now).
@@ -1816,6 +1836,14 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
                 VIAMD_LOG_ERROR("Failed to load supplemental data from file '" STR_FMT "'", STR_ARG(path_to_file));
             }
         } else if (role == FileRole_System) {
+            const str_t coordinates = load_state.coordinates ?
+                md_path_make_canonical(str_from_cstr(load_state.coordinates), state->allocator.frame) : str_t{};
+            if (load_state.type == LoaderType_AMBER_PRMTOP &&
+                (str_empty(coordinates) || coordinates.len >= sizeof(FileEntry::coordinates) ||
+                 !md_path_is_valid(coordinates) || md_path_is_directory(coordinates))) {
+                VIAMD_LOG_ERROR("Amber topology needs a matching rst7/inpcrd or NetCDF coordinate file");
+                return LoadResult_Failed;
+            }
             interrupt_async_tasks(state);
             free_trajectory_data(state);
             free_system_data(state);
@@ -1829,7 +1857,6 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
                 return LoadResult_Failed;
             }
             result = LoadResult_System;
-            VIAMD_LOG_SUCCESS("Successfully loaded molecular data from file '" STR_FMT "'", STR_ARG(path_to_file));
 
             // In the list before the system is initialized, so that what handles that sees what it was built from
             file_list_record(&state->files.list, file_entry(path_to_file, load_state), role, state->allocator.persistent);
@@ -1838,7 +1865,8 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             // Inferred whatever the data is, coarse grained or not: mdlib tells beads from atoms (and Martini from
             // other models) itself, and leaves out what it cannot derive for them (bonds, structures, backbones)
             md_infer_flags_t flags = MD_UTIL_INFER_ALL;
-            if ((load_state.flags & LoaderFlag_Topology) && state->mold.sys.bond.count > 0) {
+            if ((load_state.flags & LoaderFlag_Topology) &&
+                (state->mold.sys.bond.count > 0 || load_state.type == LoaderType_AMBER_PRMTOP)) {
                 // The file's bonds are the force field's; inferring would replace them with a guess.
                 // Structures and rings are still derived, from those bonds. A topology format that
                 // carried no bonds at all (an H5MD file without connectivity) has none to protect, and
@@ -1854,8 +1882,28 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             // A structure file of several frames (a multi model PDB, an XYZ trajectory) is its own run as well. Here
             // rather than by the caller, so that the run is there for what handles ViamdLoadData below.
             if (opens_own_run) {
-                open_run(state, path_to_file, load_state);
+                if (load_state.type == LoaderType_AMBER_PRMTOP) {
+#if MD_AMBER_NETCDF
+                    if (md_amber_netcdf_file_is_trajectory(coordinates)) {
+                        loader::LoaderState coordinate_loader = {};
+                        loader::init(&coordinate_loader, coordinates);
+                        coordinate_loader.flags |= load_state.flags & LoaderFlag_DisableCacheWrite;
+                        if (!open_run(state, coordinates, coordinate_loader)) {
+                            VIAMD_LOG_ERROR("Failed to open the Amber coordinate trajectory");
+                            free_trajectory_data(state);
+                            free_system_data(state);
+                            return LoadResult_Failed;
+                        }
+                    }
+#endif
+                } else {
+                    open_run(state, path_to_file, load_state);
+                }
             }
+            if (result == LoadResult_System && load_state.type == LoaderType_AMBER_PRMTOP) {
+                file_queue_remove_path(&state->file_queue, coordinates, state->allocator.frame);
+            }
+            VIAMD_LOG_SUCCESS("Successfully loaded molecular data from file '" STR_FMT "'", STR_ARG(path_to_file));
         } else if (role == FileRole_Trajectory) {
             if (!state->mold.sys.atom.count) {
                 VIAMD_LOG_ERROR("Before loading a trajectory, molecular data needs to be present");
@@ -2451,11 +2499,25 @@ void load_workspace(ApplicationState* data, str_t filename) {
         if (in.entry.arg[0] != '\0') {
             loader_state.arg = in.entry.arg;
         }
+        if (in.entry.coordinates[0] != '\0') {
+            loader_state.coordinates = in.entry.coordinates;
+        }
+
+        const FileEntry* loaded_system = file_list_system_file(&data->files.list);
+        const FileEntry* loaded_run = file_list_run_file(&data->files.list);
+        if (in.role == FileRole_Trajectory && loaded_system &&
+            loaded_system->type == LoaderType_AMBER_PRMTOP && loaded_system->coordinates[0] &&
+            strcmp(loaded_system->coordinates, in.entry.path) == 0 &&
+            loaded_run && strcmp(loaded_run->path, in.entry.path) == 0) {
+            // Loading a topology with a NetCDF coordinate dependency opens that file as its run.
+            // The workspace also lists the run input, which has already been restored here.
+            continue;
+        }
 
         LoadResult result = LoadResult_Failed;
         if (!md_path_is_valid(path)) {
             VIAMD_LOG_ERROR("Workspace: the file '%s' is not there", in.entry.path);
-        } else if ((loader_state.flags & LoaderFlag_RequiresDialogue) && !loader_state.arg) {
+        } else if ((loader_state.flags & LoaderFlag_RequiresDialogue) && !loader_state.arg && !loader_state.coordinates) {
             // What the dialog would have asked (the LAMMPS atom format) is not stored with the file
             VIAMD_LOG_ERROR("Workspace: '%s' has to be loaded through File > Open File..., the workspace does not say how to read it", in.entry.path);
         } else {
@@ -6334,6 +6396,33 @@ void file_queue_process(ApplicationState* state) {
                 str_copy_to_char_buf(state->load_dataset.path_buf, sizeof(state->load_dataset.path_buf), e.path);
                 state->load_dataset.path_changed = true;
                 state->load_dataset.show_window = true;
+                if (loader_state.type == LoaderType_AMBER_PRMTOP) {
+                    str_t restart = {}, trajectory = {};
+                    size_t restarts = 0, trajectories = 0;
+                    const FileQueue& queue = state->file_queue;
+                    for (uint32_t i = queue.tail; i != queue.head; i = (i + 1) % ARRAY_SIZE(queue.arr)) {
+                        str_t candidate_ext = {};
+                        extract_ext(&candidate_ext, queue.arr[i].path);
+                        if (str_eq_ignore_case(candidate_ext, STR_LIT("rst7")) ||
+                            str_eq_ignore_case(candidate_ext, STR_LIT("inpcrd")) ||
+                            str_eq_ignore_case(candidate_ext, STR_LIT("restrt")) ||
+                            str_eq_ignore_case(candidate_ext, STR_LIT("rst")) ||
+                            str_eq_ignore_case(candidate_ext, STR_LIT("ncrst"))) {
+                            restart = queue.arr[i].path;
+                            ++restarts;
+                        }
+#if MD_AMBER_NETCDF
+                        else if (loader::type_from_ext(candidate_ext) == LoaderType_AMBER_NETCDF) {
+                            trajectory = queue.arr[i].path;
+                            ++trajectories;
+                        }
+#endif
+                    }
+                    if (restarts == 1 || (restarts == 0 && trajectories == 1)) {
+                        str_copy_to_char_buf(state->load_dataset.coordinates_buf, sizeof(state->load_dataset.coordinates_buf),
+                                             restarts ? restart : trajectory);
+                    }
+                }
             } else {
                 loader_state.flags |= (e.flags & FileFlags_DisableCacheWrite) ? LoaderFlag_DisableCacheWrite : 0;
                 const LoadResult result = load_data_from_file(state, e.path, loader_state);

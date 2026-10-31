@@ -1,9 +1,10 @@
-# Amber support: NetCDF trajectories and `mdout`/`mden` energies
+# Amber topology, trajectory, and energy support
 
-Adds Amber trajectory and energy support to VIAMD, using the same pipeline as GROMACS: an Amber
-NetCDF trajectory loads like an XTC/TRR, and Amber energy output loads like an EDR. No Amber-specific
-UI was needed: playback, analysis, **System → Series**, Timeline/Distributions and `attr()` scripting
-work unchanged.
+Adds Amber support to VIAMD using the same pipeline as GROMACS: an Amber NetCDF trajectory loads
+like an XTC/TRR, Amber `mdout`/`mden` energies load like an EDR, and a native Amber topology plus
+coordinates loads like a system from TPR. The existing PDB-based workflow remains supported.
+Playback, analysis, **System → Series**, Timeline/Distributions and `attr()` scripting use the
+existing VIAMD pipeline.
 
 Full implementation details: [docs/amber-support.md](docs/amber-support.md).
 
@@ -25,8 +26,17 @@ Full implementation details: [docs/amber-support.md](docs/amber-support.md).
   - A `source` attribute records the file path.
   - Before publishing, the reader checks that every trajectory frame has a matching energy
     sample.
+  - Restarted runs concatenated in one file are published as separate `segment_N` series,
+    retaining original timestamps rather than applying a guessed offset.
   - Terms that `mden` shares with `mdout` use the `mdout` names, so
     `attr("amber_energy/etot")` works with either file.
+- **Native Amber systems**, from `.prmtop`/`.parm7` plus `.inpcrd`/`.rst7`, a classic
+  `AMBERRESTART`, or the first frame of an Amber NetCDF trajectory.
+  - Imports atom/residue metadata, charges, masses and explicit bonds.
+  - When the trajectory supplies initial coordinates, VIAMD also opens it as the run.
+  - A separately loaded PDB remains supported without topology; a matching `.prmtop` can also
+    be applied to that structure before opening the trajectory. Atom/residue order and names
+    are checked before applying topology bonds.
 - **Detection**
   - Amber energy output is recognized from its contents: `.out`, `.log`, and the extensionless
     `mdout`/`mden` files.
@@ -39,21 +49,29 @@ Full implementation details: [docs/amber-support.md](docs/amber-support.md).
 
 **mdlib** (`ext/mdlib`, `amber` branch):
 
-- New readers: `src/md_amber_netcdf.{c,h}` and `src/md_amber_energy.{c,h}`.
+- New readers: `src/md_amber_netcdf.{c,h}`, `src/md_amber_energy.{c,h}` and
+  `src/md_amber_prmtop.{c,h}`.
 - Build changes: CMake option, vcpkg feature and `CheckVCPKG.cmake`.
-- New tests: `unittest/test_amber_netcdf.c` and `unittest/test_amber_energy.c`.
+- New tests: Amber NetCDF, topology/restart loading and energy parsing/segmentation.
 - New synthetic fixtures in `unittest/amber_energy_data/`, tracked with mdlib.
 
 **VIAMD:**
 
-- `src/loader.{h,cpp}`: adds `LoaderType_AMBER_NETCDF` and `LoaderType_AMBER_ENERGY`, plus
-  content detection and the extension fix.
-- `src/main.cpp`: the Open dialog uses the same detection as drag-and-drop.
-- `src/viamd.cpp`: drop priority uses content detection; the success message shows the
-  `attr()` path to use.
+- `src/loader.{h,cpp}`: adds Amber NetCDF, energy and topology loaders, plus content detection
+  and the extension fix. A topology supplements an existing structure, or builds a system when
+  supplied with separate coordinates.
+- `src/main.cpp`: the Open dialog requests Amber coordinates for a new topology-based system,
+  and explains the PDB-supplement path when a structure is already loaded; drag-and-drop can
+  preselect a sole matching restart or trajectory.
+- `src/viamd.cpp` and `src/file_list.cpp`: topology-coordinate dependencies are recorded in
+  workspaces, and a NetCDF coordinate trajectory is also opened as a run.
 - `src/components/dataset/dataset.cpp`: Amber energy files are shown as **Energies**.
-- `test/test_loader.cpp` and `test/test_file_list.cpp`: new loader tests.
+- `test/test_loader.cpp` and `test/test_file_list.cpp`: new loader tests, including topology
+  application to a matching PDB and rejection of mismatched atom names.
 - `docs/amber-support.md`: new documentation.
+- `datasets/amber/`: a compact, single-system NMA example containing the PDB, topology, restart,
+  trajectory, `mdout`, `.out` alias and an `mden` companion. See its README for provenance and
+  which files were converted or derived.
 - `.gitmodules`: temporarily points mdlib to the published `mathieulinares/mdlib` fork. Restore
   the upstream URL after the mdlib changes are available there.
 
@@ -63,10 +81,12 @@ hash after a squash or rebase merge).
 
 ## Testing
 
-- The full `md_unittest` (855 tests) and `viamd_test` (120 tests) suites passed before moving
-  the Amber fixtures into mdlib.
-- After the move: all 5 Amber energy tests and all 13 VIAMD loader tests pass.
-- Real files checked by hand in the GUI:
+- The earlier trajectory/energy changes passed targeted reader and loader tests; these results
+  predate the native-topology and restarted-segment additions.
+- New tests cover `.prmtop` plus ASCII restart loading, applying topology to a matching PDB,
+  rejecting mismatched atom names, and distinct restarted energy segments. They have not been
+  run yet.
+- Real files checked by hand in the GUI during the earlier trajectory/energy work:
   - `mdout`: Zenodo 14673608, `pmemd` 18, with its trajectory.
   - `mden`: the CAR example, `pmemd.cuda`, with its trajectory.
 - Real trajectories also checked: MDAnalysis `ace_tip3p`, periodic, and cpptraj `trpzip2`,
@@ -74,9 +94,10 @@ hash after a squash or rebase merge).
 
 ## Known limitations
 
-- The structure must come from a separately loaded PDB with the trajectory's atom order. Native
-  `.prmtop`/`.rst7` support is future work.
-- Not supported yet: NetCDF-4, legacy `.mdcrd`, minimization output, and restarted runs
-  concatenated in one energy file.
+- PDB remains supported, but its atom order (like the order of topology coordinates) must match
+  the trajectory; only atom count is checked automatically.
+- CHAMBER topologies and nonstandard Amber topology variants are not supported.
+- Not supported yet: NetCDF-4, legacy `.mdcrd`, minimization output, and trajectory
+  velocities/forces.
 
 Details: [docs/amber-support.md](docs/amber-support.md#limitations-and-future-work).

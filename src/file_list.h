@@ -57,6 +57,7 @@ struct FileEntry {
     LoaderType type = LoaderType_Undefined;     // The loader the file was read with
     bool       explicit_type = false;           // The loader was chosen by the user rather than told from the file
     char       arg[256] = "";                   // The loader's argument (the LAMMPS atom format), empty when none
+    char       coordinates[1024] = "";         // Dependent Amber coordinates, canonical like path
     int        run = -1;                        // The run it belongs to (index into FileList::runs), -1 for the system's own
     bool       missing = false;                 // Named by a workspace but not loaded: kept, so a save does not drop it
 };

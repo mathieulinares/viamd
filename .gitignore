@@ -26,6 +26,7 @@
 *.exe
 *.out
 *.app
+!datasets/amber/nma.out
 
 # Settings file
 *.ini

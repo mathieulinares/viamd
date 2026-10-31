@@ -229,6 +229,32 @@ UTEST(viamd_file_list, workspace_round_trip) {
     EXPECT_EQ(0u, r.plan.skipped_systems + r.plan.skipped_runs + r.plan.skipped_inputs);
 }
 
+UTEST(viamd_file_list, amber_topology_coordinate_dependency_round_trips) {
+    md_allocator_i* alloc = md_get_heap_allocator();
+    char folder_buf[1024];
+    const size_t folder_len = md_path_write_canonical(folder_buf, sizeof(folder_buf), STR_LIT(VIAMD_AMBER_DATA_DIR));
+    ASSERT_GT(folder_len, 0u);
+    const str_t folder = {folder_buf, folder_len};
+    const std::string topology = std::string(folder.ptr, folder.len) + "nma.prmtop";
+    const std::string coordinates = std::string(folder.ptr, folder.len) + "nma.inpcrd";
+    const std::string workspace = std::string(folder.ptr, folder.len) + "nma.via";
+
+    List list;
+    FileEntry entry = file(topology.c_str(), LoaderType_AMBER_PRMTOP);
+    snprintf(entry.coordinates, sizeof(entry.coordinates), "%s", coordinates.c_str());
+    ASSERT_TRUE(list.record(entry, FileRole_System));
+
+    Written written(workspace.c_str(), alloc);
+    ASSERT_EQ(1, file_list_serialize(written.s, &list.list, 0, 0));
+    EXPECT_TRUE(contains(written.text(), "[Input]\nSystem=0\nPath=./nma.prmtop\n"));
+    EXPECT_TRUE(contains(written.text(), "Coordinates=./nma.inpcrd\n"));
+
+    Read read(written.text(), folder);
+    ASSERT_EQ(1u, md_array_size(read.plan.inputs));
+    EXPECT_STREQ(topology.c_str(), read.plan.inputs[0].entry.path);
+    EXPECT_STREQ(coordinates.c_str(), read.plan.inputs[0].entry.coordinates);
+}
+
 UTEST(viamd_file_list, the_order_of_the_sections_does_not_matter) {
     const str_t text = STR_LIT(
         "[Input]\nRun=5\nPath=/d/b.edr\n"

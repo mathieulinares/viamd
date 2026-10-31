@@ -356,6 +356,7 @@ enum class ElectronicStructureLegacyType {
 struct LoadDatasetWindowState {
     char path_buf[1024] = "";
     char atom_format_buf[128] = "";
+    char coordinates_buf[1024] = "";
     char err_buf[128] = "";
     bool path_is_valid = false;
     bool path_changed = false;
@@ -363,6 +364,7 @@ struct LoadDatasetWindowState {
     bool load_trajectory = false;
     bool show_window = false;
     bool show_file_dialog = false;
+    bool show_coordinates_dialog = false;
     bool atom_format_valid = false;
     int  loader_idx = 0;
     int  atom_format_idx = 0;

@@ -18,6 +18,7 @@
 #include <md_itp.h>
 #include <md_edr.h>
 #include <md_amber_energy.h>
+#include <md_amber_prmtop.h>
 #include <md_xvg.h>
 #include <md_csv.h>
 
@@ -63,6 +64,7 @@ static const str_t loader_name[LoaderType_COUNT] = {
         STR_INIT("Comma separated values (csv)"),
         STR_INIT("ASE Trajectory (traj)"),
         STR_INIT("Amber Energy (mdout/mden)"),
+        STR_INIT("Amber Topology (prmtop/parm7)"),
 };
 
 static const str_t loader_ext[LoaderType_COUNT] = {
@@ -96,6 +98,7 @@ static const str_t loader_ext[LoaderType_COUNT] = {
         STR_INIT("csv"),
         STR_INIT("traj"),
         STR_INIT("mdout"),
+        STR_INIT("prmtop"),
 };
 
 static const LoaderFlags loader_flags[LoaderType_COUNT] = {
@@ -132,6 +135,7 @@ static const LoaderFlags loader_flags[LoaderType_COUNT] = {
         LoaderFlag_Supplemental | LoaderFlag_Temporal,                 // CSV
         LoaderFlag_System | LoaderFlag_Trajectory | LoaderFlag_MM,     // ASE trajectory
         LoaderFlag_Supplemental | LoaderFlag_Temporal | LoaderFlag_MM, // Amber energy output
+        LoaderFlag_System | LoaderFlag_MM | LoaderFlag_Topology | LoaderFlag_RequiresDialogue,
 };
 
 void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
@@ -152,6 +156,9 @@ void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
         state->type = type_from_ext(ext);
         if (state->type != LoaderType_Undefined) {
             state->flags = loader_flags[state->type];
+            if (state->type == LoaderType_AMBER_PRMTOP && sys && sys->atom.count) {
+                state->flags = LoaderFlag_Supplemental | LoaderFlag_MM | LoaderFlag_Topology;
+            }
 
             // Perform special check if LAMMPS to see if we can identify the format
             if (state->type == LoaderType_LAMMPSDATA) {
@@ -197,6 +204,14 @@ void init(LoaderState* state, str_t filepath, const md_system_t* sys) {
         state->flags = loader_flags[LoaderType_MOLDEN];
         return;
     }
+    if (str_empty(ext) && md_amber_prmtop_file_is_topology(filepath)) {
+        state->type = LoaderType_AMBER_PRMTOP;
+        state->flags = loader_flags[state->type];
+        if (sys && sys->atom.count) {
+            state->flags = LoaderFlag_Supplemental | LoaderFlag_MM | LoaderFlag_Topology;
+        }
+        return;
+    }
 
     // Amber's conventional "mdout" and "mden" filenames have no extension, and .out/.log are shared by
     // many unrelated formats, so claim them only when the contents are Amber energy output.
@@ -215,6 +230,8 @@ bool load(md_system_t* out_sys, md_system_state_t* out_state, str_t filepath, co
     ASSERT(out_state);
 
     switch (state.type) {
+        case LoaderType_AMBER_PRMTOP:
+            return md_amber_prmtop_system_init_from_file(out_sys, out_state, filepath, str_from_cstr(state.coordinates));
         case LoaderType_PDB: {
             md_pdb_options_t options = MD_PDB_OPTION_NONE;
             if (state.flags & LoaderFlag_DisableCacheWrite) {
@@ -284,6 +301,8 @@ bool load_supplemental(md_system_t* out_sys, str_t filepath, const LoaderState& 
             return md_edr_system_supplement_from_file(out_sys, filepath, run);
         case LoaderType_AMBER_ENERGY:
             return md_amber_energy_system_supplement_from_file(out_sys, filepath, run);
+        case LoaderType_AMBER_PRMTOP:
+            return md_amber_prmtop_system_supplement_from_file(out_sys, filepath);
         case LoaderType_XVG:
             return md_xvg_system_supplement_from_file(out_sys, filepath, run);
         case LoaderType_CSV:
@@ -340,6 +359,9 @@ bool publish_run(md_system_t* sys, str_t filepath, str_t run, uint32_t flags) {
 }
 
 LoaderType type_from_ext(str_t ext) {
+    if (str_eq_ignore_case(ext, STR_LIT("parm7"))) {
+        return LoaderType_AMBER_PRMTOP;
+    }
 #if MD_AMBER_NETCDF
     if (str_eq_ignore_case(ext, STR_LIT("netcdf"))) {
         return LoaderType_AMBER_NETCDF;

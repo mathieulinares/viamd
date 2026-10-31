@@ -16,22 +16,23 @@ fit into VIAMD next to GROMACS XTC/TRR and EDR.
 3. [The GROMACS ↔ Amber correspondence](#the-gromacs--amber-correspondence)
 4. [Building](#building)
 5. [Trajectory reader (Amber NetCDF)](#trajectory-reader-amber-netcdf)
-6. [Energy reader (`mdout` and `mden`)](#energy-reader-mdout-and-mden)
-7. [VIAMD integration](#viamd-integration)
-8. [Using it](#using-it)
-9. [Tests](#tests)
-10. [Limitations and future work](#limitations-and-future-work)
-11. [References](#references)
+6. [Native Amber topology and restart coordinates](#native-amber-topology-and-restart-coordinates)
+7. [Energy reader (`mdout` and `mden`)](#energy-reader-mdout-and-mden)
+8. [VIAMD integration](#viamd-integration)
+9. [Using it](#using-it)
+10. [Tests and example dataset](#tests-and-example-dataset)
+11. [Limitations and future work](#limitations-and-future-work)
+12. [References](#references)
 
 ## Scope
 
 | Supported | Not supported (yet) |
 |---|---|
 | Amber NetCDF trajectories (`.nc`, `.netcdf`), classic (CDF-1) and 64-bit-offset (CDF-2) | NetCDF-4/HDF5 trajectories, CDF-5 |
-| Physical time (ps) or no time; periodic (any triclinic) or no box | Velocities, forces, replica/ensemble dimensions, cpptraj compressed coordinates |
-| Amber energy output: the `mdout` text log and the `mden` energy file (`ntwe > 0`) | Minimization output, restarted runs concatenated in one file |
-| Structure from a separately loaded file with identical atom order (usually a PDB) | Native Amber topology (`.prmtop`/`.parm7`) and restarts (`.inpcrd`/`.rst7`) |
-| | Legacy text trajectories (`.mdcrd`/`.crd`) |
+| Amber `mdout` and `mden` energy output, including restarted segments in one file | Minimization output |
+| Amber topology (`.prmtop`/`.parm7`) with ASCII restart coordinates (`.inpcrd`/`.rst7`) | CHAMBER topologies and nonstandard topology extensions |
+| Initial coordinates from a classic Amber NetCDF restart or frame 0 of an Amber NetCDF trajectory | Velocities and forces |
+| Existing PDB-plus-trajectory workflow remains supported | Legacy text trajectories (`.mdcrd`/`.crd`), replica/ensemble dimensions, cpptraj compressed coordinates |
 
 The NetCDF reader is optional at build time (it needs NetCDF-C). The energy reader is plain
 text parsing and is always built.
@@ -46,7 +47,8 @@ path, a format (type, rank, shape, components), a unit, a label and either resid
 Three roles matter here:
 
 - **System**: atoms, residues, chains, bonds, elements, from a structure or topology file
-  (GRO, PDB, TPR, ...).
+  (GRO, PDB, TPR, Amber `.prmtop`, ...). A PDB remains a complete supported route for Amber:
+  no topology file is required when the user has a matching PDB.
 - **Run**: a trajectory, published under `run/<name>` by `md_run_publish`
   ([md_system.h](../ext/mdlib/src/md_system.h)). Its `time` attribute is a **frame axis**
   (flag `MD_ATTRIBUTE_FLAG_TEMPORAL`). Positions are virtual: frames are read from the file
@@ -69,10 +71,10 @@ to change.
 
 | Role | GROMACS | Amber | Loader flags |
 |---|---|---|---|
-| System (structure) | `.gro`, `.tpr`, `.pdb` | `.pdb` generated from the same topology and atom order | `System` |
+| System (structure) | `.gro`, `.tpr`, `.pdb` | `.prmtop` + coordinates, or a separately loaded PDB | `System` |
 | Run (trajectory) | `.xtc`, `.trr` → `md_xtc_system_publish_run` | `.nc`/`.netcdf` → `md_amber_netcdf_system_publish_run` | `Trajectory \| MM` |
 | Series (energies) | `.edr` → `md_edr_system_supplement_from_file` | `mdout`, `mden` → `md_amber_energy_system_supplement_from_file` | `Supplemental \| Temporal \| MM` |
-| Energy group | `run/<name>/edr/<term>` | `run/<name>/amber_energy/<term>` | |
+| Energy group | `run/<name>/edr/<term>` | `run/<name>/amber_energy/<term>`; restarted segments are nested below `segment_N` | |
 | Script access | `attr("edr/potential")` | `attr("amber_energy/eptot")` | |
 
 The Amber readers copy the GROMACS readers' contracts:
@@ -165,6 +167,75 @@ Details:
   process-wide lock (`pthread_mutex` or Windows `SRWLOCK`).
 - **Atomicity.** On any failure nothing is published, and owned state is freed.
 
+## Native Amber topology and restart coordinates
+
+Files: [md_amber_prmtop.h](../ext/mdlib/src/md_amber_prmtop.h),
+[md_amber_prmtop.c](../ext/mdlib/src/md_amber_prmtop.c). The reader is always built; NetCDF
+coordinate inputs use the optional Amber NetCDF support.
+
+An Amber `.prmtop`/`.parm7` contains a topology and resolved force-field data, but no
+coordinates or run settings. It is therefore not a `.tpr` by itself. VIAMD supports two
+workflows: load a `.prmtop` with a separate coordinate input, or load a structure such as a PDB
+first and apply the `.prmtop` as a topology supplement. The existing PDB-only path remains
+available and does not require a `.prmtop`.
+
+The loader's coordinate field accepts:
+
+1. **ASCII `.rst7` / `.inpcrd`**: reads coordinates and an optional velocity block. For a
+   periodic topology it also reads the six lengths/angles at the end and initializes the cell.
+   Velocities are not published.
+2. **Classic NetCDF `AMBERRESTART`**: one coordinate state, with no `frame` dimension. The
+   coordinate count must match the topology.
+3. **Amber NetCDF trajectory**: the first frame initializes the system, and VIAMD also opens
+   that file as the run. The topology and coordinate atom order must agree; only the atom count
+   can be checked automatically.
+
+### Topology information loaded
+
+The parser reads Amber `%FLAG` / `%FORMAT` fixed-width blocks and publishes the data VIAMD
+needs to build a system:
+
+- Atom names, Amber atom types, masses, atomic numbers when present, partial charges, residue
+  names and residue atom offsets.
+- The explicit `BONDS_INC_HYDROGEN` and `BONDS_WITHOUT_HYDROGEN` lists. Amber's encoded atom
+  indices are converted from 3×(index−1). These topology bonds are preserved; VIAMD derives
+  structures and molecules from them rather than guessing replacement bonds.
+- Molecule boundaries and box metadata when the corresponding flags are present.
+- `atom/charge` in elementary-charge units and `atom/mass` in daltons.
+
+When applied to an already loaded structure, the topology must match its atom count, residue
+count, residue boundaries and atom/residue names in order. Truncated PDB names are accepted
+when the available prefix matches; incompatible names, residue grouping, or elements are
+rejected rather than attaching bonds to the wrong atoms. The structure's coordinates, chain
+labels and residue numbering are retained, while topology bonds, force-field atom types,
+charges and masses are applied.
+
+The parser deliberately skips the force-field parameter tables: VIAMD visualizes and analyzes
+the system but does not evaluate Amber's force field. If an older topology has no
+`ATOMIC_NUMBER`, the reader infers elements from mass and then atom/residue names.
+
+Unsupported or malformed inputs fail explicitly. CHAMBER topologies are rejected because
+their additional topology semantics are not implemented. Nonstandard extensions do not make a
+topology valid; the file still needs Amber's `%VERSION` and supported blocks.
+
+### Loading and workspace behavior
+
+With no system loaded, the Open dialog asks for coordinates when the selected loader is
+**Amber Topology**. Dragging a `.prmtop` together with exactly one restart or one Amber NetCDF
+trajectory pre-fills that choice. If both kinds or multiple candidates are present, choose the
+intended file explicitly.
+
+With a system already loaded, loading or dropping a `.prmtop` applies its topology to that
+system. The dialog explains that atom/residue order must match, and no coordinate file is
+needed. This is the PDB-first route: load the matching PDB, apply the `.prmtop`, then open the
+NetCDF trajectory. If you want to start a new topology-based system instead, start a new
+dataset before loading the `.prmtop`.
+
+The workspace records the coordinate path as a dependency of the topology, relative to the
+workspace when possible. A trajectory selected as the coordinate source is also recorded as
+the system's run. The Dataset panel shows the coordinate dependency so a missing file is
+visible and can be restored.
+
 ## Energy reader (`mdout` and `mden`)
 
 Files: [md_amber_energy.h](../ext/mdlib/src/md_amber_energy.h),
@@ -241,8 +312,9 @@ these two files.
 **Both formats:**
 
 - A term appearing twice in one record is an error.
-- Time must be nondecreasing. A restarted run that goes back in time is rejected with an
-  explicit message, as in EDR.
+- A decrease in time or a reset in step number starts a new energy segment. Segments retain
+  their original timestamps; the reader does not guess whether to splice overlaps or offset a
+  clock reset.
 - A term missing from some records is omitted, with an info message. No values are invented.
 
 ### Term names, shared between the two formats
@@ -295,7 +367,7 @@ in kJ/mol and an Amber `EPtot` in kcal/mol are therefore comparable.
 
 ### Published attributes
 
-Under `run/<name>/amber_energy/`:
+For a single segment, attributes remain under `run/<name>/amber_energy/`:
 
 | Path | Type / shape | Content |
 |---|---|---|
@@ -307,19 +379,27 @@ Under `run/<name>/amber_energy/`:
 Energies are usually written more often than coordinates (`ntpr`/`ntwe < ntwx`), and every
 sample is kept.
 
+For a concatenated file with multiple detected segments, each segment has its own time axis
+and term paths, for example `run/<name>/amber_energy/segment_1/time` and
+`run/<name>/amber_energy/segment_1/etot`. `segment_2` follows the same pattern. The shared
+`run/<name>/amber_energy/source` records the input file. VIAMD logs a warning identifying the
+restart and makes no time offsets; scripts can select the segment explicitly, such as
+`attr("amber_energy/segment_2/etot")`.
+
 ### Coverage check and replacement
 
 Publication follows the same steps as `md_edr_system_supplement`:
 
 1. Parse the whole file into temporary memory.
-2. Create the energy time axis in a scratch attribute table, the "probe".
-3. For every frame of `run/<name>/time`, check that `md_attribute_axis_map` finds an energy
+2. Create each segment's energy time axis in a scratch attribute table, the "probe".
+3. For every frame of `run/<name>/time`, check that at least one segment has a matching energy
    sample at that time.
    - If any frame has none, the load is refused with the frame index and its time. The usual
-     cause is an energy file from another run or segment.
+     cause is an energy file from another run.
 4. Remove the old `run/<name>/amber_energy` group: loading a second energy file **replaces**
    the first rather than merging two axes.
-5. Publish `time`, the terms and `source`. If any step fails, the whole group is removed.
+5. Publish each segment's `time` and complete terms, plus `source`. If any step fails, the
+   whole group is removed.
 
 ### Differences from EDR
 
@@ -343,11 +423,14 @@ panel, the Timeline and scripting needed no Amber code.
 |---|---|---|---|---|
 | `LoaderType_AMBER_NETCDF` (only with `MD_AMBER_NETCDF`) | Amber NetCDF Trajectory (nc) | `nc`, `netcdf` | `Trajectory \| MM` | `publish_run` → `md_amber_netcdf_system_publish_run` |
 | `LoaderType_AMBER_ENERGY` | Amber Energy (mdout/mden) | `mdout`, `mden`; content-detected `.out`, `.log`, none | `Supplemental \| Temporal \| MM` | `load_supplemental` → `md_amber_energy_system_supplement_from_file` |
+| `LoaderType_AMBER_PRMTOP` | Amber Topology (prmtop/parm7) | `prmtop`, `parm7` | New system: `System \| MM \| Topology \| RequiresDialogue`; loaded system: `Supplemental \| MM \| Topology` | `load` or `load_supplemental` |
 
 - The flags match XTC/TRR and EDR respectively, so roles, file-list entries and workspace
   records follow automatically:
   - `Trajectory` → `FileRole_Trajectory`;
   - `Supplemental | Temporal` → `FileRole_Series`.
+- Amber topology flags depend on whether a system is already loaded: a new system needs its
+  coordinate dialogue, while a loaded structure receives the topology as a supplement.
 - Loading a NetCDF trajectory *as a structure* is refused with the same message as XTC/TRR.
 - The Dataset window labels an Amber energy file **Energies**, as it does an EDR file
   ([dataset.cpp](../src/components/dataset/dataset.cpp)).
@@ -376,6 +459,9 @@ panel, the Timeline and scripting needed no Amber code.
   dialog.
 - Dropped files keep their priority order: structure → trajectory → series. Dropping all three
   files at once loads them in the right order.
+- A `.prmtop` is a system but requires a coordinate dependency. The Open dialog stores that
+  choice in the workspace; a dropped restart or trajectory is selected automatically only
+  when it is the sole candidate.
 
 ### Publishing the submodules
 
@@ -390,26 +476,41 @@ actually present there. A squash or rebase merge can give that commit a differen
 
 ## Using it
 
-1. Load the structure, a PDB with **the same atom order** as the trajectory, solvent and ions
-   included. If you only have a topology, generate it with cpptraj or MDTraj from the
-   `.prmtop` and the first frame.
-2. Load the trajectory `.nc`.
-3. Load `mdout` or `mden`. With **File → Open File…**, the loader *Amber Energy (mdout/mden)*
-   is pre-selected; dropped files load directly.
-4. **System → Series → amber_energy** lists the terms. Double-click one to plot it on the
-   Timeline, or drag it into a Timeline or Distributions subplot.
-5. Scripts read the same series:
+There are two supported system setup paths:
+
+- **Existing PDB path:** load a PDB with **the same atom order** as the trajectory, solvent and
+  ions included, then load the trajectory `.nc`. To add Amber topology metadata, apply the
+  matching `.prmtop` to the loaded PDB before opening the trajectory.
+- **Native topology path:** load `.prmtop`/`.parm7` and choose a matching `.inpcrd`/`.rst7`.
+  Alternatively choose the Amber trajectory `.nc`; its first frame initializes the system and
+  VIAMD opens it as the run. The topology, coordinates, and trajectory must use the same atom
+  order.
+
+Then:
+
+1. Load `mdout`, `mden`, or the `.out` alias. With **File → Open File…**, the loader *Amber
+   Energy (mdout/mden)* is pre-selected; dropped files load directly.
+2. **System → Series → amber_energy** lists the energy terms. For restarted multi-segment
+   energy files, choose `segment_N` and plot its terms independently.
+3. Double-click a term to plot it on the Timeline, or drag it into a Timeline or Distributions
+   subplot.
+4. Scripts read a single-segment series as:
 
    ```text
-   e  = attr("amber_energy/etot");     # kcal/mol, follows the current frame
-   T  = attr("amber_energy/temp_k");
+   e = attr("amber_energy/etot");        # kcal/mol, follows the current frame
    ```
 
-For the coverage check to pass, the energy output must contain a sample at every trajectory
-frame time. In practice `ntwx` (coordinates) must be a multiple of `ntpr` (`mdout`) or `ntwe`
-(`mden`), and the energy file must come from the same segment of the run.
+   For multiple segments, name the segment explicitly, for example
+   `attr("amber_energy/segment_2/etot")`.
 
-## Tests
+The compact [NMA Amber dataset](../datasets/amber/README.md) contains a matching PDB, topology,
+restart, trajectory, and both energy-reader formats for trying these paths.
+
+For the coverage check to pass, each trajectory frame time must match a sample in at least one
+energy segment. In practice `ntwx` (coordinates) must be a multiple of `ntpr` (`mdout`) or
+`ntwe` (`mden`).
+
+## Tests and example dataset
 
 - **mdlib** ([test_amber_netcdf.c](../ext/mdlib/unittest/test_amber_netcdf.c)): NetCDF fixtures
   are generated at test time with NetCDF-C. The tests cover:
@@ -422,15 +523,22 @@ frame time. In practice `ntwx` (coordinates) must be a multiple of `ntpr` (`mdou
   [amber_energy_data](../ext/mdlib/unittest/amber_energy_data):
   - `mdout` detection and publication, including repeated setup headers;
   - refusal when the energies do not cover the run;
+  - preservation of restarted runs as separate timestamped segments;
   - incomplete records;
   - `mden` detection, publication and name mapping;
   - `mden` lines that do not match their header.
 - **VIAMD** ([test_loader.cpp](../test/test_loader.cpp)):
   - loader table consistency;
+  - native `.prmtop` plus ASCII restart loading and published atom attributes;
   - `.nc` content check;
   - `mdout`/`mden` detection and supplement through the loader;
   - extensionless energy files inside a dotted directory;
   - NetCDF trajectory dispatch through `publish_run`.
+
+The small [NMA dataset](../datasets/amber/README.md) is a manual end-to-end example with
+12 atoms and 20 trajectory frames. Its `.nc` file was converted from the source Amber
+trajectory; the PDB and `mden` companion are documented derivatives. The source project
+license is included with the data.
 
 The readers were also checked against real files, outside the automated tests:
 
@@ -448,18 +556,20 @@ The readers were also checked against real files, outside the automated tests:
 
 ## Limitations and future work
 
-- **Native Amber setup.** `.prmtop`/`.parm7` and `.inpcrd`/`.rst7` would remove the PDB step.
-  The loader must then keep Amber's explicit bonds instead of inferring them.
-- **Atom order is not verified.** Only the atom count is checked against the structure.
+- **Atom order is the user's responsibility.** The PDB workflow and topology-coordinate pairing
+  check atom counts, not chemical identity or order. Files must use the same order.
+- **Topology coverage.** CHAMBER extensions and unusual/nonstandard Amber topology variants are
+  rejected. The reader loads topology metadata and bonds, not force-field evaluation parameters.
 - **Legacy `.mdcrd` trajectories.** These have no atom count, time or box metadata in the file.
-  Reading them needs explicit user choices.
-- **NetCDF-4, velocities/forces, ensembles** are not read.
+  Reading them needs a separate atom-count/time/box policy and is not implemented.
+- **NetCDF-4/HDF5** remains unsupported pending the shared HDF5 dependency and locking design.
+  Restart velocities and trajectory velocities/forces are not exposed.
 - **Energy output variants:**
   - minimization `mdout`;
-  - concatenated restarted runs, whose time goes backwards and are rejected today;
   - other producers' variants beyond those tested.
-- **One file per run.** As with EDR, loading another energy file replaces the group. Splicing
-  several segments is not supported.
+- **One energy file per run.** As with EDR, loading another energy file replaces the group.
+  Restarted segments inside one file are kept separate; VIAMD deliberately does not splice or
+  automatically offset their timestamps.
 
 ## References
 

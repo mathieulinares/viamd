@@ -2765,8 +2765,31 @@ void draw_load_dataset_window(ApplicationState* data) {
 
         LoaderType   type = (LoaderType)(state.loader_idx);
         LoaderFlags flags = loader::type_flags(type);
+        const bool amber_topology_supplement = type == LoaderType_AMBER_PRMTOP && data->mold.sys.atom.count > 0;
 
         // Draw Options
+        if (type == LoaderType_AMBER_PRMTOP) {
+            if (amber_topology_supplement) {
+                ImGui::TextWrapped("Apply topology to the loaded system. Atom names, residue boundaries and order must match.");
+                flags = LoaderFlag_Supplemental | LoaderFlag_MM | LoaderFlag_Topology;
+            } else {
+                ImGui::TextWrapped("Topology has no coordinates. Choose a matching Amber restart or NetCDF coordinate file.");
+                ImGui::InputText("Coordinates", state.coordinates_buf, sizeof(state.coordinates_buf));
+                ImGui::SameLine();
+                if (ImGui::Button("Browse##coordinates") && !state.show_coordinates_dialog) {
+                    state.show_coordinates_dialog = true;
+                }
+                if (state.show_coordinates_dialog) {
+                    state.show_coordinates_dialog = false;
+                    application::file_dialog(state.coordinates_buf, sizeof(state.coordinates_buf), application::FileDialogFlag_Open);
+                }
+                const str_t coordinates = str_from_cstr(state.coordinates_buf);
+                if (str_empty(coordinates) || !md_path_is_valid(coordinates) || md_path_is_directory(coordinates)) {
+                    load_button_enabled = false;
+                    ImGui::TextDisabled("A coordinate file is required. Its atom order must match the topology.");
+                }
+            }
+        }
         bool show_lammps_atom_format = state.path_is_valid && (type == LoaderType_LAMMPSDATA);
         if (show_lammps_atom_format) {
             const char** atom_format_names = md_lammps_atom_format_names();
@@ -2841,6 +2864,9 @@ void draw_load_dataset_window(ApplicationState* data) {
             if (type == LoaderType_LAMMPSDATA) {
                 load_state.arg = state.atom_format_buf;
             }
+            if (type == LoaderType_AMBER_PRMTOP && !amber_topology_supplement) {
+                load_state.coordinates = state.coordinates_buf;
+            }
             // A loader other than the extension would pick has to be stored with the file in a workspace
             str_t ext = {};
             extract_ext(&ext, path);
@@ -2849,6 +2875,7 @@ void draw_load_dataset_window(ApplicationState* data) {
             }
 
             const LoadResult result = load_data_from_file(data, path, load_state);
+            if (result == LoadResult_Failed && type == LoaderType_AMBER_PRMTOP) break;
             if (result == LoadResult_System || result == LoadResult_Trajectory) {
                 if (result == LoadResult_System && !data->settings.keep_representations) {
                     remove_all_representations(data);

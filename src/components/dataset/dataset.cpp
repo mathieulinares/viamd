@@ -1116,6 +1116,12 @@ struct Dataset : viamd::EventHandler {
                 }
             }
             file_row(row);
+            if (e.coordinates[0]) {
+                FileRow coordinate_row = {"Coordinates", str_from_cstr(e.coordinates), ""};
+                coordinate_row.missing = !md_path_is_valid(coordinate_row.path);
+                snprintf(coordinate_row.details, sizeof(coordinate_row.details), "Initial Amber coordinates");
+                file_row(coordinate_row);
+            }
         }
 
         ImGui::EndTable();

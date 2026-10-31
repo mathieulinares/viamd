@@ -53,6 +53,7 @@ enum LoaderType_ {
     LoaderType_CSV,     // comma separated columns, a series along the loaded trajectory
     LoaderType_ASE_TRAJ, // ASE trajectory (.traj): a system and its trajectory in one file
     LoaderType_AMBER_ENERGY, // Amber mdout or mden energies, supplemental to a loaded trajectory
+    LoaderType_AMBER_PRMTOP, // Amber topology plus coordinates, or a supplement to a loaded structure
     LoaderType_COUNT
 };
 
@@ -66,6 +67,7 @@ namespace loader {
         // An argument for the loader, as text so that a workspace can store it with the file: the
         // LAMMPS atom format. Not owned: it has to outlive the load.
         const char* arg   = 0;
+        const char* coordinates = 0; // Dependent coordinate file for Amber topology; not owned
         LoaderFlags flags = LoaderFlag_None;
     };
 

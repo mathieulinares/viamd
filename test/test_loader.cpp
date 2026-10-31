@@ -5,6 +5,7 @@
 #include <core/md_str.h>
 #include <core/md_arena_allocator.h>
 #include <md_system.h>
+#include <md_util.h>
 #include <core/md_os.h>
 
 #include <cstdio>
@@ -164,6 +165,114 @@ UTEST(viamd_loader, amber_mden_is_detected_and_supplements_run_energy) {
     EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("run/test/amber_energy/eptot")) != nullptr);
     md_system_free(&sys);
 }
+
+UTEST(viamd_loader, amber_prmtop_loads_with_matching_ascii_restart) {
+    const str_t topology = STR_LIT(VIAMD_AMBER_DATA_DIR "/nma.prmtop");
+    const char* coordinates = VIAMD_AMBER_DATA_DIR "/nma.inpcrd";
+    loader::LoaderState reader = {};
+    loader::init(&reader, topology);
+    ASSERT_EQ((LoaderType)LoaderType_AMBER_PRMTOP, reader.type);
+    EXPECT_NE(0u, reader.flags & LoaderFlag_Topology);
+    reader.coordinates = coordinates;
+
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    sys.attributes.alloc = alloc;
+    md_system_state_t state = {.alloc = alloc};
+    ASSERT_TRUE(loader::load(&sys, &state, topology, reader));
+    EXPECT_EQ(12u, sys.atom.count);
+    EXPECT_EQ(2u, sys.residue.count);
+    EXPECT_EQ(11u, sys.bond.count);
+    EXPECT_EQ(12u, state.num_atoms);
+    EXPECT_NEAR(0.7520751, state.xyz[0].x, 1.0e-5);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("atom/charge")) != nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("atom/mass")) != nullptr);
+
+    md_system_state_free(&state);
+    md_system_free(&sys);
+}
+
+UTEST(viamd_loader, amber_prmtop_supplements_a_matching_pdb) {
+    const str_t structure = STR_LIT(VIAMD_AMBER_DATA_DIR "/nma.pdb");
+    const str_t topology = STR_LIT(VIAMD_AMBER_DATA_DIR "/nma.prmtop");
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    sys.attributes.alloc = alloc;
+    md_system_state_t state = {.alloc = alloc};
+
+    loader::LoaderState structure_reader = {};
+    loader::init(&structure_reader, structure);
+    ASSERT_EQ((LoaderType)LoaderType_PDB, structure_reader.type);
+    ASSERT_TRUE(loader::load(&sys, &state, structure, structure_reader));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
+    const vec3_t initial_position = state.xyz[0];
+
+    loader::LoaderState topology_reader = {};
+    loader::init(&topology_reader, topology, &sys);
+    ASSERT_EQ((LoaderType)LoaderType_AMBER_PRMTOP, topology_reader.type);
+    EXPECT_NE(0u, topology_reader.flags & LoaderFlag_Supplemental);
+    EXPECT_EQ(0u, topology_reader.flags & LoaderFlag_RequiresDialogue);
+    ASSERT_TRUE(loader::load_supplemental(&sys, topology, topology_reader, (str_t){0}));
+
+    EXPECT_EQ(12u, sys.atom.count);
+    EXPECT_EQ(11u, sys.bond.count);
+    EXPECT_NEAR(initial_position.x, state.xyz[0].x, 1.0e-6);
+    EXPECT_NEAR(initial_position.y, state.xyz[0].y, 1.0e-6);
+    EXPECT_NEAR(initial_position.z, state.xyz[0].z, 1.0e-6);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("atom/charge")) != nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("atom/mass")) != nullptr);
+    EXPECT_FALSE(str_empty(md_particle_type_ff_type(&sys.atom.type, sys.atom.type_idx[0])));
+
+    md_system_state_free(&state);
+    md_system_free(&sys);
+}
+
+UTEST(viamd_loader, amber_prmtop_rejects_mismatched_pdb_atom_names) {
+    const str_t structure = STR_LIT(VIAMD_AMBER_DATA_DIR "/nma.pdb");
+    const str_t topology = STR_LIT(VIAMD_AMBER_DATA_DIR "/nma.prmtop");
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    sys.attributes.alloc = alloc;
+    md_system_state_t state = {.alloc = alloc};
+
+    loader::LoaderState structure_reader = {};
+    loader::init(&structure_reader, structure);
+    ASSERT_TRUE(loader::load(&sys, &state, structure, structure_reader));
+    const md_particle_type_idx_t atom_type = sys.atom.type_idx[0];
+    sys.atom.type.name[atom_type] = make_label(STR_LIT("BAD"));
+    const size_t bonds_before = sys.bond.count;
+
+    loader::LoaderState topology_reader = {};
+    loader::init(&topology_reader, topology, &sys);
+    EXPECT_FALSE(loader::load_supplemental(&sys, topology, topology_reader, (str_t){0}));
+    EXPECT_EQ(bonds_before, sys.bond.count);
+
+    md_system_state_free(&state);
+    md_system_free(&sys);
+}
+
+#if MD_AMBER_NETCDF
+UTEST(viamd_loader, amber_prmtop_can_use_the_trajectory_first_frame_as_initial_state) {
+    const str_t topology = STR_LIT(VIAMD_AMBER_DATA_DIR "/nma.prmtop");
+    const char* coordinates = VIAMD_AMBER_DATA_DIR "/nma.nc";
+    loader::LoaderState reader = {};
+    loader::init(&reader, topology);
+    ASSERT_EQ((LoaderType)LoaderType_AMBER_PRMTOP, reader.type);
+    reader.coordinates = coordinates;
+
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_system_t sys = {.alloc = alloc};
+    sys.attributes.alloc = alloc;
+    md_system_state_t state = {.alloc = alloc};
+    ASSERT_TRUE(loader::load(&sys, &state, topology, reader));
+    EXPECT_EQ(12u, sys.atom.count);
+    EXPECT_EQ(12u, state.num_atoms);
+    EXPECT_NEAR(1.903, state.xyz[0].x, 1.0e-5);
+
+    md_system_state_free(&state);
+    md_system_free(&sys);
+}
+#endif
 
 #if !defined(_WIN32)
 UTEST(viamd_loader, extensionless_amber_energy_in_a_dotted_directory_is_detected) {
