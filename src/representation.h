@@ -23,7 +23,7 @@ struct deserialization_state_t;
 // --- Representations ---
 
 // Appended at the end of 'group' (0 for the top level)
-Representation* create_representation(ApplicationState* app, RepresentationType type = RepresentationType::SpaceFill, ColorMapping color_mapping = ColorMapping::Type, str_t filter = STR_LIT("all"), uint32_t group = 0);
+Representation* create_representation(ApplicationState* app, RepresentationType type = RepresentationType::SpaceFill, ColorMapping color_mapping = ColorMapping::Type, str_t filter = {}, uint32_t group = 0);
 // Placed just after the original, in the same group
 Representation* clone_representation(ApplicationState* app, const Representation& rep);
 void remove_representation(ApplicationState* app, size_t idx);
@@ -32,6 +32,48 @@ void remove_all_representations(ApplicationState* app);
 void create_default_representations(ApplicationState* app);
 
 Representation* find_representation(ApplicationState* app, uint32_t id);
+
+// The bond between two atoms (pair, of the system) in a Bonds representation, picked by 'bond(i, j)'. Into
+// NULL: a new one at the top level, dashed for a non-covalent bond and over the sticks of a licorice otherwise, opened
+// in the window to be styled. Otherwise added to the filter of 'into', which representation_can_show_bond allows;
+// false when the filter would not fit.
+bool representation_show_bond(ApplicationState* app, md_atom_pair_t pair, md_bond_flags_t flags, Representation* into);
+// Whether representation_show_bond can add a bond to it: a Bonds representation of the whole system (an atom index
+// counts from the start of the context, and a group's context can change with the frame)
+bool representation_can_show_bond(const ApplicationState& app, const Representation& rep);
+// Whether it shows the bond between the two atoms, as of the last evaluation of its filter
+bool representation_shows_bond(const Representation& rep, md_atom_pair_t pair);
+
+// --- New representations from the context menu of the viewport ---
+
+// Something a new representation can be made of: the selection, or what was under the cursor
+struct RepresentationTarget {
+    md_bitset_t atoms = {};             // representation_target_free releases them
+    char label[64] = "";                // What the menu and the new representation call it: "ALA 23", "chain A", "all POPC"
+    bool selection = false;             // the selection, which a new representation is named by its filter where that is short
+    // The types it can be shown as (representation_target_can_show), and the one suggested: by what it is, and not one
+    // which draws most of it already
+    bool cartoon = false;               // a backbone, the lipids or nucleic acids of the cartoon glyphs
+    bool ribbons = false;               // a protein backbone
+    RepresentationType suggested_type = RepresentationType::BallAndStick;
+    ColorMapping suggested_color = ColorMapping::Type;
+};
+
+// What was under the cursor, as a whole that a representation is made of. With the selection granularity coarser than
+// Atom, what a click there would select (the highlight shown). At Atom granularity, by what it is: a protein or nucleic
+// acid by its strand where its cartoon is hit and by its residue otherwise, a lipid by its molecule (all its residues),
+// a ligand or a glycan by its part, a water by its residue, and a single atom, such as an ion, by all the residues of
+// its name. 'all' (may be NULL) is set to all the residues of its name, where it is one of several that are no part of
+// a polymer (the lipids of a kind, the waters, a ligand bound to each of several chains). False when there is none:
+// nothing hit, or a single atom that nothing else shares the name of.
+bool representation_targets_from_hit(RepresentationTarget* target, RepresentationTarget* all, const ApplicationState& app, const PickingHit& hit);
+// The selection, which takes more than one atom
+bool representation_target_from_selection(RepresentationTarget* target, const ApplicationState& app);
+void representation_target_free(RepresentationTarget* target);
+bool representation_target_can_show(const ApplicationState& app, const RepresentationTarget& target, RepresentationType type);
+// A new representation of it, at the top level, its properties open the next time the window lists it: its filter is the most telling expression that
+// picks exactly its atoms (script_suggest_selection). NULL when none fits in a filter.
+Representation* create_representation_of_target(ApplicationState* app, const RepresentationTarget& target, RepresentationType type);
 
 // --- Groups ---
 
@@ -78,6 +120,11 @@ void init_all_representations(ApplicationState* app);
 void update_all_representations(ApplicationState* app);
 
 void flag_representation_as_dirty(Representation* rep);
+
+// The weak bonds md_gl draws for a representation (md_gl_rep_set_weak_bonds): of a licorice or a ball and stick, the
+// non-covalent bonds of the system, dashed among its atoms; of a Bonds representation, the bonds its filter picked.
+// Set again whenever the bonds of the system change.
+void representation_set_weak_bonds(ApplicationState* app, Representation* rep);
 // The representations and the contexts of the groups: what they are evaluated against changed (the script, the system)
 void flag_all_representations_as_dirty(ApplicationState* app);
 // The frame changed: what follows it is evaluated again. That is a filter or a context which depends on the
@@ -92,16 +139,52 @@ bool representation_uses_atom_colors(const Representation& rep);
 // The union of the atoms of the shown representations, visibility_mask
 void recompute_atom_visibility_mask(ApplicationState* app);
 
+// --- Representations of atoms, wherever they are drawn ---
+// What the Representations window and others (the reference structures of the Density Volume window) share of the
+// representations md_gl draws, SpaceFill to Cartoon: whether one can be drawn, its draw op, its colours, its
+// properties in the window and in a workspace.
+
+// Whether the system has what a type draws: atoms, bonds, a backbone
+bool representation_particle_type_valid(const ApplicationState& app, RepresentationType type);
+
+// The draw op of a representation of atoms: its type, arguments and colours (md_rep). The copies and the subset are
+// the caller's.
+md_gl_draw_op_t representation_draw_op(const Representation& rep);
+// The draw ops of the glyphs of a Cartoon, the lipids and nucleic acids (cartoon_glyphs.h), pushed to ops: their
+// spheres, tubes and slabs, thickened by the w of its scale, in its colours of the glyphs (glyph_rep). None while it
+// shows none or their positions are not derived (cartoon_glyphs_update_positions). The copies and the subset (of the
+// glyphs) are the caller's.
+void representation_glyph_draw_ops(md_array(md_gl_draw_op_t)* ops, const ApplicationState& app, const Representation& rep, md_allocator_i* alloc);
+// The weak bonds a representation draws (md_gl_rep_set_weak_bonds), pushed to ops: the bonds of a Bonds representation,
+// solid or dashed, and the non-covalent bonds of the system, dashed, over the sticks of a licorice or a ball and stick.
+// Nothing for the others. The copies and the subset are the caller's.
+void representation_weak_bond_draw_ops(md_array(md_gl_draw_op_t)* ops, const ApplicationState& app, const Representation& rep, md_allocator_i* alloc);
+
+// The colours of all num_atoms atoms of the system for a representation which colours by atom
+// (representation_uses_atom_colors): by its colour mapping, then towards its tint and saturation. 'shown' are the
+// atoms a colour scale of an attribute spans the values of (NULL for all), whose span it keeps (atom_attribute).
+void representation_atom_colors(uint32_t* colors, size_t num_atoms, ApplicationState* app, Representation* rep, const md_bitset_t* shown);
+
 // --- Workspace ---
 
 // [RepresentationGroup] and [Representation] sections, depth first: a group before what is within it
 void representations_serialize(viamd::serialization_state_t& state, const ApplicationState* app);
+// The entries of a representation in a section, all but where it is in the tree (Group), and one of them read: false
+// when it is not one of them
+void representation_write_entries(viamd::serialization_state_t& state, const ApplicationState* app, const Representation& rep);
+bool representation_read_entry(Representation* rep, str_t ident, str_t arg);
 // True when the section was one of the above, which it has then read
 bool representations_deserialize(ApplicationState* app, str_t section, viamd::deserialization_state_t& state);
 
 // --- UI ---
 
 void draw_representations_window(ApplicationState* app);
+// Rows of the properties of a representation, in a property grid (property_grid.h), as the Representations window
+// draws them: its type (atoms_only: SpaceFill to Cartoon), the rows of its Color section, those of its Geometry
+// section. Each returns whether it needs updating.
+bool draw_representation_type(ApplicationState* app, Representation& rep, bool atoms_only);
+bool draw_representation_coloring(ApplicationState* app, Representation& rep);
+bool draw_representation_geometry(ApplicationState* app, Representation& rep);
 // The legends of the shown representations that colour by a value. A field's legend also edits the isolines of
 // its surfaces and sets the transient one (ColorScaleIsolines), so this is drawn before the frame is rendered.
 void draw_representation_legends(ApplicationState& app);

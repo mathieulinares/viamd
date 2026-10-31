@@ -58,7 +58,7 @@ static const char* size_lbl[] = { "Any size", "5 atoms", "6 atoms", "7 atoms" };
 struct Row {
     md_pucker_ring_t r = {};
     uint32_t ring_idx = 0;
-    int32_t  comp_idx = -1;
+    int32_t  res_idx = -1;
     md_ring_flags_t flags = MD_RING_FLAG_NONE;
     bool     valid = false;     // Coordinates were computed (not a degenerate ring)
 };
@@ -242,18 +242,18 @@ struct Pucker : viamd::EventHandler {
     void compute() {
         const md_system_t& sys = app_state->mold.sys;
         const md_system_state_t& state = app_state->mold.state;
-        num_rings = md_index_data_num_ranges(&sys.ring);
+        num_rings = md_ring_data_count(&sys.ring);
         rows.clear();
         if (!state.xyz) return;
         for (size_t i = 0; i < num_rings; ++i) {
-            const size_t n = md_index_range_size(&sys.ring, i);
+            const size_t n = md_ring_size(&sys.ring, i);
             if (n < 5 || n > 7) continue;
             Row row;
             row.ring_idx = (uint32_t)i;
             row.flags = md_system_ring_flags(&sys, i);
             row.valid = md_pucker_ring(&row.r, &sys, &state, i);
             if (row.r.size == 0) continue;
-            row.comp_idx = md_system_component_find_by_atom_idx(&sys, row.r.atoms[0]);
+            row.res_idx = md_system_residue_find_by_atom_idx(&sys, row.r.atoms[0]);
             rows.push_back(row);
         }
         dirty = false;
@@ -304,11 +304,12 @@ struct Pucker : viamd::EventHandler {
     void residue_label(char* buf, size_t cap, const Row& row) const {
         const md_system_t& sys = app_state->mold.sys;
         buf[0] = '\0';
-        if (row.comp_idx < 0) return;
-        const str_t name = md_component_name(&sys.component, row.comp_idx);
-        const int seq = md_component_seq_id(&sys.component, row.comp_idx);
-        const md_instance_idx_t inst = md_system_instance_find_by_atom_idx(&sys, row.r.atoms[0]);
-        const str_t chain = inst >= 0 ? md_system_instance_id(&sys, inst) : str_t{};
+        if (row.res_idx < 0) return;
+        const str_t name = md_system_residue_name(&sys, row.res_idx);
+        const int seq = md_system_residue_seq_id(&sys, row.res_idx);
+        // The chain id the data gives, none for a residue in no chain
+        const md_chain_idx_t c = md_system_chain_find_by_atom_idx(&sys, row.r.atoms[0]);
+        const str_t chain = c >= 0 ? md_system_chain_id(&sys, (size_t)c) : str_t{};
         if (chain.len) snprintf(buf, cap, "%.*s %.*s %d", (int)chain.len, chain.ptr, (int)name.len, name.ptr, seq);
         else           snprintf(buf, cap, "%.*s %d", (int)name.len, name.ptr, seq);
     }
@@ -349,7 +350,7 @@ struct Pucker : viamd::EventHandler {
             return;
         }
         const md_system_t& sys = app_state->mold.sys;
-        if (md_index_data_num_ranges(&sys.ring) != num_rings) dirty = true;
+        if (md_ring_data_count(&sys.ring) != num_rings) dirty = true;
         if (dirty) compute();
         update_shown();
 
@@ -665,7 +666,7 @@ struct Pucker : viamd::EventHandler {
             auto num = [&](int i) -> double {
                 const md_pucker_ring_t& r = rows[i].r;
                 switch (col) {
-                case Col_Residue: return rows[i].comp_idx;
+                case Col_Residue: return rows[i].res_idx;
                 case Col_Q:     return r.cp.amplitude;
                 case Col_Theta: return r.size == 6 ? r.cp.theta : -1.0;
                 case Col_Phi:   return r.cp.phi2;

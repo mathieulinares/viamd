@@ -175,6 +175,8 @@ set(SRC_FILES
     src/cartoon_glyphs.cpp
     src/color_scale.cpp
     src/color_utils.cpp
+    src/density_map.cpp
+    src/layer_groups.cpp
     src/display_units.cpp
     src/surface_field.cpp
     src/event.cpp
@@ -186,11 +188,14 @@ set(SRC_FILES
     src/loader.cpp
     src/main.cpp
     src/plot_series.cpp
+    src/plot_periodic.cpp
+    src/plot_periodic_core.cpp
     src/property_grid.cpp
     src/representation.cpp
     src/representation_tree.cpp
     src/script_editor.cpp
     src/script_reference.cpp
+    src/script_suggestions.cpp
     src/serialization_utils.cpp
     src/task_system.cpp
     src/timeline_periods.cpp
@@ -213,11 +218,14 @@ set(SRC_FILES
     src/implot_widgets.h
     src/loader.h
     src/plot_series.h
+    src/plot_periodic.h
+    src/plot_periodic_core.h
     src/property_grid.h
     src/representation.h
     src/representation_tree.h
     src/script_editor.h
     src/script_reference.h
+    src/script_suggestions.h
     src/serialization_utils.h
     src/task_system.h
     src/timeline_periods.h
@@ -275,7 +283,6 @@ if (NOT VIAMD_ENABLE_QM)
 endif()
 
 set(SHADER_FILES 
-    src/shaders/scale_hsv.frag
     src/shaders/compose_deferred.frag
     src/shaders/temporal.frag
     src/shaders/luma.frag
@@ -310,6 +317,7 @@ set(SHADER_FILES
     src/shaders/ssao/ssao_bitmask.frag
     src/shaders/ssao/blur.frag
     src/shaders/ssao/upsample.frag
+    src/shaders/shadows/screen_space.frag
 )
 
 # Bake shaders into a single header file

@@ -18,6 +18,7 @@
 
 #include <gfx/gl_utils.h>
 #include <iso_meshes.h>
+#include <script_suggestions.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -285,6 +286,7 @@ static void clear_owned(Representation* rep) {
     rep->md_rep = {};
     rep->glyph_rep = {};
     rep->atom_mask = {};
+    rep->bond_pairs = nullptr;
     rep->electronic_structure.density_vol.tex_id = 0;
     rep->electronic_structure.color_vol.tex_id   = 0;
     rep->electronic_structure.field_vol          = SurfaceFieldVolume{};
@@ -350,6 +352,7 @@ void remove_representation(ApplicationState* state, size_t idx) {
     ASSERT(idx < md_array_size(state->representation.reps));
     auto& rep = state->representation.reps[idx];
     md_bitset_free(&rep.atom_mask, state->allocator.persistent);
+    md_array_free(rep.bond_pairs, state->allocator.persistent);
     md_gl_rep_destroy(rep.md_rep);
     md_gl_rep_destroy(rep.glyph_rep);
     // A readback queued for this representation's volume would land in a texture that no longer
@@ -606,6 +609,218 @@ bool representation_uses_atom_colors(const Representation& rep) {
     }
 }
 
+bool representation_particle_type_valid(const ApplicationState& state, RepresentationType type) {
+    const md_system_t& sys = state.mold.sys;
+    switch (type) {
+    case RepresentationType::SpaceFill:     return sys.atom.count > 0;
+    case RepresentationType::Licorice:      return sys.bond.count > 0;
+    case RepresentationType::BallAndStick:  return sys.atom.count > 0;
+    case RepresentationType::Ribbons:       return sys.protein_backbone.range.count > 0;
+    // Proteins, and the lipids and nucleic acids of the glyphs
+    case RepresentationType::Cartoon:       return sys.protein_backbone.range.count > 0 || cartoon_glyphs_valid(state.mold.cartoon_glyphs);
+    default:                                return false;
+    }
+}
+
+md_gl_draw_op_t representation_draw_op(const Representation& rep) {
+    md_gl_draw_op_t op = {
+        .type = (md_gl_rep_type_t)rep.type,
+        .args = {},
+        .rep = rep.md_rep,
+    };
+    switch (rep.type) {
+    case RepresentationType::SpaceFill:
+        op.args.space_fill.radius_scale = rep.scale.x;
+        break;
+    case RepresentationType::Licorice:
+        op.args.licorice.radius = rep.scale.x;
+        op.args.licorice.color_mode = (md_gl_bond_mode_t)rep.bond_color;
+        op.args.licorice.sharpness = rep.bond_sharpness;
+        op.args.licorice.uniform_color = convert_color(rep.bond_base_color);
+        op.args.licorice.bond_orders = rep.bond_orders;
+        op.args.licorice.chain_gaps = rep.chain_gaps;
+        op.args.licorice.elastic_bonds = rep.elastic_bonds;
+        if (rep.tint_scale > 0.0f || rep.saturation < 1.0f) {
+            tint_colors(&op.args.licorice.uniform_color, 1, convert_color(rep.tint_color), rep.tint_scale, rep.saturation);
+        }
+        break;
+    case RepresentationType::BallAndStick:
+        op.args.ball_and_stick.ball_scale = rep.scale.x;
+        op.args.ball_and_stick.stick_radius = rep.scale.y;
+        op.args.ball_and_stick.color_mode = (md_gl_bond_mode_t)rep.bond_color;
+        op.args.ball_and_stick.sharpness = rep.bond_sharpness;
+        op.args.ball_and_stick.uniform_color = convert_color(rep.bond_base_color);
+        op.args.ball_and_stick.bond_orders = rep.bond_orders;
+        op.args.ball_and_stick.chain_gaps = rep.chain_gaps;
+        op.args.ball_and_stick.elastic_bonds = rep.elastic_bonds;
+        if (rep.tint_scale > 0.0f || rep.saturation < 1.0f) {
+            tint_colors(&op.args.ball_and_stick.uniform_color, 1, convert_color(rep.tint_color), rep.tint_scale, rep.saturation);
+        }
+        break;
+    case RepresentationType::Ribbons:
+        op.args.ribbons.width_scale = rep.scale.x;
+        op.args.ribbons.thickness_scale = rep.scale.y;
+        op.args.ribbons.chain_gaps = rep.chain_gaps;
+        break;
+    case RepresentationType::Cartoon:
+        op.args.cartoon.coil_scale = rep.scale.x;
+        op.args.cartoon.sheet_scale = rep.scale.y;
+        op.args.cartoon.helix_scale = rep.scale.z;
+        op.args.cartoon.chain_gaps = rep.chain_gaps;
+        break;
+    default:
+        ASSERT(false);
+        break;
+    }
+    return op;
+}
+
+// The draws of the glyphs of a Cartoon (see representation.h)
+void representation_glyph_draw_ops(md_array(md_gl_draw_op_t)* ops, const ApplicationState& state, const Representation& rep, md_allocator_i* alloc) {
+    if (!cartoon_glyphs_valid(state.mold.cartoon_glyphs) || !rep.glyph_rep.id || !rep.glyphs_shown || !state.mold.cartoon_glyphs.positions_valid) return;
+    const float scale = rep.scale.w > 0.0f ? rep.scale.w : 1.0f;
+
+    // The heads; the other points (control points, corners of slabs) have no sphere, and nucleic acids none at all
+    if (state.mold.cartoon_glyphs.num_spheres > 0) {
+        md_gl_draw_op_t spheres = {
+            .type = MD_GL_REP_SPACE_FILL,
+            .args = {},
+            .rep = rep.glyph_rep,
+            .copies = {},
+        };
+        spheres.args.space_fill.radius_scale = scale;
+        md_array_push(*ops, spheres, alloc);
+    }
+
+    if (state.mold.cartoon_glyphs.num_tubes > 0) {
+        md_gl_draw_op_t tubes = {
+            .type = MD_GL_REP_TUBES,
+            .args = {},
+            .rep = rep.glyph_rep,
+            .copies = {},
+        };
+        tubes.args.tubes.radius_scale = scale;
+        // The bands of the nucleic acids are made with the default radius, a representation has its own
+        tubes.args.tubes.band_scale = MAX(rep.nucleic_band_radius, 0.01f) / CARTOON_NUCLEIC_BAND_RADIUS;
+        md_array_push(*ops, tubes, alloc);
+    }
+
+    if (state.mold.cartoon_glyphs.num_slabs > 0) {
+        md_gl_draw_op_t slabs = {
+            .type = MD_GL_REP_SLABS,
+            .args = {},
+            .rep = rep.glyph_rep,
+            .copies = {},
+        };
+        // The rims (and the sticks, slabs of two corners) of the radius of the representation, the plate within a rim
+        // recessed to 60% of its thickness
+        slabs.args.slabs.radius = MAX(rep.nucleic_ring_radius, 0.01f) * scale;
+        slabs.args.slabs.plate  = 0.6f;
+        md_array_push(*ops, slabs, alloc);
+    }
+}
+
+// The colours of all atoms of the system for a representation which colours by atom, by its colour mapping, then towards
+// its tint and saturation (see representation.h)
+void representation_atom_colors(uint32_t* colors, size_t num_atoms, ApplicationState* state, Representation* rep, const md_bitset_t* shown) {
+    const md_system_t& sys = state->mold.sys;
+    md_allocator_i* frame_alloc = state->allocator.frame;
+    const size_t bytes = num_atoms * sizeof(uint32_t);
+
+    switch (rep->color_mapping) {
+    case ColorMapping::Uniform:
+        color_atoms_uniform(colors, num_atoms, convert_color(rep->base_color));
+        break;
+    case ColorMapping::Type:
+        color_atoms_type(colors, num_atoms, sys);
+        break;
+    case ColorMapping::Serial:
+        color_atoms_idx(colors, num_atoms, sys);
+        break;
+    case ColorMapping::ResName:
+        color_atoms_res_name(colors, num_atoms, sys);
+        break;
+    case ColorMapping::ResType:
+        color_atoms_res_type(colors, num_atoms, sys);
+        break;
+    case ColorMapping::ResSeqId:
+        color_atoms_res_seq_id(colors, num_atoms, sys);
+        break;
+    case ColorMapping::ResIndex:
+        color_atoms_res_idx(colors, num_atoms, sys);
+        break;
+    case ColorMapping::ChainId:
+        color_atoms_chain_id(colors, num_atoms, sys);
+        break;
+    case ColorMapping::ChainIndex:
+        color_atoms_chain_idx(colors, num_atoms, sys);
+        break;
+    case ColorMapping::PartIndex:
+        color_atoms_part_idx(colors, num_atoms, sys);
+        break;
+    case ColorMapping::SecondaryStructure: {
+        SecondaryStructurePalette palette = {
+            .coil  = convert_color(rep->secondary_structure.color_coil),
+            .helix = convert_color(rep->secondary_structure.color_helix),
+            .sheet = convert_color(rep->secondary_structure.color_sheet),
+        };
+        color_atoms_secondary_structure(colors, num_atoms, sys, displayed_secondary_structure(state), palette);
+        break;
+    }
+    case ColorMapping::Attribute: {
+        AtomAttributeColoring& coloring = rep->atom_attribute;
+        const md_attribute_t* attr = md_attributes_get(&sys.attributes, coloring.key);
+        size_t num_extracted = 0;
+        float* values = nullptr;
+
+        if (attr) {
+            values = (float*)md_vm_arena_push(frame_alloc, sizeof(float) * num_atoms);
+
+            // Fixing the variant axis hands back exactly the atom axis, so there is no
+            // offset arithmetic here to get wrong. A field with no variant axis is rank 1
+            // and takes no indices at all.
+            const uint32_t variant = (uint32_t)CLAMP(coloring.variant_idx, 0, MAX(atom_attribute_variant_count(attr) - 1, 0));
+            const md_attribute_slice_t slice = attr->format.rank > 1 ? md_attribute_slice_1(variant) : md_attribute_slice_all();
+            num_extracted = md_attribute_extract_f32(values, num_atoms, attr, slice, md_unit_none());
+        }
+
+        if (num_extracted == num_atoms) {
+            // The span of the atoms shown, measured again only when the values or the atoms
+            // changed: it scans every variant of the attribute
+            uint64_t span_hash = md_hash64(&coloring.key, sizeof(coloring.key), 1);
+            const uint64_t version = md_attributes_version(&sys.attributes, coloring.key);
+            span_hash = md_hash64(&version, sizeof(version), span_hash);
+            span_hash = shown ? md_bitset_hash64(*shown, span_hash) : md_hash64(&num_atoms, sizeof(num_atoms), span_hash);
+            if (span_hash != coloring.span_hash) {
+                coloring.span = atom_attribute_span(attr, shown);
+                coloring.span_hash = span_hash;
+            }
+            color_scale_update_range(&coloring.scale, coloring.span);
+
+            for (size_t i = 0; i < num_atoms; ++i) {
+                // An atom without a value is not a point on the ramp: NAN would reach the
+                // colormap lookup as an index, so it gets a neutral grey of its own instead
+                colors[i] = atom_attribute_value_absent(values[i]) ? IM_COL32(128, 128, 128, 255) : color_scale_color_u32(coloring.scale, values[i]);
+            }
+        } else {
+            if (attr) {
+                MD_LOG_DEBUG("Failed to extract values for the selected atom attribute");
+            }
+            MEMSET(colors, 0xFFFFFFFFu, bytes);
+        }
+        break;
+    }
+    default:
+        ASSERT(false);
+        break;
+    }
+
+    if (rep->tint_scale > 0.0f || rep->saturation < 1.0f) {
+        uint32_t tint_color = convert_color(rep->tint_color);
+        tint_colors(colors, num_atoms, tint_color, rep->tint_scale, rep->saturation);
+    }
+}
+
 static void update_representation(ApplicationState* state, Representation* rep) {
     ASSERT(state);
     ASSERT(rep);
@@ -621,8 +836,7 @@ static void update_representation(ApplicationState* state, Representation* rep) 
     md_temp_scope_t temp = md_temp_begin_in(frame_alloc);
     defer { md_temp_end(temp); };
 
-    const size_t bytes = num_atoms * sizeof(uint32_t);
-
+    bool again = false;     // not all done: updated again next frame
     uint32_t* colors = 0;
     if (representation_uses_atom_colors(*rep)) {
         colors = (uint32_t*)md_vm_arena_push(frame_alloc, sizeof(uint32_t) * num_atoms);
@@ -636,12 +850,24 @@ static void update_representation(ApplicationState* state, Representation* rep) 
             // Within the context of the groups it is in. A context that is not valid leaves nothing to
             // evaluate within, which is what an invalid filter of its own leaves too.
             const RepresentationContext ctx = representation_context(*state, rep->node.parent);
-            if (ctx.valid) {
+            if (ctx.valid && rep->type == RepresentationType::Bonds) {
+                // The bonds, and the atoms at their ends: those are what is coloured, and shown
+                filter_evaluate_bonds(&rep->filter, &rep->bond_pairs, representation_filter_context(*state, ctx), state->allocator.persistent);
+                md_bitmask_t ends = md_bitmask_create(0, (uint32_t)num_atoms, frame_alloc);
+                for (size_t i = 0; i < md_array_size(rep->bond_pairs); ++i) {
+                    md_bitmask_set_bit(&ends, (uint32_t)rep->bond_pairs[i].idx[0]);
+                    md_bitmask_set_bit(&ends, (uint32_t)rep->bond_pairs[i].idx[1]);
+                }
+                md_bitset_free(&rep->atom_mask, state->allocator.persistent);
+                rep->atom_mask = md_bitmask_extract(&ends, state->allocator.persistent);
+                rep->filter.result.is_dynamic |= ctx.dynamic;
+            } else if (ctx.valid) {
                 filter_evaluate(&rep->filter, &rep->atom_mask, representation_filter_context(*state, ctx), state->allocator.persistent);
                 // What it picks follows the frame if the context it picks within does
                 rep->filter.result.is_dynamic |= ctx.dynamic;
             } else {
                 md_bitset_free(&rep->atom_mask, state->allocator.persistent);
+                md_array_shrink(rep->bond_pairs, 0);
                 rep->filter.result = {};
                 rep->filter.result.is_dynamic = ctx.dynamic;     // it may come back valid in another frame
                 snprintf(rep->filter.result.error, sizeof(rep->filter.result.error), "The filter of the group '%s', the context of this one, is not valid", ctx.group ? ctx.group->name : "");
@@ -650,116 +876,23 @@ static void update_representation(ApplicationState* state, Representation* rep) 
             state->representation.atom_visibility_mask_dirty = true;
         }
 
-        switch (rep->color_mapping) {
-        case ColorMapping::Uniform:
-            color_atoms_uniform(colors, num_atoms, convert_color(rep->base_color));
-            break;
-        case ColorMapping::Type:
-            color_atoms_type(colors, num_atoms, sys);
-            break;
-        case ColorMapping::Serial:
-            color_atoms_idx(colors, num_atoms, sys);
-            break;
-        case ColorMapping::CompName:
-            color_atoms_comp_name(colors, num_atoms, sys);
-            break;
-        case ColorMapping::CompSeqId:
-            color_atoms_comp_seq_id(colors, num_atoms, sys);
-            break;
-        case ColorMapping::CompIndex:
-            color_atoms_comp_idx(colors, num_atoms, sys);
-            break;
-        case ColorMapping::InstId:
-            color_atoms_inst_id(colors, num_atoms, sys);
-            break;
-        case ColorMapping::InstIndex:
-            color_atoms_inst_idx(colors, num_atoms, sys);
-            break;
-        case ColorMapping::SecondaryStructure: {
-            SecondaryStructurePalette palette = {
-                .coil  = convert_color(rep->secondary_structure.color_coil),
-                .helix = convert_color(rep->secondary_structure.color_helix),
-                .sheet = convert_color(rep->secondary_structure.color_sheet),
-            };
-            color_atoms_secondary_structure(colors, num_atoms, sys, displayed_secondary_structure(state), palette);
-            break;
-        }
-        case ColorMapping::Attribute: {
-            AtomAttributeColoring& coloring = rep->atom_attribute;
-            const md_attribute_t* attr = md_attributes_get(&sys.attributes, coloring.key);
-            size_t num_extracted = 0;
-            float* values = nullptr;
-
-            if (attr) {
-                values = (float*)md_vm_arena_push(frame_alloc, sizeof(float) * num_atoms);
-
-                // Fixing the variant axis hands back exactly the atom axis, so there is no
-                // offset arithmetic here to get wrong. A field with no variant axis is rank 1
-                // and takes no indices at all.
-                const uint32_t variant = (uint32_t)CLAMP(coloring.variant_idx, 0, MAX(atom_attribute_variant_count(attr) - 1, 0));
-                const md_attribute_slice_t slice = attr->format.rank > 1 ? md_attribute_slice_1(variant) : md_attribute_slice_all();
-                num_extracted = md_attribute_extract_f32(values, num_atoms, attr, slice, md_unit_none());
-            }
-
-            if (num_extracted == num_atoms) {
-                // The span of the atoms shown, measured again only when the values or the atoms
-                // changed: it scans every variant of the attribute
-                const md_bitset_t* shown = rep->filter.result.success ? &rep->atom_mask : nullptr;
-                uint64_t span_hash = md_hash64(&coloring.key, sizeof(coloring.key), 1);
-                const uint64_t version = md_attributes_version(&sys.attributes, coloring.key);
-                span_hash = md_hash64(&version, sizeof(version), span_hash);
-                span_hash = shown ? md_bitset_hash64(*shown, span_hash) : md_hash64(&num_atoms, sizeof(num_atoms), span_hash);
-                if (span_hash != coloring.span_hash) {
-                    coloring.span = atom_attribute_span(attr, shown);
-                    coloring.span_hash = span_hash;
-                }
-                color_scale_update_range(&coloring.scale, coloring.span);
-
-                for (size_t i = 0; i < num_atoms; ++i) {
-                    // An atom without a value is not a point on the ramp: NAN would reach the
-                    // colormap lookup as an index, so it gets a neutral grey of its own instead
-                    colors[i] = atom_attribute_value_absent(values[i]) ? IM_COL32(128, 128, 128, 255) : color_scale_color_u32(coloring.scale, values[i]);
-                }
-            } else {
-                if (attr) {
-                    MD_LOG_DEBUG("Failed to extract values for the selected atom attribute");
-                }
-                MEMSET(colors, 0xFFFFFFFFu, bytes);
-            }
-            break;
-        }
-        default:
-            ASSERT(false);
-            break;
-        }
-    }
-
-    if (colors && (rep->tint_scale > 0.0f || rep->saturation < 1.0f)) {
-        uint32_t tint_color = convert_color(rep->tint_color);
-        tint_colors(colors, num_atoms, tint_color, rep->tint_scale, rep->saturation);
+        // Of the atoms shown, for a colour scale which spans their values
+        representation_atom_colors(colors, num_atoms, state, rep, rep->filter.result.success ? &rep->atom_mask : nullptr);
     }
 
     switch (rep->type) {
     case RepresentationType::SpaceFill:
-        rep->type_is_valid = sys.atom.count > 0;
-        break;
     case RepresentationType::Licorice:
-        rep->type_is_valid = sys.bond.count > 0;
-        break;
     case RepresentationType::BallAndStick:
-        rep->type_is_valid = sys.atom.count > 0;
-        break;
     case RepresentationType::Ribbons:
-        rep->type_is_valid = sys.protein_backbone.range.count > 0;
-        break;
     case RepresentationType::Cartoon:
-        // Proteins, and the lipids and nucleic acids of the glyphs
-        rep->type_is_valid = sys.protein_backbone.range.count > 0 || cartoon_glyphs_valid(state->mold.cartoon_glyphs);
+        rep->type_is_valid = representation_particle_type_valid(*state, rep->type);
         break;
     case RepresentationType::ElectronicStructure:
         rep->type_is_valid = electronic_structure_source_supported(es_source_mask(sys), rep->electronic_structure.source);
         if (rep->type_is_valid) {
-            electronic_structure_representation_update(state, rep, colors);
+            // what it waits for without blocking, asked again next frame
+            again = !electronic_structure_representation_update(state, rep, colors);
         }
         break;
     case RepresentationType::DipoleMoment:
@@ -767,6 +900,9 @@ static void update_representation(ApplicationState* state, Representation* rep) 
         break;
     case RepresentationType::SimulationBox:
         rep->type_is_valid = md_unitcell_flags(&state->mold.state.unitcell) != 0;
+        break;
+    case RepresentationType::Bonds:
+        rep->type_is_valid = sys.atom.count > 0;
         break;
     default:
         ASSERT(false);
@@ -778,6 +914,7 @@ static void update_representation(ApplicationState* state, Representation* rep) 
             filter_colors(colors, num_atoms, rep->atom_mask);
             state->representation.atom_visibility_mask_dirty = true;
             md_gl_rep_set_atom_colors(rep->md_rep, 0, (uint32_t)num_atoms, colors, 0);
+            representation_set_weak_bonds(state, rep);
             rep->glyphs_shown = false;
             if (rep->type == RepresentationType::Cartoon) {
                 rep->glyphs_shown = cartoon_glyphs_rep_set_colors(state->mold.cartoon_glyphs, rep->glyph_rep, colors, num_atoms, rep->two_head_spheres);
@@ -793,7 +930,79 @@ static void update_representation(ApplicationState* state, Representation* rep) 
         }
     }
 
-    rep->needs_update = false;
+    rep->needs_update = again;
+}
+
+void representation_set_weak_bonds(ApplicationState* state, Representation* rep) {
+    ASSERT(state && rep);
+    if (!rep->md_rep.id) return;
+    const md_system_t& sys = state->mold.sys;
+
+    const md_atom_pair_t* pairs = nullptr;
+    size_t count = 0;
+    if (rep->type == RepresentationType::Licorice || rep->type == RepresentationType::BallAndStick) {
+        pairs = sys.bond.pairs ? sys.bond.pairs + sys.bond.count : nullptr;
+        count = sys.bond.noncovalent_count;
+    } else if (rep->type == RepresentationType::Bonds) {
+        pairs = rep->bond_pairs;
+        count = md_array_size(rep->bond_pairs);
+    }
+
+    md_temp_scope_t temp = md_temp_begin_in(state->allocator.frame);
+    defer { md_temp_end(temp); };
+    uint32_t* atom_a = count ? (uint32_t*)md_vm_arena_push(state->allocator.frame, sizeof(uint32_t) * count) : nullptr;
+    uint32_t* atom_b = count ? (uint32_t*)md_vm_arena_push(state->allocator.frame, sizeof(uint32_t) * count) : nullptr;
+    for (size_t i = 0; i < count; ++i) {
+        atom_a[i] = (uint32_t)pairs[i].idx[0];
+        atom_b[i] = (uint32_t)pairs[i].idx[1];
+    }
+    md_gl_rep_set_weak_bonds(rep->md_rep, (uint32_t)count, atom_a, atom_b, nullptr);
+}
+
+// The dashes of a weak bond drawn dashed, and the gaps between them, as multiples of its radius
+#define WEAK_BOND_DASH_LENGTH 2.0f
+#define WEAK_BOND_GAP_LENGTH  1.5f
+
+void representation_weak_bond_draw_ops(md_array(md_gl_draw_op_t)* ops, const ApplicationState& state, const Representation& rep, md_allocator_i* alloc) {
+    ASSERT(ops);
+    md_gl_draw_op_t op = {
+        .type = MD_GL_REP_WEAK_BONDS,
+        .args = {},
+        .rep = rep.md_rep,
+    };
+    bool dashed = true;
+    if (rep.type == RepresentationType::Licorice || rep.type == RepresentationType::BallAndStick) {
+        // The non-covalent bonds of the system among its atoms, thinner than its sticks, in their colours
+        if (!rep.noncovalent_bonds || state.mold.sys.bond.noncovalent_count == 0) return;
+        const md_gl_draw_op_t sticks = representation_draw_op(rep);
+        const bool licorice = rep.type == RepresentationType::Licorice;
+        op.args.weak_bonds.radius = 0.5f * 0.2f * (licorice ? rep.scale.x : rep.scale.y);
+        op.args.weak_bonds.color_mode    = licorice ? sticks.args.licorice.color_mode    : sticks.args.ball_and_stick.color_mode;
+        op.args.weak_bonds.sharpness     = licorice ? sticks.args.licorice.sharpness     : sticks.args.ball_and_stick.sharpness;
+        op.args.weak_bonds.uniform_color = licorice ? sticks.args.licorice.uniform_color : sticks.args.ball_and_stick.uniform_color;
+    } else if (rep.type == RepresentationType::Bonds) {
+        if (md_array_size(rep.bond_pairs) == 0) return;
+        // As thick as the sticks of a licorice of the same scale
+        op.args.weak_bonds.radius = 0.2f * rep.scale.x;
+        op.args.weak_bonds.color_mode = (md_gl_bond_mode_t)rep.bond_color;
+        op.args.weak_bonds.sharpness = rep.bond_sharpness;
+        op.args.weak_bonds.uniform_color = convert_color(rep.bond_base_color);
+        if (rep.tint_scale > 0.0f || rep.saturation < 1.0f) {
+            tint_colors(&op.args.weak_bonds.uniform_color, 1, convert_color(rep.tint_color), rep.tint_scale, rep.saturation);
+        }
+        dashed = rep.bonds_dashed;
+    } else {
+        return;
+    }
+    if (dashed) {
+        op.args.weak_bonds.dash_length = WEAK_BOND_DASH_LENGTH * op.args.weak_bonds.radius;
+        op.args.weak_bonds.gap_length  = WEAK_BOND_GAP_LENGTH  * op.args.weak_bonds.radius;
+    } else {
+        // Solid: md_gl draws two dashes at least, so one too long for any bond with a gap too small to see
+        op.args.weak_bonds.dash_length = 1.0e6f;
+        op.args.weak_bonds.gap_length  = 1.0e-6f;
+    }
+    md_array_push(*ops, op, alloc);
 }
 
 void update_all_representations(ApplicationState* state) {
@@ -805,7 +1014,10 @@ void update_all_representations(ApplicationState* state) {
         }
     }
     for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
-        update_representation(state, &state->representation.reps[i]);
+        Representation* rep = &state->representation.reps[i];
+        // The field it is coloured by is evaluated over frames, shown or not
+        if (rep->type == RepresentationType::ElectronicStructure) electronic_structure_field_poll(rep);
+        update_representation(state, rep);
     }
 }
 
@@ -827,6 +1039,565 @@ void flag_representation_as_dirty(Representation* rep) {
     rep->filt_is_dirty = true;
     rep->needs_update  = true;
     rep->electronic_structure.vol_hash = 0;
+}
+
+bool representation_can_show_bond(const ApplicationState& app, const Representation& rep) {
+    return rep.type == RepresentationType::Bonds && representation_context(app, rep.node.parent).atoms == nullptr;
+}
+
+bool representation_shows_bond(const Representation& rep, md_atom_pair_t pair) {
+    for (size_t i = 0; i < md_array_size(rep.bond_pairs); ++i) {
+        const md_atom_pair_t p = rep.bond_pairs[i];
+        if ((p.idx[0] == pair.idx[0] && p.idx[1] == pair.idx[1]) || (p.idx[0] == pair.idx[1] && p.idx[1] == pair.idx[0])) return true;
+    }
+    return false;
+}
+
+bool representation_show_bond(ApplicationState* app, md_atom_pair_t pair, md_bond_flags_t flags, Representation* into) {
+    ASSERT(app);
+    char expr[64];
+    snprintf(expr, sizeof(expr), "bond(%d, %d)", pair.idx[0] + 1, pair.idx[1] + 1);
+
+    if (into) {
+        ASSERT(representation_can_show_bond(*app, *into));
+        char text[sizeof(into->filter.text)];
+        const bool empty = str_empty(str_trim(str_from_cstr(into->filter.text)));
+        const int n = empty ? snprintf(text, sizeof(text), "%s", expr) : snprintf(text, sizeof(text), "(%s) or %s", into->filter.text, expr);
+        if (n < 0 || (size_t)n >= sizeof(text)) return false;
+        MEMCPY(into->filter.text, text, (size_t)n + 1);
+        flag_representation_as_dirty(into);
+        return true;
+    }
+
+    // Distinct from what draws the bond already: one colour, dashed as a weak bond is, and a stick over that of a
+    // licorice (whose non-covalent bonds are half as thick as its sticks)
+    Representation* rep = create_representation(app, RepresentationType::Bonds, ColorMapping::Uniform, str_from_cstr(expr));
+    if (!rep) return false;
+    const bool noncovalent = md_bond_is_noncovalent(flags);
+    snprintf(rep->name, sizeof(rep->name), "bond %d-%d", pair.idx[0] + 1, pair.idx[1] + 1);
+    rep->bonds_dashed    = noncovalent;
+    rep->scale.x         = noncovalent ? 1.0f : 1.25f;
+    rep->bond_color      = BondColorMode::Uniform;
+    rep->bond_base_color = {1.0f, 0.55f, 0.1f, 1.0f};
+    rep->open_properties = true;
+    app->representation.show_window = true;
+    return true;
+}
+
+// --- New representations from the context menu of the viewport ---
+
+namespace {
+
+// What a target is a whole of, at the atom it is found from
+enum class TargetUnit { Residue, Part, Chain, Molecule, Lipid };
+
+// "ALA 23": the name and number the file gives the residue
+void residue_label(char* buf, size_t cap, const md_system_t& sys, size_t res_idx) {
+    const str_t name = md_system_residue_name(&sys, res_idx);
+    snprintf(buf, cap, STR_FMT " %d", STR_ARG(name), (int)md_system_residue_seq_id(&sys, res_idx));
+}
+
+int64_t lipid_of_residue(const md_system_t& sys, size_t res_idx) {
+    const md_lipid_data_t& lipids = sys.lipid;
+    for (size_t i = 0; i < lipids.count; ++i) {
+        const int32_t* res = md_lipid_residues(&lipids, i);
+        const size_t n = md_lipid_residue_count(&lipids, i);
+        for (size_t k = 0; k < n; ++k) {
+            if ((size_t)res[k] == res_idx) return (int64_t)i;
+        }
+    }
+    return -1;
+}
+
+// The unit which holds the atom, by an id which tells it apart from the others of its kind, -1 for none: then the atom
+// falls back to a finer unit (target_unit_set does the same)
+int64_t target_unit_id(TargetUnit unit, size_t atom, const md_system_t& sys) {
+    const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, atom);
+    switch (unit) {
+    case TargetUnit::Residue:  return res;
+    case TargetUnit::Part:     return md_system_part_find_by_atom_idx(&sys, atom);
+    case TargetUnit::Chain: {
+        const md_chain_idx_t chain = res >= 0 ? md_system_chain_find_by_residue_idx(&sys, (size_t)res) : -1;
+        return chain >= 0 ? chain : -2 - (int64_t)md_system_part_find_by_atom_idx(&sys, atom);
+    }
+    case TargetUnit::Molecule: return md_system_molecule_find_by_atom_idx(&sys, atom);
+    case TargetUnit::Lipid:    return res >= 0 ? lipid_of_residue(sys, (size_t)res) : -1;
+    }
+    return -1;
+}
+
+void target_unit_set(md_bitmask_t* mask, TargetUnit unit, size_t atom, const md_system_t& sys) {
+    const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, atom);
+    switch (unit) {
+    case TargetUnit::Lipid: {
+        const int64_t lipid = res >= 0 ? lipid_of_residue(sys, (size_t)res) : -1;
+        if (lipid < 0) break;
+        const int32_t* lres = md_lipid_residues(&sys.lipid, (size_t)lipid);
+        for (size_t k = 0; k < md_lipid_residue_count(&sys.lipid, (size_t)lipid); ++k) {
+            const md_urange_t r = md_system_residue_atom_range(&sys, (size_t)lres[k]);
+            if (r.beg < r.end) md_bitmask_set_range(mask, r.beg, r.end);
+        }
+        return;
+    }
+    case TargetUnit::Molecule: {
+        const md_molecule_idx_t mol = md_system_molecule_find_by_atom_idx(&sys, atom);
+        if (mol < 0) break;
+        mask_set_molecule(mask, (size_t)mol, sys);
+        return;
+    }
+    case TargetUnit::Chain:
+        if (res < 0) break;
+        mask_set_chain_of_res(mask, (size_t)res, sys);
+        return;
+    case TargetUnit::Part: {
+        const md_part_idx_t part = md_system_part_find_by_atom_idx(&sys, atom);
+        if (part < 0) break;
+        const md_urange_t r = md_system_part_atom_range(&sys, (size_t)part);
+        if (r.beg < r.end) md_bitmask_set_range(mask, r.beg, r.end);
+        return;
+    }
+    case TargetUnit::Residue:
+        break;
+    }
+    // The residue, or the atom where it is in none
+    if (res >= 0) {
+        const md_urange_t r = md_system_residue_atom_range(&sys, (size_t)res);
+        if (r.beg < r.end) {
+            md_bitmask_set_range(mask, r.beg, r.end);
+            return;
+        }
+    }
+    md_bitmask_set_bit(mask, (uint32_t)atom);
+}
+
+// What the menu calls the unit which holds the atom: "ALA 23", "chain A", "POPC 112", "SOL" (a molecule by its type)
+void target_unit_label(char* buf, size_t cap, TargetUnit unit, size_t atom, const md_system_t& sys) {
+    const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, atom);
+    switch (unit) {
+    case TargetUnit::Chain:
+    case TargetUnit::Part: {
+        const md_chain_idx_t chain = res >= 0 ? md_system_chain_find_by_residue_idx(&sys, (size_t)res) : -1;
+        const md_part_idx_t  part  = md_system_part_find_by_atom_idx(&sys, atom);
+        const md_part_kind_t kind  = part >= 0 ? md_system_part_kind(&sys, (size_t)part) : MD_PART_KIND_UNKNOWN;
+        // A strand by its chain, as the files call it; a ligand by its residue, as a single one is
+        if (chain >= 0 && (unit == TargetUnit::Chain || md_part_kind_is_polymer(kind))) {
+            const str_t id = md_system_chain_id(&sys, (size_t)chain);
+            snprintf(buf, cap, "chain " STR_FMT, STR_ARG(id));
+            return;
+        }
+        if (part >= 0 && md_part_kind_is_polymer(kind)) {
+            // As polymer(i) counts them
+            int num = 0;
+            for (size_t i = 0; i <= (size_t)part; ++i) num += md_part_kind_is_polymer(md_system_part_kind(&sys, i));
+            snprintf(buf, cap, "polymer %d", num);
+            return;
+        }
+        if (part >= 0) {
+            // A ligand or a glycan of several residues: by the first of them
+            const md_urange_t r = md_system_part_residue_range(&sys, (size_t)part);
+            if (r.end - r.beg > 1) {
+                char first[48];
+                residue_label(first, sizeof(first), sys, r.beg);
+                snprintf(buf, cap, "%s and %d more", first, (int)(r.end - r.beg - 1));
+                return;
+            }
+        }
+        break;
+    }
+    case TargetUnit::Molecule: {
+        const md_molecule_idx_t mol = md_system_molecule_find_by_atom_idx(&sys, atom);
+        const md_molecule_type_idx_t type = mol >= 0 ? md_system_molecule_type_idx(&sys, (size_t)mol) : -1;
+        const str_t name = type >= 0 ? md_system_molecule_type_name(&sys, (size_t)type) : str_t{};
+        if (!str_empty(name)) {
+            snprintf(buf, cap, STR_FMT, STR_ARG(name));
+            return;
+        }
+        if (res < 0 && mol >= 0) {
+            snprintf(buf, cap, "molecule %d", (int)mol + 1);
+            return;
+        }
+        break;
+    }
+    case TargetUnit::Lipid:
+    case TargetUnit::Residue:
+        break;
+    }
+    if (res >= 0) {
+        residue_label(buf, cap, sys, (size_t)res);
+    } else {
+        snprintf(buf, cap, "atom %d", (int)atom + 1);
+    }
+}
+
+const char* target_unit_plural(TargetUnit unit) {
+    switch (unit) {
+    case TargetUnit::Residue:  return "residues";
+    case TargetUnit::Part:     return "parts";
+    case TargetUnit::Chain:    return "chains";
+    case TargetUnit::Molecule: return "molecules";
+    case TargetUnit::Lipid:    return "lipids";
+    }
+    return "";
+}
+
+// The unit a hit on the atom is taken as, at Atom granularity: what one most likely means by pointing at it. A cartoon
+// is a strand, the atoms of a protein or nucleic acid a residue of it, a lipid the molecule (all of its residues), a
+// ligand or a glycan its part, unless it is a residue within a polymer (a modified one).
+TargetUnit target_unit_guess(size_t atom, bool cartoon, const md_system_t& sys) {
+    const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, atom);
+    const md_part_idx_t part = md_system_part_find_by_atom_idx(&sys, atom);
+    const md_part_kind_t part_kind = part >= 0 ? md_system_part_kind(&sys, (size_t)part) : MD_PART_KIND_UNKNOWN;
+    if (res < 0) {
+        // Nothing but the bonds to go by (an XYZ file): the molecule
+        return TargetUnit::Molecule;
+    }
+    switch (md_system_residue_kind(&sys, (size_t)res)) {
+    case MD_RESIDUE_KIND_LIPID:
+        return TargetUnit::Lipid;
+    case MD_RESIDUE_KIND_AMINO_ACID:
+    case MD_RESIDUE_KIND_NUCLEOTIDE:
+        return (cartoon && part >= 0 && md_part_kind_is_polymer(part_kind)) ? TargetUnit::Part : TargetUnit::Residue;
+    case MD_RESIDUE_KIND_WATER:
+    case MD_RESIDUE_KIND_ION:
+        return TargetUnit::Residue;
+    default:
+        if (cartoon && part >= 0 && md_part_kind_is_polymer(part_kind)) return TargetUnit::Part;
+        // A ligand or a glycan, a part of its own; a residue within a strand by itself
+        return (part >= 0 && !md_part_kind_is_polymer(part_kind) && part_kind != MD_PART_KIND_WATER) ? TargetUnit::Part : TargetUnit::Residue;
+    }
+}
+
+// All the residues which share the name of that of the atom, with the number of them. Of a residue no polymer holds.
+size_t target_same_name(md_bitmask_t* mask, size_t atom, const md_system_t& sys) {
+    const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, atom);
+    if (res < 0) return 0;
+    const md_residue_kind_t kind = md_system_residue_kind(&sys, (size_t)res);
+    if (kind == MD_RESIDUE_KIND_AMINO_ACID || kind == MD_RESIDUE_KIND_NUCLEOTIDE) return 0;
+    const md_part_idx_t part = md_system_part_find_by_atom_idx(&sys, atom);
+    if (part >= 0 && md_part_kind_is_polymer(md_system_part_kind(&sys, (size_t)part))) return 0;
+
+    const str_t name = md_system_residue_name(&sys, (size_t)res);
+    if (str_empty(name)) return 0;
+    size_t num = 0;
+    for (size_t i = 0; i < md_system_residue_count(&sys); ++i) {
+        if (!str_eq(md_system_residue_name(&sys, i), name)) continue;
+        const md_urange_t r = md_system_residue_atom_range(&sys, i);
+        if (r.beg < r.end) {
+            md_bitmask_set_range(mask, r.beg, r.end);
+            num += 1;
+        }
+    }
+    return num;
+}
+
+// What a target can be shown as, and what it is suggested to be shown as: by what it is, and not as something which
+// draws most of it already, which a new one of the same type would only coincide with
+void target_suggest(RepresentationTarget* t, const ApplicationState& app) {
+    const md_system_t& sys = app.mold.sys;
+    const md_bitset_t atoms = t->atoms;
+    const size_t num_atoms = md_bitset_count(atoms);
+
+    // What the cartoon would draw of it: the residues of a protein backbone, and the points of the glyphs (lipids and
+    // nucleic acids)
+    size_t num_backbone = 0;
+    const md_protein_backbone_data_t& bb = sys.protein_backbone;
+    for (size_t i = 0; i < bb.segment.count; ++i) {
+        const md_atom_idx_t ca = bb.segment.atoms[i].ca;
+        num_backbone += ca >= 0 && md_bitset_test(atoms, (uint32_t)ca);
+    }
+    size_t num_glyphs = 0;
+    const CartoonGlyphs& glyphs = app.mold.cartoon_glyphs;
+    if (cartoon_glyphs_valid(glyphs)) {
+        for (uint32_t i = 0; i < glyphs.num_points; ++i) {
+            const int32_t a = glyphs.point_color_atom[i];
+            num_glyphs += a >= 0 && md_bitset_test(atoms, (uint32_t)a);
+        }
+    }
+    t->ribbons = num_backbone > 0 && representation_particle_type_valid(app, RepresentationType::Ribbons);
+    t->cartoon = (num_backbone > 0 || num_glyphs > 0) && representation_particle_type_valid(app, RepresentationType::Cartoon);
+
+    // Mostly of a polymer: the residues of a protein or a nucleic acid
+    size_t num_polymer_atoms = 0;
+    size_t num_amino_atoms = 0;
+    for (size_t i = 0; i < md_system_residue_count(&sys); ++i) {
+        const md_urange_t r = md_system_residue_atom_range(&sys, i);
+        if (r.beg >= r.end || !md_bitset_test_any_range(atoms, r.beg, r.end)) continue;
+        const md_residue_kind_t kind = md_system_residue_kind(&sys, i);
+        const size_t n = md_bitset_count_range(atoms, r.beg, r.end);
+        num_amino_atoms   += kind == MD_RESIDUE_KIND_AMINO_ACID ? n : 0;
+        num_polymer_atoms += (kind == MD_RESIDUE_KIND_AMINO_ACID || kind == MD_RESIDUE_KIND_NUCLEOTIDE) ? n : 0;
+    }
+
+    // By preference: a strand (or more) as a cartoon, a lipid as its glyph; the residues of a polymer, which a cartoon
+    // likely shows already, as sticks; a ligand as balls and sticks; something large (solvent, a membrane) as spheres
+    RepresentationType prefs[4];
+    size_t num_prefs = 0;
+    const bool lipids = num_glyphs > 0 && num_backbone == 0 && num_polymer_atoms == 0;
+    if (t->cartoon && (num_backbone >= 8 || lipids || (num_glyphs >= 8))) {
+        prefs[num_prefs++] = RepresentationType::Cartoon;
+        prefs[num_prefs++] = RepresentationType::Licorice;
+        prefs[num_prefs++] = RepresentationType::SpaceFill;
+        prefs[num_prefs++] = RepresentationType::BallAndStick;
+    } else if (num_atoms > 20000) {
+        prefs[num_prefs++] = RepresentationType::SpaceFill;
+        prefs[num_prefs++] = RepresentationType::Licorice;
+        prefs[num_prefs++] = RepresentationType::BallAndStick;
+    } else if (2 * num_polymer_atoms > num_atoms) {
+        prefs[num_prefs++] = RepresentationType::Licorice;
+        prefs[num_prefs++] = RepresentationType::BallAndStick;
+        prefs[num_prefs++] = RepresentationType::SpaceFill;
+    } else {
+        prefs[num_prefs++] = RepresentationType::BallAndStick;
+        prefs[num_prefs++] = RepresentationType::SpaceFill;
+        prefs[num_prefs++] = RepresentationType::Licorice;
+    }
+
+    // The types which draw most of it already
+    bool drawn[(int)RepresentationType::Count] = {};
+    md_temp_scope_t temp = md_temp_begin();
+    for (size_t i = 0; i < md_array_size(app.representation.reps); ++i) {
+        const Representation& rep = app.representation.reps[i];
+        if ((int)rep.type > (int)RepresentationType::Cartoon || !representation_shown(app, rep)) continue;
+        if (drawn[(int)rep.type]) continue;
+        const md_bitset_t both = md_bitset_and(rep.atom_mask, atoms, md_temp_allocator(temp));
+        drawn[(int)rep.type] = 2 * md_bitset_count(both) > num_atoms;
+    }
+    md_temp_end(temp);
+
+    // The first not drawn already, else the first that can be shown at all
+    t->suggested_type = RepresentationType::SpaceFill;
+    bool found = false;
+    for (int pass = 0; pass < 2 && !found; ++pass) {
+        for (size_t i = 0; i < num_prefs; ++i) {
+            if ((pass == 1 || !drawn[(int)prefs[i]]) && representation_target_can_show(app, *t, prefs[i])) {
+                t->suggested_type = prefs[i];
+                found = true;
+                break;
+            }
+        }
+    }
+    t->suggested_color = (t->suggested_type == RepresentationType::Cartoon)
+        ? (2 * num_amino_atoms > num_atoms ? ColorMapping::SecondaryStructure : ColorMapping::ResType)
+        : ColorMapping::Type;
+}
+
+// Done with the mask: its atoms the target's, a single atom none
+bool target_finish(RepresentationTarget* t, md_bitmask_t* mask, const ApplicationState& app) {
+    const bool ok = md_bitmask_count(mask) > 1;
+    if (ok) {
+        t->atoms = md_bitmask_extract(mask, md_get_heap_allocator());
+        target_suggest(t, app);
+    }
+    md_bitmask_free(mask);
+    return ok;
+}
+
+}  // namespace
+
+bool representation_targets_from_hit(RepresentationTarget* target, RepresentationTarget* all, const ApplicationState& app, const PickingHit& hit) {
+    ASSERT(target);
+    representation_target_free(target);
+    if (all) representation_target_free(all);
+
+    const md_system_t& sys = app.mold.sys;
+    if (sys.atom.count == 0) return false;
+
+    // The atoms the hit stands for, and whether it is of a cartoon (a strand rather than a residue of it)
+    int32_t seeds[64];
+    size_t num_seeds = 0;
+    bool cartoon = false;
+    auto push = [&](int64_t atom) {
+        if (atom >= 0 && (size_t)atom < sys.atom.count && num_seeds < ARRAY_SIZE(seeds)) seeds[num_seeds++] = (int32_t)atom;
+    };
+    auto push_residue = [&](int64_t res) {
+        if (res >= 0 && (size_t)res < sys.residue.count) push(md_system_residue_atom_range(&sys, (size_t)res).beg);
+    };
+
+    if (hit.domain == PickingDomain_Atom) {
+        push(hit.local_idx);
+    } else if (hit.domain == PickingDomain_Bond) {
+        md_atom_pair_t pair;
+        md_bond_flags_t flags;
+        bool formed;
+        if (picked_bond(app, hit.local_idx, &pair, &flags, &formed)) {
+            push(pair.idx[0]);
+            push(pair.idx[1]);
+        }
+    } else if (hit.domain == PickingDomain_Ring) {
+        const int32_t* ring_atoms = nullptr;
+        size_t ring_count = 0;
+        md_ring_flags_t ring_flags = MD_RING_FLAG_NONE;
+        if (picked_ring(app, hit.local_idx, &ring_atoms, &ring_count, &ring_flags)) {
+            for (size_t i = 0; i < ring_count; ++i) push(ring_atoms[i]);
+        }
+    } else if (hit.domain == PickingDomain_BackboneSegment) {
+        const md_protein_backbone_data_t& bb = sys.protein_backbone;
+        if (hit.local_idx < bb.segment.count) {
+            cartoon = true;
+            const md_residue_idx_t res = bb.segment.res_idx ? bb.segment.res_idx[hit.local_idx] : -1;
+            if (res >= 0) push_residue(res);
+            else push(bb.segment.atoms[hit.local_idx].ca);
+        }
+    } else if (hit.domain == PickingDomain_CartoonGlyph) {
+        const CartoonGlyphs& glyphs = app.mold.cartoon_glyphs;
+        const uint32_t point = cartoon_glyphs_picked_point(glyphs, hit.local_idx);
+        if (point < glyphs.num_points) {
+            cartoon = true;
+            const int32_t res = cartoon_glyphs_point_residue(glyphs, point);
+            if (res >= 0) push_residue(res);
+            else push(glyphs.point_color_atom[point]);
+        }
+    } else if (hit.domain == PickingDomain_ChainGap) {
+        cartoon = true;
+        push_residue(hit.local_idx);
+        push_residue((int64_t)hit.local_idx + 1);
+    }
+    if (num_seeds == 0) return false;
+
+    md_bitmask_t mask = md_bitmask_create(0, (uint32_t)sys.atom.count, md_get_heap_allocator());
+
+    const SelectionGranularity granularity = app.selection.granularity;
+    TargetUnit unit = TargetUnit::Residue;
+    if (granularity != SelectionGranularity::Atom) {
+        // What a click there selects, which the highlight showed
+        switch (granularity) {
+        case SelectionGranularity::Part:     unit = md_system_part_count(&sys) ? TargetUnit::Part : TargetUnit::Residue; break;
+        case SelectionGranularity::Chain:    unit = TargetUnit::Chain; break;
+        case SelectionGranularity::Molecule: unit = sys.molecule.count ? TargetUnit::Molecule : TargetUnit::Part; break;
+        default:                             unit = TargetUnit::Residue; break;
+        }
+        for (size_t i = 0; i < num_seeds; ++i) {
+            mask_set_atom_by_selection_granularity(&mask, (size_t)seeds[i], granularity, sys);
+        }
+    } else {
+        unit = target_unit_guess((size_t)seeds[0], cartoon, sys);
+        for (size_t i = 0; i < num_seeds; ++i) {
+            target_unit_set(&mask, unit, (size_t)seeds[i], sys);
+        }
+    }
+
+    // Its name: that of the unit, or how many of them there are (a bond between two residues)
+    int64_t ids[ARRAY_SIZE(seeds)];
+    size_t num_ids = 0;
+    for (size_t i = 0; i < num_seeds; ++i) {
+        const int64_t id = target_unit_id(unit, (size_t)seeds[i], sys);
+        bool found = false;
+        for (size_t k = 0; k < num_ids; ++k) found |= ids[k] == id;
+        if (!found) ids[num_ids++] = id;
+    }
+    if (num_ids > 1) {
+        snprintf(target->label, sizeof(target->label), "%d %s", (int)num_ids, target_unit_plural(unit));
+    } else {
+        target_unit_label(target->label, sizeof(target->label), unit, (size_t)seeds[0], sys);
+    }
+
+    // All of its name, where it is one of several (and the one alone, where it is a single atom: an ion)
+    RepresentationTarget same = {};
+    bool same_ok = false;
+    {
+        md_bitmask_t same_mask = md_bitmask_create(0, (uint32_t)sys.atom.count, md_get_heap_allocator());
+        const size_t num = target_same_name(&same_mask, (size_t)seeds[0], sys);
+        const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, (size_t)seeds[0]);
+        if (num > 1 && res >= 0) {
+            const str_t name = md_system_residue_name(&sys, (size_t)res);
+            snprintf(same.label, sizeof(same.label), "all " STR_FMT, STR_ARG(name));
+            same_ok = target_finish(&same, &same_mask, app);
+        } else {
+            md_bitmask_free(&same_mask);
+        }
+    }
+
+    bool ok = target_finish(target, &mask, app);
+    if (ok && same_ok && md_bitset_equal(target->atoms, same.atoms)) {
+        // The only one of its name: it is all of them
+        representation_target_free(&same);
+        same_ok = false;
+    }
+    if (!ok && same_ok) {
+        // A single atom, such as an ion: all of its name instead
+        *target = same;
+        same = {};
+        same_ok = false;
+        ok = true;
+    }
+    if (all && same_ok) {
+        *all = same;
+    } else {
+        representation_target_free(&same);
+    }
+    return ok;
+}
+
+bool representation_target_from_selection(RepresentationTarget* target, const ApplicationState& app) {
+    ASSERT(target);
+    representation_target_free(target);
+    if (md_bitmask_count(&app.selection.selection_mask) < 2) return false;
+    target->atoms = md_bitmask_extract(&app.selection.selection_mask, md_get_heap_allocator());
+    snprintf(target->label, sizeof(target->label), "selection");
+    target->selection = true;
+    target_suggest(target, app);
+    return true;
+}
+
+void representation_target_free(RepresentationTarget* target) {
+    ASSERT(target);
+    md_bitset_free(&target->atoms, md_get_heap_allocator());
+    *target = RepresentationTarget{};
+}
+
+bool representation_target_can_show(const ApplicationState& app, const RepresentationTarget& target, RepresentationType type) {
+    switch (type) {
+    case RepresentationType::SpaceFill:
+    case RepresentationType::Licorice:
+    case RepresentationType::BallAndStick:
+        return representation_particle_type_valid(app, type);
+    case RepresentationType::Ribbons: return target.ribbons;
+    case RepresentationType::Cartoon: return target.cartoon;
+    default: return false;
+    }
+}
+
+Representation* create_representation_of_target(ApplicationState* app, const RepresentationTarget& target, RepresentationType type) {
+    ASSERT(app);
+    if (md_bitset_empty(target.atoms)) return nullptr;
+
+    // The most telling way of writing it which fits
+    md_temp_scope_t temp = md_temp_begin();
+    char filter[sizeof(AtomFilter::text)] = "";
+    const md_array(ScriptSuggestion) suggestions = script_suggest_selection(STR_LIT("x"), target.atoms, app->mold.sys, md_temp_allocator(temp));
+    for (size_t i = 0; i < md_array_size(suggestions); ++i) {
+        str_t expr = suggestions[i].text;
+        if (!str_begins_with(expr, STR_LIT("x = "))) continue;
+        expr = str_trim(str_substr(expr, 4));
+        if (str_ends_with(expr, STR_LIT(";"))) expr = str_trim(str_substr(expr, 0, expr.len - 1));
+        if (!str_empty(expr) && expr.len < sizeof(filter)) {
+            str_copy_to_char_buf(filter, sizeof(filter), expr);
+            break;
+        }
+    }
+    md_temp_end(temp);
+    if (filter[0] == '\0') {
+        VIAMD_LOG_INFO("'%s' is too scattered to write as the filter of a representation", target.label);
+        return nullptr;
+    }
+
+    ColorMapping color = ColorMapping::Type;
+    if (type == RepresentationType::Cartoon || type == RepresentationType::Ribbons) {
+        // As suggested where it was suggested a cartoon, else by the secondary structure of a protein
+        color = target.suggested_type == RepresentationType::Cartoon ? target.suggested_color
+              : (target.ribbons ? ColorMapping::SecondaryStructure : ColorMapping::ResType);
+    }
+    Representation* rep = create_representation(app, type, color, str_from_cstr(filter));
+    if (!rep) return nullptr;
+    // A selection by the expression, where that is short enough to read as a name
+    if (target.selection && strlen(filter) < 32) {
+        snprintf(rep->name, sizeof(rep->name), "%s", filter);
+    } else {
+        snprintf(rep->name, sizeof(rep->name), "%s", target.label);
+    }
+    // Opened, to be styled, when the window lists it
+    rep->open_properties = true;
+    return rep;
 }
 
 void flag_all_representations_as_dirty(ApplicationState* state) {
@@ -867,6 +1638,15 @@ void flag_dynamic_representations_as_dirty(ApplicationState* state) {
     }
 }
 
+// The nucleotides on a nucleic backbone, atomistic or coarse grained: those the cartoon shows
+static size_t num_nucleotides_on_backbone(const md_system_t& sys) {
+    size_t num = 0;
+    for (size_t i = 0; i < sys.nucleic_backbone.segment.count; ++i) {
+        num += sys.nucleic_backbone.segment.atoms[i].c4 >= 0;
+    }
+    return num;
+}
+
 // What a system starts out shown with: by what is in it
 void create_default_representations(ApplicationState* state) {
     bool amino_acid_present = false;
@@ -885,26 +1665,26 @@ void create_default_representations(ApplicationState* state) {
 
     if (state->mold.sys.atom.count > 3'000'000) {
         VIAMD_LOG_INFO("Large system detected, creating default representation for all atoms");
-        Representation* rep = create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type, STR_LIT("all"));
+        Representation* rep = create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type);
         snprintf(rep->name, sizeof(rep->name), "default");
         goto done;
     }
 
-    if (state->mold.sys.component.count == 0) {
+    if (state->mold.sys.residue.count == 0) {
         // No residues present
-        Representation* rep = create_representation(state, RepresentationType::BallAndStick, ColorMapping::Type, STR_LIT("all"));
+        Representation* rep = create_representation(state, RepresentationType::BallAndStick, ColorMapping::Type);
         snprintf(rep->name, sizeof(rep->name), "default");
         goto done;
     }
 
-    // What is present, by what the components are. The selections of the representations below are by the same.
-    for (size_t i = 0; i < state->mold.sys.component.count; ++i) {
-        switch (md_component_kind(&state->mold.sys.component, i)) {
-        case MD_COMPONENT_KIND_AMINO_ACID: amino_acid_present = true; break;
-        case MD_COMPONENT_KIND_NUCLEOTIDE: nucleic_present = true; num_nucleotides += 1; break;
-        case MD_COMPONENT_KIND_ION:        ion_present = true;        break;
-        case MD_COMPONENT_KIND_WATER:      water_present = true;      break;
-        case MD_COMPONENT_KIND_LIPID:      lipid_present = true;      break;
+    // What is present, by what the residues are. The selections of the representations below are by the same.
+    for (size_t i = 0; i < state->mold.sys.residue.count; ++i) {
+        switch (md_system_residue_kind(&state->mold.sys, i)) {
+        case MD_RESIDUE_KIND_AMINO_ACID: amino_acid_present = true; break;
+        case MD_RESIDUE_KIND_NUCLEOTIDE: nucleic_present = true; num_nucleotides += 1; break;
+        case MD_RESIDUE_KIND_ION:          ion_present = true;        break;
+        case MD_RESIDUE_KIND_WATER:        water_present = true;      break;
+        case MD_RESIDUE_KIND_LIPID:        lipid_present = true;      break;
         default:                           ligand_present = true;     break;
         }
     }
@@ -916,35 +1696,63 @@ void create_default_representations(ApplicationState* state) {
     // rest of them (lipids by name whose anatomy is not known, as without bonds) as ligands
     if (lipid_present) {
         const md_lipid_data_t& lipids = state->mold.sys.lipid;
-        size_t num_lipid_comps = 0;
+        size_t num_lipid_residues = 0;
         size_t num_known = 0;
-        for (size_t i = 0; i < state->mold.sys.component.count; ++i) {
-            num_lipid_comps += md_component_kind(&state->mold.sys.component, i) == MD_COMPONENT_KIND_LIPID;
+        for (size_t i = 0; i < state->mold.sys.residue.count; ++i) {
+            num_lipid_residues += md_system_residue_kind(&state->mold.sys, i) == MD_RESIDUE_KIND_LIPID;
         }
         for (size_t i = 0; i < lipids.count; ++i) {
-            if (lipids.head_offset[i + 1] > lipids.head_offset[i]) num_known += lipids.comp_range[i].end - lipids.comp_range[i].beg;
+            if (lipids.head_offset[i + 1] > lipids.head_offset[i]) num_known += md_lipid_residue_count(&lipids, i);
         }
         lipid_cartoon = num_known > 0 && cartoon_glyphs_valid(state->mold.cartoon_glyphs);
-        if (!lipid_cartoon || num_known < num_lipid_comps) ligand_present = true;
+        if (!lipid_cartoon || num_known < num_lipid_residues) ligand_present = true;
     }
     if (lipid_cartoon) {
-        Representation* lip = create_representation(state, RepresentationType::Cartoon, ColorMapping::CompName, STR_LIT("lipid"));
+        Representation* lip = create_representation(state, RepresentationType::Cartoon, ColorMapping::ResType, STR_LIT("lipid"));
         snprintf(lip->name, sizeof(lip->name), "lipid");
     }
 
     // Coarse grained when most of it is. A handful of beads, or atoms a loader could not assign an
     // element to, should not take the protein, ligand and water representations from the rest.
     if (2 * num_coarse_grained > state->mold.sys.atom.count) {
-        // Proteins of beads have a trace backbone and its secondary structure (CG-DSSP): a cartoon, the rest as beads
+        // Proteins of beads have a trace backbone and its secondary structure (CG-DSSP): a cartoon. So do nucleic acids
+        // of beads where every nucleotide is on a backbone, their bases with the rings of ideal ones. The water as a
+        // representation of its own, hidden unless there is nothing else, as for atoms: the water beads of a solvated
+        // membrane are most of it. The rest as beads.
         const bool protein_trace = amino_acid_present && state->mold.sys.protein_backbone.segment.count > 0;
+        const size_t num_on_backbone = num_nucleotides_on_backbone(state->mold.sys);
+        const bool nucleic_cartoon = nucleic_present && num_on_backbone >= 10 && num_on_backbone == num_nucleotides && cartoon_glyphs_valid(state->mold.cartoon_glyphs);
         if (protein_trace) {
             Representation* prot = create_representation(state, RepresentationType::Cartoon, ColorMapping::SecondaryStructure, STR_LIT("protein"));
             snprintf(prot->name, sizeof(prot->name), "protein");
         }
-        const str_t rest = protein_trace ? (lipid_cartoon ? STR_LIT("not (protein or head or tail)") : STR_LIT("not protein"))
-                                         : (lipid_cartoon ? STR_LIT("not (head or tail)") : STR_LIT("all"));
-        Representation* rep = create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type, rest);
+        if (nucleic_cartoon) {
+            Representation* nucl = create_representation(state, RepresentationType::Cartoon, ColorMapping::ResType, STR_LIT("nucleic"));
+            snprintf(nucl->name, sizeof(nucl->name), "nucleic");
+        }
+        const char* shown[4];
+        int num_shown = 0;
+        if (protein_trace)   shown[num_shown++] = "protein";
+        if (nucleic_cartoon) shown[num_shown++] = "nucleic";
+        if (lipid_cartoon)   shown[num_shown++] = "head or tail";
+        if (water_present)   shown[num_shown++] = "water";
+        char rest[64] = "";
+        if (num_shown == 1 && !strchr(shown[0], ' ')) {
+            snprintf(rest, sizeof(rest), "not %s", shown[0]);
+        } else if (num_shown > 0) {
+            int len = snprintf(rest, sizeof(rest), "not (");
+            for (int i = 0; i < num_shown; ++i) {
+                len += snprintf(rest + len, sizeof(rest) - len, "%s%s", i > 0 ? " or " : "", shown[i]);
+            }
+            snprintf(rest + len, sizeof(rest) - len, ")");
+        }
+        Representation* rep = create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type, str_from_cstr(rest));
         snprintf(rep->name, sizeof(rep->name), "default");
+        if (water_present) {
+            Representation* water = create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type, STR_LIT("water"));
+            snprintf(water->name, sizeof(water->name), "water");
+            water->enabled = !amino_acid_present && !nucleic_present && !ligand_present && !lipid_present;
+        }
         goto done;
     }
 
@@ -952,16 +1760,21 @@ void create_default_representations(ApplicationState* state) {
         RepresentationType type = RepresentationType::Cartoon;
         ColorMapping color = ColorMapping::SecondaryStructure;
 
-        // Several chains are told apart by color; a short single chain (or none: free amino acids) is shown atom by atom
+        // Several strands are told apart by color; a short single strand (or none: free amino acids) is shown atom by atom
+        const md_system_t& sys = state->mold.sys;
         size_t num_chains = 0;
         size_t chain_res_count = 0;
-        for (size_t i = 0; i < state->mold.sys.instance.count; ++i) {
-            if (md_system_instance_entity_kind(&state->mold.sys, i) == MD_ENTITY_KIND_PEPTIDE) {
-                if (num_chains++ == 0) chain_res_count = md_instance_comp_count(&state->mold.sys.instance, i);
+        for (size_t i = 0; i < md_system_part_count(&sys); ++i) {
+            if (md_system_part_kind(&sys, i) == MD_PART_KIND_PEPTIDE) {
+                if (num_chains++ == 0) {
+                    const md_urange_t r = md_system_part_residue_range(&sys, i);
+                    chain_res_count = r.end - r.beg;
+                }
             }
         }
         if (num_chains > 1) {
-            color = ColorMapping::InstId;
+            // By the chain ids the data gives, else by the strands themselves
+            color = md_system_chain_count(&sys) > 0 ? ColorMapping::ChainId : ColorMapping::PartIndex;
         } else if (chain_res_count < 20) {
             type = RepresentationType::BallAndStick;
             color = ColorMapping::Type;
@@ -973,12 +1786,9 @@ void create_default_representations(ApplicationState* state) {
     if (nucleic_present) {
         // A cartoon where every nucleotide is on a backbone (and there are some of them), else atom by atom: the cartoon
         // shows nothing of a nucleotide off a backbone
-        size_t num_on_backbone = 0;
-        for (size_t i = 0; i < state->mold.sys.nucleic_backbone.segment.count; ++i) {
-            num_on_backbone += state->mold.sys.nucleic_backbone.segment.atoms[i].c4 >= 0;
-        }
+        const size_t num_on_backbone = num_nucleotides_on_backbone(state->mold.sys);
         const bool cartoon = num_on_backbone >= 10 && num_on_backbone == num_nucleotides && cartoon_glyphs_valid(state->mold.cartoon_glyphs);
-        Representation* nucl = create_representation(state, cartoon ? RepresentationType::Cartoon : RepresentationType::BallAndStick, cartoon ? ColorMapping::CompName : ColorMapping::Type, STR_LIT("nucleic"));
+        Representation* nucl = create_representation(state, cartoon ? RepresentationType::Cartoon : RepresentationType::BallAndStick, cartoon ? ColorMapping::ResType : ColorMapping::Type, STR_LIT("nucleic"));
         snprintf(nucl->name, sizeof(nucl->name), "nucleic");
     }
     if (ion_present) {
@@ -1049,252 +1859,262 @@ done:
 // Workspace
 // ---------------------------------------------------------------------------------------------------------
 
+bool representation_read_entry(Representation* rep, str_t ident, str_t arg) {
+    if (str_eq(ident, STR_LIT("Name"))) {
+        viamd::extract_to_char_buf(rep->name, sizeof(rep->name), arg);
+    } else if (str_eq(ident, STR_LIT("Filter"))) {
+        viamd::extract_to_char_buf(rep->filter.text, sizeof(rep->filter.text), arg);
+    } else if (str_eq(ident, STR_LIT("Enabled"))) {
+        viamd::extract_bool(rep->enabled, arg);
+    } else if (str_eq(ident, STR_LIT("Type"))) {
+        viamd::extract_enum(rep->type, arg, (int)RepresentationType::Count);
+    } else if (str_eq(ident, STR_LIT("ColorMapping"))) {
+        viamd::extract_enum(rep->color_mapping, arg, (int)ColorMapping::Count);
+    } else if (str_eq(ident, STR_LIT("StaticColor")) || str_eq(ident, STR_LIT("BaseColor"))) {
+        viamd::extract_vec4(rep->base_color, arg);
+    } else if (str_eq(ident, STR_LIT("Saturation"))) {
+        viamd::extract_flt(rep->saturation, arg);
+    } else if (str_eq(ident, STR_LIT("TintColor"))) {
+        viamd::extract_vec4(rep->tint_color, arg);
+    } else if (str_eq(ident, STR_LIT("TintScale"))) {
+        viamd::extract_flt(rep->tint_scale, arg);
+    } else if (str_eq(ident, STR_LIT("SecondaryStructureColorUnknown"))) {
+        viamd::extract_vec4(rep->secondary_structure.color_unknown, arg);
+    } else if (str_eq(ident, STR_LIT("SecondaryStructureColorCoil"))) {
+        viamd::extract_vec4(rep->secondary_structure.color_coil, arg);
+    } else if (str_eq(ident, STR_LIT("SecondaryStructureColorHelix"))) {
+        viamd::extract_vec4(rep->secondary_structure.color_helix, arg);
+    } else if (str_eq(ident, STR_LIT("SecondaryStructureColorSheet"))) {
+        viamd::extract_vec4(rep->secondary_structure.color_sheet, arg);
+    } else if (str_eq(ident, STR_LIT("BondColor"))) {
+        viamd::extract_enum(rep->bond_color, arg, (int)BondColorMode::Count);
+    } else if (str_eq(ident, STR_LIT("BondSharpness"))) {
+        viamd::extract_flt(rep->bond_sharpness, arg);
+    } else if (str_eq(ident, STR_LIT("BondBaseColor"))) {
+        viamd::extract_vec4(rep->bond_base_color, arg);
+    } else if (str_eq(ident, STR_LIT("BondOrders"))) {
+        viamd::extract_bool(rep->bond_orders, arg);
+    } else if (str_eq(ident, STR_LIT("BondsDashed"))) {
+        viamd::extract_bool(rep->bonds_dashed, arg);
+    } else if (str_eq(ident, STR_LIT("ChainGaps"))) {
+        viamd::extract_bool(rep->chain_gaps, arg);
+    } else if (str_eq(ident, STR_LIT("ElasticBonds"))) {
+        viamd::extract_bool(rep->elastic_bonds, arg);
+    } else if (str_eq(ident, STR_LIT("NoncovalentBonds"))) {
+        viamd::extract_bool(rep->noncovalent_bonds, arg);
+    } else if (str_eq(ident, STR_LIT("TwoHeadSpheres"))) {
+        viamd::extract_bool(rep->two_head_spheres, arg);
+    } else if (str_eq(ident, STR_LIT("NucleicBandRadius"))) {
+        viamd::extract_flt(rep->nucleic_band_radius, arg);
+    } else if (str_eq(ident, STR_LIT("NucleicRingRadius"))) {
+        viamd::extract_flt(rep->nucleic_ring_radius, arg);
+    } else if (str_eq(ident, STR_LIT("Radius"))) {
+        // DEPRECATED
+        viamd::extract_flt(rep->scale.x, arg);
+    } else if (str_eq(ident, STR_LIT("Tension"))) {
+        // DEPRECATED
+    } else if (str_eq(ident, STR_LIT("Width"))) {
+        viamd::extract_flt(rep->scale.x, arg);
+    } else if (str_eq(ident, STR_LIT("Thickness"))) {
+        viamd::extract_flt(rep->scale.y, arg);
+    } else if (str_eq(ident, STR_LIT("Param"))) {
+        viamd::extract_vec4(rep->scale, arg);
+    } else if (str_eq(ident, STR_LIT("AutoUpdate"))) {
+        viamd::extract_bool(rep->dynamic_evaluation, arg);
+    } else if (str_eq(ident, STR_LIT("DynamicEval"))) {
+        // DEPRECATED, and not read: the window used to clear it whenever it drew a representation whose filter
+        // did not depend on the frame, so a stored 0 mostly says nothing about what the user chose. Read, it
+        // would keep a representation from following a context that does (a group within(...)) without a word.
+        // AutoUpdate is the choice alone.
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyPath"))) {
+        // Ids are a function of the path: this resolves before the dataset is loaded
+        rep->atom_attribute.key = md_attributes_id_from_path(arg);
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyVariant"))) {
+        viamd::extract_int(rep->atom_attribute.variant_idx, arg);
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyColormap"))) {
+        viamd::extract_int(rep->atom_attribute.scale.colormap, arg);
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyRange"))) {
+        // A range that was written is one somebody set: a workspace from before the range could
+        // follow the values has no AtomicPropertyAutoRange, and keeps it. One that has, has it
+        // after this line and says for itself.
+        float r[2];
+        if (viamd::extract_flt_vec(r, 2, arg)) {
+            rep->atom_attribute.scale.range_beg = r[0];
+            rep->atom_attribute.scale.range_end = r[1];
+            rep->atom_attribute.scale.auto_range = false;
+        }
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyAutoRange"))) {
+        viamd::extract_bool(rep->atom_attribute.scale.auto_range, arg);
+    } else if (str_eq(ident, STR_LIT("AtomicPropertySymmetric"))) {
+        viamd::extract_bool(rep->atom_attribute.scale.symmetric, arg);
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyLegend"))) {
+        viamd::extract_bool(rep->atom_attribute.scale.show_legend, arg);
+    } else if (str_eq(ident, STR_LIT("AtomicPropertyDataRange")) || str_eq(ident, STR_LIT("AtomicPropertySymmetricZero"))) {
+        // Written by earlier versions: the span is measured from the data now, and the old
+        // symmetric flag never reached the colours
+    } else if (str_eq(ident, STR_LIT("DipolePath"))) {
+        rep->dipole.dipole_key = md_attributes_id_from_path(arg);
+    } else if (str_eq(ident, STR_LIT("DipoleIndex"))) {
+        int i;
+        if (viamd::extract_int(i, arg) && i >= 0) rep->dipole.dipole_index = (uint32_t)i;
+    } else if (str_eq(ident, STR_LIT("DipoleColor"))) {
+        viamd::extract_vec4(rep->dipole.color, arg);
+    } else if (str_eq(ident, STR_LIT("DipoleOffset"))) {
+        viamd::extract_vec3(rep->dipole.offset, arg);
+    } else if (str_eq(ident, STR_LIT("DipoleScale"))) {
+        viamd::extract_dbl(rep->dipole.scale, arg);
+    } else if (str_eq(ident, STR_LIT("DipoleRadius"))) {
+        viamd::extract_flt(rep->dipole.radius, arg);
+    } else if (str_eq(ident, STR_LIT("PeriodicImages"))) {
+        viamd::extract_bool(rep->periodic_images, arg);
+    } else if (str_eq(ident, STR_LIT("BoxColor"))) {
+        viamd::extract_vec4(rep->box.color, arg);
+    } else if (str_eq(ident, STR_LIT("BoxThickness"))) {
+        viamd::extract_flt(rep->box.thickness, arg);
+    } else if (str_eq(ident, STR_LIT("BoxAxes"))) {
+        viamd::extract_bool(rep->box.axes, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureMoIdx")) || str_eq(ident, STR_LIT("ElectronicStructureOrbitalIdx"))) {
+        viamd::extract_int(rep->electronic_structure.orbital_idx, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureNtoIdx")) || str_eq(ident, STR_LIT("ElectronicStructureExcitedStateIdx"))) {
+        viamd::extract_int(rep->electronic_structure.excited_state_idx, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureNtoLambdaIdx"))) {
+        viamd::extract_int(rep->electronic_structure.nto_lambda_idx, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureDensityPropertyPath"))) {
+        // The id is a function of the path, so this resolves without the dataset being
+        // loaded yet - and names the same property after a reload, which the index it
+        // replaces did not.
+        rep->electronic_structure.density_property_key = md_attributes_id_from_path(arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureDensityPropertyIdx"))) {
+        // DEPRECATED. A position in a list that only existed while a particular file was
+        // open; there is nothing to resolve it against. Workspaces written before the
+        // path was stored fall back to the first property available.
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureRes"))) {
+        int res;
+        if (viamd::extract_int(res, arg)) rep->electronic_structure.resolution = (VolumeResolution)res;
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureType"))) {
+        int type;
+        if (viamd::extract_int(type, arg)) electronic_structure_set_legacy_type(&rep->electronic_structure, type);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureSource"))) {
+        int source;
+        if (viamd::extract_int(source, arg)) {
+            rep->electronic_structure.source = (ElectronicStructureSource)source;
+            electronic_structure_set_source_defaults(&rep->electronic_structure);
+        }
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureField"))) {
+        int field;
+        if (viamd::extract_int(field, arg)) electronic_structure_set_legacy_field(&rep->electronic_structure, field);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureUseMagnitude"))) {
+        viamd::extract_bool(rep->electronic_structure.use_magnitude, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureSpin"))) {
+        int spin;
+        if (viamd::extract_int(spin, arg)) rep->electronic_structure.spin = (ElectronicStructureSpin)spin;
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureNtoComponent"))) {
+        int component;
+        if (viamd::extract_int(component, arg)) rep->electronic_structure.nto_component = (ElectronicStructureNtoComponent)component;
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureTransitionDensityComponent"))) {
+        int component;
+        if (viamd::extract_int(component, arg)) rep->electronic_structure.transition_density_component = (ElectronicStructureTransitionDensityComponent)component;
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureIso"))) {
+        viamd::extract_dbl(rep->electronic_structure.iso_value, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureColoring"))) {
+        int c;
+        if (viamd::extract_int(c, arg) && c >= 0 && c < (int)SurfaceColoring::Count) rep->electronic_structure.coloring = (SurfaceColoring)c;
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldKind"))) {
+        int k;
+        if (viamd::extract_int(k, arg) && k >= 0 && k < (int)SurfaceFieldKind::Count) rep->electronic_structure.field_kind = (SurfaceFieldKind)k;
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldColormap"))) {
+        viamd::extract_int(rep->electronic_structure.field_map.colormap, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldRange"))) {
+        float r[2];
+        if (viamd::extract_flt_vec(r, 2, arg)) { rep->electronic_structure.field_map.range_beg = r[0]; rep->electronic_structure.field_map.range_end = r[1]; }
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldSymmetric"))) {
+        viamd::extract_bool(rep->electronic_structure.field_map.symmetric, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldAutoRange"))) {
+        viamd::extract_bool(rep->electronic_structure.field_map.auto_range, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldLegend"))) {
+        viamd::extract_bool(rep->electronic_structure.field_map.show_legend, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldIsolinesShow"))) {
+        viamd::extract_bool(rep->electronic_structure.field_isolines.show, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldIsolineWidth"))) {
+        viamd::extract_flt(rep->electronic_structure.field_isolines.width, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldIsolineCount"))) {
+        int n;
+        if (viamd::extract_int(n, arg)) {
+            rep->electronic_structure.field_isolines.count = CLAMP(n, 0, ISOLINES_MAX);
+        }
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureTintPos"))) {
+        viamd::extract_vec4(rep->electronic_structure.tint_psi_pos, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureTintNeg"))) {
+        viamd::extract_vec4(rep->electronic_structure.tint_psi_neg, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureTintDen"))) {
+        viamd::extract_vec4(rep->electronic_structure.tint_den, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureColPos"))) {
+        viamd::extract_vec4(rep->electronic_structure.col_psi_pos, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureColNeg"))) {
+        viamd::extract_vec4(rep->electronic_structure.col_psi_neg, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureColDen"))) {
+        viamd::extract_vec4(rep->electronic_structure.col_den, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureColAtt"))) {
+        viamd::extract_vec4(rep->electronic_structure.col_att, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureColDet"))) {
+        viamd::extract_vec4(rep->electronic_structure.col_det, arg);
+    } else if (str_eq(ident, STR_LIT("ElectronicStructureDensityPropertyIsoCount"))) {
+        int n;
+        if (viamd::extract_int(n, arg)) {
+            rep->electronic_structure.density_property.num_isos = CLAMP(n, 0, (int)ARRAY_SIZE(rep->electronic_structure.density_property.values));
+        }
+    } else if (str_begins_with(ident, STR_LIT("ElectronicStructureFieldIsoline"))) {
+        // ElectronicStructureFieldIsoline<i>: the value of line i, in the field's own unit
+        const str_t num = str_substr(ident, STR_LIT("ElectronicStructureFieldIsoline").len, SIZE_MAX);
+        int i = 0;
+        bool ok = num.len > 0;
+        for (size_t k = 0; k < num.len; ++k) {
+            if (num.ptr[k] < '0' || num.ptr[k] > '9') { ok = false; break; }
+            i = i * 10 + (num.ptr[k] - '0');
+        }
+        if (ok && i < ISOLINES_MAX) {
+            viamd::extract_flt(rep->electronic_structure.field_isolines.values[i], arg);
+        }
+    } else {
+        for (int i = 0; i < (int)ARRAY_SIZE(rep->electronic_structure.density_property.values); ++i) {
+            char key[64];
+            snprintf(key, sizeof(key), "ElectronicStructureDensityPropertyIsoValue%d", i);
+            if (str_eq(ident, str_from_cstr(key))) {
+                viamd::extract_dbl(rep->electronic_structure.density_property.values[i], arg);
+                return true;
+            }
+            snprintf(key, sizeof(key), "ElectronicStructureDensityPropertyIsoColor%d", i);
+            if (str_eq(ident, str_from_cstr(key))) {
+                viamd::extract_vec4(rep->electronic_structure.density_property.colors[i], arg);
+                return true;
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
 static void deserialize_representation(ApplicationState* data, viamd::deserialization_state_t& state) {
     Representation* rep = create_representation(data);
     str_t ident, arg;
     while (viamd::next_entry(ident, arg, state)) {
-        if (str_eq(ident, STR_LIT("Name"))) {
-            viamd::extract_to_char_buf(rep->name, sizeof(rep->name), arg);
-        } else if (str_eq(ident, STR_LIT("Group"))) {
+        if (str_eq(ident, STR_LIT("Group"))) {
             // By the id of a [RepresentationGroup] before it. One that names nothing leaves it at the top level.
             int group = 0;
             if (viamd::extract_int(group, arg) && group > 0 && find_representation_group(data, (uint32_t)group)) {
                 rep->node.parent = (uint32_t)group;
             }
-        } else if (str_eq(ident, STR_LIT("Filter"))) {
-            viamd::extract_to_char_buf(rep->filter.text, sizeof(rep->filter.text), arg);
-        } else if (str_eq(ident, STR_LIT("Enabled"))) {
-            viamd::extract_bool(rep->enabled, arg);
-        } else if (str_eq(ident, STR_LIT("Type"))) {
-            viamd::extract_enum(rep->type, arg, (int)RepresentationType::Count);
-        } else if (str_eq(ident, STR_LIT("ColorMapping"))) {
-            viamd::extract_enum(rep->color_mapping, arg, (int)ColorMapping::Count);
-        } else if (str_eq(ident, STR_LIT("StaticColor")) || str_eq(ident, STR_LIT("BaseColor"))) {
-            viamd::extract_vec4(rep->base_color, arg);
-        } else if (str_eq(ident, STR_LIT("Saturation"))) {
-            viamd::extract_flt(rep->saturation, arg);
-        } else if (str_eq(ident, STR_LIT("TintColor"))) {
-            viamd::extract_vec4(rep->tint_color, arg);
-        } else if (str_eq(ident, STR_LIT("TintScale"))) {
-            viamd::extract_flt(rep->tint_scale, arg);
-        } else if (str_eq(ident, STR_LIT("SecondaryStructureColorUnknown"))) {
-            viamd::extract_vec4(rep->secondary_structure.color_unknown, arg);
-        } else if (str_eq(ident, STR_LIT("SecondaryStructureColorCoil"))) {
-            viamd::extract_vec4(rep->secondary_structure.color_coil, arg);
-        } else if (str_eq(ident, STR_LIT("SecondaryStructureColorHelix"))) {
-            viamd::extract_vec4(rep->secondary_structure.color_helix, arg);
-        } else if (str_eq(ident, STR_LIT("SecondaryStructureColorSheet"))) {
-            viamd::extract_vec4(rep->secondary_structure.color_sheet, arg);
-        } else if (str_eq(ident, STR_LIT("BondColor"))) {
-            viamd::extract_enum(rep->bond_color, arg, (int)BondColorMode::Count);
-        } else if (str_eq(ident, STR_LIT("BondSharpness"))) {
-            viamd::extract_flt(rep->bond_sharpness, arg);
-        } else if (str_eq(ident, STR_LIT("BondBaseColor"))) {
-            viamd::extract_vec4(rep->bond_base_color, arg);
-        } else if (str_eq(ident, STR_LIT("BondOrders"))) {
-            viamd::extract_bool(rep->bond_orders, arg);
-        } else if (str_eq(ident, STR_LIT("ChainGaps"))) {
-            viamd::extract_bool(rep->chain_gaps, arg);
-        } else if (str_eq(ident, STR_LIT("TwoHeadSpheres"))) {
-            viamd::extract_bool(rep->two_head_spheres, arg);
-        } else if (str_eq(ident, STR_LIT("NucleicBandRadius"))) {
-            viamd::extract_flt(rep->nucleic_band_radius, arg);
-        } else if (str_eq(ident, STR_LIT("NucleicRingRadius"))) {
-            viamd::extract_flt(rep->nucleic_ring_radius, arg);
-        } else if (str_eq(ident, STR_LIT("Radius"))) {
-            // DEPRECATED
-            viamd::extract_flt(rep->scale.x, arg);
-        } else if (str_eq(ident, STR_LIT("Tension"))) {
-            // DEPRECATED
-        } else if (str_eq(ident, STR_LIT("Width"))) {
-            viamd::extract_flt(rep->scale.x, arg);
-        } else if (str_eq(ident, STR_LIT("Thickness"))) {
-            viamd::extract_flt(rep->scale.y, arg);
-        } else if (str_eq(ident, STR_LIT("Param"))) {
-            viamd::extract_vec4(rep->scale, arg);
-        } else if (str_eq(ident, STR_LIT("AutoUpdate"))) {
-            viamd::extract_bool(rep->dynamic_evaluation, arg);
-        } else if (str_eq(ident, STR_LIT("DynamicEval"))) {
-            // DEPRECATED, and not read: the window used to clear it whenever it drew a representation whose filter
-            // did not depend on the frame, so a stored 0 mostly says nothing about what the user chose. Read, it
-            // would keep a representation from following a context that does (a group within(...)) without a word.
-            // AutoUpdate is the choice alone.
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyPath"))) {
-            // Ids are a function of the path: this resolves before the dataset is loaded
-            rep->atom_attribute.key = md_attributes_id_from_path(arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyVariant"))) {
-            viamd::extract_int(rep->atom_attribute.variant_idx, arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyColormap"))) {
-            viamd::extract_int(rep->atom_attribute.scale.colormap, arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyRange"))) {
-            // A range that was written is one somebody set: a workspace from before the range could
-            // follow the values has no AtomicPropertyAutoRange, and keeps it. One that has, has it
-            // after this line and says for itself.
-            float r[2];
-            if (viamd::extract_flt_vec(r, 2, arg)) {
-                rep->atom_attribute.scale.range_beg = r[0];
-                rep->atom_attribute.scale.range_end = r[1];
-                rep->atom_attribute.scale.auto_range = false;
-            }
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyAutoRange"))) {
-            viamd::extract_bool(rep->atom_attribute.scale.auto_range, arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertySymmetric"))) {
-            viamd::extract_bool(rep->atom_attribute.scale.symmetric, arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyLegend"))) {
-            viamd::extract_bool(rep->atom_attribute.scale.show_legend, arg);
-        } else if (str_eq(ident, STR_LIT("AtomicPropertyDataRange")) || str_eq(ident, STR_LIT("AtomicPropertySymmetricZero"))) {
-            // Written by earlier versions: the span is measured from the data now, and the old
-            // symmetric flag never reached the colours
-        } else if (str_eq(ident, STR_LIT("DipolePath"))) {
-            rep->dipole.dipole_key = md_attributes_id_from_path(arg);
-        } else if (str_eq(ident, STR_LIT("DipoleIndex"))) {
-            int i;
-            if (viamd::extract_int(i, arg) && i >= 0) rep->dipole.dipole_index = (uint32_t)i;
-        } else if (str_eq(ident, STR_LIT("DipoleColor"))) {
-            viamd::extract_vec4(rep->dipole.color, arg);
-        } else if (str_eq(ident, STR_LIT("DipoleOffset"))) {
-            viamd::extract_vec3(rep->dipole.offset, arg);
-        } else if (str_eq(ident, STR_LIT("DipoleScale"))) {
-            viamd::extract_dbl(rep->dipole.scale, arg);
-        } else if (str_eq(ident, STR_LIT("DipoleRadius"))) {
-            viamd::extract_flt(rep->dipole.radius, arg);
-        } else if (str_eq(ident, STR_LIT("PeriodicImages"))) {
-            viamd::extract_bool(rep->periodic_images, arg);
-        } else if (str_eq(ident, STR_LIT("BoxColor"))) {
-            viamd::extract_vec4(rep->box.color, arg);
-        } else if (str_eq(ident, STR_LIT("BoxThickness"))) {
-            viamd::extract_flt(rep->box.thickness, arg);
-        } else if (str_eq(ident, STR_LIT("BoxAxes"))) {
-            viamd::extract_bool(rep->box.axes, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureMoIdx")) || str_eq(ident, STR_LIT("ElectronicStructureOrbitalIdx"))) {
-            viamd::extract_int(rep->electronic_structure.orbital_idx, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureNtoIdx")) || str_eq(ident, STR_LIT("ElectronicStructureExcitedStateIdx"))) {
-            viamd::extract_int(rep->electronic_structure.excited_state_idx, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureNtoLambdaIdx"))) {
-            viamd::extract_int(rep->electronic_structure.nto_lambda_idx, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureDensityPropertyPath"))) {
-            // The id is a function of the path, so this resolves without the dataset being
-            // loaded yet - and names the same property after a reload, which the index it
-            // replaces did not.
-            rep->electronic_structure.density_property_key = md_attributes_id_from_path(arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureDensityPropertyIdx"))) {
-            // DEPRECATED. A position in a list that only existed while a particular file was
-            // open; there is nothing to resolve it against. Workspaces written before the
-            // path was stored fall back to the first property available.
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureRes"))) {
-            int res;
-            if (viamd::extract_int(res, arg)) rep->electronic_structure.resolution = (VolumeResolution)res;
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureType"))) {
-            int type;
-            if (viamd::extract_int(type, arg)) electronic_structure_set_legacy_type(&rep->electronic_structure, type);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureSource"))) {
-            int source;
-            if (viamd::extract_int(source, arg)) {
-                rep->electronic_structure.source = (ElectronicStructureSource)source;
-                electronic_structure_set_source_defaults(&rep->electronic_structure);
-            }
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureField"))) {
-            int field;
-            if (viamd::extract_int(field, arg)) electronic_structure_set_legacy_field(&rep->electronic_structure, field);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureUseMagnitude"))) {
-            viamd::extract_bool(rep->electronic_structure.use_magnitude, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureSpin"))) {
-            int spin;
-            if (viamd::extract_int(spin, arg)) rep->electronic_structure.spin = (ElectronicStructureSpin)spin;
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureNtoComponent"))) {
-            int component;
-            if (viamd::extract_int(component, arg)) rep->electronic_structure.nto_component = (ElectronicStructureNtoComponent)component;
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureTransitionDensityComponent"))) {
-            int component;
-            if (viamd::extract_int(component, arg)) rep->electronic_structure.transition_density_component = (ElectronicStructureTransitionDensityComponent)component;
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureIso"))) {
-            viamd::extract_dbl(rep->electronic_structure.iso_value, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureColoring"))) {
-            int c;
-            if (viamd::extract_int(c, arg) && c >= 0 && c < (int)SurfaceColoring::Count) rep->electronic_structure.coloring = (SurfaceColoring)c;
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldKind"))) {
-            int k;
-            if (viamd::extract_int(k, arg) && k >= 0 && k < (int)SurfaceFieldKind::Count) rep->electronic_structure.field_kind = (SurfaceFieldKind)k;
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldColormap"))) {
-            viamd::extract_int(rep->electronic_structure.field_map.colormap, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldRange"))) {
-            float r[2];
-            if (viamd::extract_flt_vec(r, 2, arg)) { rep->electronic_structure.field_map.range_beg = r[0]; rep->electronic_structure.field_map.range_end = r[1]; }
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldSymmetric"))) {
-            viamd::extract_bool(rep->electronic_structure.field_map.symmetric, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldAutoRange"))) {
-            viamd::extract_bool(rep->electronic_structure.field_map.auto_range, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldLegend"))) {
-            viamd::extract_bool(rep->electronic_structure.field_map.show_legend, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldIsolinesShow"))) {
-            viamd::extract_bool(rep->electronic_structure.field_isolines.show, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldIsolineWidth"))) {
-            viamd::extract_flt(rep->electronic_structure.field_isolines.width, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureFieldIsolineCount"))) {
-            int n;
-            if (viamd::extract_int(n, arg)) {
-                rep->electronic_structure.field_isolines.count = CLAMP(n, 0, ISOLINES_MAX);
-            }
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureTintPos"))) {
-            viamd::extract_vec4(rep->electronic_structure.tint_psi_pos, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureTintNeg"))) {
-            viamd::extract_vec4(rep->electronic_structure.tint_psi_neg, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureTintDen"))) {
-            viamd::extract_vec4(rep->electronic_structure.tint_den, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureColPos"))) {
-            viamd::extract_vec4(rep->electronic_structure.col_psi_pos, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureColNeg"))) {
-            viamd::extract_vec4(rep->electronic_structure.col_psi_neg, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureColDen"))) {
-            viamd::extract_vec4(rep->electronic_structure.col_den, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureColAtt"))) {
-            viamd::extract_vec4(rep->electronic_structure.col_att, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureColDet"))) {
-            viamd::extract_vec4(rep->electronic_structure.col_det, arg);
-        } else if (str_eq(ident, STR_LIT("ElectronicStructureDensityPropertyIsoCount"))) {
-            int n;
-            if (viamd::extract_int(n, arg)) {
-                rep->electronic_structure.density_property.num_isos = CLAMP(n, 0, (int)ARRAY_SIZE(rep->electronic_structure.density_property.values));
-            }
-        } else if (str_begins_with(ident, STR_LIT("ElectronicStructureFieldIsoline"))) {
-            // ElectronicStructureFieldIsoline<i>: the value of line i, in the field's own unit
-            const str_t num = str_substr(ident, STR_LIT("ElectronicStructureFieldIsoline").len, SIZE_MAX);
-            int i = 0;
-            bool ok = num.len > 0;
-            for (size_t k = 0; k < num.len; ++k) {
-                if (num.ptr[k] < '0' || num.ptr[k] > '9') { ok = false; break; }
-                i = i * 10 + (num.ptr[k] - '0');
-            }
-            if (ok && i < ISOLINES_MAX) {
-                viamd::extract_flt(rep->electronic_structure.field_isolines.values[i], arg);
-            }
         } else {
-            for (int i = 0; i < (int)ARRAY_SIZE(rep->electronic_structure.density_property.values); ++i) {
-                char key[64];
-                snprintf(key, sizeof(key), "ElectronicStructureDensityPropertyIsoValue%d", i);
-                if (str_eq(ident, str_from_cstr(key))) {
-                    viamd::extract_dbl(rep->electronic_structure.density_property.values[i], arg);
-                    break;
-                }
-                snprintf(key, sizeof(key), "ElectronicStructureDensityPropertyIsoColor%d", i);
-                if (str_eq(ident, str_from_cstr(key))) {
-                    viamd::extract_vec4(rep->electronic_structure.density_property.colors[i], arg);
-                    break;
-                }
-            }
+            representation_read_entry(rep, ident, arg);
         }
     }
     // Last in the group it says it is in: the sections are in the order of the window
     tree_normalize(data);
 }
 
-static void serialize_representation(viamd::serialization_state_t& state, const ApplicationState* app_state, const Representation& rep) {
+void representation_write_entries(viamd::serialization_state_t& state, const ApplicationState* app_state, const Representation& rep) {
     const md_attributes_t* attributes = &app_state->mold.sys.attributes;
 
-    viamd::write_section_header(state, STR_LIT("Representation"));
-    if (find_representation_group(*app_state, rep.node.parent)) {
-        viamd::write_int(state, STR_LIT("Group"), rep.node.parent);
-    }
     viamd::write_str(state,  STR_LIT("Name"), str_from_cstr(rep.name));
     viamd::write_str(state,  STR_LIT("Filter"), str_from_cstr(rep.filter.text));
     viamd::write_bool(state, STR_LIT("Enabled"), rep.enabled);
@@ -1312,7 +2132,12 @@ static void serialize_representation(viamd::serialization_state_t& state, const 
     viamd::write_flt(state,  STR_LIT("BondSharpness"), rep.bond_sharpness);
     viamd::write_vec4(state, STR_LIT("BondBaseColor"), rep.bond_base_color);
     viamd::write_bool(state, STR_LIT("BondOrders"), rep.bond_orders);
+    if (rep.type == RepresentationType::Bonds) {
+        viamd::write_bool(state, STR_LIT("BondsDashed"), rep.bonds_dashed);
+    }
     viamd::write_bool(state, STR_LIT("ChainGaps"), rep.chain_gaps);
+    viamd::write_bool(state, STR_LIT("ElasticBonds"), rep.elastic_bonds);
+    viamd::write_bool(state, STR_LIT("NoncovalentBonds"), rep.noncovalent_bonds);
     viamd::write_bool(state, STR_LIT("TwoHeadSpheres"), rep.two_head_spheres);
     viamd::write_flt(state,  STR_LIT("NucleicBandRadius"), rep.nucleic_band_radius);
     viamd::write_flt(state,  STR_LIT("NucleicRingRadius"), rep.nucleic_ring_radius);
@@ -1404,6 +2229,14 @@ static void serialize_representation(viamd::serialization_state_t& state, const 
             viamd::write_vec4(state, str_from_cstr(key), rep.electronic_structure.density_property.colors[j]);
         }
     }
+}
+
+static void serialize_representation(viamd::serialization_state_t& state, const ApplicationState* app_state, const Representation& rep) {
+    viamd::write_section_header(state, STR_LIT("Representation"));
+    if (find_representation_group(*app_state, rep.node.parent)) {
+        viamd::write_int(state, STR_LIT("Group"), rep.node.parent);
+    }
+    representation_write_entries(state, app_state, rep);
 }
 
 static void deserialize_group(ApplicationState* data, viamd::deserialization_state_t& state) {
@@ -1520,7 +2353,9 @@ static bool draw_surface_coloring(ElectronicStructureRepresentation& es, const m
                 es.coloring = c;
                 // A field this dataset can make, if the one the representation names is not
                 if (c == SurfaceColoring::Field && !surface_field_available(es.field_kind, sys)) {
-                    es.field_kind = surface_field_first_available(sys);
+                    const SurfaceFieldKind first = surface_field_first_available(sys);
+                    surface_field_scale_for_kind(&es.field_map, es.field_kind, first);
+                    es.field_kind = first;
                 }
                 update_rep = true;
             }
@@ -1528,6 +2363,8 @@ static bool draw_surface_coloring(ElectronicStructureRepresentation& es, const m
             if (!enabled && c == SurfaceColoring::Field) {
                 ImGui::SetItemTooltip("Nothing in this dataset to make a field from:\n"
                                       "the electrostatic potential needs a basis, a ground state density and the QM atoms' nuclear charges,\n"
+                                      "the local ionization energy a basis and canonical orbitals with their occupations and energies,\n"
+                                      "the local electron attachment energy the same and at least one virtual orbital below zero,\n"
                                       "the embedding potential classical charges (atom/charge) on atoms outside the QM region");
             }
         }
@@ -1548,16 +2385,20 @@ static bool draw_surface_coloring(ElectronicStructureRepresentation& es, const m
     // Where the field stands, on its label: how much of it has been evaluated, and where
     const SurfaceFieldVolume& vol = es.field_vol;
     char status[160] = "";
-    if (!mesh_mode && vol.num_surface_samples > 0) {
+    if (!mesh_mode && surface_field_busy(vol)) {
+        snprintf(status, sizeof(status), "evaluating, %zu of %zu voxels (%dx%dx%d) so far", vol.num_evaluated, vol.num_voxels,
+                 vol.grid.dim[0], vol.grid.dim[1], vol.grid.dim[2]);
+    } else if (!mesh_mode && vol.num_surface_samples > 0) {
         snprintf(status, sizeof(status), "%zu of %zu voxels (%dx%dx%d) evaluated on the %s", vol.num_evaluated, vol.num_voxels,
                  vol.grid.dim[0], vol.grid.dim[1], vol.grid.dim[2], vol.on_gpu ? "GPU" : "CPU");
     }
     prop::row("field", status);
-    if (ImGui::BeginCombo("##field", surface_field_kind_str[(int)es.field_kind])) {
+    if (ImGui::BeginCombo("##field", surface_field_kind_info(es.field_kind).label)) {
         for (int k = 0; k < (int)SurfaceFieldKind::Count; ++k) {
             const SurfaceFieldKind kind = (SurfaceFieldKind)k;
             ImGui::BeginDisabled(!surface_field_available(kind, sys));
-            if (ImGui::Selectable(surface_field_kind_str[k], es.field_kind == kind)) {
+            if (ImGui::Selectable(surface_field_kind_info(kind).label, es.field_kind == kind)) {
+                if (es.field_kind != kind) surface_field_scale_for_kind(&es.field_map, es.field_kind, kind);
                 es.field_kind = kind;
                 update_rep = true;
             }
@@ -1566,31 +2407,60 @@ static bool draw_surface_coloring(ElectronicStructureRepresentation& es, const m
         ImGui::EndCombo();
     }
     if (es.field_kind == SurfaceFieldKind::EmbeddingPotential) {
-        ImGui::SetItemTooltip("The electrostatic potential of the environment's classical multipoles on the surface: the charges,\n"
-                              "and the dipoles and quadrupoles where the potential has them.\n"
-                              "The QM region is left out, whatever charges a topology gives its atoms.\n"
-                              "For a polarizable embedding this is the potential of its PERMANENT multipoles:\n"
-                              "the induced dipoles are solved for during the calculation and not stored.");
+        // What this dataset's potential is made of, since a polarizable run may or may not have kept its
+        // induced dipoles. Counted only while the tooltip shows: it reads a column over every atom.
+        if (ImGui::BeginItemTooltip()) {
+            ImGui::TextUnformatted("The electrostatic potential of the environment on the surface: its charges, the dipoles and\n"
+                                   "quadrupoles where the potential has them, and for a polarizable embedding the dipoles the\n"
+                                   "calculation induced, where it kept them - the potential the QM region was embedded in.\n"
+                                   "The QM region is left out, whatever charges a topology gives its atoms.");
+            // What this dataset's potential is made of: whatever it carries, as it carries it
+            const SurfaceFieldEmbeddingContent c = surface_field_embedding_content(sys);
+            ImGui::Separator();
+            ImGui::TextUnformatted("This dataset:");
+            if (c.charges)     ImGui::BulletText("charges on %zu sites", c.charges);
+            if (c.dipoles)     ImGui::BulletText("permanent dipoles on %zu sites", c.dipoles);
+            if (c.quadrupoles) ImGui::BulletText("quadrupoles on %zu sites", c.quadrupoles);
+            if (c.induced)     ImGui::BulletText("induced dipoles on %zu polarizable sites", c.induced);
+            if (c.induced) {
+                ImGui::TextUnformatted("The total potential the QM region was embedded in.");
+            } else if (c.polarizable) {
+                ImGui::Text("The PERMANENT part only: %zu sites are polarizable, but the file keeps no induced\n"
+                            "dipoles, so their part of what the QM region was embedded in is missing.", c.polarizable);
+            }
+            ImGui::EndTooltip();
+        }
     } else if (es.field_kind == SurfaceFieldKind::ElectrostaticPotential) {
         ImGui::SetItemTooltip("The electrostatic potential of the QM region on the surface: its nuclei and its ground state\n"
                               "electron density, exact over the basis. Negative (red) where the electrons dominate - lone pairs,\n"
                               "pi systems, where an electrophile is drawn - and positive (blue) where the nuclei are less screened.\n"
                               "Mapped onto an isodensity surface (0.001-0.002 au) it is the molecular electrostatic potential.\n"
                               "An embedding's environment is not part of it.");
+    } else if (es.field_kind == SurfaceFieldKind::AverageLocalIonizationEnergy) {
+        ImGui::SetItemTooltip("The average local ionization energy of the QM region on the surface: the orbital energies of its\n"
+                              "occupied orbitals, weighted by how much each contributes to the electron density there,\n"
+                              "sum n |e| |phi|^2 / sum n |phi|^2. Lowest (red) where the least tightly held electrons are - the\n"
+                              "sites an electrophile or a radical attacks - and never below the HOMO's |e|. Meant for an\n"
+                              "isodensity surface (0.001-0.002 au). Kohn-Sham orbital energies give lower values than Hartree-Fock.");
+    } else if (es.field_kind == SurfaceFieldKind::LocalElectronAttachmentEnergy) {
+        ImGui::SetItemTooltip("The local electron attachment energy of the QM region on the surface: the energies of its virtual\n"
+                              "orbitals below zero, the ones that bind an added electron, weighted by their densities against the\n"
+                              "electron density. Never positive; lowest where a nucleophile attacks or a halogen bond forms (the\n"
+                              "sigma hole). Defined for hybrid DFT orbitals and read on the 0.004 au isodensity surface; it depends\n"
+                              "strongly on the method and basis, and is 0 everywhere with Hartree-Fock virtuals.");
     }
 
     // The colours are applied per pixel as the surface is shaded, so a change to the scale needs
     // nothing re-evaluated: it is not an update of the representation
     // With mesh rendering the field is evaluated at the vertices of the meshes, not on a volume
     color_scale_draw_controls(&es.field_map, mesh_mode ? electronic_structure_mesh_field_span(es) : surface_field_span(vol),
-                              surface_field_unit(es.field_kind), "on surface", "its 1st to 99th percentile on the surface");
+                              surface_field_kind_info(es.field_kind).unit, "on surface", "its 1st to 99th percentile on the surface");
     // Drawn as the surface is shaded, like the colours: nothing to re-evaluate
-    color_scale_draw_isoline_controls(&es.field_isolines, es.field_map, surface_field_unit(es.field_kind));
+    color_scale_draw_isoline_controls(&es.field_isolines, es.field_map, surface_field_kind_info(es.field_kind).unit);
 
     return update_rep;
 }
 
-static bool draw_atom_coloring(ApplicationState* state, Representation& rep);
 
 // The properties of an electronic structure representation: what the volume is of (Source), the surfaces drawn from
 // it (Surface) and how they are coloured (Color)
@@ -1854,8 +2724,13 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
                     // tail of the ragged lambda axis stops it.
                     const double LAMBDA_CUTOFF = 1.0e-3;
                     double lambdas[32];
-                    const int num_lambdas = (int)es_nto_lambdas(lambdas, ARRAY_SIZE(lambdas), state->mold.sys,
-                                                                (size_t)es.excited_state_idx, LAMBDA_CUTOFF);
+                    const bool nto_ready = es_nto_ready(state, (size_t)es.excited_state_idx);
+                    const int num_lambdas = nto_ready ? (int)es_nto_lambdas(lambdas, ARRAY_SIZE(lambdas), state->mold.sys,
+                                                                            (size_t)es.excited_state_idx, LAMBDA_CUTOFF) : 0;
+                    if (!nto_ready) {
+                        prop::row("\xce\xbb", "The natural transition orbital pair, by its weight");
+                        ImGui::TextDisabled("computing...");
+                    }
                     if (num_lambdas > 0) {
                         es.nto_lambda_idx = CLAMP(es.nto_lambda_idx, 0, num_lambdas - 1);
 
@@ -1970,7 +2845,7 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
         const bool density_property = electronic_structure_is_density_property(es);
         update_rep |= draw_surface_coloring(es, state->mold.sys, !density_property, mesh_mode);
         if (es.coloring == SurfaceColoring::AtomColors) {
-            update_rep |= draw_atom_coloring(state, rep);
+            update_rep |= draw_representation_coloring(state, rep);
         }
 
         // The colours of the surfaces, or the tint of what colours them; a property's are per isovalue (Surface)
@@ -2066,7 +2941,7 @@ static void apply_window_actions(ApplicationState* state, const WindowActions& a
         ungroup_representation_group(state, act.ungroup);
     }
     if (act.add_representation) {
-        create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type, STR_LIT("all"), act.add_into);
+        create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type, STR_LIT(""), act.add_into);
     }
     if (act.add_group) {
         create_representation_group(state, STR_LIT("group"), act.add_into);
@@ -2248,12 +3123,25 @@ static void draw_tree_level(ApplicationState* state, const WindowTree& tree, uin
 // How the atoms of a representation are coloured, as rows of its Color section: the mapping and what it takes - a
 // colour, an attribute through a colour scale, the colours of the secondary structures - and for sticks the bonds.
 // Also what an electronic structure coloured by its atoms takes its colours from.
-static bool draw_atom_coloring(ApplicationState* state, Representation& rep) {
+bool draw_representation_coloring(ApplicationState* state, Representation& rep) {
     bool update_rep = false;
 
     prop::row("coloring");
-    if (ImGui::Combo("##atom_coloring", (int*)(&rep.color_mapping), color_mapping_str, IM_ARRAYSIZE(color_mapping_str))) {
-        update_rep = true;
+    if (ImGui::BeginCombo("##atom_coloring", color_mapping_str[(int)rep.color_mapping])) {
+        for (ColorMapping mapping : color_mapping_order) {
+            if (ImGui::Selectable(color_mapping_str[(int)mapping], rep.color_mapping == mapping)) {
+                rep.color_mapping = mapping;
+                update_rep = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (rep.color_mapping == ColorMapping::ResType) {
+        ImGui::SetItemTooltip("The colors of the residue types, set in the Residue Types of the System window");
+    } else if ((rep.color_mapping == ColorMapping::ChainId || rep.color_mapping == ColorMapping::ChainIndex) && md_system_chain_count(&state->mold.sys) == 0) {
+        ImGui::SetItemTooltip("The data gives no chain ids, so the system has no chains: Part Index tells its strands apart");
+    } else if (rep.color_mapping == ColorMapping::PartIndex) {
+        ImGui::SetItemTooltip("One color per part: each strand of a polymer, each ligand, each water");
     }
 
     if (rep.color_mapping == ColorMapping::Uniform) {
@@ -2321,7 +3209,7 @@ static bool draw_atom_coloring(ApplicationState* state, Representation& rep) {
         update_rep |= prop::color("##ss_sheet", rep.secondary_structure.color_sheet.elem);
     }
 
-    if (rep.type == RepresentationType::Licorice || rep.type == RepresentationType::BallAndStick) {
+    if (rep.type == RepresentationType::Licorice || rep.type == RepresentationType::BallAndStick || rep.type == RepresentationType::Bonds) {
         // How the bonds are coloured, and what that takes
         prop::row("bonds");
         update_rep |= ImGui::Combo("##bond_color", (int*)(&rep.bond_color), bond_color_mode_str, IM_ARRAYSIZE(bond_color_mode_str));
@@ -2352,17 +3240,32 @@ static bool draw_atom_coloring(ApplicationState* state, Representation& rep) {
     return update_rep;
 }
 
-// Whether a chain of the system is broken somewhere (MD_COMPONENT_FLAG_BREAK_AFTER): residues missing in a crystal
+// Whether a chain of the system is broken somewhere (MD_RESIDUE_FLAG_BREAK_AFTER): residues missing in a crystal
 // structure, which the representations with chain gaps draw a dashed line over
 static bool system_has_chain_breaks(const md_system_t& sys) {
-    for (size_t i = 0; i < sys.component.count; ++i) {
-        if (md_component_flags(&sys.component, i) & MD_COMPONENT_FLAG_BREAK_AFTER) return true;
+    for (size_t i = 0; i < sys.residue.count; ++i) {
+        if (md_system_residue_flags(&sys, i) & MD_RESIDUE_FLAG_BREAK_AFTER) return true;
     }
     return false;
 }
 
+// Whether the system has elastic bonds (an elastic network, restraints), kept per topology: a system may have millions
+// of bonds, and the properties of a representation are drawn every frame
+static bool system_has_elastic_bonds(const md_system_t& sys) {
+    static uint64_t version = 0;
+    static bool     result  = false;
+    if (version != sys.topology_version || version == 0) {
+        version = sys.topology_version;
+        result = false;
+        for (size_t i = 0; i < sys.bond.count && sys.bond.flags && !result; ++i) {
+            result = md_bond_kind(sys.bond.flags[i]) == MD_BOND_KIND_ELASTIC;
+        }
+    }
+    return result;
+}
+
 // The sizes of what a representation draws, as rows of its Geometry section: scales of the defaults, so 1 is as is
-static bool draw_geometry(ApplicationState* state, Representation& rep) {
+bool draw_representation_geometry(ApplicationState* state, Representation& rep) {
     bool update_rep = false;
     const char* scale_fmt = (const char*)u8"%.2f×";
     switch (rep.type) {
@@ -2373,6 +3276,12 @@ static bool draw_geometry(ApplicationState* state, Representation& rep) {
     case RepresentationType::Licorice:
         prop::row("radius");
         update_rep |= ImGui::SliderFloat("##radius", &rep.scale[0], 0.1f, 4.0f, scale_fmt);
+        break;
+    case RepresentationType::Bonds:
+        prop::row("radius", "As the sticks of a licorice of the same scale");
+        update_rep |= ImGui::SliderFloat("##radius", &rep.scale[0], 0.1f, 4.0f, scale_fmt);
+        prop::row("dashed", "Drawn as dashes rather than sticks, as weak bonds often are");
+        update_rep |= ImGui::Checkbox("##bonds_dashed", &rep.bonds_dashed);
         break;
     case RepresentationType::BallAndStick:
         prop::row("balls");
@@ -2421,23 +3330,28 @@ static bool draw_geometry(ApplicationState* state, Representation& rep) {
         update_rep |= ImGui::Checkbox("##chain_gaps", &rep.chain_gaps);
     }
     if (rep.type == RepresentationType::Licorice || rep.type == RepresentationType::BallAndStick) {
-        prop::row("bond orders", "Double and triple bonds as two and three sticks, aromatic and delocalized bonds with a dashed line");
+        prop::row("bond orders", "Double and triple bonds as two and three sticks, aromatic rings with a circle (dashed in fused aromatic systems, whose sextets are not assigned to particular rings), delocalized bonds with a dashed line");
         update_rep |= ImGui::Checkbox("##bond_orders", &rep.bond_orders);
+        if (state->mold.sys.bond.noncovalent_count > 0) {
+            prop::row("non-covalent bonds", "The non-covalent bonds of the system among its atoms (hydrogen bonds and interactions a file gives or a user marks), dashed and thinner than the sticks. Off to leave them to a Bonds representation");
+            update_rep |= ImGui::Checkbox("##noncovalent_bonds", &rep.noncovalent_bonds);
+        }
+        if (system_has_elastic_bonds(state->mold.sys)) {
+            prop::row("elastic bonds", "The springs of the force field which are not bonds of the molecules: the elastic network of a coarse grained protein or nucleic acid, restraints. Drawn as plain bonds when shown");
+            update_rep |= ImGui::Checkbox("##elastic_bonds", &rep.elastic_bonds);
+        }
     }
     return update_rep;
 }
 
-// The properties of a representation, below its row when it is open: what it is and what it shows on rows of their
-// own, then its sections. Returns whether it needs updating.
-static bool draw_representation_properties(ApplicationState* state, Representation& rep) {
+bool draw_representation_type(ApplicationState* state, Representation& rep, bool atoms_only) {
     bool update_rep = false;
-    prop::begin("representation");
-
     // @TODO: Only display the representations which can be used for the current dataset
     prop::row("type");
     if (!rep.type_is_valid) ImGui::PushInvalid();
     if (ImGui::BeginCombo("##type", representation_type_str[(int)rep.type])) {
-        for (int i = 0; i < (int)RepresentationType::Count; ++i) {
+        const int count = atoms_only ? (int)RepresentationType::Cartoon + 1 : (int)RepresentationType::Count;
+        for (int i = 0; i < count; ++i) {
             if (i == (int)RepresentationType::ElectronicStructure) {
                 // Enlisted when the system carries ANY electronic structure source - orbitals are
                 // one, and a file without an SCF block can still carry density properties
@@ -2455,22 +3369,40 @@ static bool draw_representation_properties(ApplicationState* state, Representati
         ImGui::EndCombo();
     }
     if (!rep.type_is_valid) ImGui::PopInvalid();
+    return update_rep;
+}
+
+// The properties of a representation, below its row when it is open: what it is and what it shows on rows of their
+// own, then its sections. Returns whether it needs updating.
+static bool draw_representation_properties(ApplicationState* state, Representation& rep) {
+    bool update_rep = false;
+    prop::begin("representation");
+
+    update_rep |= draw_representation_type(state, rep, false);
 
     // Of what md_gl draws and the box, where there is a cell to repeat in. Drawn so every frame: not an update.
-    const bool periodic = ((RepresentationType::SpaceFill <= rep.type && rep.type <= RepresentationType::Cartoon) || rep.type == RepresentationType::SimulationBox) &&
+    const bool bonds = rep.type == RepresentationType::Bonds;
+    const bool periodic = ((RepresentationType::SpaceFill <= rep.type && rep.type <= RepresentationType::Cartoon) || rep.type == RepresentationType::SimulationBox || bonds) &&
                           md_unitcell_flags(&state->mold.state.unitcell) != 0;
     const bool atoms = RepresentationType::SpaceFill <= rep.type && rep.type <= RepresentationType::Cartoon;
 
-    if (atoms) {
-        // Completed within the context it is evaluated in: what is not there would not match
+    if (atoms || bonds) {
+        // Completed within the context it is evaluated in: what is not there would not match. Either takes atoms or
+        // bonds, the one as the other: the atoms of bonds, the bonds among atoms.
         const RepresentationContext ctx = representation_context(*state, rep.node.parent);
+        const md_filter_context_t fctx = representation_filter_context(*state, ctx);
         prop::row("filter");
-        if (filter_input("##filter", &rep.filter, representation_filter_context(*state, ctx))) {
+        if (filter_input("##filter", &rep.filter, fctx, 0, nullptr, bonds ? "all bonds (or bonds, or atoms: the bonds among them)" : "all (or atoms, or bonds: their atoms)")) {
             rep.filt_is_dirty = true;
             update_rep = true;
         }
-        if (ctx.group && rep.filter.result.success && ImGui::IsItemHovered() && !filter_completions_open()) {
-            ImGui::SetTooltip("Within the context of the group '%s': %s", ctx.group->name, ctx.group->filter.text);
+        if (rep.filter.result.success && ImGui::IsItemHovered() && !filter_completions_open()) {
+            if (ctx.group) {
+                ImGui::SetTooltip("Within the context of the group '%s': %s", ctx.group->name, ctx.group->filter.text);
+            } else if (bonds) {
+                ImGui::SetTooltip("%zu bonds.\nA set of bonds: bond(kind='hydrogen'), bond(origin='user'), bond(bond_delta()).\n"
+                                  "A set of atoms: the bonds among them, of the system.", md_array_size(rep.bond_pairs));
+            }
         }
 
         if (periodic) {
@@ -2591,11 +3523,11 @@ static bool draw_representation_properties(ApplicationState* state, Representati
         break;
     default:
         if (prop::section("Color")) {
-            update_rep |= draw_atom_coloring(state, rep);
+            update_rep |= draw_representation_coloring(state, rep);
             prop::section_end();
         }
         if (prop::section("Geometry", false)) {
-            update_rep |= draw_geometry(state, rep);
+            update_rep |= draw_representation_geometry(state, rep);
             prop::section_end();
         }
         break;
@@ -2635,6 +3567,10 @@ static void draw_representation_row(ApplicationState* state, const WindowTree& t
     if (handle.tooltip) ImGui::SetTooltip(DRAG_HANDLE_HINT);
     ImGui::SameLine(0, 0);
 
+    if (rep.open_properties) {
+        ImGui::SetNextItemOpen(true);
+        rep.open_properties = false;
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, pad));
     const bool open = ImGui::TreeNodeEx("##node", ImGuiTreeNodeFlags_FramePadding);
     ImGui::PopStyleVar();
@@ -2898,7 +3834,7 @@ void draw_representation_legends(ApplicationState& state) {
             ElectronicStructureRepresentation& es = rep.electronic_structure;
             const bool has_field = state.settings.isosurface_rendering == IsosurfaceRendering_Mesh ? electronic_structure_mesh_field_span(es).valid : es.field_vol.tex_id != 0;
             if (es.coloring == SurfaceColoring::Field && es.field_map.show_legend && has_field) {
-                color_scale_draw_legend(es.field_map, surface_field_unit(es.field_kind), surface_field_kind_str[(int)es.field_kind], rep.name, (int)rep.node.id, slot++, &es.field_isolines);
+                color_scale_draw_legend(es.field_map, surface_field_kind_info(es.field_kind).unit, surface_field_kind_info(es.field_kind).label, rep.name, (int)rep.node.id, slot++, &es.field_isolines);
                 continue;
             }
         }

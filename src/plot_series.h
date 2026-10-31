@@ -118,6 +118,11 @@ ImVec4 series_default_color(const ApplicationState* app, const SeriesKey& key);
 // "script/<ident>" -> "<ident>" for a script series, empty otherwise
 str_t series_script_ident(const SeriesKey& key);
 
+// The name of member k of the series' population, from "<path>/labels": what the script property holds is what an
+// attr() pattern matched ("Coul-SR:Protein-SOL" of attr("edr/coul_sr_*")). Empty when its members have no names. A
+// view into the table, valid for the frame.
+str_t series_member_label(const ApplicationState* app, const SeriesKey& key, int k);
+
 // How what a script series shows stands against the script as it is now in the editor, and how far its evaluation has
 // come. Anything else is always current.
 enum SeriesStatus : uint8_t {
@@ -173,6 +178,8 @@ struct PlotSeries {
     float           marker_size = 1.0f;
     float           bar_width = 1.0f;           // of a bin, for bars
     int             num_bins = 128;             // for a distribution
+    float           smoothing = 0.0f;           // for a distribution of values: the bandwidth of a kernel density estimate
+                                                // in Silverman's, 0 for none (series_resolve_histogram)
 
     // Which members of a population are drawn
     std::bitset<PLOT_MAX_POPULATION> population_mask = {};
@@ -241,6 +248,31 @@ enum : uint32_t {
 // not, as a static string for a tooltip. Cheap enough to ask for every attribute in a table.
 uint32_t series_views(const ApplicationState* app, const SeriesKey& key, const char** out_reason = nullptr);
 
+// ## Periodic values
+//
+// A series of periodic values, such as an angle about an axis: a value is the same as itself plus a whole period. A script
+// property says so (MD_SCRIPT_PROPERTY_FLAG_PERIODIC) by publishing "<path>/period" (beg, end) and "<path>/seam" beside its
+// values; anything else which does is periodic alike. A plot lays such values out on a circle cut open (plot_periodic.h).
+struct SeriesPeriodic {
+    double beg = 0, end = 0;    // the period its values are given in: [-180, 180[ of a dihedral. Not periodic unless end > beg
+    double seam = 0;            // where its values are best cut open, in [beg, end[: where they are least likely to be
+};
+
+static inline bool series_periodic_valid(const SeriesPeriodic& p) {
+    return p.end > p.beg;
+}
+
+static inline double series_periodic_length(const SeriesPeriodic& p) {
+    return p.end - p.beg;
+}
+
+// The same period, to within float: series in it are cut alike (plot_periodic.h)
+bool series_periodic_equal(const SeriesPeriodic& a, const SeriesPeriodic& b);
+
+// The period of the series at key, its values scaled by scale (stored unit -> display unit). False, and out not periodic,
+// when it is not periodic.
+bool series_periodic(SeriesPeriodic* out, const ApplicationState* app, const SeriesKey& key, double scale);
+
 // ## Over time
 
 // Resolved for the frame it was resolved in: what a plot reads.
@@ -253,6 +285,8 @@ struct SeriesTemporalView {
     int   dim = 1;                  // population members drawn (1 for the summaries)
     bool  band = false;             // drawn as an area between series_temporal_band's lo and hi
     float y_scale = 1.0f;           // stored unit -> display unit
+    SeriesPeriodic periodic = {};   // of periodic values, in the display unit. The bands of a periodic series (Sigma, Extent)
+                                    // are about their centre: the upper side may lie past periodic.end
 
     char  label[96] = "";                       // with the state appended (series_state_suffix)
     char  plot_id[SERIES_PATH_CAP + 104] = "";  // label###identity, what ImPlot is handed: the label may change
@@ -293,7 +327,9 @@ struct SeriesHistogramView {
     const float* bins = nullptr;    // dim * num_bins, member k's bins at k * num_bins, stored units
     int    num_bins = 0;
     int    dim = 1;
-    double x_min = 0, x_max = 0;    // in the display unit
+    double x_min = 0, x_max = 0;    // in the display unit. Of periodic values, the period they are given in: bin i is the
+                                    // same as bin i + num_bins, a period on (series_histogram_point_at)
+    SeriesPeriodic periodic = {};   // of periodic values, in the display unit
     double y_scale = 1.0;           // bins -> display unit
     double y_min = 0, y_max = 0;    // in the display unit
 
@@ -310,17 +346,20 @@ struct SeriesHistogramView {
     SeriesPeriodInfo periods[PLOT_MAX_PERIODS];
 };
 
+// How a histogram of values is smoothed: a kernel density estimate, Gaussian, of bandwidth smoothing times Silverman's
+// rule of thumb, wrapped around the period for periodic values. 0 for the histogram as binned.
+//
 // num_bins is what is asked for; a script distribution is evaluated at a resolution of its own and
 // gives at most that. False, with labels filled in, when there is nothing to bin.
 // period: a timeline period (see PlotSeries::periods), over whose frames it is binned, or 0 for the frames of the key.
 // A script distribution over a period is read from the evaluation's slot of it (SCRIPT_SLOT_PERIOD), which is asked for
 // here: nothing is evaluated for it unless it is not kept per frame, and then only when Evaluate is pressed.
-bool series_resolve_histogram(SeriesHistogramView* out, ApplicationState* app, const SeriesKey& key, int num_bins, uint32_t period = 0);
+bool series_resolve_histogram(SeriesHistogramView* out, ApplicationState* app, const SeriesKey& key, int num_bins, uint32_t period = 0, float smoothing = 0.0f);
 
 // Over several periods, one member each, in their order: all binned alike, so that they compare. A population is
 // pooled (the aggregate) over periods. Without periods, the same as series_resolve_histogram.
 bool series_resolve_histogram_periods(SeriesHistogramView* out, ApplicationState* app, const SeriesKey& key, int num_bins,
-                                      const uint32_t* periods, int num_periods);
+                                      const uint32_t* periods, int num_periods, float smoothing = 0.0f);
 
 // The frames of a period now, [beg, end[: of the period, or for 0 of the key's own period. False when it covers no
 // frames, or the period is gone.
@@ -339,19 +378,46 @@ static inline double series_histogram_index_at(const SeriesHistogramView& v, dou
     return w > 0.0 ? (x - v.x_min) / w - 0.5 : 0.0;
 }
 
+// The bin of an index which may lie outside [0, num_bins[: of periodic values, the bin a whole number of periods away
+// (bin -1 is the last, a period back); otherwise none, -1
+static inline int series_histogram_bin(const SeriesHistogramView& v, long long u) {
+    if (v.num_bins <= 0) return -1;
+    if (series_periodic_valid(v.periodic)) {
+        const long long m = u % v.num_bins;
+        return (int)(m < 0 ? m + v.num_bins : m);
+    }
+    return (0 <= u && u < v.num_bins) ? (int)u : -1;
+}
+
+// Bin u of member k, where u may lie outside [0, num_bins[ for periodic values: at its place a whole number of periods
+// away, so that the curve goes on around the circle
+static inline ImPlotPoint series_histogram_point_at(const SeriesHistogramView& v, int k, long long u) {
+    const double w = series_histogram_bin_width(v);
+    const int b = series_histogram_bin(v, u);
+    return ImPlotPoint(v.x_min + ((double)u + 0.5) * w, b >= 0 ? v.bins[(size_t)k * v.num_bins + b] * v.y_scale : 0.0);
+}
+
 // ## Volumes
 
-// A script property evaluated as a volume (rank 3), for the density volume and the export
+// A script property evaluated as a volume, for the density volume and the export: one volume, published {x, y, z}, or an
+// array of them ('sdf(...) in residue(1:n)'), published {n, x, y, z}. Of an array, one member is viewed at a time, its
+// reference structures visualized with subidx member (md_script_vis_eval_ref), as the script editor names it: v[member + 1].
 struct SeriesVolumeView {
-    const float* data = nullptr;    // dim[0] * dim[1] * dim[2] values, as the script publishes them. Valid this frame.
+    const float* data = nullptr;    // dim[0] * dim[1] * dim[2] values of the member, as the script publishes them. Valid this frame.
     uint32_t dim[3] = {};
-    uint64_t version = 0;           // of the data: changes whenever it does
-    char  label[64] = "";
+    uint32_t count = 0;             // the volumes of the property: 1 for a single volume
+    uint32_t member = 0;            // which of them data is, [0, count)
+    uint64_t version = 0;           // of the data of the property: changes whenever it does, not with the member
+    char  label[64] = "";           // "v", "v[2]" of an array, "v[2] (Production)"
     char  script_ident[64] = "";
     md_script_vis_ref_t vis_ref = {};
     SeriesState state = {};
 };
-bool series_resolve_volume(SeriesVolumeView* out, ApplicationState* app, const SeriesKey& key);
+// member is clamped to the volumes there are (out->member is the one resolved)
+bool series_resolve_volume(SeriesVolumeView* out, ApplicationState* app, const SeriesKey& key, uint32_t member = 0);
+// The volumes of the property at key without resolving it (nothing is asked of a period's slot): 1 for a volume, n for an
+// array of n, 0 when none is published
+uint32_t series_volume_count(const ApplicationState* app, const SeriesKey& key);
 
 // ## Listing script properties
 
