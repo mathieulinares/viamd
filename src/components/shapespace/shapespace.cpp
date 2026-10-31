@@ -367,7 +367,8 @@ struct Shapespace : viamd::EventHandler {
                 // as the one before, and is opened without a SystemInit or SystemFree (the tasks reading the old one
                 // were interrupted and waited for already)
                 const LoadDataPayload* load = (const LoadDataPayload*)e.payload;
-                if (load && (load->loader_state.flags & (LoaderFlag_System | LoaderFlag_Trajectory))) {
+                if (load && ((load->loader_state.flags & (LoaderFlag_System | LoaderFlag_Trajectory)) ||
+                             (load->role == FileRole_Supplement && load->loader_state.type == LoaderType_AMBER_PRMTOP))) {
                     release_all(true);
                     system_generation += 1;
                 }

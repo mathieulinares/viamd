@@ -245,7 +245,7 @@ UTEST(viamd_file_list, amber_topology_coordinate_dependency_round_trips) {
     ASSERT_TRUE(list.record(entry, FileRole_System));
 
     Written written(workspace.c_str(), alloc);
-    ASSERT_EQ(1, file_list_serialize(written.s, &list.list, 0, 0));
+    ASSERT_EQ(0, file_list_serialize(written.s, &list.list, 0, 0));
     EXPECT_TRUE(contains(written.text(), "[Input]\nSystem=0\nPath=./nma.prmtop\n"));
     EXPECT_TRUE(contains(written.text(), "Coordinates=./nma.inpcrd\n"));
 
@@ -254,6 +254,31 @@ UTEST(viamd_file_list, amber_topology_coordinate_dependency_round_trips) {
     EXPECT_STREQ(topology.c_str(), read.plan.inputs[0].entry.path);
     EXPECT_STREQ(coordinates.c_str(), read.plan.inputs[0].entry.coordinates);
 }
+
+#if MD_AMBER_NETCDF
+UTEST(viamd_file_list, amber_supplement_and_run_round_trip_in_load_order) {
+    md_allocator_i* alloc = md_get_heap_allocator();
+    char folder_buf[1024];
+    const size_t folder_len = md_path_write_canonical(folder_buf, sizeof(folder_buf), STR_LIT(VIAMD_AMBER_DATA_DIR));
+    ASSERT_GT(folder_len, 0u);
+    const str_t folder = {folder_buf, folder_len};
+    auto at = [&](const char* name) { return std::string(folder.ptr, folder.len) + name; };
+
+    List list;
+    ASSERT_TRUE(list.record(file(at("nma.pdb").c_str(), LoaderType_PDB), FileRole_System));
+    ASSERT_TRUE(list.record(file(at("nma.nc").c_str(), LoaderType_AMBER_NETCDF), FileRole_Trajectory));
+    ASSERT_TRUE(list.record(file(at("nma.prmtop").c_str(), LoaderType_AMBER_PRMTOP), FileRole_Supplement));
+    ASSERT_TRUE(list.record(file(at("nma.mdout").c_str(), LoaderType_AMBER_ENERGY), FileRole_Series));
+
+    const std::string workspace = at("nma.via");
+    Written written(workspace.c_str(), alloc);
+    ASSERT_EQ(1, file_list_serialize(written.s, &list.list, 0, 0));
+    EXPECT_FALSE(contains(written.text(), "Coordinates="));
+    Read read(written.text(), folder);
+    const std::string got = read.str();
+    EXPECT_STREQ("nma.pdb:System:-1 nma.prmtop:Supplement:-1 nma.nc:Trajectory:0 nma.mdout:Series:0", got.c_str());
+}
+#endif
 
 UTEST(viamd_file_list, the_order_of_the_sections_does_not_matter) {
     const str_t text = STR_LIT(

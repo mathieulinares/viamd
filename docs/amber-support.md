@@ -108,7 +108,8 @@ cmake --build build -j
   does not exist in that build.
 - With vcpkg, the mdlib manifest has an `amber-netcdf` feature pulling `netcdf-c`.
   [CheckVCPKG.cmake](../ext/mdlib/cmake/CheckVCPKG.cmake) enables it automatically when the
-  option is set.
+  option is set and mdlib's manifest is in use, including with an explicitly supplied vcpkg
+  toolchain. A caller-supplied manifest is not modified.
 - The energy reader [md_amber_energy.c](../ext/mdlib/src/md_amber_energy.c) has no dependency
   and is always compiled.
 
@@ -208,7 +209,15 @@ count, residue boundaries and atom/residue names in order. Truncated PDB names a
 when the available prefix matches; incompatible names, residue grouping, or elements are
 rejected rather than attaching bonds to the wrong atoms. The structure's coordinates, chain
 labels and residue numbering are retained, while topology bonds, force-field atom types,
-charges and masses are applied.
+charges and masses are applied. Existing user bonds are retained without duplicating matching
+topology bonds, and matching particle-type radii and colors are preserved. Distinct input
+particle types remain distinct even if their topology identifiers and appearances coincide.
+The Dataset panel rebuilds its type lists; workspace appearance overrides identify populated
+types by an atom index as well as their name, force-field type and loaded element. Workspaces
+without that index retain the previous identifier-based lookup. Overrides are applied after
+all system supplements have loaded. Chemistry, backbone and rendering data are rebuilt from
+the topology; an already-open run and its energy series remain attached while per-frame backbone
+properties are recomputed.
 
 The parser deliberately skips the force-field parameter tables: VIAMD visualizes and analyzes
 the system but does not evaluate Amber's force field. If an older topology has no
@@ -298,7 +307,11 @@ these two files.
   `=` may be attached to the name or the value.
 - A record starts at `NSTEP`. Assignments before the first `NSTEP` (setup headers such as
   `ntx = 7`) are ignored.
-- Parsing stops at the averages/RMS section, so those summary values never become samples.
+- A dashed separator after a complete record closes it. Intervening diagnostics, such as
+  repeated centre-of-mass motion removal values, are not mistaken for energy terms.
+- Averages/RMS sections are skipped so their summary values never become samples. Parsing
+  resumes at a later `4. RESULTS` section, or at the next record after `5. TIMINGS`.
+  Without either marker, data following a summary is ambiguous and remains skipped.
 - A record must have `NSTEP`, `TIME(PS)` and `Etot`. An incomplete record is an error and never
   reuses values from the previous one.
 
@@ -307,14 +320,15 @@ these two files.
 - Column names come from the file's own `L<k>` header, so other column sets are accepted.
 - A record line whose value count differs from its header line is rejected, with the line
   number in the error.
-- A new header in the middle of the file (an appended run) closes the open record.
+- A new header in the middle of the file (an appended run) closes the open record. A repeated
+  `L0` header begins a new segment even when its first step and time equal the preceding ones.
 
 **Both formats:**
 
 - A term appearing twice in one record is an error.
-- A decrease in time or a reset in step number starts a new energy segment. Segments retain
-  their original timestamps; the reader does not guess whether to splice overlaps or offset a
-  clock reset.
+- A decrease in time, a reset in step number, or an explicit appended-run boundary starts a
+  new energy segment. Segments retain their original timestamps; the reader does not guess
+  whether to splice overlaps or offset a clock reset.
 - A term missing from some records is omitted, with an info message. No values are invented.
 
 ### Term names, shared between the two formats
@@ -457,8 +471,8 @@ panel, the Timeline and scripting needed no Amber code.
 - **Drag-and-drop** (`file_queue_push` in [viamd.cpp](../src/viamd.cpp)) falls back to content
   detection for unknown extensions. A dropped `mdout`/`mden`/`.out` therefore loads without a
   dialog.
-- Dropped files keep their priority order: structure → trajectory → series. Dropping all three
-  files at once loads them in the right order.
+- Dropped files use the priority order: structure → Amber topology supplement → trajectory →
+  series. A matching PDB, topology, trajectory and energy file can therefore be dropped together.
 - A `.prmtop` is a system but requires a coordinate dependency. The Open dialog stores that
   choice in the workspace; a dropped restart or trajectory is selected automatically only
   when it is the sole candidate.
@@ -518,22 +532,32 @@ energy segment. In practice `ntwx` (coordinates) must be a multiple of `ntpr` (`
   - nonperiodic extraction clearing a previous cell;
   - missing time and cells, giving ordinals and no box;
   - wrong convention and decreasing time;
-  - 64-bit-offset files, bad axis labels and fill values.
+  - 64-bit-offset files, bad axis labels and fill values;
+  - classic NetCDF restart coordinates, triclinic cells and atom-count validation.
 - **mdlib** ([test_amber_energy.c](../ext/mdlib/unittest/test_amber_energy.c)), using fixtures in
   [amber_energy_data](../ext/mdlib/unittest/amber_energy_data):
   - `mdout` detection and publication, including repeated setup headers;
   - refusal when the energies do not cover the run;
-  - preservation of restarted runs as separate timestamped segments;
+  - preservation of restarted runs, including equal boundary times and records after summaries,
+    as separate timestamped segments;
+  - coverage validation across many segments and long term names;
   - incomplete records;
   - `mden` detection, publication and name mapping;
   - `mden` lines that do not match their header.
 - **VIAMD** ([test_loader.cpp](../test/test_loader.cpp)):
   - loader table consistency;
-  - native `.prmtop` plus ASCII restart loading and published atom attributes;
+  - native `.prmtop` plus ASCII and classic NetCDF restart loading and published atom attributes;
+  - topology application to a matching PDB, preserved user bonds and appearance, distinct source
+    particle types, workspace override matching, recomputed chemistry, and mismatch rejection;
+  - periodic molecule boundaries aligned or misaligned with residues;
+  - the NMA PDB, topology, trajectory, `mdout`, `.out` and `mden` imported together, with all
+    trajectory-frame energies compared across the three files;
   - `.nc` content check;
   - `mdout`/`mden` detection and supplement through the loader;
   - extensionless energy files inside a dotted directory;
   - NetCDF trajectory dispatch through `publish_run`.
+- **VIAMD** ([test_file_list.cpp](../test/test_file_list.cpp)): workspace round trips for
+  topology-coordinate dependencies and the PDB → topology → trajectory → energy workflow.
 
 The small [NMA dataset](../datasets/amber/README.md) is a manual end-to-end example with
 12 atoms and 20 trajectory frames. Its `.nc` file was converted from the source Amber

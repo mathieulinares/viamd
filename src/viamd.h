@@ -1720,6 +1720,7 @@ struct ApplicationState {
     // The fingerprints are gone for the same reason: md_attributes_version is the one answer to
     // "did this change", and a stamp next to the data can be forgotten by whoever writes it.
     struct {
+        uint64_t backbone_task_generation = 0;
         struct {
             size_t stride = 0;                          // == shape[1] of 'backbone/secondary_structure'
             size_t count = 0;                           // == its element count
@@ -1838,6 +1839,7 @@ struct LoadDataPayload {
     ApplicationState* app_state;
     loader::LoaderState loader_state;
     str_t path_to_file;
+    FileRole role;
 };
 
 // A picking tooltip, gathered from every handler that recognises the hit and drawn as one window: a title names what

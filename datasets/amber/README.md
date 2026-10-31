@@ -33,6 +33,7 @@ initial state and opens the trajectory as the run.
 The PDB-first route is also supported: load `nma.pdb`, apply `nma.prmtop` to add
 Amber topology metadata, then open `nma.nc`. VIAMD checks the atom and residue
 names and boundaries before applying the topology; the loaded coordinates are kept.
+The PDB, topology, trajectory and energy file can also be dropped together.
 
 ## Provenance
 

@@ -1271,6 +1271,7 @@ static void run_path_from_file(char* buf, size_t cap, str_t path) {
 
 void free_trajectory_data(ApplicationState* state) {
     ASSERT(state);
+    ++state->trajectory_data.backbone_task_generation;
 
     // The orientation reference was read from this run's first frame. A run loaded in its place, on the
     // same topology, has a first frame of its own.
@@ -1324,13 +1325,13 @@ void free_trajectory_data(ApplicationState* state) {
     free_frame_cache(&state->mold.frame_cache, state->allocator.persistent);
 }
 
-void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_flags) {
+static void init_trajectory_data_impl(ApplicationState* data, str_t run_file, uint32_t traj_flags, bool refresh_backbone_only) {
     // The trajectory is a RUN in the attribute table: "<run>/time" is its frame axis, and everything
     // sampled along it lives below the same prefix - the positions streamed from the file, the per
     // frame backbone data below, an energy file loaded later - so that freeing the trajectory is
     // removing the prefix. A trajectory that came inside the structure file (a multi model PDB) is
     // named after that; a structure of one frame publishes nothing and has no run.
-    {
+    if (!refresh_backbone_only) {
         run_path_from_file(data->mold.run, sizeof(data->mold.run), run_file);
         const str_t run = str_from_cstr(data->mold.run);
         if (!loader::publish_run(&data->mold.sys, run_file, run, traj_flags)) {
@@ -1341,36 +1342,32 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
 
     size_t num_frames = run_num_frames(data);
     if (num_frames > 0) {
-        size_t min_frame = 0;
-        size_t max_frame = num_frames - 1;
-        const double* frame_times = run_frame_times(data);
         char path_buf[256];
+        if (!refresh_backbone_only) {
+            size_t min_frame = 0;
+            size_t max_frame = num_frames - 1;
+            const double* frame_times = run_frame_times(data);
+            init_frame_cache(&data->mold.frame_cache, data->mold.sys.atom.count, data->allocator.persistent);
+            ASSERT(frame_times);
 
-        init_frame_cache(&data->mold.frame_cache, data->mold.sys.atom.count, data->allocator.persistent);
-
-        ASSERT(frame_times);
-
-        // The timeline carries time in the unit the user asked to see it in. Everything downstream
-        // reads x_values and view_range, so this is the one place the conversion happens; a later
-        // change to the preference is picked up by update_timeline_time_unit in main.cpp.
-        const double time_scl = display_units::factor(&data->timeline.time_unit, run_time_unit(data));
-        data->timeline.time_scale    = time_scl;
-        data->timeline.units_version = display_units::version();
-
-        double min_time = frame_times[0] * time_scl;
-        double max_time = frame_times[num_frames - 1] * time_scl;
-
-        data->timeline.view_range = {min_time, max_time};
-
-        md_array_resize(data->timeline.x_values, num_frames, data->allocator.persistent);
-        for (size_t i = 0; i < num_frames; ++i) {
-            data->timeline.x_values[i] = (float)(frame_times[i] * time_scl);
+            // The timeline carries time in the unit the user asked to see it in.
+            const double time_scl = display_units::factor(&data->timeline.time_unit, run_time_unit(data));
+            data->timeline.time_scale    = time_scl;
+            data->timeline.units_version = display_units::version();
+            double min_time = frame_times[0] * time_scl;
+            double max_time = frame_times[num_frames - 1] * time_scl;
+            data->timeline.view_range = {min_time, max_time};
+            md_array_resize(data->timeline.x_values, num_frames, data->allocator.persistent);
+            for (size_t i = 0; i < num_frames; ++i) {
+                data->timeline.x_values[i] = (float)(frame_times[i] * time_scl);
+            }
+            data->animation.frame = CLAMP(data->animation.frame, (double)min_frame, (double)max_frame);
+            int64_t frame_idx = CLAMP((int64_t)(data->animation.frame + 0.5), 0, (int64_t)max_frame);
+            extract_frame(data, frame_idx, &data->mold.state);
         }
 
-        data->animation.frame = CLAMP(data->animation.frame, (double)min_frame, (double)max_frame);
-        int64_t frame_idx = CLAMP((int64_t)(data->animation.frame + 0.5), 0, (int64_t)max_frame);
-
-        extract_frame(data, frame_idx, &data->mold.state);
+        task_system::task_interrupt_and_wait_for(data->tasks.backbone_computations);
+        const uint64_t backbone_generation = ++data->trajectory_data.backbone_task_generation;
 
         if (data->mold.sys.protein_backbone.segment.count > 0) {
             // The angles and the per frame secondary structure are TEMPORAL attributes: the table
@@ -1429,6 +1426,16 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
             data->trajectory_data.backbone_angles.data   = (md_backbone_angles_t*)md_attributes_data(attributes, angle_id, MD_ATTRIBUTE_TYPE_F32);
             data->trajectory_data.backbone_angles.stride = num_segments;
             data->trajectory_data.backbone_angles.count  = num_segments * num_frames;
+            if (!data->trajectory_data.secondary_structure.data || !data->trajectory_data.backbone_angles.data) {
+                MD_LOG_ERROR("Could not allocate trajectory backbone attributes");
+                if (ss_id != MD_ATTRIBUTE_INVALID) md_attributes_remove(attributes, ss_id);
+                if (angle_id != MD_ATTRIBUTE_INVALID) md_attributes_remove(attributes, angle_id);
+                data->trajectory_data.secondary_structure = {};
+                data->trajectory_data.backbone_angles = {};
+                md_array_free(data->trajectory_data.secondary_structure_render.data, data->allocator.persistent);
+                data->trajectory_data.secondary_structure_render = {};
+                return;
+            }
 
             // The denoised copy stays an ordinary array: it is a PRESENTATION smoothing of the one
             // above, read only by the renderer, and publishing it would put two answers to "what is
@@ -1437,9 +1444,6 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
             data->trajectory_data.secondary_structure_render.count = data->mold.sys.protein_backbone.segment.count * num_frames;
             md_array_resize(data->trajectory_data.secondary_structure_render.data, data->mold.sys.protein_backbone.segment.count * num_frames, data->allocator.persistent);
             MEMSET(data->trajectory_data.secondary_structure_render.data, 0, md_array_bytes(data->trajectory_data.secondary_structure_render.data));
-
-            // Launch work to compute the values
-            task_system::task_interrupt_and_wait_for(data->tasks.backbone_computations);
 
             data->tasks.backbone_computations = task_system::create_pool_task(STR_LIT("Backbone Operations"), (uint32_t)num_frames, [data](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
                 (void)thread_num;
@@ -1471,7 +1475,8 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
             });
 
             uint64_t time = (uint64_t)md_tick_now();
-            task_system::ID main_task = task_system::create_main_task(STR_LIT("Update Trajectory Data"), [data, t0 = time, num_frames]() {
+            task_system::ID main_task = task_system::create_main_task(STR_LIT("Update Trajectory Data"), [data, t0 = time, num_frames, backbone_generation]() {
+                if (data->trajectory_data.backbone_task_generation != backbone_generation) return;
                 secondary_structure_render_denoise(
                     data->trajectory_data.secondary_structure_render.data,
                     data->trajectory_data.secondary_structure.data,
@@ -1503,14 +1508,33 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
 
             task_system::set_task_dependency(main_task, data->tasks.backbone_computations);
             task_system::enqueue_task(data->tasks.backbone_computations);
+        } else if (refresh_backbone_only) {
+            md_attributes_t* attributes = &data->mold.sys.attributes;
+            const str_t leaves[] = {STR_LIT("backbone/angle"), STR_LIT("backbone/secondary_structure")};
+            for (str_t leaf : leaves) {
+                const md_attribute_id_t id = md_attributes_id_from_path(run_attribute_path(path_buf, sizeof(path_buf), data, leaf));
+                if (id != MD_ATTRIBUTE_INVALID) md_attributes_remove(attributes, id);
+            }
+            data->trajectory_data.backbone_angles = {};
+            data->trajectory_data.secondary_structure = {};
+            md_array_free(data->trajectory_data.secondary_structure_render.data, data->allocator.persistent);
+            data->trajectory_data.secondary_structure_render = {};
         }
 
+        if (refresh_backbone_only) {
+            data->mold.last_interpolated_nearest_frame = -1;
+            data->mold.interpolate_system_state = true;
+        }
         data->mold.dirty_gpu_buffers |= MolBit_DirtyPosition;
         data->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
 
         // Prefetch frames
         //launch_prefetch_job(data);
     }
+}
+
+void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_flags) {
+    init_trajectory_data_impl(data, run_file, traj_flags, false);
 }
 
 void assembly_transforms(md_array(mat4_t)* transforms, md_array(uint32_t)* copy_offset, const md_system_t& sys, int assembly, md_allocator_i* alloc) {
@@ -1752,6 +1776,31 @@ static void file_queue_remove_path(FileQueue* queue, str_t path, md_allocator_i*
     queue->head = write;
 }
 
+static void bond_tracking_clear(ApplicationState* app);
+
+static void refresh_amber_topology_dependents(ApplicationState* state) {
+    bond_tracking_clear(state);
+    state->operations.bond_tracking.scope_dirty = true;
+    recenter_mark_query_dirty(state);
+    md_gl_mol_set_system_backbone(state->mold.gl_mol, &state->mold.sys);
+    md_gl_mol_set_chain_gaps(state->mold.gl_mol, &state->mold.sys);
+    assembly_subsets_free(state);
+    cartoon_glyphs_init(&state->mold.cartoon_glyphs, state->mold.sys, state->mold.gl_mol, state->allocator.persistent);
+    for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
+        Representation& rep = state->representation.reps[i];
+        md_gl_rep_destroy(rep.glyph_rep);
+        rep.glyph_rep = cartoon_glyphs_rep_create(state->mold.cartoon_glyphs);
+        rep.glyphs_shown = false;
+    }
+    if (md_util_state_backbone_compute(&state->mold.state, &state->mold.sys)) {
+        upload_secondary_structure_weights(state);
+    }
+    init_trajectory_data_impl(state, {}, 0, true);
+    state->mold.dirty_gpu_buffers |= MolBit_DirtyPosition | MolBit_DirtyRadius |
+                                     MolBit_DirtyFlags | MolBit_ClearVelocity;
+    system_bonds_changed(state, false);
+}
+
 // Opens the run in path for the loaded system, replacing the one it has (one run per system for now).
 // False when the file holds no frames to make a run of, which is not an error for a structure file.
 static bool open_run(ApplicationState* state, str_t path, const loader::LoaderState& load_state) {
@@ -1821,7 +1870,11 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
                 file_list_record(&state->files.list, file_entry(path_to_file, load_state), role, state->allocator.persistent);
 
                 // A topology replaces bonds (and with them structures), which the GPU holds a copy of
-                state->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
+                if (load_state.type == LoaderType_AMBER_PRMTOP && role == FileRole_Supplement) {
+                    refresh_amber_topology_dependents(state);
+                } else {
+                    state->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
+                }
                 // attr() in the script resolves against the table when it is compiled.
                 state->script.compile_ir = true;
                 if (role == FileRole_Series) {
@@ -1932,6 +1985,7 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             .app_state = state,
             .loader_state = load_state,
             .path_to_file = path_to_file,
+            .role = role,
         };
         viamd::event_system_broadcast_event(viamd::EventType_ViamdLoadData, viamd::EventPayloadType_LoadData, &data);
     }
@@ -6322,7 +6376,7 @@ bool file_queue_full(const FileQueue* queue) {
 void file_queue_push(FileQueue* queue, str_t path, FileFlags flags) {
     ASSERT(queue);
     ASSERT(!file_queue_full(queue));
-    int prio = 5;
+    int prio = 6;
 
 
     str_t ext = {};
@@ -6338,14 +6392,18 @@ void file_queue_push(FileQueue* queue, str_t path, FileFlags flags) {
             type = detected.type;
         }
         LoaderFlags loader_flags = loader::type_flags(type);
-        if (loader_flags & LoaderFlag_System) {
+        if (type == LoaderType_AMBER_PRMTOP) {
+            // A topology supplements a dropped structure, or initializes one before its trajectory.
+            prio = 3;
+        } else if (loader_flags & LoaderFlag_System) {
             prio = 2;
         } else if (loader_flags & LoaderFlag_Temporal) {
             // Joins the trajectory's run, so it goes after the trajectory when both are dropped
-            prio = 4;
-        } else if (loader_flags & (LoaderFlag_Trajectory | LoaderFlag_Supplemental)) {
-            // A supplemental file (a topology) needs the system in place, same as a trajectory
+            prio = 5;
+        } else if (loader_flags & LoaderFlag_Supplemental) {
             prio = 3;
+        } else if (loader_flags & LoaderFlag_Trajectory) {
+            prio = 4;
         } else {
             flags |= FileFlags_ShowDialogue;
         }
@@ -6382,7 +6440,7 @@ void file_queue_process(ApplicationState* state) {
     if (!file_queue_empty(&state->file_queue) && !state->load_dataset.show_window) {
         FileQueue::Entry e = file_queue_pop(&state->file_queue);
 
-        str_t ext;
+        str_t ext = {};
         extract_ext(&ext, e.path);
 
         if (str_eq_ignore_case(ext, WORKSPACE_FILE_EXTENSION)) {
@@ -6418,7 +6476,7 @@ void file_queue_process(ApplicationState* state) {
                         }
 #endif
                     }
-                    if (restarts == 1 || (restarts == 0 && trajectories == 1)) {
+                    if ((restarts == 1 && trajectories == 0) || (restarts == 0 && trajectories == 1)) {
                         str_copy_to_char_buf(state->load_dataset.coordinates_buf, sizeof(state->load_dataset.coordinates_buf),
                                              restarts ? restart : trajectory);
                     }

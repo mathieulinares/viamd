@@ -1667,6 +1667,15 @@ struct DensityVolume : viamd::EventHandler {
                 dirty_rep = true;
                 break;
             }
+            case viamd::EventType_ViamdLoadData: {
+                const LoadDataPayload* load = (const LoadDataPayload*)e.payload;
+                if (load && load->role == FileRole_Supplement && load->loader_state.type == LoaderType_AMBER_PRMTOP) {
+                    release_all_rep_resources();
+                    clear_structures();
+                    dirty_rep = true;
+                }
+                break;
+            }
             case viamd::EventType_ViamdSystemFree: {
                 // What the representations hold is of the molecule that goes; their settings stay
                 release_all_rep_resources();

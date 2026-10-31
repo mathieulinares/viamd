@@ -6,6 +6,7 @@
 #include <serialization_utils.h>
 #include <display_units.h>
 #include <plot_series.h>
+#include "dataset_particle_type.h"
 
 #include <core/md_common.h>
 #include <core/md_allocator.h>
@@ -67,6 +68,7 @@ struct ParticleTypeOverride {
     char name[32] = "";             // Name of the particle type
     char ff_type[64] = "";          // Force field type, empty when the type has none
     md_atomic_number_t load_z = 0;  // Element the type was assigned upon load. Name, force field type and element identify the type
+    int first_atom = -1;            // Distinguishes types with otherwise identical identifiers
 
     // Only the fields which were present in the section are applied
     bool has_z              = false;
@@ -204,6 +206,7 @@ struct Dataset : viamd::EventHandler {
     md_array(ParticleTypeOverride) pending_overrides = 0;
     md_array(ResidueTypeOverride) pending_res_type_overrides = 0;
     char pending_workspace[1024] = "";  // Workspace the pending overrides stem from, used to discard stale ones
+    bool workspace_loading = false;
 
     Dataset() { 
         viamd::event_system_register_handler(*this); 
@@ -512,7 +515,7 @@ struct Dataset : viamd::EventHandler {
     }
 
     // Apply the buffered [ComponentType] sections onto the freshly inferred types, identified by name and kind
-    void apply_pending_res_type_overrides(ApplicationState& data, bool& color_changed) {
+    void apply_pending_res_type_overrides(ApplicationState& data, bool& color_changed, bool report_missing) {
         const size_t num_overrides = md_array_size(pending_res_type_overrides);
         if (num_overrides == 0) return;
 
@@ -524,7 +527,9 @@ struct Dataset : viamd::EventHandler {
             const ResidueTypeOverride& ovr = pending_res_type_overrides[j];
             const md_residue_type_idx_t t = md_residue_type_find(&type, str_from_cstr(ovr.name), ovr.kind);
             if (t < 0) {
-                MD_LOG_INFO("Dataset: workspace contains overrides for residue type '%s' (%s) which is not present in the loaded system", ovr.name, md_residue_kind_name(ovr.kind));
+                if (report_missing) {
+                    MD_LOG_INFO("Dataset: workspace contains overrides for residue type '%s' (%s) which is not present in the loaded system", ovr.name, md_residue_kind_name(ovr.kind));
+                }
                 continue;
             }
             if (ovr.has_use_defaults) {
@@ -653,6 +658,9 @@ struct Dataset : viamd::EventHandler {
                 viamd::write_str(state, STR_LIT("ForceFieldType"), ff_type);
             }
             viamd::write_int(state, STR_LIT("LoadedElement"), item.load.z);
+            if (md_array_size(item.indices)) {
+                viamd::write_int(state, STR_LIT("FirstAtom"), item.indices[0]);
+            }
 
             if (delta.elem)     viamd::write_int (state, STR_LIT("Element"),       type.z[i]);
             if (delta.radius)   viamd::write_flt (state, STR_LIT("Radius"),        type.radius[i]);
@@ -668,6 +676,7 @@ struct Dataset : viamd::EventHandler {
         begin_pending_overrides(state);
 
         ParticleTypeOverride ovr = {};
+        bool invalid_first_atom = false;
 
         str_t ident, arg;
         while (viamd::next_entry(ident, arg, state)) {
@@ -680,6 +689,8 @@ struct Dataset : viamd::EventHandler {
                 if (viamd::extract_int(z, arg)) {
                     ovr.load_z = (md_atomic_number_t)z;
                 }
+            } else if (str_eq_cstr(ident, "FirstAtom")) {
+                invalid_first_atom = !viamd::extract_int(ovr.first_atom, arg) || ovr.first_atom < 0;
             } else if (str_eq_cstr(ident, "Element")) {
                 int z;
                 if (viamd::extract_int(z, arg)) {
@@ -707,6 +718,10 @@ struct Dataset : viamd::EventHandler {
             MD_LOG_INFO("Dataset: skipping [AtomType] section without a Name entry");
             return;
         }
+        if (invalid_first_atom) {
+            MD_LOG_ERROR("Dataset: skipping [AtomType] section with an invalid FirstAtom entry");
+            return;
+        }
 
         md_array_push(pending_overrides, ovr, md_get_heap_allocator());
     }
@@ -722,7 +737,7 @@ struct Dataset : viamd::EventHandler {
     // Apply the buffered overrides onto the freshly loaded particle types. Must run after init_dataset_items so
     // that the load state has been snapshotted: it stays the baseline, the user's modifications sit on top.
     // A property a section does not carry was never modified, so it keeps whatever the loader assigned.
-    void apply_pending_particle_type_overrides(ApplicationState& data, bool& radius_changed, bool& color_changed) {
+    void apply_pending_particle_type_overrides(ApplicationState& data, bool& radius_changed, bool& color_changed, bool report_missing) {
         size_t num_overrides = md_array_size(pending_overrides);
         if (num_overrides == 0) return;
 
@@ -737,15 +752,11 @@ struct Dataset : viamd::EventHandler {
             str_t name = str_from_cstr(ovr.name);
             str_t ff_type = str_from_cstr(ovr.ff_type);
 
-            // Identify the type by its name, its force field type (empty for sources without one, which
-            // is also what a workspace written before force field types existed holds) and the element
-            // it had upon load
+            // Older workspaces have no FirstAtom; their original name/force-field/element lookup still works.
             bool matched = false;
             for (size_t i = 0; i < type_count; ++i) {
                 DatasetItem& item = particle_types[i];
-                if (item.load.z != ovr.load_z) continue;
-                if (!str_eq(md_particle_type_name(&type, i), name)) continue;
-                if (!str_eq(md_particle_type_ff_type(&type, i), ff_type)) continue;
+                if (!matches_particle_type_override(sys, i, item.load.z, name, ff_type, ovr.load_z, ovr.first_atom)) continue;
 
                 if (ovr.has_z) {
                     type.z[i] = ovr.z;
@@ -772,7 +783,7 @@ struct Dataset : viamd::EventHandler {
                 break;
             }
 
-            if (!matched) {
+            if (!matched && report_missing) {
                 MD_LOG_INFO("Dataset: workspace contains overrides for atom type '%s' which is not present in the loaded system", ovr.name);
             }
         }
@@ -786,15 +797,19 @@ struct Dataset : viamd::EventHandler {
 
         // Order matters. The per type overrides carry the UseDefaults flags, and those decide which types the
         // element defaults are allowed to touch, so they have to be in place before the defaults are pushed.
-        apply_pending_particle_type_overrides(data, radius_changed, color_changed);
+        if (!workspace_loading) {
+            apply_pending_particle_type_overrides(data, radius_changed, color_changed, true);
+        }
         apply_element_defaults_to_particle_types(data, radius_changed, color_changed);
 
         // The same for the residue types and the defaults of their monomers
-        apply_pending_res_type_overrides(data, color_changed);
+        if (!workspace_loading) {
+            apply_pending_res_type_overrides(data, color_changed, true);
+        }
         apply_monomer_defaults_to_res_types(data, color_changed);
 
-        // Applied, or for a system they do not belong to
-        free_pending_overrides();
+        // A workspace can add particle types through a topology supplement after this system.
+        if (!workspace_loading) free_pending_overrides();
 
         if (radius_changed) {
             data.mold.dirty_gpu_buffers |= MolBit_DirtyRadius;
@@ -802,6 +817,72 @@ struct Dataset : viamd::EventHandler {
         if (color_changed) {
             flag_all_representations_as_dirty(&data);
         }
+    }
+
+    void on_amber_topology_supplement(ApplicationState& data) {
+        struct ParticleAppearance {
+            bool valid;
+            bool use_defaults;
+            float load_radius;
+            uint32_t load_color;
+        };
+        struct ResidueAppearance {
+            bool use_defaults;
+            uint32_t load_color;
+        };
+
+        const md_system_t& sys = data.mold.sys;
+        const size_t num_types = md_system_particle_type_count(&sys);
+        const size_t old_res_types = md_array_size(res_types);
+        md_temp_scope_t temp = md_temp_begin();
+        ParticleAppearance* previous = md_temp_alloc_zero_array(temp, ParticleAppearance, num_types);
+        ResidueAppearance* previous_res = old_res_types ?
+            md_temp_alloc_array(temp, ResidueAppearance, old_res_types) : nullptr;
+        if (!previous || (old_res_types && !previous_res)) {
+            MD_LOG_ERROR("Dataset: unable to preserve type appearance after applying Amber topology");
+        } else {
+            for (size_t i = 0; i < md_array_size(particle_types); ++i) {
+                const DatasetItem& item = particle_types[i];
+                for (size_t j = 0; j < md_array_size(item.indices); ++j) {
+                    const int atom = item.indices[j];
+                    if (atom < 0 || (size_t)atom >= sys.atom.count) continue;
+                    const size_t type = (size_t)sys.atom.type_idx[atom];
+                    if (type >= num_types || previous[type].valid || item.load.z != sys.atom.type.z[type]) continue;
+                    previous[type] = {true, item.use_defaults, item.load.radius, item.load.color};
+                }
+            }
+            for (size_t i = 0; i < old_res_types; ++i) {
+                previous_res[i] = {res_types[i].use_defaults, res_types[i].load_color};
+            }
+        }
+
+        init_dataset_items(data);
+        if (previous && (!old_res_types || previous_res)) {
+            for (size_t i = 0; i < md_array_size(particle_types); ++i) {
+                if (!previous[i].valid) continue;
+                particle_types[i].use_defaults = previous[i].use_defaults;
+                particle_types[i].load.radius = previous[i].load_radius;
+                particle_types[i].load.color = previous[i].load_color;
+            }
+            for (size_t i = 0; i < MIN(old_res_types, md_array_size(res_types)); ++i) {
+                res_types[i].use_defaults = previous_res[i].use_defaults;
+                res_types[i].load_color = previous_res[i].load_color;
+            }
+        }
+        md_temp_end(temp);
+
+        bool radius_changed = false;
+        bool color_changed = false;
+        if (!workspace_loading) {
+            apply_pending_particle_type_overrides(data, radius_changed, color_changed, false);
+        }
+        apply_element_defaults_to_particle_types(data, radius_changed, color_changed);
+        if (!workspace_loading) {
+            apply_pending_res_type_overrides(data, color_changed, false);
+        }
+        apply_monomer_defaults_to_res_types(data, color_changed);
+        data.mold.dirty_gpu_buffers |= MolBit_DirtyRadius;
+        flag_all_representations_as_dirty(&data);
     }
 
     void process_events(const viamd::Event* events, size_t num_events) final {
@@ -818,10 +899,26 @@ struct Dataset : viamd::EventHandler {
             }
             case viamd::EventType_ViamdDeserializeBegin:
                 // A workspace without [ElementDefault], [AtomType], [MonomerDefault] or [ComponentType] sections has the built in ones
+                workspace_loading = true;
                 init_element_defaults();
                 init_monomer_defaults();
                 free_pending_overrides();
                 break;
+            case viamd::EventType_ViamdDeserializeEnd: {
+                workspace_loading = false;
+                if (app_state && app_state->mold.sys.atom.count) {
+                    bool radius_changed = false;
+                    bool color_changed = false;
+                    apply_pending_particle_type_overrides(*app_state, radius_changed, color_changed, true);
+                    apply_element_defaults_to_particle_types(*app_state, radius_changed, color_changed);
+                    apply_pending_res_type_overrides(*app_state, color_changed, true);
+                    apply_monomer_defaults_to_res_types(*app_state, color_changed);
+                    if (radius_changed) app_state->mold.dirty_gpu_buffers |= MolBit_DirtyRadius;
+                    if (color_changed) flag_all_representations_as_dirty(app_state);
+                    free_pending_overrides();
+                }
+                break;
+            }
             case viamd::EventType_ViamdShutdown:
                 // Cleanup
                 clear_dataset_items();
@@ -831,6 +928,13 @@ struct Dataset : viamd::EventHandler {
             case viamd::EventType_ViamdSystemInit: {
                 ApplicationState& state = *(ApplicationState*)e.payload;
                 on_system_init(state);
+                break;
+            }
+            case viamd::EventType_ViamdLoadData: {
+                const LoadDataPayload* load = (const LoadDataPayload*)e.payload;
+                if (load && load->loader_state.type == LoaderType_AMBER_PRMTOP && load->role == FileRole_Supplement) {
+                    on_amber_topology_supplement(*load->app_state);
+                }
                 break;
             }
             case viamd::EventType_ViamdFrameTick: {

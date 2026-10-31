@@ -64,10 +64,15 @@ Full implementation details: [docs/amber-support.md](docs/amber-support.md).
   and explains the PDB-supplement path when a structure is already loaded; drag-and-drop can
   preselect a sole matching restart or trajectory.
 - `src/viamd.cpp` and `src/file_list.cpp`: topology-coordinate dependencies are recorded in
-  workspaces, and a NetCDF coordinate trajectory is also opened as a run.
-- `src/components/dataset/dataset.cpp`: Amber energy files are shown as **Energies**.
+  workspaces, a NetCDF coordinate trajectory is also opened as a run, and dropped structures,
+  topology supplements, trajectories and energy files are ordered for loading. Applying topology
+  refreshes chemistry, backbone data and representations while retaining an open trajectory.
+- `src/components/dataset/dataset.cpp`: Amber energy files are shown as **Energies**; type
+  lists and saved appearance overrides are refreshed when a topology supplements a PDB.
+  Workspace overrides also distinguish types with identical names and force-field identifiers.
+- Shapespace and Density Volume invalidate topology-dependent cached data and glyphs.
 - `test/test_loader.cpp` and `test/test_file_list.cpp`: new loader tests, including topology
-  application to a matching PDB and rejection of mismatched atom names.
+  application to a matching PDB, rejection of mismatched atom names and workspace load order.
 - `docs/amber-support.md`: new documentation.
 - `datasets/amber/`: a compact, single-system NMA example containing the PDB, topology, restart,
   trajectory, `mdout`, `.out` alias and an `mden` companion. See its README for provenance and
@@ -81,11 +86,17 @@ hash after a squash or rebase merge).
 
 ## Testing
 
-- The earlier trajectory/energy changes passed targeted reader and loader tests; these results
-  predate the native-topology and restarted-segment additions.
-- New tests cover `.prmtop` plus ASCII restart loading, applying topology to a matching PDB,
-  rejecting mismatched atom names, and distinct restarted energy segments. They have not been
-  run yet.
+- GCC 13 Release builds of VIAMD and both test targets succeed with Amber NetCDF enabled and
+  disabled. The focused Amber reader, loader and workspace-file tests pass in both builds
+  (51 enabled, 40 disabled).
+- Automated coverage includes `.prmtop` with ASCII and classic NetCDF restart coordinates,
+  applying topology to a matching PDB, workspace input order, mismatched atom names, and
+  restarted energy segments. The NMA PDB, topology, trajectory and all three energy files are
+  imported together, and values are compared at every trajectory frame.
+- Manual GUI validation is still needed for a protein topology applied after a trajectory is
+  already open, including backbone cartoons, Shapespace and Density Volume.
+- vcpkg manifest-feature selection was checked in CMake for automatic and explicit toolchains,
+  a custom manifest, disabled manifest mode, and an environment-supplied non-vcpkg toolchain.
 - Real files checked by hand in the GUI during the earlier trajectory/energy work:
   - `mdout`: Zenodo 14673608, `pmemd` 18, with its trajectory.
   - `mden`: the CAR example, `pmemd.cuda`, with its trajectory.
