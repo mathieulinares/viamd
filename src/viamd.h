@@ -7,12 +7,15 @@
 #include <core/md_array.h>
 
 #include <md_system.h>
+#include <plane.h>
+#include <transfer_function_widget.h>
 #include <md_gto.h>
 #include <core/md_grid.h>
-#include <md_script.h>
+#include <script_engine.h>
 #include <md_gl.h>
 #include <md_util.h>
 #include <md_chem.h>
+#include <md_edr.h>
 
 #if MD_ENABLE_GPU
 #include <core/md_gpu.h>
@@ -32,6 +35,7 @@
 #include <cartoon_glyphs.h>
 #include <loader.h>
 #include <file_list.h>
+#include <load_order.h>
 #include <event.h>
 #include <plot_series.h>
 #include <timeline_periods.h>
@@ -88,7 +92,7 @@ constexpr ImGuiKey KEY_RECENTER_ON_HIGHLIGHT    = ImGuiKey_F2;
 constexpr ImGuiKeyChord KEY_SCRIPT_EVALUATE          = ImGuiMod_Shift | ImGuiKey_Enter;
 constexpr ImGuiKeyChord KEY_SHOW_ATTRIBUTE_WINDOW = ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_A;
 
-constexpr str_t WORKSPACE_FILE_EXTENSION = STR_INIT("via");
+constexpr md_str_t WORKSPACE_FILE_EXTENSION = MD_STR_INIT("via");
 
 typedef uint64_t PickingDomainID;
 typedef uint64_t PickingSourceID;
@@ -98,17 +102,17 @@ constexpr PickingDomainID PickingDomain_Atom   = HASH_STR_LIT64("picking domain 
 constexpr PickingDomainID PickingDomain_Bond   = HASH_STR_LIT64("picking domain bond");
 constexpr PickingDomainID PickingDomain_Dipole = HASH_STR_LIT64("picking domain dipole");
 // A protein backbone segment (md_system_t::protein_backbone.segment): what the cartoon and ribbons pick as. They are
-// drawn per segment, not per atom, so a hit names the segment and resolves to the component it stems from.
+// drawn per segment, not per atom, so a hit names the segment and resolves to the residue it stems from.
 constexpr PickingDomainID PickingDomain_BackboneSegment = HASH_STR_LIT64("picking domain backbone segment");
 // A ring of the system (md_system_t::ring): what the circle of an aromatic ring picks as (licorice, ball and stick with
 // bond orders). A hit names the ring, ring(local_idx + 1) in the script, and resolves to its atoms.
 constexpr PickingDomainID PickingDomain_Ring = HASH_STR_LIT64("picking domain ring");
 // A point of the cartoon of the lipids and nucleic acids (CartoonGlyphs): a head, a point along a tail or a backbone, or
 // the part of a tube around a control point. A hit names the point (cartoon_glyphs_picked_point) and resolves to the
-// component it stands for.
+// residue it stands for.
 constexpr PickingDomainID PickingDomain_CartoonGlyph = HASH_STR_LIT64("picking domain cartoon glyph");
 // The gap of a chain over a break (md_gl_mol_set_chain_gaps): the dashed line where residues are missing. A hit names
-// the component before the break (MD_COMPONENT_FLAG_BREAK_AFTER) and resolves to it and the one after it.
+// the residue before the break (MD_RESIDUE_FLAG_BREAK_AFTER) and resolves to it and the one after it.
 constexpr PickingDomainID PickingDomain_ChainGap = HASH_STR_LIT64("picking domain chain gap");
 
 // The domains whose hits stand for atoms of the system: hovering one highlights them, and a click commits the highlight
@@ -121,7 +125,13 @@ static inline bool picking_domain_resolves_to_atoms(PickingDomainID domain) {
 constexpr uint64_t interaction_surface_main = HASH_STR_LIT64("interaction surface main"); // This is the main interaction surface which corresponds to the main interaction window, but we want to keep it separate from the picking source and domain ids as we may want to have different picking sources/domains for different interaction surfaces in the future
 
 enum class PlaybackMode { Stopped, Playing, Count };
-enum class SelectionGranularity { Atom, Component, Instance, Count };
+// Part: the part of the atom (md_part_data_t), a covalent piece of its molecule: a strand of a polymer with its caps, a
+// glycan, a ligand. Chain: the chain of the atom (md_chain_data_t), or its part for one in no chain (the data gives no
+// chain ids: the strand it is of). Molecule: the molecule of the atom (md_molecule_data_t), atoms joined by bonds with
+// their residues and polymer strands whole. Fragment: the fragment of the atom (md_fragment.h), a ring system, a
+// functional group, a backbone, an alkyl chain. The values are those a workspace stores, so a new one goes last;
+// selection_granularity_order is the order to offer them in, finest first.
+enum class SelectionGranularity { Atom, Residue, Part, Molecule, Fragment, Count };
 enum class SelectionOperator { Or, And, AndNot, Set, Clear, Count };
 enum class SelectionGrowthMode { CovalentBond, Radial, Count };
 enum class CameraMode { Perspective, Orthographic, Count };
@@ -132,16 +142,17 @@ enum class AntiAliasingMode { TAA, FXAA, Count };
 // Stored in workspaces by value: append, never insert or reorder. The order shown is color_mapping_order.
 enum class ColorMapping {
     Uniform,
-    Type,               // the colour of the atom type
+    Type,               // the colour of the particle type
     Serial,             // one per atom index
-    CompName,           // one per component name, of no meaning
-    CompSeqId,
-    CompIndex,
-    InstId,
-    InstIndex,
+    ResName,            // one per residue name, of no meaning
+    ResSeqId,
+    ResIndex,
+    ChainId,            // one per chain id the data gives (md_chain_data_t)
+    ChainIndex,         // one per chain, by its position
     SecondaryStructure,
     Attribute,          // a per atom attribute of the system, through a colour scale
-    CompType,           // the colour of the component type, from its standard monomer unless overridden (md_component_type_data_t)
+    ResType,            // the colour of the residue type, from its standard monomer unless overridden (md_residue_type_data_t)
+    PartIndex,          // one per part (md_part_data_t), by its position: each strand, ligand and water
     Count
 };
 
@@ -151,6 +162,8 @@ enum class ElectronicStructureSource {
     TransitionDensity,
     ElectronDensity,
     DensityProperty,
+    ElectronLocalization,       // the electron localization function, ELF (md_qm_elf): drawn as a volume or on a plane
+    LocalizedOrbitalLocator,    // the localized orbital locator, LOL (md_qm_lol): likewise
     Count
 };
 
@@ -220,14 +233,24 @@ enum class RepresentationType {
     ElectronicStructure,
     DipoleMoment,
     SimulationBox,
-    Bonds,              // The bonds its filter picks (md_filter_bonds), as sticks or dashed, without the atoms
+    Bonds,              // The bonds its filter picks (script::filter_bonds), as sticks or dashed, without the atoms
     Count
 };
 
 inline const char* selection_granularity_str[(int)SelectionGranularity::Count] = {
     "Atom",
-    "Component",
-    "Instance",
+    "Residue",
+    "Part",
+    "Molecule",
+    "Fragment",
+};
+
+inline const SelectionGranularity selection_granularity_order[(int)SelectionGranularity::Count] = {
+    SelectionGranularity::Atom,
+    SelectionGranularity::Fragment,
+    SelectionGranularity::Residue,
+    SelectionGranularity::Part,
+    SelectionGranularity::Molecule,
 };
 
 inline const char* interpolation_mode_str[(int)InterpolationMode::Count] = {
@@ -249,7 +272,8 @@ inline const char* representation_type_str[(int)RepresentationType::Count] = {
     "Bonds",
 };
 
-// What a component (residue) and an instance (chain) are, is said in the words of the files: residue and chain
+// In the words of the files: residue, and chain for the chains the data gives (md_chain_data_t); a part is a strand, a
+// ligand or a water (md_part_data_t), which tells the strands of a system without chain ids apart
 inline const char* color_mapping_str[(int)ColorMapping::Count] = {
     "Uniform",
     "Atom Type",
@@ -262,6 +286,7 @@ inline const char* color_mapping_str[(int)ColorMapping::Count] = {
     "Secondary Structure",
     "Attribute",
     "Res Type",
+    "Part Index",
 };
 
 // The order the colour mappings are listed in
@@ -269,12 +294,13 @@ inline const ColorMapping color_mapping_order[(int)ColorMapping::Count] = {
     ColorMapping::Uniform,
     ColorMapping::Type,
     ColorMapping::Serial,
-    ColorMapping::CompName,
-    ColorMapping::CompType,
-    ColorMapping::CompSeqId,
-    ColorMapping::CompIndex,
-    ColorMapping::InstId,
-    ColorMapping::InstIndex,
+    ColorMapping::ResName,
+    ColorMapping::ResType,
+    ColorMapping::ResSeqId,
+    ColorMapping::ResIndex,
+    ColorMapping::ChainId,
+    ColorMapping::ChainIndex,
+    ColorMapping::PartIndex,
     ColorMapping::SecondaryStructure,
     ColorMapping::Attribute,
 };
@@ -286,6 +312,8 @@ inline const char* electronic_structure_source_str[(int)ElectronicStructureSourc
     "Transition Density",
     "Electron Density",
     "Density Property",
+    "Electron Localization (ELF)",
+    "Localized Orbital Locator (LOL)",
 };
 
 enum ElectronicStructureSourceFlag_ : uint32_t {
@@ -294,6 +322,8 @@ enum ElectronicStructureSourceFlag_ : uint32_t {
     ElectronicStructureSourceFlag_TransitionDensity         = 1u << (int)ElectronicStructureSource::TransitionDensity,
     ElectronicStructureSourceFlag_ElectronDensity           = 1u << (int)ElectronicStructureSource::ElectronDensity,
     ElectronicStructureSourceFlag_DensityProperty           = 1u << (int)ElectronicStructureSource::DensityProperty,
+    ElectronicStructureSourceFlag_ElectronLocalization      = 1u << (int)ElectronicStructureSource::ElectronLocalization,
+    ElectronicStructureSourceFlag_LocalizedOrbitalLocator   = 1u << (int)ElectronicStructureSource::LocalizedOrbitalLocator,
 };
 
 typedef uint32_t ElectronicStructureSourceFlags;
@@ -386,6 +416,58 @@ inline const char* volume_resolution_str[(int)VolumeResolution::Count] = {
     "High",
 };
 
+
+// How an electronic structure representation draws its field
+enum class ElectronicStructureDisplay {
+    Isosurface,     // surfaces where the field takes given values
+    Volume,         // direct volume rendering through a transfer function, cut by planes
+    Planes,         // the field on a set of planes, each of its own opacity
+    Count
+};
+
+inline const char* electronic_structure_display_str[(int)ElectronicStructureDisplay::Count] = {
+    "Isosurface",
+    "Volume",
+    "Planes",
+};
+
+#define ES_MAX_PLANES 8
+
+// The spacing of the planes display's images (each plane evaluated on itself)
+enum class PlaneDetail {
+    Coarse,
+    Fine,
+    Finest,
+    Count,
+};
+
+// Angstrom per pixel of a plane's image for each PlaneDetail; an image is at most GPU_PLANE_DIM pixels a side, the
+// spacing made coarser where the plane is larger than that
+inline const float plane_detail_spacing_angstrom[(int)PlaneDetail::Count] = {
+    0.05f,
+    0.02f,
+    0.01f,
+};
+
+// A plane of an electronic structure representation: a cut of its volume display, or a slice of its planes display
+struct ElectronicStructurePlane {
+    Plane plane = {};
+    bool  enabled = true;       // a cut cuts, a slice is drawn
+    float opacity = 1.0f;       // a slice's
+    // A slice's rectangle on its plane (a cut has none: it is the plane through the box): its centre, its first side's
+    // direction (u, unit, along the plane; v = normal x u) and its half sizes along u and v (Angstrom). Not limited
+    // to the box: outside it the volume's values at the box's faces carry on. An extent of 0: not set yet (the
+    // rectangle around where the plane cuts the box, once the box is there: es_slices_conform).
+    vec3_t center = {};
+    vec3_t axis = {};
+    vec2_t extent = {};
+};
+
+struct ElectronicStructurePlaneSet {
+    ElectronicStructurePlane items[ES_MAX_PLANES] = {};
+    int count = 0;
+};
+
 // Samples per Angstrom for each VolumeResolution. Beside the enum, because a value per enumerator
 // is part of what the enum MEANS and a second table elsewhere is how the two drift apart.
 inline const double volume_resolution_samples_per_angstrom[(int)VolumeResolution::Count] = {
@@ -425,6 +507,14 @@ enum class BondColorMode {
     Count,
 };
 
+// Which bonds a Bonds representation draws dashed, each in the style of its kind (md_gl_dashes_t, BOND DASHES in md_gl.h)
+enum class BondDashes {
+    ByKind,     // Those which are not covalent: coordinate bonds, hydrogen bonds, interactions
+    None,
+    All,
+    Count,
+};
+
 inline const char* bond_color_mode_str[(int)BondColorMode::Count] = {
     "Nearest Atom",
     "Smooth Atom",
@@ -433,7 +523,7 @@ inline const char* bond_color_mode_str[(int)BondColorMode::Count] = {
 
 struct FileQueue {
     struct Entry {
-        str_t path;
+        md_str_t path;
         FileFlags flags;
         int prio;
     };
@@ -466,7 +556,7 @@ struct Selection {
 // DipoleGroup and 'label' points into the attribute table, so it must not outlive the system.
 struct DipoleGroup {
     md_attribute_id_t key = MD_ATTRIBUTE_INVALID;   // id of the vector attribute, stable across a reload
-    str_t  label  = { 0 };                          // group name as the path spells it
+    md_str_t  label  = { 0 };                          // group name as the path spells it
     uint32_t count = 0;                             // elements in the group; 1 means the index is decorative
     md_unit_t unit = md_unit_none();
 };
@@ -477,8 +567,11 @@ struct DipoleGroup {
 // the attribute table rather than at a copy - so it is good for as long as the system is loaded and
 // must not outlive it.
 struct DensityProperty {
+    // How many a caller gathers into a buffer on its stack: well past what any file carries
+    static constexpr size_t MaxCount = 512;
+
     uint64_t key    = 0;    // attribute id, stable across a reload
-    str_t label     = { 0 };
+    md_str_t label     = { 0 };
 };
 
 // ---------------------------------------------------------------------------
@@ -549,6 +642,21 @@ struct IsoDesc {
     float optical_densities[8];
 };
 
+// The image of a slice evaluated on its plane (the planes display; viamd.cpp, electronic_structure_plane_images_update): two, the one drawn and the one being evaluated, swapped when it is there. Drawn only while it is of the
+// plane as it is (current): until then, and while the plane is dragged, the plane is drawn from the volume (and so is
+// anything of it outside the image's rectangle).
+struct ElectronicStructurePlaneImage {
+    Volume    img[2] = {};      // W x H x 1 R32F, the texture to world of its rectangle (texture_to_world)
+    uint64_t  key[2] = {};      // of what each is of (the source and the slice's rectangle): 0 none
+    float     spacing[2] = {};  // each one's (Angstrom; it covers the rectangle exactly, its pixels near this square)
+    int       front = 0;        // the one drawn
+    uint32_t  serial = 0;       // counted up as the front changes: what the scene's hash takes
+    bool      pending = false;  // the other is being evaluated
+    bool      current = false;  // the front one is of the plane, the source and the frame as they are
+    double    issued = 0.0;     // when the pending one was issued (s), and how long the front one took (ms)
+    float     ms = 0.0f;
+};
+
 struct ElectronicStructureRepresentation {
     Volume density_vol = {};
     Volume color_vol   = {};
@@ -588,7 +696,7 @@ struct ElectronicStructureRepresentation {
     // SurfaceColoring::Field: the field, how it maps to colour, and its values on the grid of
     // density_vol - evaluated only around the isosurfaces this representation draws
     SurfaceFieldKind    field_kind = SurfaceFieldKind::EmbeddingPotential;
-    ColorScale          field_map  = surface_field_default_scale();
+    ColorScale          field_map  = surface_field_default_scale(SurfaceFieldKind::EmbeddingPotential);
     ColorScaleIsolines  field_isolines = {};    // lines on the surfaces where the field takes given values
     SurfaceFieldVolume  field_vol  = {};
 
@@ -612,7 +720,51 @@ struct ElectronicStructureRepresentation {
 
 	uint64_t col_hash = 0;
 	uint64_t vol_hash = 0;
+
+    ElectronicStructureDisplay display = ElectronicStructureDisplay::Isosurface;
+
+    // The planes of each display, apart, so that one is switched to and from without changing the other's
+    // (electronic_structure_planes picks the display's). Volume: the cuts (what is drawn is the box of the volume on
+    // the kept side of every enabled one). Planes: the slices, each drawn with its opacity, the direction of its
+    // normal of no matter. Edited in the view with a gizmo (es_planes.h).
+    ElectronicStructurePlaneSet cuts;
+    ElectronicStructurePlaneSet slices;
+
+    // Planes: each slice evaluated on itself (plane_images, at plane_detail's spacing); drawn from the volume, at Mid
+    // (electronic_structure_volume_resolution), where its image is not there, while it is dragged, and without the GPU
+    PlaneDetail   plane_detail = PlaneDetail::Fine;
+    ElectronicStructurePlaneImage plane_images[ES_MAX_PLANES] = {};
+
+    // The box the volume is (or would be) evaluated in: its unit cube to the world (Angstrom), as the volume's
+    // texture_to_world; set whenever the representation is updated, with or without a volume (es_volume_box)
+    mat4_t box_to_world = {};
+    bool   has_box = false;
+
+    // Volume and Planes: what a value is drawn as, a colour map's colour over a range and an opacity curve over it
+    // (transfer_function.h, edited with transfer_function_widget.h); the planes take the colours alone
+    struct {
+        TransferFunction tf = {};
+        bool  map_init = false;        // tf was set up for a field (es_volume_map_update) ...
+        int   map_kind = 0;            // ... of this kind (ElectronicStructureValueKind): set up again when that changes
+        uint32_t tf_tex = 0;           // tf baked into a texture, and the hash of what it was baked from
+        uint64_t tf_hash = 0;
+        TransferFunctionView view = {};// the editor's view of the values, and the histogram it shows (of the volume)
+    } volume;
 };
+
+// The resolution the representation's volume is evaluated at: the planes display's is Mid (what a plane is drawn from
+// until its own image is there, while it is dragged, and without the GPU), not a setting; else the representation's
+static inline VolumeResolution electronic_structure_volume_resolution(const ElectronicStructureRepresentation& es) {
+    return es.display == ElectronicStructureDisplay::Planes ? VolumeResolution::Mid : es.resolution;
+}
+
+// The planes of the representation's display: its slices in the planes display, its cuts otherwise
+static inline ElectronicStructurePlaneSet& electronic_structure_planes(ElectronicStructureRepresentation& es) {
+    return es.display == ElectronicStructureDisplay::Planes ? es.slices : es.cuts;
+}
+static inline const ElectronicStructurePlaneSet& electronic_structure_planes(const ElectronicStructureRepresentation& es) {
+    return es.display == ElectronicStructureDisplay::Planes ? es.slices : es.cuts;
+}
 
 static inline ElectronicStructureSourceFlags electronic_structure_source_flag(ElectronicStructureSource source) {
     return 1u << (uint32_t)source;
@@ -624,6 +776,20 @@ static inline bool electronic_structure_source_supported(ElectronicStructureSour
 
 static inline bool electronic_structure_is_density_property(const ElectronicStructureRepresentation& rep) {
     return rep.source == ElectronicStructureSource::DensityProperty;
+}
+
+// What the values of a representation's field are, which its colour map is set up for (es_volume_map_update)
+enum class ElectronicStructureValueKind {
+    Density,        // >= 0, largest at the nuclei
+    Signed,         // an orbital, a difference: about 0
+    Localization,   // in [0, 1]: ELF, LOL
+};
+
+// ELF and LOL: in [0, 1] everywhere, of both spins together. An isosurface of one says little (what it is about is
+// how it varies through space), so they are drawn as a volume or on a plane only.
+static inline bool electronic_structure_is_localization(const ElectronicStructureRepresentation& rep) {
+    return rep.source == ElectronicStructureSource::ElectronLocalization ||
+           rep.source == ElectronicStructureSource::LocalizedOrbitalLocator;
 }
 
 static inline bool electronic_structure_uses_orbital_idx(const ElectronicStructureRepresentation& rep) {
@@ -661,6 +827,11 @@ static inline bool electronic_structure_is_signed(const ElectronicStructureRepre
     return electronic_structure_uses_magnitude_toggle(rep) && !rep.use_magnitude;
 }
 
+static inline ElectronicStructureValueKind electronic_structure_value_kind(const ElectronicStructureRepresentation& rep) {
+    if (electronic_structure_is_localization(rep)) return ElectronicStructureValueKind::Localization;
+    return electronic_structure_is_signed(rep) ? ElectronicStructureValueKind::Signed : ElectronicStructureValueKind::Density;
+}
+
 static inline bool electronic_structure_uses_density_iso_squared(const ElectronicStructureRepresentation& rep) {
     return rep.source == ElectronicStructureSource::TransitionDensity ||
            rep.source == ElectronicStructureSource::ElectronDensity;
@@ -678,13 +849,13 @@ static inline vec4_t electronic_structure_density_property_default_color(const E
 }
 
 static inline void electronic_structure_density_property_init_defaults(ElectronicStructureRepresentation* rep) {
-    ASSERT(rep);
+    MD_ASSERT(rep);
     rep->density_property.num_isos = 2;
     rep->density_property.values[0] =  0.05;
     rep->density_property.values[1] = -0.05;
     rep->density_property.colors[0] = rep->col_psi_pos;
     rep->density_property.colors[1] = rep->col_psi_neg;
-    for (int i = 2; i < (int)ARRAY_SIZE(rep->density_property.values); ++i) {
+    for (int i = 2; i < (int)MD_COUNTOF(rep->density_property.values); ++i) {
         rep->density_property.values[i] = 0.05 * (double)(i + 1);
         rep->density_property.colors[i] = electronic_structure_density_property_default_color(*rep, i);
     }
@@ -709,11 +880,11 @@ static inline const char* electronic_structure_iso_value_tooltip(const Electroni
 }
 
 static inline void electronic_structure_iso_desc_init(IsoDesc* iso, const ElectronicStructureRepresentation& rep) {
-    ASSERT(iso);
+    MD_ASSERT(iso);
     *iso = {};    
 
     if (electronic_structure_is_density_property(rep)) {
-        const int num_isos = CLAMP(rep.density_property.num_isos, 0, (int)ARRAY_SIZE(rep.density_property.values));
+        const int num_isos = MD_CLAMP(rep.density_property.num_isos, 0, (int)MD_COUNTOF(rep.density_property.values));
         iso->count = (size_t)num_isos;
         for (int i = 0; i < num_isos; ++i) {
             iso->values[i] = (float)rep.density_property.values[i];
@@ -768,14 +939,14 @@ static inline ElectronicStructureField electronic_structure_legacy_field(const E
 }
 
 static inline void electronic_structure_set_legacy_field(ElectronicStructureRepresentation* rep, int field) {
-    ASSERT(rep);
+    MD_ASSERT(rep);
     rep->use_magnitude = (rep->source == ElectronicStructureSource::MolecularOrbital ||
                           rep->source == ElectronicStructureSource::NaturalTransitionOrbital) &&
                          (ElectronicStructureField)field == ElectronicStructureField::Density;
 }
 
 static inline void electronic_structure_set_source_defaults(ElectronicStructureRepresentation* rep) {
-    ASSERT(rep);
+    MD_ASSERT(rep);
     switch (rep->source) {
     case ElectronicStructureSource::MolecularOrbital:
         if (rep->spin != ElectronicStructureSpin::Alpha && rep->spin != ElectronicStructureSpin::Beta) {
@@ -795,6 +966,15 @@ static inline void electronic_structure_set_source_defaults(ElectronicStructureR
         rep->spin = ElectronicStructureSpin::Total;
         rep->use_magnitude = false;
         break;
+    case ElectronicStructureSource::ElectronLocalization:
+    case ElectronicStructureSource::LocalizedOrbitalLocator:
+        // of both spins together, and drawn only as a volume or on a plane
+        rep->spin = ElectronicStructureSpin::None;
+        rep->use_magnitude = false;
+        if (rep->display == ElectronicStructureDisplay::Isosurface) {
+            rep->display = ElectronicStructureDisplay::Volume;
+        }
+        break;
     case ElectronicStructureSource::DensityProperty:
         rep->spin = ElectronicStructureSpin::None;
         rep->use_magnitude = false;
@@ -808,13 +988,13 @@ static inline void electronic_structure_set_source_defaults(ElectronicStructureR
         }
         break;
     default:
-        ASSERT(false);
+        MD_ASSERT(false);
         break;
     }
 }
 
 static inline void electronic_structure_set_legacy_type(ElectronicStructureRepresentation* rep, int type) {
-    ASSERT(rep);
+    MD_ASSERT(rep);
     switch ((ElectronicStructureLegacyType)type) {
     case ElectronicStructureLegacyType::MolecularOrbital:
         rep->source = ElectronicStructureSource::MolecularOrbital;
@@ -860,7 +1040,7 @@ static inline void electronic_structure_set_legacy_type(ElectronicStructureRepre
         rep->spin = ElectronicStructureSpin::Total;
         break;
     default:
-        ASSERT(false);
+        MD_ASSERT(false);
         break;
     }
 }
@@ -888,9 +1068,11 @@ static inline int electronic_structure_legacy_type(const ElectronicStructureRepr
     case ElectronicStructureSource::ElectronDensity:
         return (int)ElectronicStructureLegacyType::ElectronDensity;
     case ElectronicStructureSource::DensityProperty:
+    case ElectronicStructureSource::ElectronLocalization:
+    case ElectronicStructureSource::LocalizedOrbitalLocator:
         return (int)ElectronicStructureLegacyType::ElectronDensity;
     default:
-        ASSERT(false);
+        MD_ASSERT(false);
         return 0;
     }
 }
@@ -924,8 +1106,8 @@ struct DipoleRepresentation {
 // The edges of the unit cell, of the frame shown (it may change with it)
 struct BoxRepresentation {
     vec4_t color = { 0.25f, 0.25f, 0.25f, 1.0f };
-    float thickness = 0.2f;     // Å, the diameter of the edges (capsules, lit), never thinner than a pixel; 0 for lines of
-                                // a pixel, unlit
+    float thickness = 1.5f;     // pt, the width of the edges on screen (tubes, lit), never thinner than a pixel; 0 for
+                                // lines of a pixel, unlit
     bool axes = false;          // The edges along a, b and c from the origin of the cell red, green and blue
 };
 
@@ -953,6 +1135,9 @@ struct Representation {
     bool enabled = true;            // its own switch: it is shown when every group around it is too (representation_shown)
 	bool needs_update = true;
     bool type_is_valid = false;
+    // Drawn as spheres for now: what its type draws (bonds, a backbone) is not there yet, while the system is inferred in
+    // the background (SystemInference)
+    bool sphere_fallback = false;
     bool filt_is_dirty = true;
     bool dynamic_evaluation = true; // follow the frame when what the filter picks depends on it ("auto-update")
 
@@ -982,9 +1167,10 @@ struct Representation {
     bool   chain_gaps = true;     // Cartoon, ribbons, licorice, ball and stick: a dashed line over each break of a chain (md_gl_mol_set_chain_gaps)
     bool   elastic_bonds = false; // Licorice, ball and stick: the elastic bonds (MD_BOND_KIND_ELASTIC), springs of the force field such as an elastic network, which are not bonds of the molecules
     bool   noncovalent_bonds = true; // Licorice, ball and stick: the non-covalent bonds of the system among its atoms, dashed and thinner than its sticks. Off where a Bonds representation is to draw them instead
-    // Bonds: what the filter picks, as of its last evaluation (in the persistent allocator), and whether they are dashed
+    bool   coordinate_bonds_dashed = true; // Licorice, ball and stick: the coordinate bonds (MD_BOND_KIND_COORDINATE) dashed, rather than sticks
+    // Bonds: what the filter picks, as of its last evaluation (in the persistent allocator), and which are dashed
     md_array(md_atom_pair_t) bond_pairs = nullptr;
-    bool   bonds_dashed = false;
+    BondDashes bond_dashes = BondDashes::ByKind;
     bool   open_properties = false; // The window opens its properties the next time it lists it (one made from the context menu, to be styled)
     bool   two_head_spheres = false;  // Cartoon: the head of a phospholipid as its head group and its backbone (CartoonGlyphs)
     // Cartoon of nucleic acids, Å (before the scale of the lipids and nucleic acids): the radius of the band of the
@@ -1100,7 +1286,7 @@ struct PickingReadbackRequest {
 };
 
 // The key of the script evaluation's slot of a distribution or a volume over a timeline period, by its id
-// (md_script_eval_slot_request): asked for by what is shown over the period (series_resolve_histogram,
+// (script::aggregate_request): asked for by what is shown over the period (series_resolve_histogram,
 // series_resolve_volume)
 #define SCRIPT_SLOT_PERIOD(id) (((uint64_t)1 << 32) | (uint64_t)(id))
 
@@ -1108,10 +1294,10 @@ struct PickingReadbackRequest {
 struct ScriptVisTarget {
     enum Kind : uint8_t { None = 0, Ref, Str };
     Kind kind = None;
-    md_script_vis_ref_t ref = {};       // Ref
-    str_t str = {};                     // Str: an expression, copied into the frame allocator
+    script::Ref ref = {};               // Ref
+    md_str_t str = {};                     // Str: an expression, copied into the frame allocator
     int subidx = -1;
-    md_script_vis_flags_t flags = 0;
+    uint32_t flags = 0;                 // script::DRAW_*
 };
 
 // A visualization computed off the main thread (viamd.cpp)
@@ -1120,6 +1306,28 @@ struct ScriptVisJob;
 // Edge length of the device evaluation scratch (ApplicationState::gpu_volume), in voxels: the largest
 // grid any evaluation on the device can write, which is the largest compute_dim makes.
 inline constexpr uint32_t GPU_VOLUME_DIM = 512;
+
+// Edge length of the device scratch the images of planes are evaluated into (ApplicationState::gpu_plane): a
+// GPU_PLANE_DIM^2 x 1 R32F texture, the largest plane image (es_plane_images.h)
+inline constexpr uint32_t GPU_PLANE_DIM = 2048;
+
+// What is derived from the core a loader gives (the bonds, what the residues are, the structures, the chemistry:
+// md_util_system_infer), inferred in the background on a copy of the system and put in its place between frames. Until
+// then the system is shown as loaded: its atoms, as spheres where a representation needs what is not there yet. One
+// system at a time: a load cancels the inference of the system before it.
+struct SystemInference {
+    task_system::Job    job;
+    md_util_infer_work_t work = {};             // Inferred on: the core of the system shared, what is inferred in arena
+    md_allocator_i*     arena = nullptr;
+    md_array(md_allocator_i*) kept = nullptr;   // The arenas of what was published: arrays of the system now
+    md_infer_flags_t    flags = MD_UTIL_INFER_NONE;
+    std::atomic<bool>   done{false};            // The work is inferred: not cancelled half way
+    bool                pending = false;        // The system shows its core: inference is under way, or to be started again
+    bool                restart = false;        // Cancelled (the pool was interrupted) or of a topology since changed
+    // The default representations wait for it: a placeholder shows the atoms meanwhile, replaced unless it was changed
+    bool                defaults_pending = false;
+    char                placeholder_name[64] = "";
+};
 
 struct ApplicationState {
     // --- APPLICATION ---
@@ -1135,6 +1343,10 @@ struct ApplicationState {
     // reason. Whoever evaluates borrows these; nobody else frees them.
     md_gpu_stream_t gpu_stream  = nullptr;   // the device's default compute stream
     md_gpu_texture_t gpu_volume = nullptr;   // 3d R32F scratch for an evaluated orbital / density
+    md_gpu_texture_t gpu_plane  = nullptr;   // GPU_PLANE_DIM^2 x 1 R32F scratch for the image of a plane
+    // Where the evaluations write and their readbacks read: gpu_volume when null. An evaluation into another
+    // scratch sets it for its call (gpu_eval_target_scope, viamd.cpp); a readback queued records its own.
+    md_gpu_texture_t gpu_eval_target = nullptr;
     md_gpu_addr_t   gpu_coeff   = 0;         // AO coefficients, sized to the widest basis
     size_t          gpu_coeff_capacity = 0;
 
@@ -1146,8 +1358,16 @@ struct ApplicationState {
         bool              in_flight = false;
         ApplicationState* owner     = nullptr;
         uint32_t          tex_id    = 0;        // GL texture to receive the data
+        md_gpu_texture_t  src       = nullptr;  // the scratch it is read from (gpu_volume or gpu_plane)
         md_gpu_mem_t      rb        = {};       // HOST_READ block; the data is read through rb.cpu
         size_t            size      = 0;
+        // A density evaluation not yet all issued (md_gto_gpu_job_t: issued in pieces over the frames): the
+        // readback is queued when it is (gpu_volume_jobs_poll), of this grid
+        void*             density_job = nullptr;
+        md_grid_t         grid      = {};
+        // The same once it is all issued, kept for its progress until the readback lands (gpu_volume_jobs_progress)
+        void*             issued_job = nullptr;
+        int64_t           t0 = 0;               // md_tick_t: when the evaluation began
     };
     // Readbacks are issued at most one per representation per change, and a change cannot be
     // requested again until the previous frame has been drawn, so a handful of slots is ample.
@@ -1170,6 +1390,11 @@ struct ApplicationState {
         // free_trajectory_data). A workspace stores this list and loads it again in the same order.
         FileList list;
         char workspace[1024] = {0};
+
+        // Halves of a system waiting for the other half (load_data_from_file): a topology without coordinates
+        // (prmtop, psf) waits for its coordinates, and coordinates (a restart, a trajectory) wait for a topology or
+        // a structure file of their atoms. Whichever comes second builds the system. Empty paths when none waits.
+        PendingFiles pending;
     } files;
 
     // The idea for the file load queue is to fill it with files that are dropped onto the application
@@ -1208,19 +1433,19 @@ struct ApplicationState {
         md_array(mat4_t) periodic_transforms_prev = 0;
 
         // The biological assembly shown (md_system_t assembly, of a deposited structure), -1 for the coordinates as
-        // they are. Shown in place of them and of the periodic images: each part of it the instances of the part, in the
+        // they are. Shown in place of them and of the periodic images: each group of it the instances of the group, in the
         // copies its operators make, drawn by instancing. The atoms of a copy are those of the system, which they pick
         // and select as. The operators place the coordinates as the file gives them, so the operations which move them
         // (centering, wrapping, making whole) are not applied while one is shown. The figure's: in the workspace.
         int assembly = -1;
 
-        // Of the assembly shown, set by update_view_param: the transforms of its copies, part by part, those of part p
-        // [assembly_copy_offset[p], assembly_copy_offset[p + 1]). Empty when none is shown.
+        // Of the assembly shown, set by update_view_param: the transforms of its copies, group by group, those of group g
+        // [assembly_copy_offset[g], assembly_copy_offset[g + 1]). Empty when none is shown.
         md_array(mat4_t)   assembly_transforms  = 0;
         md_array(uint32_t) assembly_copy_offset = 0;
 
-        // Of the assembly shown, the instances of each part as a subset of the molecule (md_gl_subset_t), which its
-        // copies draw, and the subset of the cartoon glyphs which that makes. A part of all instances has none (0): the
+        // Of the assembly shown, the instances of each group as a subset of the molecule (md_gl_subset_t), which its
+        // copies draw, and the subset of the cartoon glyphs which that makes. A group of all instances has none (0): the
         // whole molecule. Made when another assembly is shown, or another system (assembly_subsets_update).
         md_array(md_gl_subset_t) assembly_subsets       = 0;
         md_array(md_gl_subset_t) assembly_glyph_subsets = 0;
@@ -1233,7 +1458,7 @@ struct ApplicationState {
         ScreenshotResolution resolution = ScreenshotResolution::Window;
         int   res_x = 1920;
         int   res_y = 1080;
-        str_t path_to_file = {};    // Being made: saved once the image has settled (render())
+        md_str_t path_to_file = {};    // Being made: saved once the image has settled (render())
     } screenshot;
 
     struct {
@@ -1257,6 +1482,7 @@ struct ApplicationState {
         md_gfx_handle_t     gfx_structure = {};
 #endif
         md_system_t         sys = {};
+        SystemInference     inference;
 
         // The actual interpolated state of the system.
         // Is only used for rendering and visualization of properties. Its attributes carry the backbone angles and
@@ -1301,6 +1527,9 @@ struct ApplicationState {
                                                         // alone: the image of the scene depends on them only through the
                                                         // visible and the selected atoms (representation.visibility_mask_hash,
                                                         // render.selection_hash), not through the highlighted
+        // The excited states whose natural transition orbitals have been read on a worker thread (viamd.cpp,
+        // NtoWarm; es_nto_ready). Of the system: freed with it, once its tasks have ended.
+        void*               nto_warm = nullptr;
 
 #if MD_ENABLE_GPU
         // GPU side data derived from sys, sitting beside gl_mol and for the same reason: it is
@@ -1317,6 +1546,28 @@ struct ApplicationState {
         // uploaded against what is wanted is the only test that cannot go stale, and it costs a hash
         // over the QM atoms against an upload of the same array.
         uint64_t            gpu_atoms_hash = 0;
+        // The SCF density the evaluations read, as a matrix in tiles (md_gto_gpu_dmat): only the AO pairs
+        // an evaluation reads, built on the device from the orbitals, so no matrix is made on the host.
+        // Its pattern follows the atoms while they stay within its margin; the matrix is rebuilt when the
+        // density asked for, or the orbitals it is made of, change.
+        md_gto_gpu_dmat_t   gpu_dmat = nullptr;
+        uint64_t            gpu_dmat_key = 0;      // the density and the orbitals' versions it holds, 0: none
+        // The next one, made on a worker thread for the representations (viamd.cpp, DmatBuild), and the key of
+        // one that could not be (made where it is asked for instead)
+        void*               gpu_dmat_build = nullptr;
+        uint64_t            gpu_dmat_failed_key = 0;
+        // What the ELF and LOL kernel reads (viamd.cpp, LocalizationGpu): a GPU basis at their AO cutoff and the
+        // spins' density matrices in tiles, made by a pool task; and the key of one that could not be made
+        void*               gpu_localization = nullptr;
+        uint64_t            gpu_localization_failed_key = 0;
+        // Any other density a representation evaluates (a transition density, made by its provider on every
+        // read; a density property, read from its file) as the packed triangle the kernel reads, extracted on a
+        // worker thread straight into a device buffer of its own (viamd.cpp, DensityPackBuild) and kept: the
+        // last one, until another is asked for
+        md_gpu_addr_t       gpu_dpack = 0;
+        uint64_t            gpu_dpack_key = 0;     // the density, slice and version it holds, 0: none
+        void*               gpu_dpack_build = nullptr;
+        uint64_t            gpu_dpack_failed_key = 0;
 #endif
     } mold;
 
@@ -1326,10 +1577,14 @@ struct ApplicationState {
     char  hovered_property_label[64] = "";
     int   hovered_property_pop_idx = -1;
 
+    // What was under the cursor when the context menu of the viewport opened, which its entries are about: the menu
+    // covers the cursor once it is open
+    PickingHit context_menu_hit = {};
+
     // --- ASYNC TASKS HANDLES ---
     struct {
-        task_system::ID backbone_computations = task_system::INVALID_ID;
-        task_system::ID evaluate = task_system::INVALID_ID;
+        task_system::Job backbone_computations;
+        task_system::Job evaluate;
     } tasks;
 
     // --- ATOM SELECTION ---
@@ -1388,6 +1643,12 @@ struct ApplicationState {
             uint64_t key = 0;
         } highlight_groups;
 
+        // The highlight of the groups of an energy term (highlight_energy_term_groups) is set every frame its term is
+        // hovered, wherever that is; the first frame it is not, script_vis_update clears it, so that it never outlives
+        // the hover in a window which does not clear the highlight itself
+        bool term_groups_highlighted = false;       // this frame
+        bool term_groups_highlighted_prev = false;  // the frame before
+
         struct {
             AtomFilter filter;
             md_bitmask_t mask = {};
@@ -1424,7 +1685,7 @@ struct ApplicationState {
     PickingRange   picking_range_backbone {};   // Reserved picking range for protein backbone segments (cartoon, ribbons)
     PickingRange   picking_range_ring {};   // Reserved picking range for rings (circles of aromatic rings)
     PickingRange   picking_range_glyph {};  // Reserved picking range for the points of the cartoon of lipids and nucleic acids
-    PickingRange   picking_range_gap {};    // Reserved picking range for the gaps of the chains, one index per component
+    PickingRange   picking_range_gap {};    // Reserved picking range for the gaps of the chains, one index per residue
 
     PickingHandler picking_handler {};      // Handler for managing picking interactions
 
@@ -1577,6 +1838,11 @@ struct ApplicationState {
         bool atom_visibility_mask_dirty = false;
         uint64_t gl_version = 0;    // bumped whenever what a representation draws is uploaded, for views that cache their image
         bool show_window = false;
+        // The plane the gizmo in the view edits: of the representation of this id (its node id), at this index
+        struct {
+            uint32_t rep_id = 0;
+            int      plane = -1;
+        } gizmo;
     } representation;
 
     struct {
@@ -1719,28 +1985,31 @@ struct ApplicationState {
         vec4_t text_color       = {1,1,1,1};
         vec4_t text_bg_color    = {0,0,0,0.5f};
 
-        uint64_t text_hash;
+        uint64_t text_hash = 0;     // Of the editor's text in the last frame: a change compiles it again (main.cpp)
+
+        // The workspace's language: what the editor's text is compiled as, and what the filters are written in
+        script::Language language = script::Language::V1;
 
         // ir: the last compilation of the editor's text, what its markers refer to. eval_ir: the compilation the
         // evaluation (eval) was made from, what the plots show. Often the same IR. Assigned directly: an IR is
         // never freed while either points at it (see script_ir_collect).
-        md_script_ir_t*   ir = nullptr;
-        md_script_ir_t*   eval_ir = nullptr;
+        script::Program*  ir = nullptr;
+        script::Program*  eval_ir = nullptr;
 
-        // Every IR made (script_ir_create), freed by script_ir_collect once nothing can be using it
-        md_array(md_script_ir_t*) all_irs = nullptr;
+        // Every IR made (script_ir_create), freed by script_ir_collect once nothing uses it (no field, no task)
+        md_array(script::Program*) all_irs = nullptr;
 
         // One evaluation: every property over every frame, and the distributions and volumes shown over timeline
         // periods in slots over their frames (SCRIPT_SLOT_PERIOD)
-        md_script_eval_t* eval = nullptr;
+        script::Eval*     eval = nullptr;
         md_array(uint32_t) eval_frames = nullptr;   // what the running evaluation task works through
         // The visualization: the target is set anew every frame, the job computes it off the main thread, and
         // what is shown is the last result while it is still for the target (see script_vis_update)
         ScriptVisTarget vis_target = {};
         ScriptVisJob* vis_running = nullptr;
         ScriptVisJob* vis_result = nullptr;
-        task_system::ID vis_task = task_system::INVALID_ID;
-        const md_script_vis_t* vis_shown = nullptr;
+        task_system::Job vis_task;
+        const script::Drawing* vis_shown = nullptr;
 
         // Controls current subindex being visualized (if array)
         int sub_idx = -1;
@@ -1749,6 +2018,10 @@ struct ApplicationState {
         bool eval_init = false;
         bool evaluate = false;     // a new evaluation, to be started
         double time_since_last_change = 0.0;
+        size_t   num_compile_markers = 0;   // the editor's markers from compiling; the evaluation's come after them
+        size_t   first_mark_marker = 0;     // where the marks' markers start among them, in the order of script::marks()
+        uint64_t marks_units_version = 0;   // display_units::version() the marks' texts were written in
+        uint64_t eval_errors_version = 0;   // of the evaluation's errors marked (script::eval_errors)
         uint64_t ir_fingerprint = 0;
     } script;
 
@@ -1802,7 +2075,7 @@ struct ViamdEventHandler : viamd::EventHandler {
     ApplicationState* state = nullptr;
 
     explicit ViamdEventHandler(ApplicationState* s) : state(s) {
-        ASSERT(state);
+        MD_ASSERT(state);
         viamd::event_system_register_handler(*this);
     }
 
@@ -1812,7 +2085,7 @@ struct ViamdEventHandler : viamd::EventHandler {
 struct LoadDataPayload {
     ApplicationState* app_state;
     loader::LoaderState loader_state;
-    str_t path_to_file;
+    md_str_t path_to_file;
 };
 
 // A picking tooltip, gathered from every handler that recognises the hit and drawn as one window: a title names what
@@ -1823,8 +2096,8 @@ enum class TooltipLineKind : uint8_t { Title, Row };
 
 struct TooltipLine {
     TooltipLineKind kind = TooltipLineKind::Title;
-    str_t key  = {};    // Row only, and must live for the frame (a literal, a label of the system, frame memory)
-    str_t text = {};
+    md_str_t key  = {};    // Row only, and must live for the frame (a literal, a label of the system, frame memory)
+    md_str_t text = {};
 };
 
 struct PickingTooltipTextRequest {
@@ -1839,7 +2112,7 @@ struct PickingTooltipTextRequest {
 #define TOOLTIP_ANGSTROM "\xC3\x85"     // Å
 
 void tooltip_title(PickingTooltipTextRequest* req, const char* format, ...);
-void tooltip_row(PickingTooltipTextRequest* req, str_t key, const char* format, ...);
+void tooltip_row(PickingTooltipTextRequest* req, md_str_t key, const char* format, ...);
 
 enum ViewFitRound {
     ViewFitRound_Highlight = 0,
@@ -1868,7 +2141,7 @@ void draw_measurement_style_controls(ApplicationState* app);
 static inline immediate::ScriptLineStyle measurement_line_style(const ApplicationState& app) {
     return {{app.view.param.matrix.curr.view, app.view.param.matrix.curr.proj},
         {(float)app.gbuffer.width, (float)app.gbuffer.height},
-        app.script.line_width*(float)app.gbuffer.width/MAX(app.app.window.width, 1)};
+        app.script.line_width*(float)app.gbuffer.width/MD_MAX(app.app.window.width, 1)};
 }
 
 // This is the supplied event payload for requesting a view fit.
@@ -1937,7 +2210,7 @@ static inline void modify_field(md_bitmask_t* m, md_bitset_t s, SelectionOperato
         md_bitmask_assign(m, s);
         break;
     default:
-        ASSERT(false);
+        MD_ASSERT(false);
     }
 }
 
@@ -1945,84 +2218,189 @@ static inline void modify_field(md_bitmask_t* m, md_urange_t range, SelectionOpe
     modify_field(m, md_bitset_range(range.beg, range.end), op);
 }
 
-// Grows the mask to whole components or instances: those it has any atom of. In place: the entities are
-// disjoint, so setting one does not change what the test of another sees.
-static inline void grow_mask_by_selection_granularity(md_bitmask_t* mask, SelectionGranularity granularity, const md_system_t& sys) {
-    ASSERT(mask);
-    if (granularity == SelectionGranularity::Atom || md_bitmask_empty(mask)) return;
+static inline void mask_set_molecule(md_bitmask_t* mask, size_t mol_idx, const md_system_t& sys) {
+    const md_molecule_t mol = md_system_molecule(&sys, mol_idx);
+    for (size_t k = 0; k < mol.count; ++k) md_bitmask_set_bit(mask, (uint32_t)mol.atom_idx[k]);
+}
 
-    switch(granularity) {
-    case SelectionGranularity::Component:
-        for (size_t i = 0; i < md_system_component_count(&sys); ++i) {
-            md_urange_t range = md_system_component_atom_range(&sys, i);
-            if (md_bitmask_test_any_range(mask, range.beg, range.end)) {
-                md_bitmask_set_range(mask, range.beg, range.end);
-            }
-        }
-        break;
-    case SelectionGranularity::Instance:
-        for (size_t i = 0; i < md_system_instance_count(&sys); ++i) {
-            md_urange_t range = md_system_instance_atom_range(&sys, i);
-            if (md_bitmask_test_any_range(mask, range.beg, range.end)) {
-                md_bitmask_set_range(mask, range.beg, range.end);
-            }
-        }
-        break;
-    default:
-        ASSERT(false);
+// A fragment is not a range of atoms (its hydrogens are interleaved with other atoms), so its atoms are set one by one
+static inline void mask_set_fragment(md_bitmask_t* mask, md_fragment_idx_t frag, const md_system_t& sys) {
+    for (md_fragment_atom_iter_t it = md_fragment_atom_iter(&sys, frag); md_fragment_atom_iter_next(&it);) {
+        md_bitmask_set_bit(mask, (uint32_t)it.atom);
     }
 }
 
-// Sets the bits of the entity (atom, component or instance) containing atom_idx, according to granularity.
-// Cheaper than setting a single bit followed by grow_mask_by_selection_granularity, as it only looks up the owning entity.
+static inline void mask_set_chain(md_bitmask_t* mask, size_t chain_idx, const md_system_t& sys) {
+    const md_urange_t* end = md_system_chain_run_end(&sys, chain_idx);
+    for (const md_urange_t* it = md_system_chain_run_beg(&sys, chain_idx); it && it < end; ++it) {
+        const md_urange_t range = md_system_chain_run_atom_range(&sys, *it);
+        if (range.beg < range.end) md_bitmask_set_range(mask, range.beg, range.end);
+    }
+}
+
+// What Chain granularity takes of a residue: its chain (md_chain_data_t), else its part (the data gives it no chain
+// id: a strand of a polymer is a part, as polymer(i) of the script has it, and so is a ligand or a water), else the
+// residue itself
+static inline void mask_set_chain_of_res(md_bitmask_t* mask, size_t res_idx, const md_system_t& sys) {
+    const md_chain_idx_t chain = md_system_chain_find_by_residue_idx(&sys, res_idx);
+    if (chain >= 0) {
+        mask_set_chain(mask, (size_t)chain, sys);
+        return;
+    }
+    const md_part_idx_t part = md_system_part_find_by_residue_idx(&sys, res_idx);
+    const md_urange_t r = part >= 0 ? md_system_part_atom_range(&sys, (size_t)part) : md_system_residue_atom_range(&sys, res_idx);
+    if (r.beg < r.end) md_bitmask_set_range(mask, r.beg, r.end);
+}
+
+// Grows the mask to whole fragments, residues, parts, chains or molecules: those it has any atom of. A chain is not one range of atoms (the waters
+// filed under a chain come after every polymer), so what is touched is found first and set after.
+static inline void grow_mask_by_selection_granularity(md_bitmask_t* mask, SelectionGranularity granularity, const md_system_t& sys) {
+    MD_ASSERT(mask);
+    if (granularity == SelectionGranularity::Atom || md_bitmask_empty(mask)) return;
+
+    switch(granularity) {
+    case SelectionGranularity::Fragment: {
+        // Without fragments (a system whose molecules were not inferred) a fragment is taken to be its residue
+        const size_t num_frags = md_system_fragment_count(&sys);
+        if (num_frags == 0) {
+            grow_mask_by_selection_granularity(mask, SelectionGranularity::Residue, sys);
+            break;
+        }
+        md_allocator_i* alloc = md_get_heap_allocator();
+        md_bitmask_t touched = md_bitmask_create(0, (uint32_t)num_frags, alloc);
+        md_bitset_iter_t it = md_bitmask_iter(mask);
+        while (md_bitset_iter_next(&it)) {
+            const md_fragment_idx_t frag = md_system_fragment_find_by_atom_idx(&sys, it.idx);
+            if (frag != MD_FRAGMENT_NONE) md_bitmask_set_bit(&touched, frag);
+        }
+        md_bitset_iter_t fit = md_bitmask_iter(&touched);
+        while (md_bitset_iter_next(&fit)) {
+            mask_set_fragment(mask, (md_fragment_idx_t)fit.idx, sys);
+        }
+        md_bitmask_free(&touched);
+        break;
+    }
+    case SelectionGranularity::Residue:
+        for (size_t i = 0; i < md_system_residue_count(&sys); ++i) {
+            md_urange_t range = md_system_residue_atom_range(&sys, i);
+            if (md_bitmask_test_any_range(mask, range.beg, range.end)) {
+                md_bitmask_set_range(mask, range.beg, range.end);
+            }
+        }
+        break;
+    case SelectionGranularity::Part:
+        // Without parts (a system whose parts were not inferred) a part is taken to be its residue
+        if (md_system_part_count(&sys) == 0) {
+            grow_mask_by_selection_granularity(mask, SelectionGranularity::Residue, sys);
+            break;
+        }
+        for (size_t i = 0; i < md_system_part_count(&sys); ++i) {
+            const md_urange_t range = md_system_part_atom_range(&sys, i);
+            if (range.beg < range.end && md_bitmask_test_any_range(mask, range.beg, range.end)) {
+                md_bitmask_set_range(mask, range.beg, range.end);
+            }
+        }
+        break;
+    case SelectionGranularity::Molecule: {
+        // Without molecules a molecule is taken to be its part, as at Chain granularity outside a chain
+        if (sys.molecule.count == 0) {
+            grow_mask_by_selection_granularity(mask, SelectionGranularity::Part, sys);
+            break;
+        }
+        // A molecule's atoms need not be one range, so each molecule is taken once whatever order its atoms come in
+        md_allocator_i* alloc = md_get_heap_allocator();
+        md_bitmask_t touched = md_bitmask_create(0, (uint32_t)sys.molecule.count, alloc);
+        md_bitset_iter_t it = md_bitmask_iter(mask);
+        while (md_bitset_iter_next(&it)) {
+            const md_molecule_idx_t mol = md_system_molecule_find_by_atom_idx(&sys, it.idx);
+            if (mol >= 0) md_bitmask_set_bit(&touched, (uint32_t)mol);
+        }
+        md_bitset_iter_t mit = md_bitmask_iter(&touched);
+        while (md_bitset_iter_next(&mit)) {
+            mask_set_molecule(mask, mit.idx, sys);
+        }
+        md_bitmask_free(&touched);
+        break;
+    }
+    default:
+        MD_ASSERT(false);
+    }
+}
+
+// Sets the bits of what holds atom_idx at the granularity: the atom, its fragment (its residue where it is in none),
+// its residue, its part, its chain (its part where it is in no chain), or its molecule. Cheaper than setting a single bit followed by
+// grow_mask_by_selection_granularity, as it only looks up the owner.
 static inline void mask_set_atom_by_selection_granularity(md_bitmask_t* mask, size_t atom_idx, SelectionGranularity granularity, const md_system_t& sys) {
-    ASSERT(mask);
+    MD_ASSERT(mask);
     if (atom_idx >= sys.atom.count) return;
 
     md_urange_t range = {(uint32_t)atom_idx, (uint32_t)atom_idx + 1};
     switch (granularity) {
     case SelectionGranularity::Atom:
         break;
-    case SelectionGranularity::Component: {
-        md_component_idx_t comp_idx = md_system_component_find_by_atom_idx(&sys, atom_idx);
-        if (comp_idx >= 0) {
-            range = md_system_component_atom_range(&sys, comp_idx);
+    case SelectionGranularity::Fragment: {
+        const md_fragment_idx_t frag = md_system_fragment_find_by_atom_idx(&sys, atom_idx);
+        if (frag != MD_FRAGMENT_NONE) {
+            mask_set_fragment(mask, frag, sys);
+            return;
+        }
+        const md_residue_idx_t res_idx = md_system_residue_find_by_atom_idx(&sys, atom_idx);
+        if (res_idx >= 0) range = md_system_residue_atom_range(&sys, res_idx);
+        break;
+    }
+    case SelectionGranularity::Residue: {
+        md_residue_idx_t res_idx = md_system_residue_find_by_atom_idx(&sys, atom_idx);
+        if (res_idx >= 0) {
+            range = md_system_residue_atom_range(&sys, res_idx);
         }
         break;
     }
-    case SelectionGranularity::Instance: {
-        md_instance_idx_t inst_idx = md_system_instance_find_by_atom_idx(&sys, atom_idx);
-        if (inst_idx >= 0) {
-            range = md_system_instance_atom_range(&sys, inst_idx);
+    case SelectionGranularity::Part: {
+        const int32_t part_idx = md_system_part_find_by_atom_idx(&sys, atom_idx);
+        if (part_idx >= 0) {
+            range = md_system_part_atom_range(&sys, (size_t)part_idx);
+        } else {
+            const md_residue_idx_t res_idx = md_system_residue_find_by_atom_idx(&sys, atom_idx);
+            if (res_idx >= 0) range = md_system_residue_atom_range(&sys, res_idx);
         }
+        break;
+    }
+    case SelectionGranularity::Molecule: {
+        const md_molecule_idx_t mol = md_system_molecule_find_by_atom_idx(&sys, atom_idx);
+        if (mol >= 0) {
+            mask_set_molecule(mask, (size_t)mol, sys);
+            return;
+        }
+        const md_part_idx_t part_idx = md_system_part_find_by_atom_idx(&sys, atom_idx);
+        if (part_idx >= 0) range = md_system_part_atom_range(&sys, (size_t)part_idx);
         break;
     }
     default:
-        ASSERT(false);
+        MD_ASSERT(false);
     }
     md_bitmask_set_range(mask, range.beg, range.end);
 }
 
-// Sets the bits of a component, or of its instance at Instance granularity, for a hit that names a component rather
+// Sets the bits of a residue, or of what holds it at a coarser granularity, for a hit that names a residue rather
 // than an atom (a backbone segment of the cartoon or ribbons). There is no atom to pick there, so Atom granularity
-// selects the component as well.
-static inline void mask_set_component_by_selection_granularity(md_bitmask_t* mask, size_t comp_idx, SelectionGranularity granularity, const md_system_t& sys) {
-    ASSERT(mask);
-    if (comp_idx >= sys.component.count) return;
+// selects the residue as well.
+static inline void mask_set_residue_by_selection_granularity(md_bitmask_t* mask, size_t res_idx, SelectionGranularity granularity, const md_system_t& sys) {
+    MD_ASSERT(mask);
+    if (res_idx >= sys.residue.count) return;
 
-    const md_urange_t range = md_system_component_atom_range(&sys, comp_idx);
+    const md_urange_t range = md_system_residue_atom_range(&sys, res_idx);
     if (range.beg == range.end) return;
     if (granularity == SelectionGranularity::Atom) {
-        granularity = SelectionGranularity::Component;
+        granularity = SelectionGranularity::Residue;
     }
-    // Any atom of the component finds the component, and its instance
+    // Any atom of the residue finds the residue, and its chain
     mask_set_atom_by_selection_granularity(mask, range.beg, granularity, sys);
 }
 
 // Sets the bits of the atoms of a ring (count atoms), each grown by the granularity, for a hit on the circle of an
 // aromatic ring (picked_ring): at Atom granularity the ring itself, at coarser ones what its atoms are in
 static inline void mask_set_ring_by_selection_granularity(md_bitmask_t* mask, const int32_t* atoms, size_t count, SelectionGranularity granularity, const md_system_t& sys) {
-    ASSERT(mask);
+    MD_ASSERT(mask);
     for (size_t i = 0; i < count; ++i) {
         if (atoms[i] >= 0 && (size_t)atoms[i] < sys.atom.count) {
             mask_set_atom_by_selection_granularity(mask, (size_t)atoms[i], granularity, sys);
@@ -2031,13 +2409,13 @@ static inline void mask_set_ring_by_selection_granularity(md_bitmask_t* mask, co
 }
 
 static inline void single_selection_sequence_clear(SingleSelectionSequence* seq) {
-    ASSERT(seq);
-    MEMSET(seq->idx, -1, sizeof(seq->idx));
+    MD_ASSERT(seq);
+    md_memset(seq->idx, -1, sizeof(seq->idx));
 }
 
 static inline void single_selection_sequence_push_idx(SingleSelectionSequence* seq, int32_t idx) {
-    ASSERT(seq);
-    for (size_t i = 0; i < ARRAY_SIZE(seq->idx); ++i) {
+    MD_ASSERT(seq);
+    for (size_t i = 0; i < MD_COUNTOF(seq->idx); ++i) {
         // Already in the sequence: keep the position it was first picked at. Appending it again
         // would desync the sequence from the selection mask, which is an OR and does not grow.
         if (seq->idx[i] == idx) {
@@ -2051,22 +2429,22 @@ static inline void single_selection_sequence_push_idx(SingleSelectionSequence* s
 }
 
 static inline void single_selection_sequence_pop_idx(SingleSelectionSequence* seq, int32_t idx) {
-    ASSERT(seq);
-    for (size_t i = 0; i < ARRAY_SIZE(seq->idx); ++i) {
+    MD_ASSERT(seq);
+    for (size_t i = 0; i < MD_COUNTOF(seq->idx); ++i) {
         if (seq->idx[i] == idx) {
-            for (size_t j = i; j < ARRAY_SIZE(seq->idx) - 1; ++j) {
+            for (size_t j = i; j < MD_COUNTOF(seq->idx) - 1; ++j) {
                 seq->idx[j] = seq->idx[j+1];
             }
-            seq->idx[ARRAY_SIZE(seq->idx)-1] = -1;
+            seq->idx[MD_COUNTOF(seq->idx)-1] = -1;
             break;
         }
     }
 }
 
 static inline void single_selection_sequence_pop_back(SingleSelectionSequence* seq) {
-    ASSERT(seq);
+    MD_ASSERT(seq);
     size_t i = 0;
-    for (; i < ARRAY_SIZE(seq->idx); ++i) {
+    for (; i < MD_COUNTOF(seq->idx); ++i) {
         if (seq->idx[i] == -1) break;
     }
     if (i > 0) {
@@ -2075,9 +2453,9 @@ static inline void single_selection_sequence_pop_back(SingleSelectionSequence* s
 }
 
 static inline int32_t single_selection_sequence_last(const SingleSelectionSequence* seq) {
-    ASSERT(seq);
+    MD_ASSERT(seq);
     size_t i = 0;
-    for (; i < ARRAY_SIZE(seq->idx); ++i) {
+    for (; i < MD_COUNTOF(seq->idx); ++i) {
         if (seq->idx[i] == -1) break;
     }
     if (i > 0) {
@@ -2088,7 +2466,7 @@ static inline int32_t single_selection_sequence_last(const SingleSelectionSequen
 
 static inline size_t single_selection_sequence_count(const SingleSelectionSequence* seq) {
     size_t i = 0;
-    for (; i < ARRAY_SIZE(seq->idx); ++i) {
+    for (; i < MD_COUNTOF(seq->idx); ++i) {
         if (seq->idx[i] == -1) break;
     }
     return i;
@@ -2106,27 +2484,21 @@ void interrupt_async_tasks(ApplicationState* state);
 
 // Dataset loading
 
-// What load_data_from_file made of a file
-enum LoadResult {
-    LoadResult_Failed = 0,
-    LoadResult_System,      // A new system, with its run when the file holds several frames
-    LoadResult_Trajectory,  // A new run for the loaded system
-    LoadResult_Supplement,  // Added to the loaded system, or along its run: the system and the run are as they were
-};
 
 // Loads a file in the given role (see file_list.h): FileRole_System replaces the system, FileRole_Trajectory
 // the run, a supplement adds to the system and a series to the run. opens_own_run: a system file of several
 // frames opens them as the run too. A file that loads is recorded in files.list.
-LoadResult load_data(ApplicationState* app, str_t filepath, const loader::LoaderState& load_state, FileRole role, bool opens_own_run = false);
+LoadResult load_data(ApplicationState* app, md_str_t filepath, const loader::LoaderState& load_state, FileRole role, bool opens_own_run = false);
 
 // Loads a file on its own, as one dropped on the window or opened from the menu: in the role its loader flags
-// give it (file_role), and a system file opens its own frames as the run.
-LoadResult load_data_from_file(ApplicationState* app, str_t filepath, const loader::LoaderState& load_state);
+// give it (file_role), and a system file opens its own frames as the run. A topology without coordinates and its
+// coordinates come in either order (load_order.h).
+LoadResult load_data_from_file(ApplicationState* app, md_str_t filepath, const loader::LoaderState& load_state);
 void init_system_data(ApplicationState* app);
 // Publishes the trajectory in run_file as the loaded run and sets up everything that follows it.
 // run_file is the trajectory, or the structure file itself when that holds several frames. traj_flags
 // takes MD_RUN_FLAG_DISABLE_CACHE_WRITE to leave no index beside the file.
-void init_trajectory_data(ApplicationState* app, str_t run_file, uint32_t traj_flags = 0);
+void init_trajectory_data(ApplicationState* app, md_str_t run_file, uint32_t traj_flags = 0);
 
 // The loaded run's frame axis ("<run>/time"): its frame count, its times (resident, F64) and their
 // unit, which is none when the file does not know time and the values are frame ordinals. NULL,
@@ -2147,6 +2519,17 @@ bool extract_frame(const ApplicationState* app, int64_t frame, md_system_state_t
 // the reference of the topology (md_system_t::reference).
 bool recompute_bonds(ApplicationState* app, int64_t frame);
 
+// INFERENCE IN THE BACKGROUND (SystemInference)
+// Starts inferring what flags say on a copy of the system as it is now
+void system_inference_start(ApplicationState* app, md_infer_flags_t flags);
+// Once per frame: starts again what was cancelled, or was inferred from a topology which changed since
+void system_inference_update(ApplicationState* app);
+// Whether the system shows its core, what inference derives not there yet
+bool system_inference_pending(const ApplicationState& app);
+// Waits for it and puts it in place: before what changes the topology, or reads what is derived from it, at once
+// (a supplement, a workspace, an edit of the bonds)
+void system_inference_finish(ApplicationState* app);
+
 // To be called before the bonds of the system are changed: the script evaluation, which reads them on the worker
 // threads, is interrupted (the script is compiled again after the change, and starts over), and the other tasks of the
 // pool finish.
@@ -2160,10 +2543,10 @@ void system_bonds_changed(ApplicationState* app, bool graph_edited);
 // The kind of a bond by its name in md_bond_kind_names ("coordinate", "hydrogen"), as a workspace stores it.
 // bond_kind_parse reads it back (flags of the kind alone), false for a name which is not of one kind.
 const char* bond_kind_str(md_bond_flags_t flags);
-bool        bond_kind_parse(md_bond_flags_t* out, str_t str);
+bool        bond_kind_parse(md_bond_flags_t* out, md_str_t str);
 // Origins of bonds, a mask of 1 << md_bond_origin_t, by name: "file,inferred"
 const char* bond_origins_str(char* buf, size_t cap, uint32_t origins);
-bool        bond_origins_parse(uint32_t* out, str_t str);
+bool        bond_origins_parse(uint32_t* out, md_str_t str);
 
 // Brings the bond changes tracked (operations.bond_tracking) up to date with the frame shown, the topology, the scope
 // and the parameters. Once a frame, before the bonds are uploaded.
@@ -2186,11 +2569,15 @@ bool picked_ring(const ApplicationState& app, size_t idx, const int32_t** atoms,
 // come after them as they are drawn (formed is set for those)
 bool picked_bond(const ApplicationState& app, size_t idx, md_atom_pair_t* pair, md_bond_flags_t* flags, bool* formed);
 
+// Sets the bits of what a hit stands for, grown by the granularity: what hovering it highlights, and what clicking it
+// selects (the atoms of a bond, the residue of a cartoon segment, ...)
+void picking_hit_mask_set(md_bitmask_t* mask, const ApplicationState& app, const PickingHit& hit, SelectionGranularity granularity);
+
 // "<run>/<leaf>" in the loaded trajectory's run, e.g. "run/md/backbone/angle" for "backbone/angle".
 // Empty when no trajectory is loaded, or when it does not fit in buf.
-str_t run_attribute_path(char* buf, size_t cap, const ApplicationState* app, str_t leaf);
+md_str_t run_attribute_path(char* buf, size_t cap, const ApplicationState* app, md_str_t leaf);
 // The attribute at "<run>/<leaf>" of the current run; NULL without a run or without such an attribute.
-const md_attribute_t* run_attribute(const ApplicationState* app, str_t leaf);
+const md_attribute_t* run_attribute(const ApplicationState* app, md_str_t leaf);
 
 // The secondary structure to show for the displayed state, one per segment of sys.protein_backbone: the denoised copy
 // of the run at the displayed frame (secondary_structure_render), else the state's own assignment
@@ -2209,9 +2596,9 @@ int playback_stride(const ApplicationState* app);
 
 // Workspace
 // See #workspace in viamd.cpp for what a workspace holds and the order it is loaded in
-void load_workspace(ApplicationState* app, str_t file);
+void load_workspace(ApplicationState* app, md_str_t file);
 // True when the whole file was written; it is then the current workspace (files.workspace)
-bool save_workspace(ApplicationState* app, str_t file);
+bool save_workspace(ApplicationState* app, md_str_t file);
 
 // Whether this window is open belongs to the workspace: stored under [Windows] as name=0/1. name
 // is the window's identity in the file, so it stays the same when the window is renamed on screen.
@@ -2220,12 +2607,12 @@ void workspace_register_window(const char* name, bool* show);
 
 // Selections
 // What filters are evaluated and completed against: the system as it is shown, and the names of the script in the editor
-static inline md_filter_context_t filter_context(const ApplicationState* app) {
-    return md_filter_context_t{&app->mold.sys, &app->mold.state, app->script.ir};
+static inline script::FilterCtx filter_context(const ApplicationState* app) {
+    return script::FilterCtx{&app->mold.sys, &app->mold.state, app->script.ir};
 }
 
 // The selection keeps its own copy of atom_mask
-Selection* create_selection(ApplicationState* app, str_t name, md_bitset_t atom_mask = {});
+Selection* create_selection(ApplicationState* app, md_str_t name, md_bitset_t atom_mask = {});
 void remove_selection(ApplicationState* app, size_t idx);
 void remove_all_selections(ApplicationState* app);
 
@@ -2236,7 +2623,7 @@ void remove_all_selections(ApplicationState* app);
 // pass cap 0 to count. Cheap enough to call per frame: it is a prefix query over a small sorted
 // array plus two lookups per group, and there is nothing to cache or invalidate because the
 // attribute table IS the state.
-// Groups missing either half, or whose shapes are not one 3-component value, are skipped.
+// Groups missing either half, or whose shapes are not one 3-residue value, are skipped.
 size_t dipole_groups_gather(DipoleGroup out[], size_t cap, const md_system_t& sys);
 
 // The same description for ONE group, straight from its vector attribute - for a representation or
@@ -2268,15 +2655,37 @@ ElectronicStructureSourceFlags es_source_mask(const md_system_t& sys);
 // electronic structure at all, and leaves the representation untouched.
 bool electronic_structure_select_available_source(ElectronicStructureRepresentation* es, const md_system_t& sys);
 
+// Takes what the field a representation is coloured by has finished evaluating (surface_field_poll):
+// once a frame, whatever else updates
+void electronic_structure_field_poll(Representation* rep);
+
 // Brings what an electronic structure representation draws up to date: its volume, evaluated again only
 // when what it is evaluated from changed (the frame among it), and the colours of its surfaces - from
 // atom_colors, the colours of the atoms as the representation has them, or from the field it is coloured by.
-void electronic_structure_representation_update(ApplicationState* state, Representation* rep, const uint32_t* atom_colors);
+// False when something it waits for without blocking (the volume's last readback, a density matrix made on a
+// worker thread, the density a field update reads) is not there yet: it is to be called again next frame.
+// The planes display evaluated on its planes (on the GPU): each slice's image, made again where
+// the plane, the source or the frame changed (not while the plane is dragged), one at a time per plane. A plane whose
+// image is not current is drawn from the volume, which this display keeps too. Called every frame; false while one is
+// under way.
+bool electronic_structure_plane_images_update(ApplicationState* state, Representation* rep);
+// For measurements (the timings shown with it): bumped with each change to how the images are evaluated
+#define ES_PLANE_IMAGES_REVISION "plane-images r5"
+// Whether it is: the planes display, and the source on the GPU
+bool es_plane_images_supported(ApplicationState* state, const ElectronicStructureRepresentation& es);
+
+bool electronic_structure_representation_update(ApplicationState* state, Representation* rep, const uint32_t* atom_colors);
+
+// The evaluations of ELF and LOL run as pool tasks (viamd.cpp, localization_poll), polled by the representations'
+// updates: those nobody wants any more are let go of here once they have stopped, once a frame; all of them (waited
+// for) at the shutdown, before the GPU device goes.
+void es_jobs_collect(ApplicationState* state);
+void es_jobs_shutdown(ApplicationState* state);
 
 
 // Turns a dipole group name into something presentable: "ground_state" -> "Ground State".
 // Writes at most cap-1 characters plus a terminator, returns the length written.
-int dipole_label_pretty(char* buf, size_t cap, str_t group);
+int dipole_label_pretty(char* buf, size_t cap, md_str_t group);
 
 // The same, plus a 1 based element number when the group holds more than one moment:
 // "Electric Transition 3". A single moment gets no number, because there is nothing to tell apart.
@@ -2288,15 +2697,15 @@ int dipole_entry_label(char* buf, size_t cap, const DipoleGroup& group, uint32_t
 
 // Ids of the attributes under atom/ which are per atom scalar fields, in path order.
 // Returns the total number found and writes at most cap, so pass cap 0 to count.
-// An attribute qualifies when its values are single components and its LAST index axis is this
+// An attribute qualifies when its values are single residues and its LAST index axis is this
 // system's atom count; an optional leading axis is the variant axis. Everything else under atom/ -
-// a position, a velocity, anything several components wide - is data this colouring cannot express
+// a position, a velocity, anything several residues wide - is data this colouring cannot express
 // and is skipped rather than mangled. Cheap enough to call per frame.
 size_t atom_attribute_query(md_attribute_id_t out_ids[], size_t cap, const md_system_t& sys);
 
 // What to show for it: the attribute's label, or its leaf path segment when it has none. A view
 // into the table's storage, null terminated, so it can go straight to ImGui.
-str_t atom_attribute_label(const md_attribute_t* attr);
+md_str_t atom_attribute_label(const md_attribute_t* attr);
 
 // Number of variants: the leading index axis, 1 when the field has none.
 int atom_attribute_variant_count(const md_attribute_t* attr);
@@ -2316,7 +2725,7 @@ void atom_attribute_legend_label(char* buf, size_t cap, const md_attribute_t* at
 // fast math every float spelling of the test (v != v, isnan) may be folded away.
 static inline bool atom_attribute_value_absent(float v) {
     uint32_t u;
-    MEMCPY(&u, &v, sizeof(u));
+    md_memcpy(&u, &v, sizeof(u));
     return (u & 0x7fffffffu) > 0x7f800000u;
 }
 
@@ -2333,7 +2742,7 @@ void system_gpu_data_free(ApplicationState* state);
 // md_attribute_slice_1(m) for a {M,A} matrix of molecular orbitals, md_attribute_slice_2(s,l) for
 // the {S,L,A} natural transition orbitals - the caller says which row, and nothing here has to know
 // which of the two it was addressing.
-double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, const md_system_t& sys, str_t coefficient_path, const md_attribute_slice_t* slice);
+double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, const md_system_t& sys, md_str_t coefficient_path, const md_attribute_slice_t* slice);
 
 // Evaluates one molecular orbital into a 3D texture, sourcing everything it needs from the system:
 // the GTO basis and the AO coefficients from the attribute table, the atom positions from the state.
@@ -2345,7 +2754,11 @@ double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, c
 // is data is data.
 bool orbital_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_system_t& sys,
                          const vec3_t* atom_pos, size_t num_atom_pos,
-                         str_t coefficient_path, const md_attribute_slice_t* slice, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff);
+                         md_str_t coefficient_path, const md_attribute_slice_t* slice, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff);
+// From coefficients the caller holds, num_ao of them
+bool orbital_coefficients_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_system_t& sys,
+                                      const vec3_t* atom_pos, size_t num_atom_pos,
+                                      const double* ao_coeffs, size_t num_ao, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff);
 
 // Positions for a system's BASIS atoms, in the bohr and interleaved layout md_gto works in, taken
 // out of `state` through the QM -> system map. Allocated from temp; null with a zero count when the
@@ -2361,6 +2774,44 @@ vec3_t* basis_atom_positions_extract(size_t* out_count, md_temp_scope_t temp, co
 // the texture's contents NOW rather than next frame - an export, say. A no-op without the GPU
 // backend, where evaluation writes the texture directly.
 void gpu_volume_jobs_drain(ApplicationState* state);
+
+// Issues what the density jobs have room for (their pieces, a few in flight), and queues the readbacks of those
+// all issued: once a frame.
+void gpu_volume_jobs_poll(ApplicationState* state);
+
+// The density evaluations on the GPU under way for longer than a moment, for a progress display: how far each is
+// (0 to 1). Returns how many (at most cap). 0 without the GPU backend.
+size_t gpu_volume_jobs_progress(const ApplicationState* state, float* fraction, size_t cap);
+
+// Drops the density evaluation into vol_tex that is not yet all issued, if there is one: what it has in flight
+// completes, nothing more is issued, and the texture keeps what it held. True when one was dropped.
+bool gpu_volume_job_cancel(ApplicationState* state, uint32_t vol_tex);
+
+// Whether a density's matrix is being made on a worker thread for a representation's volume (an SCF density's
+// tiles, or another density's packed triangle), and for how long: for a progress display. False without the
+// GPU backend.
+bool density_dmat_preparing(const ApplicationState* state, double* seconds);
+
+// A line of the task overlay from a component, given in answer to EventType_ViamdTaskProgressRequest: what is
+// under way, how far it is (0 to 1), and optionally a flag the overlay's close button raises to stop it. Read in
+// the frame it is given in, so the flag only has to live that long. This is how a component shows its work
+// there: main.cpp asks rather than calls, as a component may not be built (the QM module is a build option).
+struct TaskProgress {
+    const char*       label    = "";
+    float             fraction = 0.0f;
+    volatile int32_t* cancel   = nullptr;
+};
+
+struct TaskProgressRequest {
+    TaskProgress items[8];
+    size_t       count = 0;
+};
+
+static inline void task_progress_add(TaskProgressRequest* req, const char* label, float fraction, volatile int32_t* cancel) {
+    if (req->count < MD_COUNTOF(req->items)) {
+        req->items[req->count++] = TaskProgress{ label, MD_CLAMP(fraction, 0.0f, 1.0f), cancel };
+    }
+}
 
 
 // The QM ATOM DOMAIN: the atoms a quantum chemistry calculation covered, in its own order and at
@@ -2421,14 +2872,14 @@ struct OrbitalFrontier {
     int lumo_idx      = -1;
     int num_orbitals  = 0;
 };
-bool es_orbital_frontier(OrbitalFrontier* out, const md_system_t& sys, str_t occupation_path);
+bool es_orbital_frontier(OrbitalFrontier* out, const md_system_t& sys, md_str_t occupation_path);
 
 // The orbital energies of one spin channel (es_path::alpha_energy or its beta sibling), in Hartree,
 // or NULL when that column is absent. Hands back the stored buffer rather than a copy: the column is
 // resident F64 and every caller only reads it. out_count receives its length, which is the orbital
 // count the column itself states - compare it against es_orbital_extent's before indexing the two
 // together rather than assuming they agree.
-const double* es_orbital_energies(size_t* out_count, const md_system_t& sys, str_t energy_path);
+const double* es_orbital_energies(size_t* out_count, const md_system_t& sys, md_str_t energy_path);
 
 // True when the system holds a SECOND, DISTINCT set of orbital coefficients - an unrestricted
 // calculation. Restricted and restricted-openshell publish beta as an alias of alpha: one datum
@@ -2452,7 +2903,7 @@ bool es_has_distinct_beta_occupations(const md_system_t& sys);
 //
 // A double rather than a count: natural orbitals occupy fractionally, and rounding here would hide
 // that from a caller who cares. Canonical SCF sums to an integer within float noise.
-double es_electron_count(const md_system_t& sys, str_t occupation_path);
+double es_electron_count(const md_system_t& sys, md_str_t occupation_path);
 
 // Excited states carrying natural transition orbitals, from the weight table's leading axis.
 size_t es_excited_state_count(const md_system_t& sys);
@@ -2462,17 +2913,29 @@ size_t es_excited_state_count(const md_system_t& sys);
 // Returns how many were written.
 size_t es_nto_lambdas(double* out_values, size_t cap, const md_system_t& sys, size_t state_idx, double cutoff);
 
+// Whether one excited state's NTOs can be read without waiting. A reader may compute them the first time they
+// are read (VeloxChem's, from the response vectors: a tenth of a second for a few hundred occupied orbitals,
+// seconds for a thousand) and keep them after, so what the frame reads - the weights, the volume, the flow
+// diagram - asks this first: false while they are being read on a worker thread, which this begins when they
+// have not been. What waits on it keeps showing what it had. True when there is nothing to wait for (resident
+// or absent).
+bool es_nto_ready(ApplicationState* state, size_t state_idx);
+// Whether any are being read on a worker thread, and for how long the oldest has been (the async info panel)
+bool es_nto_warming(const ApplicationState* state, double* seconds);
+// What es_nto_ready keeps, freed: with the system, after its pool tasks have ended
+void es_nto_warm_free(ApplicationState* state);
+
 // One AO x AO density matrix, out of the attribute at density_path narrowed by 'slice', whole and in
 // double precision. Allocated from temp; NULL when the path is absent or the slice does not narrow
 // it to one symmetric matrix. Either storage is read: square ({A,A}, or {S,A,A} with
 // md_attribute_slice_1(state)), or packed (MD_ATTRIBUTE_FLAG_PACKED_SYMMETRIC, as the density
 // properties are). out_dim receives A.
-double* density_matrix_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, str_t density_path, const md_attribute_slice_t* slice);
+double* density_matrix_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, md_str_t density_path, const md_attribute_slice_t* slice);
 
 // The same matrix as its packed upper triangle in float, A(A+1)/2 values - the form both density
 // evaluation paths hand the shader. Prefer it wherever the matrix only goes on to be evaluated: a
 // packed attribute is read as it is, and its full double matrix is never made.
-float* density_packed_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, str_t density_path, const md_attribute_slice_t* slice);
+float* density_packed_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, md_str_t density_path, const md_attribute_slice_t* slice);
 
 // Evaluates one density into a 3D texture, from the same two sources as orbital_evaluate_gl: the
 // basis/ attributes and the state's atom positions. density_path plus 'slice' name the matrix -
@@ -2480,7 +2943,7 @@ float* density_packed_extract(size_t* out_dim, md_temp_scope_t temp, const md_sy
 // state index - and whether that matrix is stored or computed on demand is the table's business.
 bool density_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_system_t& sys,
                          const vec3_t* atom_pos, size_t num_atom_pos,
-                         str_t density_path, const md_attribute_slice_t* slice, md_gto_op_t op);
+                         md_str_t density_path, const md_attribute_slice_t* slice, md_gto_op_t op);
 
 // The same, over a matrix the caller already has in hand rather than a path to extract it from.
 // The transition densities are VIRTUAL and are rebuilt from the response solution on every read,
@@ -2499,36 +2962,36 @@ bool density_matrix_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const m
 // is waiting for a neutral name, and the moment a second reader publishes something comparable is
 // the moment to give them one and alias these onto it.
 namespace es_path {
-    inline const str_t alpha_coefficient   = STR_INIT("orbital/alpha/coefficient");
-    inline const str_t beta_coefficient    = STR_INIT("orbital/beta/coefficient");
+    inline const md_str_t alpha_coefficient   = MD_STR_INIT("orbital/alpha/coefficient");
+    inline const md_str_t beta_coefficient    = MD_STR_INIT("orbital/beta/coefficient");
 
-    inline const str_t alpha_energy        = STR_INIT("orbital/alpha/energy");
-    inline const str_t beta_energy         = STR_INIT("orbital/beta/energy");
+    inline const md_str_t alpha_energy        = MD_STR_INIT("orbital/alpha/energy");
+    inline const md_str_t beta_energy         = MD_STR_INIT("orbital/beta/energy");
 
-    inline const str_t alpha_occupation    = STR_INIT("orbital/alpha/occupation");
-    inline const str_t beta_occupation     = STR_INIT("orbital/beta/occupation");
+    inline const md_str_t alpha_occupation    = MD_STR_INIT("orbital/alpha/occupation");
+    inline const md_str_t beta_occupation     = MD_STR_INIT("orbital/beta/occupation");
 
     // The AO metric the coefficients and densities above are expressed against. Singular for a
     // basis that was stored spherically - see the note on md_vlx_publish_attributes.
-    inline const str_t overlap             = STR_INIT("basis/overlap");
+    inline const md_str_t overlap             = MD_STR_INIT("basis/overlap");
 
-    inline const str_t alpha_density       = STR_INIT("orbital/alpha/density");
-    inline const str_t beta_density        = STR_INIT("orbital/beta/density");
-    inline const str_t total_density       = STR_INIT("orbital/total/density");
-    inline const str_t difference_density  = STR_INIT("orbital/difference/density");
+    inline const md_str_t alpha_density       = MD_STR_INIT("orbital/alpha/density");
+    inline const md_str_t beta_density        = MD_STR_INIT("orbital/beta/density");
+    inline const md_str_t total_density       = MD_STR_INIT("orbital/total/density");
+    inline const md_str_t difference_density  = MD_STR_INIT("orbital/difference/density");
 
-    inline const str_t nto_particle        = STR_INIT("vlx/rsp/nto/particle/coefficient");
-    inline const str_t nto_hole            = STR_INIT("vlx/rsp/nto/hole/coefficient");
+    inline const md_str_t nto_particle        = MD_STR_INIT("vlx/rsp/nto/particle/coefficient");
+    inline const md_str_t nto_hole            = MD_STR_INIT("vlx/rsp/nto/hole/coefficient");
 
     // {S,Lmax}, the weight of each NTO pair, padded with zeros on the ragged lambda axis and
     // indexing the same space as the two coefficient attributes above.
-    inline const str_t nto_lambda          = STR_INIT("vlx/rsp/nto/lambda");
+    inline const md_str_t nto_lambda          = MD_STR_INIT("vlx/rsp/nto/lambda");
 
-    inline const str_t attachment_density  = STR_INIT("vlx/rsp/transition_density/attachment");
-    inline const str_t detachment_density  = STR_INIT("vlx/rsp/transition_density/detachment");
-    inline const str_t transition_diff     = STR_INIT("vlx/rsp/transition_density/difference");
+    inline const md_str_t attachment_density  = MD_STR_INIT("vlx/rsp/transition_density/attachment");
+    inline const md_str_t detachment_density  = MD_STR_INIT("vlx/rsp/transition_density/detachment");
+    inline const md_str_t transition_diff     = MD_STR_INIT("vlx/rsp/transition_density/difference");
 
-    inline const str_t density_property    = STR_INIT("vlx/density_property");
+    inline const md_str_t density_property    = MD_STR_INIT("vlx/density_property");
 }
 
 // The only interpretation of use_magnitude there is. ABS is a MODIFIER bit on an accumulate op, not
@@ -2539,7 +3002,7 @@ inline md_gto_op_t es_gto_op(bool use_magnitude) {
 
 // Which density path a spin selection names. The four are siblings in the table precisely so that
 // this is a lookup and not four cases of arithmetic at the point of use.
-inline str_t es_electron_density_path(ElectronicStructureSpin spin) {
+inline md_str_t es_electron_density_path(ElectronicStructureSpin spin) {
     switch (spin) {
     case ElectronicStructureSpin::Alpha:      return es_path::alpha_density;
     case ElectronicStructureSpin::Beta:       return es_path::beta_density;
@@ -2561,21 +3024,31 @@ bool electronic_structure_grid_init(md_grid_t* grid, const md_system_t& sys, con
 //
 // With the GPU backend the texture is filled from the frame loop rather than before the call
 // returns; gpu_volume_jobs_drain() forces it where the contents are needed immediately.
-bool orbital_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, str_t coefficient_path,
+bool orbital_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, md_str_t coefficient_path,
                       const md_attribute_slice_t* slice, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff);
-bool density_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, str_t density_path,
-                      const md_attribute_slice_t* slice, md_gto_op_t op);
+// The same for an orbital the caller made itself (a block NTO, a combination of orbitals): its AO coefficients,
+// num_ao of them, which must match the system's basis. Copied before the call returns.
+bool orbital_coefficients_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, const double* ao_coeffs, size_t num_ao,
+                                   md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff);
+// async (the representations): on the GPU, the density is issued as a job (md_gto_gpu_job_t) the frame loop
+// completes (gpu_volume_jobs_poll), where the launch would wait for its counting pass
+bool density_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, md_str_t density_path,
+                      const md_attribute_slice_t* slice, md_gto_op_t op, bool async = false);
 
 // density_evaluate over a matrix the caller already holds - see density_matrix_evaluate_gl.
 bool density_matrix_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid,
                              const double* density_matrix, size_t dim, md_gto_op_t op);
+
+// Whether an evaluation above goes to the GPU, and the main thread only queues it. False means the GL fallback, which
+// evaluates on the main thread before it returns: what is evaluated ahead of being asked for should then wait.
+bool gpu_volume_evaluation_available(const ApplicationState* state);
 
 #if MD_ENABLE_GPU
 // The first half of density_evaluate: evaluates into the DEVICE scratch volume (ApplicationState::
 // gpu_volume) and leaves it there, for a consumer which records another kernel over it on the same
 // stream instead of reading it back. False when the GPU backend is unavailable, in which case there
 // is no scratch volume to run anything over and the caller wants the GL path instead.
-bool density_evaluate_to_gpu_volume(ApplicationState* state, const md_grid_t& grid, str_t density_path,
+bool density_evaluate_to_gpu_volume(ApplicationState* state, const md_grid_t& grid, md_str_t density_path,
                                     const md_attribute_slice_t* slice, md_gto_op_t op);
 
 // The same, over a matrix the caller already holds - see density_matrix_evaluate_gl.
@@ -2805,7 +3278,7 @@ void point_set_region_mask_compute(
 // File Queue
 bool file_queue_empty(const FileQueue* queue);
 bool file_queue_full(const FileQueue* queue);
-void file_queue_push(FileQueue* queue, str_t path, FileFlags flags = FileFlags_None);
+void file_queue_push(FileQueue* queue, md_str_t path, FileFlags flags = FileFlags_None);
 
 FileQueue::Entry file_queue_front(const FileQueue* queue);
 FileQueue::Entry file_queue_pop(FileQueue* queue);
@@ -2815,31 +3288,31 @@ void file_queue_process(ApplicationState* state);
 // view
 // A good view of the atoms in mask (all of them when null), framed in region of the view (see ViewRegion and
 // camera_compute_default_view). fov_y is that of the camera that looks through it. With an assembly of sys (view.assembly,
-// -1 for none), of those atoms in the instances of each of its parts, in all of the copies of the part.
+// -1 for none), of those atoms in the instances of each of its groups, in all of the copies of the group.
 void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask = nullptr, float fov_y = Camera().fov_y, const ViewRegion& region = {}, const md_system_t* sys = nullptr, int assembly = -1);
 static inline void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitmask_t* mask, float fov_y = Camera().fov_y, const ViewRegion& region = {}, const md_system_t* sys = nullptr, int assembly = -1) {
     const md_bitset_t members = md_bitmask_view(mask);
     reset_view(transform, state, &members, fov_y, region, sys, assembly);
 }
 
-// ASSEMBLIES (view.assembly). The parts of assembly asm_idx are [a.part_offset[asm_idx], a.part_offset[asm_idx + 1]),
-// and the instances and operators of part p those assembly_part gives, pointers into the arrays of a. Both read from the
-// offsets as they are, not through the md_urange_t of md_assembly_part_range and its kin: MSVC 19.52 (/O2) compiled
+// ASSEMBLIES (view.assembly). The groups of assembly asm_idx are [a.group_offset[asm_idx], a.group_offset[asm_idx + 1]),
+// and the instances and operators of group g those assembly_group gives, pointers into the arrays of a. Both read from the
+// offsets as they are, not through the md_urange_t of md_assembly_group_range and its kin: MSVC 19.52 (/O2) compiled
 // loops from the beg of such a range to index with the 64 bits that held both of its ends, the end in the upper half,
 // and read far out of bounds (assembly_transforms, reset_view).
-struct AssemblyPart {
+struct AssemblyGroup {
     const md_instance_idx_t* inst;
     const md_instance_idx_t* inst_end;
     const uint32_t* oper;
     const uint32_t* oper_end;
 };
 
-static inline AssemblyPart assembly_part(const md_assembly_data_t& a, size_t p) {
-    ASSERT(p < a.part_count);
-    return {a.inst + a.part_inst_offset[p], a.inst + a.part_inst_offset[p + 1], a.oper + a.part_oper_offset[p], a.oper + a.part_oper_offset[p + 1]};
+static inline AssemblyGroup assembly_group(const md_assembly_data_t& a, size_t g) {
+    MD_ASSERT(g < a.group_count);
+    return {a.inst + a.group_inst_offset[g], a.inst + a.group_inst_offset[g + 1], a.oper + a.group_oper_offset[g], a.oper + a.group_oper_offset[g + 1]};
 }
 
-// The transforms of the copies an assembly of the system makes, part by part, and with copy_offset (optional) where the
+// The transforms of the copies an assembly of the system makes, group by group, and with copy_offset (optional) where the
 // copies of each part begin, its end last. Empty for an assembly the system has not (-1: none).
 void assembly_transforms(md_array(mat4_t)* transforms, md_array(uint32_t)* copy_offset, const md_system_t& sys, int assembly, md_allocator_i* alloc);
 
@@ -2849,29 +3322,34 @@ void assembly_subsets_update(ApplicationState* app);
 void assembly_subsets_free(ApplicationState* app);
 
 // Script IR lifetime
-// Every IR is made by script_ir_create, and nothing frees one directly. Off the main thread an IR is used by the
-// evaluation task and the visualization task only, and each takes the current one (script.eval_ir, script.ir)
-// when it starts. So while neither runs, an IR which neither field points at is used by nothing, and
-// script_ir_collect frees it. Main thread, once per frame. A new task which uses an IR joins the check there.
-md_script_ir_t* script_ir_create(ApplicationState* state);
+// Every IR is made by script_ir_create, compiling src in the workspace's language, and nothing frees one directly. A
+// task that reads an IR off the main thread retains it when it is made (script::program_retain, on the main thread)
+// and releases it when it is done (from any thread): the evaluation task the IR it evaluates, the visualization job
+// the IR it draws until the job is freed. script_ir_collect frees an IR that neither field (script.ir,
+// script.eval_ir) points at and no task holds. Main thread, once per frame.
+script::Program* script_ir_create(ApplicationState* state, md_str_t src, const script::CompileDesc& desc);
+
+// Sets the workspace's script language: the editor's highlighting and completion follow, the script is compiled
+// again, and every filter is evaluated again in it. The text is kept as it is.
+void script_set_language(ApplicationState* state, script::Language lang);
 void script_ir_collect(ApplicationState* state);
 
 // Script visualization
 // The script IR which made ref: the one being compiled (whose tokens the editor marks) or the one being
 // evaluated (whose properties the plots show). NULL if neither, e.g. once it has been recompiled.
-const md_script_ir_t* script_ir_of(const ApplicationState* state, md_script_vis_ref_t ref);
+const script::Program* script_ir_of(const ApplicationState* state, script::Ref ref);
 // What is visualized is set anew every frame by whatever is hovered, and the last one set in a frame is what
 // is shown. It is computed on a worker thread, never stalling the frame, and shown once ready: from then on for
 // as long as it is still what is set. When the atoms move it is computed again, while the previous result
 // stays on screen.
 //
 // Sets ref, visualized in the IR which made it. Nothing if it no longer resolves.
-void script_visualize_ref(ApplicationState* state, md_script_vis_ref_t ref, int subidx, md_script_vis_flags_t flags = 0);
+void script_visualize_ref(ApplicationState* state, script::Ref ref, int subidx, uint32_t flags = 0);
 // What the value visualized by reference (script_visualize_ref) is at the frame shown, in a few lines: what a hover shows
 // beside the type. Empty while it is computed, and for a visualization of an expression.
-str_t script_vis_value_text(ApplicationState* state);
+md_str_t script_vis_value_text(ApplicationState* state);
 // Sets an expression, compiled against the script being edited (its identifiers)
-void script_visualize_str(ApplicationState* state, str_t str, md_script_vis_flags_t flags = 0);
+void script_visualize_str(ApplicationState* state, md_str_t str, uint32_t flags = 0);
 // Clears what is set. Start of every frame, before anything sets one.
 void script_vis_begin_frame(ApplicationState* state);
 // Takes a finished computation, starts one for what is set if it is not computed yet, and decides what is
@@ -2883,4 +3361,17 @@ uint64_t script_vis_shown_key(const ApplicationState* state);
 static inline void render_invalidate(ApplicationState* state) { state->render.version += 1; }
 // Drops every result, waiting for a running computation. Before the system goes.
 void script_vis_reset(ApplicationState* state);
-void script_set_hovered_property(ApplicationState* state, str_t label, int population_idx = -1);
+
+// GROUPS OF AN ENERGY TERM. The groups of the system a term of an energy file is of (md_edr_term_groups): the two energy
+// groups of Coul-SR:Protein-SOL, the T-coupling group of T-Protein. attr is a series of the system, whose label keeps the
+// term's name. False, and out untouched, for any other series. Its text: "Protein and SOL", "Protein".
+bool   energy_term_groups(md_edr_term_groups_t* out, const ApplicationState* state, const md_attribute_t* attr);
+size_t energy_term_groups_text(char* buf, size_t cap, const ApplicationState* state, const md_edr_term_groups_t& tg);
+// Whether the series is an energy term of groups by its name, whether or not the system has them: for saying so when it
+// does not (md_edr_term_is_of_groups)
+bool   energy_term_names_groups(const md_attribute_t* attr);
+// Highlights the groups of an energy term, each in a colour of its own (selection.highlight_groups): hovering
+// Coul-SR:Protein-SOL marks Protein and SOL apart. Every frame it is hovered, as any highlight. False when the series is
+// of no groups.
+bool   highlight_energy_term_groups(ApplicationState* state, const md_attribute_t* attr);
+void script_set_hovered_property(ApplicationState* state, md_str_t label, int population_idx = -1);

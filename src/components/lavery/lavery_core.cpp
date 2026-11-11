@@ -680,7 +680,7 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys) {
     for (uint32_t r = 0; r < bb.range.count; ++r) {
         if (md_nucleic_backbone_range_is_coarse_grained(&bb, r)) continue;
         for (uint32_t s = bb.range.offset[r]; s < bb.range.offset[r + 1]; ++s) {
-            const int32_t comp = bb.segment.comp_idx[s];
+            const int32_t comp = bb.segment.res_idx[s];
             const int32_t c1 = bb.segment.atoms[s].c1;
             if (comp < 0 || c1 < 0) continue;
             BaseTopology base;
@@ -688,13 +688,13 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys) {
             base.strand = r;
             base.chain_order = s - bb.range.offset[r];
             base.glycosidic_atom = c1;
-            const auto range = md_component_atom_range(&sys.component, comp);
+            const auto range = md_system_residue_atom_range(&sys, comp);
             // Like the cartoon, identify base rings by their bonds to the sugar,
             // not by per-atom nucleobase flags.
             std::vector<uint32_t> ring_ids;
-            for (uint32_t ring = 0; ring < md_index_data_num_ranges(&sys.ring); ++ring) {
-                const int32_t* atoms = md_index_range_beg(&sys.ring, ring);
-                const size_t n = md_index_range_size(&sys.ring, ring);
+            for (uint32_t ring = 0; ring < md_ring_data_count(&sys.ring); ++ring) {
+                const int32_t* atoms = md_ring_atoms(&sys.ring, ring);
+                const size_t n = md_ring_size(&sys.ring, ring);
                 if (n < 5 || n > 6) continue;
                 bool within = true;
                 bool sugar = false;
@@ -706,8 +706,8 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys) {
             }
             int32_t nitrogen = -1;
             for (uint32_t ring : ring_ids) {
-                const int32_t* atoms = md_index_range_beg(&sys.ring, ring);
-                for (size_t k = 0; k < md_index_range_size(&sys.ring, ring); ++k) {
+                const int32_t* atoms = md_ring_atoms(&sys.ring, ring);
+                for (size_t k = 0; k < md_ring_size(&sys.ring, ring); ++k) {
                     if (md_atom_atomic_number(&sys.atom, atoms[k]) == 7 &&
                         md_bond_find(&sys.bond, atoms[k], c1) != -1) nitrogen = atoms[k];
                 }
@@ -715,7 +715,7 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys) {
             if (nitrogen < 0) continue;
             auto atom_named = [&](const char* name) -> int32_t {
                 for (uint32_t atom = range.beg; atom < range.end; ++atom) {
-                    if (str_eq_cstr(md_atom_name(&sys.atom, atom), name)) return (int32_t)atom;
+                    if (md_str_eq_cstr(md_atom_name(&sys.atom, atom), name)) return (int32_t)atom;
                 }
                 return -1;
             };
@@ -737,8 +737,8 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys) {
             base.atoms.push_back((uint32_t)nitrogen);
             for (size_t pass = 0; pass < ring_ids.size(); ++pass) {
                 for (uint32_t ring : ring_ids) {
-                    const int32_t* atoms = md_index_range_beg(&sys.ring, ring);
-                    const size_t n = md_index_range_size(&sys.ring, ring);
+                    const int32_t* atoms = md_ring_atoms(&sys.ring, ring);
+                    const size_t n = md_ring_size(&sys.ring, ring);
                     bool connected = false;
                     for (size_t k = 0; k < n; ++k) {
                         connected |= std::find(base.atoms.begin(), base.atoms.end(), (uint32_t)atoms[k]) != base.atoms.end();

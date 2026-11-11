@@ -8,15 +8,15 @@
 #include <core/md_vec_math.h>
 
 void gbuffer_init(GBuffer* gbuf, int width, int height, int out_width, int out_height) {
-    ASSERT(gbuf);
+    MD_ASSERT(gbuf);
 
     // A 0x0 framebuffer -- an iconified window, or a window manager that reports no
     // size yet at startup -- gives zero-sized attachments and an incomplete FBO, which
     // then turns every subsequent draw into GL_INVALID_FRAMEBUFFER_OPERATION. render()
     // already refuses to resize to 0x0, but the initial call at startup does not, so
     // clamp here and let the first frame that reports real dimensions resize us.
-    width  = MAX(width,  1);
-    height = MAX(height, 1);
+    width  = MD_MAX(width,  1);
+    height = MD_MAX(height, 1);
     out_width  = out_width  > 0 ? out_width  : width;
     out_height = out_height > 0 ? out_height : height;
 
@@ -141,14 +141,14 @@ void gbuffer_init(GBuffer* gbuf, int width, int height, int out_width, int out_h
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT_TRANSPARENCY, GL_TEXTURE_2D, gbuf->tex.transparency, 0);
     }
 
-    // Not wrapped in ASSERT: that macro expands to nothing in release builds, so the
+    // Not wrapped in MD_ASSERT: that macro expands to nothing in release builds, so the
     // check would not run at all and an incomplete G-buffer would silently turn every
     // later draw into GL_INVALID_FRAMEBUFFER_OPERATION.
     GLenum status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         MD_LOG_ERROR("G-buffer framebuffer is incomplete (0x%04X) at %ix%i", (unsigned int)status, width, height);
     }
-    glDrawBuffers((int)ARRAY_SIZE(draw_buffers), draw_buffers);
+    glDrawBuffers((int)MD_COUNTOF(draw_buffers), draw_buffers);
     glClearColor(0, 0, 0, 0);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
 
@@ -185,7 +185,7 @@ void gbuffer_init(GBuffer* gbuf, int width, int height, int out_width, int out_h
 }
 
 void gbuffer_clear(GBuffer* gbuffer) {
-    ASSERT(gbuffer);
+    MD_ASSERT(gbuffer);
 
     const GLenum draw_buffers[] = {
         GL_COLOR_ATTACHMENT_COLOR,
@@ -204,7 +204,7 @@ void gbuffer_clear(GBuffer* gbuffer) {
     const vec4_t zero = {0, 0, 0, 0};
     const vec4_t picking = {1, 1, 1, 1};
 
-    glDrawBuffers((int)ARRAY_SIZE(draw_buffers), draw_buffers);
+    glDrawBuffers((int)MD_COUNTOF(draw_buffers), draw_buffers);
     glClearBufferfv(GL_COLOR, 0, zero.elem);
     glClearBufferfv(GL_COLOR, 1, zero.elem);
     glClearBufferfv(GL_COLOR, 2, zero.elem);
@@ -214,7 +214,7 @@ void gbuffer_clear(GBuffer* gbuffer) {
 }
 
 void gbuffer_free(GBuffer* gbuf) {
-    ASSERT(gbuf);
+    MD_ASSERT(gbuf);
     gbuffer_marks_free(&gbuf->marks);
     gbuffer_marks_free(&gbuf->contours);
     if (gbuf->fbo) glDeleteFramebuffers(1, &gbuf->fbo);
@@ -236,7 +236,7 @@ void gbuffer_marks_begin(GBuffer* gbuf) {
 }
 
 void gbuffer_marks_init(MarksBuffer* marks, int width, int height) {
-    ASSERT(marks && width > 0 && height > 0);
+    MD_ASSERT(marks && width > 0 && height > 0);
     if (marks->width == (uint32_t)width && marks->height == (uint32_t)height) return;
     if (!marks->fbo) glGenFramebuffers(1, &marks->fbo);
     if (!marks->texture) glGenTextures(1, &marks->texture);
@@ -272,7 +272,7 @@ void gbuffer_marks_free(MarksBuffer* marks) {
 }
 
 void gbuffer_marks_begin(GBuffer* gbuf, const MarksBuffer& marks) {
-    ASSERT(gbuf);
+    MD_ASSERT(gbuf);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, marks.fbo);
     const GLenum marks_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, marks_buffers);
@@ -297,7 +297,7 @@ void gbuffer_marks_begin(GBuffer* gbuf, const MarksBuffer& marks) {
 }
 
 void gbuffer_marks_end(GBuffer* gbuf) {
-    ASSERT(gbuf);
+    MD_ASSERT(gbuf);
     glActiveTexture(GL_TEXTURE0 + MD_GL_USER_TEXTURE_UNIT);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);

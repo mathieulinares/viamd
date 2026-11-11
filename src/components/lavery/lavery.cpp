@@ -434,7 +434,7 @@ struct Lavery : viamd::EventHandler {
     std::atomic<bool> calculation_ok = false;
     std::atomic<bool> cancel_requested = false;
     std::atomic<size_t> frames_done = 0;
-    task_system::ID calculation = task_system::INVALID_ID;
+    task_system::Job calculation;
     bool calculating = false;
     bool computed = false;
     std::string run;
@@ -443,9 +443,9 @@ struct Lavery : viamd::EventHandler {
     Lavery() { viamd::event_system_register_handler(*this); }
 
     void wait_for_attribute_readers() {
-        if (app->script.eval) md_script_eval_interrupt(app->script.eval);
-        task_system::task_wait_for(app->tasks.evaluate);
-        task_system::task_wait_for(app->script.vis_task);
+        if (app->script.eval) script::eval_interrupt(app->script.eval);
+        app->tasks.evaluate.wait();
+        app->script.vis_task.wait();
     }
 
     void clear_highlight() {
@@ -465,13 +465,12 @@ struct Lavery : viamd::EventHandler {
         display_analysis = {};
         cancel_recompute();
         cancel_requested = true;
-        if (calculation != task_system::INVALID_ID) task_system::task_interrupt_and_wait_for(calculation);
-        calculation = task_system::INVALID_ID;
+        calculation.cancel_and_wait();
         clear_highlight();
         if (app && !run.empty()) {
             wait_for_attribute_readers();
             const std::string prefix = run + "/lavery";
-            if (md_attributes_remove_prefix(&app->mold.sys.attributes, str_from_cstr(prefix.c_str()))) app->script.compile_ir = true;
+            if (md_attributes_remove_prefix(&app->mold.sys.attributes, md_str_from_cstr(prefix.c_str()))) app->script.compile_ir = true;
         }
         if (!external_mapping[Class_Pair].empty()) saved_external_mapping=external_mapping_text();
         for (auto* setup : {&sequence_reference_setup,&export_reference_setup,&ranking_reference_setup,&heatmap_reference_setup})
@@ -796,88 +795,88 @@ struct Lavery : viamd::EventHandler {
             }
             case viamd::EventType_ViamdSerialize: {
                 auto& state = *(viamd::serialization_state_t*)e.payload;
-                viamd::write_section_header(state, STR_LIT("Lavery"));
-                viamd::write_int(state, STR_LIT("MetricLayout"), METRIC_LAYOUT);
-                viamd::write_bool(state, STR_LIT("ShowWindow"), show_window);
-                viamd::write_bool(state, STR_LIT("ShowHeatmap"), show_heatmap);
-                viamd::write_bool(state, STR_LIT("SyncViewport"), sync_viewport);
-                viamd::write_bool(state, STR_LIT("CompareAll"), compare_all);
-                viamd::write_bool(state, STR_LIT("ShowAxis"), show_axis);
-                viamd::write_int(state, STR_LIT("AxisKind"), axis_kind);
-                viamd::write_bool(state, STR_LIT("DetectionEnabled"), detection_enabled);
-                viamd::write_bool(state, STR_LIT("SignedOverlay"), signed_overlay);
-                viamd::write_bool(state, STR_LIT("OverlayHalo"), overlay_halo);
-                viamd::write_bool(state, STR_LIT("MeasurementText"), measurement_text);
-                viamd::write_bool(state, STR_LIT("MeasurementFeedback"), measurement_feedback);
-                viamd::write_flt(state, STR_LIT("ContourThickness"), contour_thickness);
-                viamd::write_bool(state, STR_LIT("LandmarkView"), landmark_view);
-                viamd::write_bool(state, STR_LIT("LandmarkViewLabels"), landmark_view_labels);
-                viamd::write_flt(state, STR_LIT("LandmarkRadius"), landmark_radius);
-                viamd::write_flt(state, STR_LIT("LandmarkOpacity"), landmark_opacity);
-                viamd::write_flt(state, STR_LIT("LandmarkExtension"), landmark_extension);
-                viamd::write_int(state, STR_LIT("EventVisualStyle"), event_visual_style);
-                viamd::write_flt(state, STR_LIT("GlowStrength"), glow_strength);
-                viamd::write_flt(state, STR_LIT("StateMinTimePs"), state_min_time_ps);
-                viamd::write_int(state, STR_LIT("StateMinFrames"), state_min_frames);
-                viamd::write_flt(state, STR_LIT("PairingMinTimePs"), pairing_min_time_ps);
-                viamd::write_int(state, STR_LIT("PairingMinFrames"), pairing_min_frames);
-                viamd::write_int(state, STR_LIT("StateHistoryKind"), state_history_kind);
-                viamd::write_bool(state, STR_LIT("AggregateOutliers"), aggregate_outliers);
-                viamd::write_int(state, STR_LIT("SelectedParameters"), (int)selected_parameters);
-                viamd::write_int(state, STR_LIT("Baseline"), baseline);
-                viamd::write_int(state, STR_LIT("ReferenceScope"), reference_scope);
-                viamd::write_int(state, STR_LIT("ReferenceSource"), reference_source);
-                viamd::write_str(state, STR_LIT("ExternalReferencePath"), str_from_cstr(external_path.c_str()));
+                viamd::write_section_header(state, MD_STR_LIT("Lavery"));
+                viamd::write_int(state, MD_STR_LIT("MetricLayout"), METRIC_LAYOUT);
+                viamd::write_bool(state, MD_STR_LIT("ShowWindow"), show_window);
+                viamd::write_bool(state, MD_STR_LIT("ShowHeatmap"), show_heatmap);
+                viamd::write_bool(state, MD_STR_LIT("SyncViewport"), sync_viewport);
+                viamd::write_bool(state, MD_STR_LIT("CompareAll"), compare_all);
+                viamd::write_bool(state, MD_STR_LIT("ShowAxis"), show_axis);
+                viamd::write_int(state, MD_STR_LIT("AxisKind"), axis_kind);
+                viamd::write_bool(state, MD_STR_LIT("DetectionEnabled"), detection_enabled);
+                viamd::write_bool(state, MD_STR_LIT("SignedOverlay"), signed_overlay);
+                viamd::write_bool(state, MD_STR_LIT("OverlayHalo"), overlay_halo);
+                viamd::write_bool(state, MD_STR_LIT("MeasurementText"), measurement_text);
+                viamd::write_bool(state, MD_STR_LIT("MeasurementFeedback"), measurement_feedback);
+                viamd::write_flt(state, MD_STR_LIT("ContourThickness"), contour_thickness);
+                viamd::write_bool(state, MD_STR_LIT("LandmarkView"), landmark_view);
+                viamd::write_bool(state, MD_STR_LIT("LandmarkViewLabels"), landmark_view_labels);
+                viamd::write_flt(state, MD_STR_LIT("LandmarkRadius"), landmark_radius);
+                viamd::write_flt(state, MD_STR_LIT("LandmarkOpacity"), landmark_opacity);
+                viamd::write_flt(state, MD_STR_LIT("LandmarkExtension"), landmark_extension);
+                viamd::write_int(state, MD_STR_LIT("EventVisualStyle"), event_visual_style);
+                viamd::write_flt(state, MD_STR_LIT("GlowStrength"), glow_strength);
+                viamd::write_flt(state, MD_STR_LIT("StateMinTimePs"), state_min_time_ps);
+                viamd::write_int(state, MD_STR_LIT("StateMinFrames"), state_min_frames);
+                viamd::write_flt(state, MD_STR_LIT("PairingMinTimePs"), pairing_min_time_ps);
+                viamd::write_int(state, MD_STR_LIT("PairingMinFrames"), pairing_min_frames);
+                viamd::write_int(state, MD_STR_LIT("StateHistoryKind"), state_history_kind);
+                viamd::write_bool(state, MD_STR_LIT("AggregateOutliers"), aggregate_outliers);
+                viamd::write_int(state, MD_STR_LIT("SelectedParameters"), (int)selected_parameters);
+                viamd::write_int(state, MD_STR_LIT("Baseline"), baseline);
+                viamd::write_int(state, MD_STR_LIT("ReferenceScope"), reference_scope);
+                viamd::write_int(state, MD_STR_LIT("ReferenceSource"), reference_source);
+                viamd::write_str(state, MD_STR_LIT("ExternalReferencePath"), md_str_from_cstr(external_path.c_str()));
                 const auto& fingerprint=external_reference.records ? external_reference.fingerprint : saved_reference_fingerprint;
-                viamd::write_str(state, STR_LIT("ExternalReferenceFingerprint"), str_from_cstr(fingerprint.c_str()));
+                viamd::write_str(state, MD_STR_LIT("ExternalReferenceFingerprint"), md_str_from_cstr(fingerprint.c_str()));
                 const std::string mapping_text=external_mapping_text();
-                viamd::write_str(state, STR_LIT("ExternalReferenceMapping"),str_from_cstr(mapping_text.c_str()));
-                viamd::write_bool(state, STR_LIT("BaselineRangeEnabled"), baseline_range_enabled);
-                viamd::write_bool(state, STR_LIT("BaselineRangePeriod"), baseline_range_period);
-                viamd::write_int(state, STR_LIT("BaselinePeriodId"), baseline_period_id);
-                viamd::write_flt(state, STR_LIT("BaselineRangeBeginPs"), baseline_range_begin_ps);
-                viamd::write_flt(state, STR_LIT("BaselineRangeEndPs"), baseline_range_end_ps);
-                viamd::write_int(state, STR_LIT("BaselineRangeFirst"), baseline_range_first);
-                viamd::write_int(state, STR_LIT("BaselineRangeLast"), baseline_range_last);
-                viamd::write_int(state, STR_LIT("EventParameters"), (int)event_parameters);
-                viamd::write_int(state, STR_LIT("EventParametersVersion"), 1);
-                viamd::write_int(state, STR_LIT("EventMinFrames"), event_min_frames);
-                viamd::write_flt(state, STR_LIT("EventMinTimePs"), event_min_time_ps);
-                viamd::write_flt(state, STR_LIT("EventGapTimePs"), event_gap_time_ps);
-                viamd::write_bool(state, STR_LIT("EventRangeEnabled"), event_range_enabled);
-                viamd::write_bool(state, STR_LIT("EventRangePeriod"), event_range_period);
-                viamd::write_int(state, STR_LIT("EventPeriodId"), event_period_id);
-                viamd::write_flt(state, STR_LIT("EventRangeBeginPs"), event_range_begin_ps);
-                viamd::write_flt(state, STR_LIT("EventRangeEndPs"), event_range_end_ps);
-                viamd::write_int(state, STR_LIT("EventRangeFirst"), event_range_first);
-                viamd::write_int(state, STR_LIT("EventRangeLast"), event_range_last);
-                viamd::write_bool(state, STR_LIT("EventTimeNs"), event_time_ns);
-                viamd::write_int(state, STR_LIT("EventMaxGap"), event_max_gap);
-                viamd::write_int(state, STR_LIT("EventNeighbourhood"), event_neighbourhood);
-                viamd::write_bool(state, STR_LIT("EventWholeStructure"), event_whole_structure);
-                viamd::write_flt(state, STR_LIT("EventHysteresis"), event_hysteresis);
-                viamd::write_bool(state, STR_LIT("EventPairLoss"), event_pair_loss);
-                viamd::write_bool(state, STR_LIT("EventHierarchy"), event_hierarchy);
-                viamd::write_flt(state, STR_LIT("EventBurstExtra"), event_burst_extra);
-                viamd::write_int(state, STR_LIT("EventBurstMode"), event_burst_mode);
-                viamd::write_flt(state, STR_LIT("EventResidualSigma"), event_residual_sigma);
-                viamd::write_bool(state, STR_LIT("EventsActiveOnly"), events_active_only);
-                viamd::write_flt(state, STR_LIT("EventsMaxShownTimePs"), events_max_shown_time_ps);
-                viamd::write_int(state, STR_LIT("EventsMaxShownFrames"), events_max_shown_frames);
-                viamd::write_bool(state, STR_LIT("EventsFollowPlayback"), events_follow_playback);
-                viamd::write_flt(state, STR_LIT("LayoutSidebar"), layout_sidebar);
-                viamd::write_flt(state, STR_LIT("LayoutEvents"), layout_events);
-                viamd::write_flt(state, STR_LIT("LayoutOverview"), layout_overview);
-                viamd::write_flt(state, STR_LIT("LayoutMiddle"), layout_middle);
-                viamd::write_flt(state, STR_LIT("LayoutCountPlot"), count_plot_height);
-                viamd::write_flt(state, STR_LIT("LayoutTimelinePlot"), timeline_plot_height);
-                viamd::write_flt(state, STR_LIT("LayoutDistributionPlot"), distribution_plot_height);
-                viamd::write_flt(state, STR_LIT("LayoutOutlierList"), outliers_list_height);
-                viamd::write_flt(state, STR_LIT("OutlierSigma"), outlier_sigma);
-                viamd::write_int(state, STR_LIT("MultipleTesting"), multiple_testing);
-                viamd::write_flt(state, STR_LIT("FamilyAlpha"), family_alpha);
-                viamd::write_int(state, STR_LIT("Metric"), metric);
-                viamd::write_int(state, STR_LIT("Member"), member);
+                viamd::write_str(state, MD_STR_LIT("ExternalReferenceMapping"),md_str_from_cstr(mapping_text.c_str()));
+                viamd::write_bool(state, MD_STR_LIT("BaselineRangeEnabled"), baseline_range_enabled);
+                viamd::write_bool(state, MD_STR_LIT("BaselineRangePeriod"), baseline_range_period);
+                viamd::write_int(state, MD_STR_LIT("BaselinePeriodId"), baseline_period_id);
+                viamd::write_flt(state, MD_STR_LIT("BaselineRangeBeginPs"), baseline_range_begin_ps);
+                viamd::write_flt(state, MD_STR_LIT("BaselineRangeEndPs"), baseline_range_end_ps);
+                viamd::write_int(state, MD_STR_LIT("BaselineRangeFirst"), baseline_range_first);
+                viamd::write_int(state, MD_STR_LIT("BaselineRangeLast"), baseline_range_last);
+                viamd::write_int(state, MD_STR_LIT("EventParameters"), (int)event_parameters);
+                viamd::write_int(state, MD_STR_LIT("EventParametersVersion"), 1);
+                viamd::write_int(state, MD_STR_LIT("EventMinFrames"), event_min_frames);
+                viamd::write_flt(state, MD_STR_LIT("EventMinTimePs"), event_min_time_ps);
+                viamd::write_flt(state, MD_STR_LIT("EventGapTimePs"), event_gap_time_ps);
+                viamd::write_bool(state, MD_STR_LIT("EventRangeEnabled"), event_range_enabled);
+                viamd::write_bool(state, MD_STR_LIT("EventRangePeriod"), event_range_period);
+                viamd::write_int(state, MD_STR_LIT("EventPeriodId"), event_period_id);
+                viamd::write_flt(state, MD_STR_LIT("EventRangeBeginPs"), event_range_begin_ps);
+                viamd::write_flt(state, MD_STR_LIT("EventRangeEndPs"), event_range_end_ps);
+                viamd::write_int(state, MD_STR_LIT("EventRangeFirst"), event_range_first);
+                viamd::write_int(state, MD_STR_LIT("EventRangeLast"), event_range_last);
+                viamd::write_bool(state, MD_STR_LIT("EventTimeNs"), event_time_ns);
+                viamd::write_int(state, MD_STR_LIT("EventMaxGap"), event_max_gap);
+                viamd::write_int(state, MD_STR_LIT("EventNeighbourhood"), event_neighbourhood);
+                viamd::write_bool(state, MD_STR_LIT("EventWholeStructure"), event_whole_structure);
+                viamd::write_flt(state, MD_STR_LIT("EventHysteresis"), event_hysteresis);
+                viamd::write_bool(state, MD_STR_LIT("EventPairLoss"), event_pair_loss);
+                viamd::write_bool(state, MD_STR_LIT("EventHierarchy"), event_hierarchy);
+                viamd::write_flt(state, MD_STR_LIT("EventBurstExtra"), event_burst_extra);
+                viamd::write_int(state, MD_STR_LIT("EventBurstMode"), event_burst_mode);
+                viamd::write_flt(state, MD_STR_LIT("EventResidualSigma"), event_residual_sigma);
+                viamd::write_bool(state, MD_STR_LIT("EventsActiveOnly"), events_active_only);
+                viamd::write_flt(state, MD_STR_LIT("EventsMaxShownTimePs"), events_max_shown_time_ps);
+                viamd::write_int(state, MD_STR_LIT("EventsMaxShownFrames"), events_max_shown_frames);
+                viamd::write_bool(state, MD_STR_LIT("EventsFollowPlayback"), events_follow_playback);
+                viamd::write_flt(state, MD_STR_LIT("LayoutSidebar"), layout_sidebar);
+                viamd::write_flt(state, MD_STR_LIT("LayoutEvents"), layout_events);
+                viamd::write_flt(state, MD_STR_LIT("LayoutOverview"), layout_overview);
+                viamd::write_flt(state, MD_STR_LIT("LayoutMiddle"), layout_middle);
+                viamd::write_flt(state, MD_STR_LIT("LayoutCountPlot"), count_plot_height);
+                viamd::write_flt(state, MD_STR_LIT("LayoutTimelinePlot"), timeline_plot_height);
+                viamd::write_flt(state, MD_STR_LIT("LayoutDistributionPlot"), distribution_plot_height);
+                viamd::write_flt(state, MD_STR_LIT("LayoutOutlierList"), outliers_list_height);
+                viamd::write_flt(state, MD_STR_LIT("OutlierSigma"), outlier_sigma);
+                viamd::write_int(state, MD_STR_LIT("MultipleTesting"), multiple_testing);
+                viamd::write_flt(state, MD_STR_LIT("FamilyAlpha"), family_alpha);
+                viamd::write_int(state, MD_STR_LIT("Metric"), metric);
+                viamd::write_int(state, MD_STR_LIT("Member"), member);
                 serialize_settings(state);
                 serialize_workflows(state);
                 break;
@@ -963,200 +962,200 @@ struct Lavery : viamd::EventHandler {
             case viamd::EventType_ViamdDeserialize: {
                 auto& state = *(viamd::deserialization_state_t*)e.payload;
                 if (deserialize_workflows(state)) break;
-                if (!str_eq(viamd::section_header(state), STR_LIT("Lavery"))) break;
+                if (!md_str_eq(viamd::section_header(state), MD_STR_LIT("Lavery"))) break;
                 int event_parameters_version = 0;
-                str_t key, arg;
+                md_str_t key, arg;
                 while (viamd::next_entry(key, arg, state)) {
-                    if (str_eq(key, STR_LIT("MetricLayout"))) viamd::extract_enum(metric_layout, arg, METRIC_LAYOUT + 1);
-                    else if (str_eq(key, STR_LIT("ShowWindow"))) viamd::extract_bool(show_window, arg);
-                    else if (str_eq(key, STR_LIT("ShowHeatmap"))) viamd::extract_bool(show_heatmap, arg);
-                    else if (str_eq(key, STR_LIT("SyncViewport"))) viamd::extract_bool(sync_viewport, arg);
-                    else if (str_eq(key, STR_LIT("CompareAll"))) viamd::extract_bool(compare_all, arg);
-                    else if (str_eq(key, STR_LIT("ShowAxis"))) viamd::extract_bool(show_axis, arg);
-                    else if (str_eq(key, STR_LIT("AxisKind"))) viamd::extract_enum(axis_kind, arg, 2);
-                    else if (str_eq(key, STR_LIT("DetectionEnabled"))) viamd::extract_bool(detection_enabled, arg);
-                    else if (str_eq(key, STR_LIT("SignedOverlay"))) viamd::extract_bool(signed_overlay, arg);
-                    else if (str_eq(key, STR_LIT("OverlayHalo"))) viamd::extract_bool(overlay_halo, arg);
-                    else if (str_eq(key, STR_LIT("MeasurementText"))) viamd::extract_bool(measurement_text, arg);
-                    else if (str_eq(key, STR_LIT("MeasurementFeedback"))) viamd::extract_bool(measurement_feedback, arg);
-                    else if (str_eq(key, STR_LIT("LandmarkView"))) viamd::extract_bool(landmark_view, arg);
-                    else if (str_eq(key, STR_LIT("LandmarkViewLabels"))) viamd::extract_bool(landmark_view_labels, arg);
-                    else if (str_eq(key, STR_LIT("LandmarkRadius")) || str_eq(key, STR_LIT("LandmarkOpacity")) ||
-                        str_eq(key, STR_LIT("LandmarkExtension"))) {
-                        const bool radius = str_eq(key, STR_LIT("LandmarkRadius")), opacity = str_eq(key, STR_LIT("LandmarkOpacity"));
+                    if (md_str_eq(key, MD_STR_LIT("MetricLayout"))) viamd::extract_enum(metric_layout, arg, METRIC_LAYOUT + 1);
+                    else if (md_str_eq(key, MD_STR_LIT("ShowWindow"))) viamd::extract_bool(show_window, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("ShowHeatmap"))) viamd::extract_bool(show_heatmap, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("SyncViewport"))) viamd::extract_bool(sync_viewport, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("CompareAll"))) viamd::extract_bool(compare_all, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("ShowAxis"))) viamd::extract_bool(show_axis, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("AxisKind"))) viamd::extract_enum(axis_kind, arg, 2);
+                    else if (md_str_eq(key, MD_STR_LIT("DetectionEnabled"))) viamd::extract_bool(detection_enabled, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("SignedOverlay"))) viamd::extract_bool(signed_overlay, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("OverlayHalo"))) viamd::extract_bool(overlay_halo, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("MeasurementText"))) viamd::extract_bool(measurement_text, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("MeasurementFeedback"))) viamd::extract_bool(measurement_feedback, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LandmarkView"))) viamd::extract_bool(landmark_view, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LandmarkViewLabels"))) viamd::extract_bool(landmark_view_labels, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LandmarkRadius")) || md_str_eq(key, MD_STR_LIT("LandmarkOpacity")) ||
+                        md_str_eq(key, MD_STR_LIT("LandmarkExtension"))) {
+                        const bool radius = md_str_eq(key, MD_STR_LIT("LandmarkRadius")), opacity = md_str_eq(key, MD_STR_LIT("LandmarkOpacity"));
                         const float lo = radius ? 0.05f : opacity ? 0.1f : 0.0f, hi = radius || opacity ? 1.0f : 10.0f;
                         float value = NAN;
                         if (!viamd::extract_flt(value, arg) || !std::isfinite(value) || value < lo || value > hi)
                             MD_LOG_ERROR("Lavery: %.*s must be finite and between %g and %g", (int)key.len, key.ptr, lo, hi);
                         else (radius ? landmark_radius : opacity ? landmark_opacity : landmark_extension) = value;
                     }
-                    else if (str_eq(key, STR_LIT("ContourThickness"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("ContourThickness"))) {
                         float thickness = contour_thickness;
                         if (!viamd::extract_flt(thickness, arg) || !std::isfinite(thickness) || thickness < 1.0f || thickness > 4.0f)
                             MD_LOG_ERROR("Lavery: contour thickness must be finite and between 1 and 4");
                         else contour_thickness = thickness;
                     }
-                    else if (str_eq(key, STR_LIT("EventVisualStyle"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventVisualStyle"))) {
                         if (!viamd::extract_enum(event_visual_style, arg, EventVisual_Count))
                             MD_LOG_ERROR("Lavery: event visual style must be Contour (0), Glow (1), Both (2) or Off (3)");
                     }
-                    else if (str_eq(key, STR_LIT("GlowStrength"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("GlowStrength"))) {
                         float strength = glow_strength;
                         if (!viamd::extract_flt(strength, arg) || !std::isfinite(strength) || strength < 0 || strength > 1)
                             MD_LOG_ERROR("Lavery: glow strength must be finite and between 0 and 1");
                         else glow_strength = strength;
                     }
-                    else if (str_eq(key, STR_LIT("StateMinTimePs"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("StateMinTimePs"))) {
                         viamd::extract_flt(state_min_time_ps, arg);
                         if (!std::isfinite(state_min_time_ps) || state_min_time_ps < 0) state_min_time_ps = -1;
                     }
-                    else if (str_eq(key, STR_LIT("StateHistoryKind"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("StateHistoryKind"))) {
                         if (!viamd::extract_int(state_history_kind, arg) || state_history_kind < 0 || state_history_kind > 5) {
                             MD_LOG_ERROR("Lavery: invalid state history selection");
                             state_history_kind = 0;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("PairingMinTimePs"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("PairingMinTimePs"))) {
                         if (!viamd::extract_flt(pairing_min_time_ps, arg) || !std::isfinite(pairing_min_time_ps) || pairing_min_time_ps < 0) {
                             MD_LOG_ERROR("Lavery: PairingMinTimePs must be finite and nonnegative");
                             pairing_min_time_ps = 200;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("PairingMinFrames"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("PairingMinFrames"))) {
                         if (!viamd::extract_int(pairing_min_frames, arg) || pairing_min_frames < 1) {
                             MD_LOG_ERROR("Lavery: PairingMinFrames must be positive");
                             pairing_min_frames = 3;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("StateMinFrames"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("StateMinFrames"))) {
                         viamd::extract_int(state_min_frames, arg);
                         state_min_frames = std::clamp(state_min_frames, 1, 100000);
                     }
-                    else if (str_eq(key, STR_LIT("AggregateOutliers"))) viamd::extract_bool(aggregate_outliers, arg);
-                    else if (str_eq(key, STR_LIT("SelectedParameters"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("AggregateOutliers"))) viamd::extract_bool(aggregate_outliers, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("SelectedParameters"))) {
                         int mask = (int)CLASS_LOCAL_ALL;
                         viamd::extract_int(mask, arg);
                         selected_parameters = (uint32_t)mask & CLASS_LOCAL_ALL;
                     }
-                    else if (str_eq(key, STR_LIT("OutlierSigma"))) viamd::extract_flt(outlier_sigma, arg);
-                    else if (str_eq(key, STR_LIT("MultipleTesting"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("OutlierSigma"))) viamd::extract_flt(outlier_sigma, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("MultipleTesting"))) {
                         viamd::extract_int(multiple_testing, arg);
                         multiple_testing = std::clamp(multiple_testing, 0, (int)MultipleTesting_Count - 1);
-                    } else if (str_eq(key, STR_LIT("FamilyAlpha"))) {
+                    } else if (md_str_eq(key, MD_STR_LIT("FamilyAlpha"))) {
                         viamd::extract_flt(family_alpha, arg);
                         family_alpha = std::isfinite(family_alpha) ? std::clamp(family_alpha, 0.001f, 0.2f) : 0.05f;
                     }
-                    else if (str_eq(key, STR_LIT("Baseline"))) viamd::extract_enum(baseline, arg, Baseline_Count);
-                    else if (str_eq(key, STR_LIT("ReferenceScope"))) viamd::extract_enum(reference_scope, arg, Reference_Count);
-                    else if (str_eq(key, STR_LIT("ReferenceSource"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("Baseline"))) viamd::extract_enum(baseline, arg, Baseline_Count);
+                    else if (md_str_eq(key, MD_STR_LIT("ReferenceScope"))) viamd::extract_enum(reference_scope, arg, Reference_Count);
+                    else if (md_str_eq(key, MD_STR_LIT("ReferenceSource"))) {
                         if (!viamd::extract_int(reference_source,arg) || reference_source<0 || reference_source>1) {
                             MD_LOG_ERROR("Lavery: invalid reference source");
                             reference_source = 0;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("ExternalReferencePath"))) {
-                        str_t text;
+                    else if (md_str_eq(key, MD_STR_LIT("ExternalReferencePath"))) {
+                        md_str_t text;
                         if (viamd::extract_str(text,arg)) external_path.assign(text.ptr,text.len);
                         external_load_pending = !external_path.empty();
                     }
-                    else if (str_eq(key, STR_LIT("ExternalReferenceMapping"))) {
-                        str_t text;
+                    else if (md_str_eq(key, MD_STR_LIT("ExternalReferenceMapping"))) {
+                        md_str_t text;
                         if (viamd::extract_str(text,arg)) saved_external_mapping.assign(text.ptr,text.len);
                     }
-                    else if (str_eq(key, STR_LIT("ExternalReferenceFingerprint"))) {
-                        str_t text;
+                    else if (md_str_eq(key, MD_STR_LIT("ExternalReferenceFingerprint"))) {
+                        md_str_t text;
                         if (viamd::extract_str(text,arg)) saved_reference_fingerprint.assign(text.ptr,text.len);
                     }
-                    else if (str_eq(key, STR_LIT("BaselineRangeEnabled"))) viamd::extract_bool(baseline_range_enabled, arg);
-                    else if (str_eq(key, STR_LIT("BaselineRangePeriod"))) viamd::extract_bool(baseline_range_period, arg);
-                    else if (str_eq(key, STR_LIT("BaselinePeriodId"))) extract_period_id(baseline_period_id, arg);
-                    else if (str_eq(key, STR_LIT("BaselineRangeBeginPs"))) viamd::extract_flt(baseline_range_begin_ps, arg);
-                    else if (str_eq(key, STR_LIT("BaselineRangeEndPs"))) viamd::extract_flt(baseline_range_end_ps, arg);
-                    else if (str_eq(key, STR_LIT("BaselineRangeFirst"))) viamd::extract_int(baseline_range_first, arg);
-                    else if (str_eq(key, STR_LIT("BaselineRangeLast"))) viamd::extract_int(baseline_range_last, arg);
-                    else if (str_eq(key, STR_LIT("EventParameters"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("BaselineRangeEnabled"))) viamd::extract_bool(baseline_range_enabled, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("BaselineRangePeriod"))) viamd::extract_bool(baseline_range_period, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("BaselinePeriodId"))) extract_period_id(baseline_period_id, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("BaselineRangeBeginPs"))) viamd::extract_flt(baseline_range_begin_ps, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("BaselineRangeEndPs"))) viamd::extract_flt(baseline_range_end_ps, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("BaselineRangeFirst"))) viamd::extract_int(baseline_range_first, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("BaselineRangeLast"))) viamd::extract_int(baseline_range_last, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventParameters"))) {
                         int mask = (int)DEFAULT_EVENT_PARAMETERS;
                         viamd::extract_int(mask, arg);
                         event_parameters = (uint32_t)mask & kEventAllParameters;
                     }
-                    else if (str_eq(key, STR_LIT("EventParametersVersion")))
+                    else if (md_str_eq(key, MD_STR_LIT("EventParametersVersion")))
                         viamd::extract_enum(event_parameters_version, arg, 2);
-                    else if (str_eq(key, STR_LIT("EventMinFrames"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventMinFrames"))) {
                         viamd::extract_int(event_min_frames, arg);
                         event_min_frames = std::clamp(event_min_frames, 1, 100000);
                     }
-                    else if (str_eq(key, STR_LIT("EventMinTimePs"))) viamd::extract_flt(event_min_time_ps, arg);
-                    else if (str_eq(key, STR_LIT("EventGapTimePs"))) viamd::extract_flt(event_gap_time_ps, arg);
-                    else if (str_eq(key, STR_LIT("EventRangeEnabled"))) viamd::extract_bool(event_range_enabled, arg);
-                    else if (str_eq(key, STR_LIT("EventRangePeriod"))) viamd::extract_bool(event_range_period, arg);
-                    else if (str_eq(key, STR_LIT("EventPeriodId"))) extract_period_id(event_period_id, arg);
-                    else if (str_eq(key, STR_LIT("EventRangeBeginPs"))) viamd::extract_flt(event_range_begin_ps, arg);
-                    else if (str_eq(key, STR_LIT("EventRangeEndPs"))) viamd::extract_flt(event_range_end_ps, arg);
-                    else if (str_eq(key, STR_LIT("EventRangeFirst"))) viamd::extract_int(event_range_first, arg);
-                    else if (str_eq(key, STR_LIT("EventRangeLast"))) viamd::extract_int(event_range_last, arg);
-                    else if (str_eq(key, STR_LIT("EventTimeNs"))) viamd::extract_bool(event_time_ns, arg);
-                    else if (str_eq(key, STR_LIT("EventMaxGap"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventMinTimePs"))) viamd::extract_flt(event_min_time_ps, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventGapTimePs"))) viamd::extract_flt(event_gap_time_ps, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventRangeEnabled"))) viamd::extract_bool(event_range_enabled, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventRangePeriod"))) viamd::extract_bool(event_range_period, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventPeriodId"))) extract_period_id(event_period_id, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventRangeBeginPs"))) viamd::extract_flt(event_range_begin_ps, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventRangeEndPs"))) viamd::extract_flt(event_range_end_ps, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventRangeFirst"))) viamd::extract_int(event_range_first, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventRangeLast"))) viamd::extract_int(event_range_last, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventTimeNs"))) viamd::extract_bool(event_time_ns, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventMaxGap"))) {
                         viamd::extract_int(event_max_gap, arg);
                         event_max_gap = std::clamp(event_max_gap, 0, 100000);
                     }
-                    else if (str_eq(key, STR_LIT("EventNeighbourhood"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventNeighbourhood"))) {
                         viamd::extract_int(event_neighbourhood, arg);
                         event_neighbourhood = std::clamp(event_neighbourhood, 0, 1000);
                     }
-                    else if (str_eq(key, STR_LIT("EventWholeStructure"))) viamd::extract_bool(event_whole_structure, arg);
-                    else if (str_eq(key, STR_LIT("EventHysteresis"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventWholeStructure"))) viamd::extract_bool(event_whole_structure, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventHysteresis"))) {
                         viamd::extract_flt(event_hysteresis, arg);
                         event_hysteresis = std::isfinite(event_hysteresis) ? std::clamp(event_hysteresis, 0.0f, 2.0f) : 0.5f;
                     }
-                    else if (str_eq(key, STR_LIT("EventPairLoss"))) viamd::extract_bool(event_pair_loss, arg);
-                    else if (str_eq(key, STR_LIT("EventHierarchy"))) viamd::extract_bool(event_hierarchy, arg);
-                    else if (str_eq(key, STR_LIT("EventBurstExtra"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventPairLoss"))) viamd::extract_bool(event_pair_loss, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventHierarchy"))) viamd::extract_bool(event_hierarchy, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventBurstExtra"))) {
                         viamd::extract_flt(event_burst_extra, arg);
                         if (!std::isfinite(event_burst_extra) || event_burst_extra < 0.25f || event_burst_extra > 4.0f) {
                             MD_LOG_ERROR("Lavery: EventBurstExtra must be between 0.25 and 4 sigma");
                             event_burst_extra = 1.0f;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("EventBurstMode"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventBurstMode"))) {
                         viamd::extract_int(event_burst_mode, arg);
                         if (event_burst_mode < 0 || event_burst_mode > 1) {
                             MD_LOG_ERROR("Lavery: EventBurstMode must be 0 (stronger) or 1 (background)");
                             event_burst_mode = 0;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("EventResidualSigma"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventResidualSigma"))) {
                         viamd::extract_flt(event_residual_sigma, arg);
                         if (!std::isfinite(event_residual_sigma) || event_residual_sigma < 0.5f || event_residual_sigma > 6.0f) {
                             MD_LOG_ERROR("Lavery: EventResidualSigma must be between 0.5 and 6 sigma");
                             event_residual_sigma = 2.0f;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("Metric"))) viamd::extract_enum(metric, arg, Metric_Count);
-                    else if (str_eq(key, STR_LIT("Member"))) viamd::extract_int(member, arg);
-                    else if (str_eq(key, STR_LIT("EventsActiveOnly"))) viamd::extract_bool(events_active_only, arg);
-                    else if (str_eq(key, STR_LIT("EventsMaxShownTimePs"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("Metric"))) viamd::extract_enum(metric, arg, Metric_Count);
+                    else if (md_str_eq(key, MD_STR_LIT("Member"))) viamd::extract_int(member, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventsActiveOnly"))) viamd::extract_bool(events_active_only, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventsMaxShownTimePs"))) {
                         viamd::extract_flt(events_max_shown_time_ps, arg);
                         if (!std::isfinite(events_max_shown_time_ps) || events_max_shown_time_ps < 0) {
                             MD_LOG_ERROR("Lavery: EventsMaxShownTimePs must be finite and nonnegative; using Unlimited");
                             events_max_shown_time_ps = 0;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("EventsMaxShownFrames"))) {
+                    else if (md_str_eq(key, MD_STR_LIT("EventsMaxShownFrames"))) {
                         viamd::extract_int(events_max_shown_frames, arg);
                         if (events_max_shown_frames < 0) {
                             MD_LOG_ERROR("Lavery: EventsMaxShownFrames must be nonnegative; using Unlimited");
                             events_max_shown_frames = 0;
                         }
                     }
-                    else if (str_eq(key, STR_LIT("EventsFollowPlayback"))) viamd::extract_bool(events_follow_playback, arg);
-                    else if (str_eq(key, STR_LIT("LayoutSidebar"))) viamd::extract_flt(layout_sidebar, arg);
-                    else if (str_eq(key, STR_LIT("LayoutEvents"))) viamd::extract_flt(layout_events, arg);
-                    else if (str_eq(key, STR_LIT("LayoutOverview"))) viamd::extract_flt(layout_overview, arg);
-                    else if (str_eq(key, STR_LIT("LayoutMiddle"))) viamd::extract_flt(layout_middle, arg);
-                    else if (str_eq(key, STR_LIT("LayoutCountPlot"))) viamd::extract_flt(count_plot_height, arg);
-                    else if (str_eq(key, STR_LIT("LayoutTimelinePlot"))) viamd::extract_flt(timeline_plot_height, arg);
-                    else if (str_eq(key, STR_LIT("LayoutDistributionPlot"))) viamd::extract_flt(distribution_plot_height, arg);
-                    else if (str_eq(key, STR_LIT("LayoutOutlierList"))) viamd::extract_flt(outliers_list_height, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("EventsFollowPlayback"))) viamd::extract_bool(events_follow_playback, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutSidebar"))) viamd::extract_flt(layout_sidebar, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutEvents"))) viamd::extract_flt(layout_events, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutOverview"))) viamd::extract_flt(layout_overview, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutMiddle"))) viamd::extract_flt(layout_middle, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutCountPlot"))) viamd::extract_flt(count_plot_height, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutTimelinePlot"))) viamd::extract_flt(timeline_plot_height, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutDistributionPlot"))) viamd::extract_flt(distribution_plot_height, arg);
+                    else if (md_str_eq(key, MD_STR_LIT("LayoutOutlierList"))) viamd::extract_flt(outliers_list_height, arg);
                     else deserialize_setting(key, arg);
                 }
                 // Older workspaces: nucleotide indices move past the helical parameters, which stay unselected.
@@ -1177,11 +1176,11 @@ struct Lavery : viamd::EventHandler {
     }
 
     static void write_text(viamd::serialization_state_t& state, const char* ident, const std::string& text) {
-        viamd::write_str(state, str_from_cstr(ident), str_t{text.data(), text.size()});
+        viamd::write_str(state, md_str_from_cstr(ident), md_str_t{text.data(), text.size()});
     }
 
-    static bool read_text(std::string& out, str_t arg) {
-        str_t text;
+    static bool read_text(std::string& out, md_str_t arg) {
+        md_str_t text;
         if (!viamd::extract_str(text, arg)) return false;
         out.assign(text.ptr, text.len);
         return true;
@@ -1189,54 +1188,54 @@ struct Lavery : viamd::EventHandler {
 
     static void write_interval(viamd::serialization_state_t& state, const WorkflowInterval& interval, const std::string& prefix = {}) {
         auto ident = [&](const char* name) { return prefix + name; };
-        viamd::write_int(state, str_from_cstr(ident("IntervalKind").c_str()), interval.kind);
-        viamd::write_int(state, str_from_cstr(ident("IntervalPeriod").c_str()), interval.period);
-        viamd::write_dbl(state, str_from_cstr(ident("IntervalBeginPs").c_str()), interval.begin_ps);
-        viamd::write_dbl(state, str_from_cstr(ident("IntervalEndPs").c_str()), interval.end_ps);
-        viamd::write_int(state, str_from_cstr(ident("IntervalFirst").c_str()), interval.first);
-        viamd::write_int(state, str_from_cstr(ident("IntervalLast").c_str()), interval.last);
+        viamd::write_int(state, md_str_from_cstr(ident("IntervalKind").c_str()), interval.kind);
+        viamd::write_int(state, md_str_from_cstr(ident("IntervalPeriod").c_str()), interval.period);
+        viamd::write_dbl(state, md_str_from_cstr(ident("IntervalBeginPs").c_str()), interval.begin_ps);
+        viamd::write_dbl(state, md_str_from_cstr(ident("IntervalEndPs").c_str()), interval.end_ps);
+        viamd::write_int(state, md_str_from_cstr(ident("IntervalFirst").c_str()), interval.first);
+        viamd::write_int(state, md_str_from_cstr(ident("IntervalLast").c_str()), interval.last);
     }
 
-    static bool read_interval(WorkflowInterval& interval, str_t key, str_t arg, const std::string& prefix = {}) {
+    static bool read_interval(WorkflowInterval& interval, md_str_t key, md_str_t arg, const std::string& prefix = {}) {
         if (key.len < prefix.size() || prefix.compare(0, prefix.size(), key.ptr, prefix.size())) return false;
-        const str_t name = {key.ptr + prefix.size(), key.len - prefix.size()};
-        if (str_eq(name, STR_LIT("IntervalKind"))) viamd::extract_enum(interval.kind, arg, 3);
-        else if (str_eq(name, STR_LIT("IntervalPeriod"))) extract_period_id(interval.period, arg);
-        else if (str_eq(name, STR_LIT("IntervalBeginPs"))) viamd::extract_dbl(interval.begin_ps, arg);
-        else if (str_eq(name, STR_LIT("IntervalEndPs"))) viamd::extract_dbl(interval.end_ps, arg);
-        else if (str_eq(name, STR_LIT("IntervalFirst"))) viamd::extract_int(interval.first, arg);
-        else if (str_eq(name, STR_LIT("IntervalLast"))) viamd::extract_int(interval.last, arg);
+        const md_str_t name = {key.ptr + prefix.size(), key.len - prefix.size()};
+        if (md_str_eq(name, MD_STR_LIT("IntervalKind"))) viamd::extract_enum(interval.kind, arg, 3);
+        else if (md_str_eq(name, MD_STR_LIT("IntervalPeriod"))) extract_period_id(interval.period, arg);
+        else if (md_str_eq(name, MD_STR_LIT("IntervalBeginPs"))) viamd::extract_dbl(interval.begin_ps, arg);
+        else if (md_str_eq(name, MD_STR_LIT("IntervalEndPs"))) viamd::extract_dbl(interval.end_ps, arg);
+        else if (md_str_eq(name, MD_STR_LIT("IntervalFirst"))) viamd::extract_int(interval.first, arg);
+        else if (md_str_eq(name, MD_STR_LIT("IntervalLast"))) viamd::extract_int(interval.last, arg);
         else return false;
         return true;
     }
 
     // Session settings of the analysis workflows, stored in [Lavery].
     void serialize_settings(viamd::serialization_state_t& state) const {
-        viamd::write_int(state, STR_LIT("WorkflowStateVersion"), 1);
-        viamd::write_int(state, STR_LIT("HeatmapReferenceMode"), heatmap_reference_mode);
-        viamd::write_int(state, STR_LIT("ComparisonClass"), comparison_class);
-        viamd::write_int(state, STR_LIT("ComparisonStyle"), comparison_style);
-        viamd::write_flt(state, STR_LIT("ComparisonLineWidth"), comparison_line_width);
-        viamd::write_flt(state, STR_LIT("ComparisonOpacity"), comparison_opacity);
-        viamd::write_int(state, STR_LIT("ProfileClass"), profile_class);
-        viamd::write_int_vec(state, STR_LIT("ProfileParameters"), profile_parameters.data(), profile_parameters.size());
-        viamd::write_bool(state, STR_LIT("ProfileUsePeriod"), profile_use_period);
-        viamd::write_int(state, STR_LIT("ProfilePeriod"), profile_period);
-        viamd::write_bool(state, STR_LIT("ProfileSpread"), profile_spread);
-        viamd::write_bool(state, STR_LIT("ProfileCurrent"), profile_current);
-        viamd::write_bool(state, STR_LIT("ProfileReference"), profile_reference);
-        viamd::write_bool(state, STR_LIT("ProfilePrimaryVisible"), profile_primary_visible);
-        viamd::write_int(state, STR_LIT("ProfileView"), profile_view);
-        viamd::write_int(state, STR_LIT("ProfileOccupancyKind"), profile_occupancy_kind);
-        viamd::write_flt(state, STR_LIT("ProfileBendThreshold"), profile_bend_threshold);
-        viamd::write_bool(state, STR_LIT("ProfileFixedOccupancyScale"), profile_fixed_occupancy_scale);
-        viamd::write_flt(state, STR_LIT("LandmarkMinOccupancy"), landmark_min_occupancy);
-        viamd::write_int(state, STR_LIT("RepresentativeCount"), representative_count);
-        viamd::write_flt(state, STR_LIT("RepresentativeSeparation"), representative_separation);
-        viamd::write_flt(state, STR_LIT("RepresentativeCoverage"), representative_coverage);
-        viamd::write_bool(state, STR_LIT("RepresentativeAllMembers"), representative_all_members);
+        viamd::write_int(state, MD_STR_LIT("WorkflowStateVersion"), 1);
+        viamd::write_int(state, MD_STR_LIT("HeatmapReferenceMode"), heatmap_reference_mode);
+        viamd::write_int(state, MD_STR_LIT("ComparisonClass"), comparison_class);
+        viamd::write_int(state, MD_STR_LIT("ComparisonStyle"), comparison_style);
+        viamd::write_flt(state, MD_STR_LIT("ComparisonLineWidth"), comparison_line_width);
+        viamd::write_flt(state, MD_STR_LIT("ComparisonOpacity"), comparison_opacity);
+        viamd::write_int(state, MD_STR_LIT("ProfileClass"), profile_class);
+        viamd::write_int_vec(state, MD_STR_LIT("ProfileParameters"), profile_parameters.data(), profile_parameters.size());
+        viamd::write_bool(state, MD_STR_LIT("ProfileUsePeriod"), profile_use_period);
+        viamd::write_int(state, MD_STR_LIT("ProfilePeriod"), profile_period);
+        viamd::write_bool(state, MD_STR_LIT("ProfileSpread"), profile_spread);
+        viamd::write_bool(state, MD_STR_LIT("ProfileCurrent"), profile_current);
+        viamd::write_bool(state, MD_STR_LIT("ProfileReference"), profile_reference);
+        viamd::write_bool(state, MD_STR_LIT("ProfilePrimaryVisible"), profile_primary_visible);
+        viamd::write_int(state, MD_STR_LIT("ProfileView"), profile_view);
+        viamd::write_int(state, MD_STR_LIT("ProfileOccupancyKind"), profile_occupancy_kind);
+        viamd::write_flt(state, MD_STR_LIT("ProfileBendThreshold"), profile_bend_threshold);
+        viamd::write_bool(state, MD_STR_LIT("ProfileFixedOccupancyScale"), profile_fixed_occupancy_scale);
+        viamd::write_flt(state, MD_STR_LIT("LandmarkMinOccupancy"), landmark_min_occupancy);
+        viamd::write_int(state, MD_STR_LIT("RepresentativeCount"), representative_count);
+        viamd::write_flt(state, MD_STR_LIT("RepresentativeSeparation"), representative_separation);
+        viamd::write_flt(state, MD_STR_LIT("RepresentativeCoverage"), representative_coverage);
+        viamd::write_bool(state, MD_STR_LIT("RepresentativeAllMembers"), representative_all_members);
         const int masks[Class_Count] = {(int)representative_masks[0], (int)representative_masks[1], (int)representative_masks[2]};
-        viamd::write_int_vec(state, STR_LIT("RepresentativeMasks"), masks, Class_Count);
+        viamd::write_int_vec(state, MD_STR_LIT("RepresentativeMasks"), masks, Class_Count);
         write_interval(state, representative_interval, "Representative");
         for (int cls = 0; cls < Class_Count; ++cls) {
             std::string selected = saved_representative_members[cls];
@@ -1253,119 +1252,119 @@ struct Lavery : viamd::EventHandler {
                 features += std::to_string((int)feature.metric) + "\t" + class_labels(metric_class(feature.metric))[feature.member] + "\n";
         }
         if (!features.empty()) write_text(state, "RepresentativeFeatures", features);
-        viamd::write_int(state, STR_LIT("ExportKind"), data_export.kind);
-        viamd::write_int(state, STR_LIT("ExportEventTable"), data_export.event_table);
-        viamd::write_int(state, STR_LIT("ExportPartner"), data_export.partner);
-        viamd::write_int(state, STR_LIT("ExportParameters"), data_export.parameters);
-        viamd::write_int(state, STR_LIT("ExportProfiles"), data_export.profiles);
-        viamd::write_bool(state, STR_LIT("ExportAllPositions"), data_export.all_positions);
-        viamd::write_bool(state, STR_LIT("ExportReference"), data_export.reference);
-        viamd::write_bool(state, STR_LIT("ExportPrepareReference"), data_export.prepare_reference);
-        viamd::write_int(state, STR_LIT("ExportBpFirst"), data_export.bp_first);
-        viamd::write_int(state, STR_LIT("ExportBpLast"), data_export.bp_last);
-        viamd::write_flt(state, STR_LIT("ExportBendThreshold"), data_export.bend_threshold);
+        viamd::write_int(state, MD_STR_LIT("ExportKind"), data_export.kind);
+        viamd::write_int(state, MD_STR_LIT("ExportEventTable"), data_export.event_table);
+        viamd::write_int(state, MD_STR_LIT("ExportPartner"), data_export.partner);
+        viamd::write_int(state, MD_STR_LIT("ExportParameters"), data_export.parameters);
+        viamd::write_int(state, MD_STR_LIT("ExportProfiles"), data_export.profiles);
+        viamd::write_bool(state, MD_STR_LIT("ExportAllPositions"), data_export.all_positions);
+        viamd::write_bool(state, MD_STR_LIT("ExportReference"), data_export.reference);
+        viamd::write_bool(state, MD_STR_LIT("ExportPrepareReference"), data_export.prepare_reference);
+        viamd::write_int(state, MD_STR_LIT("ExportBpFirst"), data_export.bp_first);
+        viamd::write_int(state, MD_STR_LIT("ExportBpLast"), data_export.bp_last);
+        viamd::write_flt(state, MD_STR_LIT("ExportBendThreshold"), data_export.bend_threshold);
         write_interval(state, data_export.interval, "Export");
     }
 
-    void deserialize_setting(str_t key, str_t arg) {
+    void deserialize_setting(md_str_t key, md_str_t arg) {
         auto finite = [&](float& value, float lo, float hi) {
             float v = value;
             if (viamd::extract_flt(v, arg) && std::isfinite(v)) value = std::clamp(v, lo, hi);
         };
-        if (str_eq(key, STR_LIT("WorkflowStateVersion"))) {
+        if (md_str_eq(key, MD_STR_LIT("WorkflowStateVersion"))) {
             // Saved lists replace the defaults.
             comparison_overlays.clear();
             for (auto& datasets : data_export.datasets) datasets.clear();
         }
-        else if (str_eq(key, STR_LIT("HeatmapReferenceMode"))) viamd::extract_enum(heatmap_reference_mode, arg, 2);
-        else if (str_eq(key, STR_LIT("ComparisonClass"))) viamd::extract_enum(comparison_class, arg, Class_Count);
-        else if (str_eq(key, STR_LIT("ComparisonStyle"))) viamd::extract_enum(comparison_style, arg, 3);
-        else if (str_eq(key, STR_LIT("ComparisonLineWidth"))) finite(comparison_line_width, 1, 6);
-        else if (str_eq(key, STR_LIT("ComparisonOpacity"))) finite(comparison_opacity, 0, 1);
-        else if (str_eq(key, STR_LIT("ProfileClass"))) viamd::extract_enum(profile_class, arg, Class_Count);
-        else if (str_eq(key, STR_LIT("ProfileParameters"))) {
+        else if (md_str_eq(key, MD_STR_LIT("HeatmapReferenceMode"))) viamd::extract_enum(heatmap_reference_mode, arg, 2);
+        else if (md_str_eq(key, MD_STR_LIT("ComparisonClass"))) viamd::extract_enum(comparison_class, arg, Class_Count);
+        else if (md_str_eq(key, MD_STR_LIT("ComparisonStyle"))) viamd::extract_enum(comparison_style, arg, 3);
+        else if (md_str_eq(key, MD_STR_LIT("ComparisonLineWidth"))) finite(comparison_line_width, 1, 6);
+        else if (md_str_eq(key, MD_STR_LIT("ComparisonOpacity"))) finite(comparison_opacity, 0, 1);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileClass"))) viamd::extract_enum(profile_class, arg, Class_Count);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileParameters"))) {
             std::array<int, Class_Count> parameters = {};
             if (viamd::extract_int_vec(parameters.data(), parameters.size(), arg))
                 for (int cls = 0; cls < Class_Count; ++cls)
                     if (parameters[cls] >= 0 && parameters[cls] < class_parameter_count(cls)) profile_parameters[cls] = parameters[cls];
         }
-        else if (str_eq(key, STR_LIT("ProfileUsePeriod"))) viamd::extract_bool(profile_use_period, arg);
-        else if (str_eq(key, STR_LIT("ProfilePeriod"))) extract_period_id(profile_period, arg);
-        else if (str_eq(key, STR_LIT("ProfileSpread"))) viamd::extract_bool(profile_spread, arg);
-        else if (str_eq(key, STR_LIT("ProfileCurrent"))) viamd::extract_bool(profile_current, arg);
-        else if (str_eq(key, STR_LIT("ProfileReference"))) viamd::extract_bool(profile_reference, arg);
-        else if (str_eq(key, STR_LIT("ProfilePrimaryVisible"))) viamd::extract_bool(profile_primary_visible, arg);
-        else if (str_eq(key, STR_LIT("ProfileView"))) viamd::extract_enum(profile_view, arg, Profile_Count);
-        else if (str_eq(key, STR_LIT("ProfileOccupancyKind"))) viamd::extract_enum(profile_occupancy_kind, arg, 6);
-        else if (str_eq(key, STR_LIT("ProfileBendThreshold"))) finite(profile_bend_threshold, 0, 180);
-        else if (str_eq(key, STR_LIT("ProfileFixedOccupancyScale"))) viamd::extract_bool(profile_fixed_occupancy_scale, arg);
-        else if (str_eq(key, STR_LIT("LandmarkMinOccupancy"))) finite(landmark_min_occupancy, 0, 100);
-        else if (str_eq(key, STR_LIT("RepresentativeCount"))) {
+        else if (md_str_eq(key, MD_STR_LIT("ProfileUsePeriod"))) viamd::extract_bool(profile_use_period, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ProfilePeriod"))) extract_period_id(profile_period, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileSpread"))) viamd::extract_bool(profile_spread, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileCurrent"))) viamd::extract_bool(profile_current, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileReference"))) viamd::extract_bool(profile_reference, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ProfilePrimaryVisible"))) viamd::extract_bool(profile_primary_visible, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileView"))) viamd::extract_enum(profile_view, arg, Profile_Count);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileOccupancyKind"))) viamd::extract_enum(profile_occupancy_kind, arg, 6);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileBendThreshold"))) finite(profile_bend_threshold, 0, 180);
+        else if (md_str_eq(key, MD_STR_LIT("ProfileFixedOccupancyScale"))) viamd::extract_bool(profile_fixed_occupancy_scale, arg);
+        else if (md_str_eq(key, MD_STR_LIT("LandmarkMinOccupancy"))) finite(landmark_min_occupancy, 0, 100);
+        else if (md_str_eq(key, MD_STR_LIT("RepresentativeCount"))) {
             if (viamd::extract_int(representative_count, arg)) representative_count = std::clamp(representative_count, 1, 1000);
         }
-        else if (str_eq(key, STR_LIT("RepresentativeSeparation"))) finite(representative_separation, 0, 1e9f);
-        else if (str_eq(key, STR_LIT("RepresentativeCoverage"))) finite(representative_coverage, 0, 100);
-        else if (str_eq(key, STR_LIT("RepresentativeAllMembers"))) viamd::extract_bool(representative_all_members, arg);
-        else if (str_eq(key, STR_LIT("RepresentativeMasks"))) {
+        else if (md_str_eq(key, MD_STR_LIT("RepresentativeSeparation"))) finite(representative_separation, 0, 1e9f);
+        else if (md_str_eq(key, MD_STR_LIT("RepresentativeCoverage"))) finite(representative_coverage, 0, 100);
+        else if (md_str_eq(key, MD_STR_LIT("RepresentativeAllMembers"))) viamd::extract_bool(representative_all_members, arg);
+        else if (md_str_eq(key, MD_STR_LIT("RepresentativeMasks"))) {
             int masks[Class_Count] = {};
             if (viamd::extract_int_vec(masks, Class_Count, arg))
                 for (int cls = 0; cls < Class_Count; ++cls) representative_masks[cls] = (uint32_t)masks[cls] & class_all_parameters(cls);
         }
         else if (read_interval(representative_interval, key, arg, "Representative")) {}
-        else if (str_eq(key, STR_LIT("RepresentativeFeatures"))) read_text(saved_representative_features, arg);
-        else if (str_eq(key, STR_LIT("ExportKind"))) viamd::extract_enum(data_export.kind, arg, 4);
-        else if (str_eq(key, STR_LIT("ExportEventTable"))) viamd::extract_enum(data_export.event_table, arg, 3);
-        else if (str_eq(key, STR_LIT("ExportPartner"))) viamd::extract_enum(data_export.partner, arg, 3);
-        else if (str_eq(key, STR_LIT("ExportParameters"))) {
+        else if (md_str_eq(key, MD_STR_LIT("RepresentativeFeatures"))) read_text(saved_representative_features, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ExportKind"))) viamd::extract_enum(data_export.kind, arg, 4);
+        else if (md_str_eq(key, MD_STR_LIT("ExportEventTable"))) viamd::extract_enum(data_export.event_table, arg, 3);
+        else if (md_str_eq(key, MD_STR_LIT("ExportPartner"))) viamd::extract_enum(data_export.partner, arg, 3);
+        else if (md_str_eq(key, MD_STR_LIT("ExportParameters"))) {
             int64_t mask = 0;
             if (viamd::extract_int64(mask, arg)) data_export.parameters = (uint32_t)mask & ALL_METRIC_PARAMETERS;
         }
-        else if (str_eq(key, STR_LIT("ExportProfiles"))) {
+        else if (md_str_eq(key, MD_STR_LIT("ExportProfiles"))) {
             int64_t mask = 0;
             if (viamd::extract_int64(mask, arg) && mask >= 0) data_export.profiles = (uint32_t)mask;
         }
-        else if (str_eq(key, STR_LIT("ExportAllPositions"))) viamd::extract_bool(data_export.all_positions, arg);
-        else if (str_eq(key, STR_LIT("ExportReference"))) viamd::extract_bool(data_export.reference, arg);
-        else if (str_eq(key, STR_LIT("ExportPrepareReference"))) viamd::extract_bool(data_export.prepare_reference, arg);
-        else if (str_eq(key, STR_LIT("ExportBpFirst"))) { if (viamd::extract_int(data_export.bp_first, arg)) data_export.bp_first = std::max(1, data_export.bp_first); }
-        else if (str_eq(key, STR_LIT("ExportBpLast"))) { if (viamd::extract_int(data_export.bp_last, arg)) data_export.bp_last = std::max(1, data_export.bp_last); }
-        else if (str_eq(key, STR_LIT("ExportBendThreshold"))) finite(data_export.bend_threshold, 0, 180);
+        else if (md_str_eq(key, MD_STR_LIT("ExportAllPositions"))) viamd::extract_bool(data_export.all_positions, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ExportReference"))) viamd::extract_bool(data_export.reference, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ExportPrepareReference"))) viamd::extract_bool(data_export.prepare_reference, arg);
+        else if (md_str_eq(key, MD_STR_LIT("ExportBpFirst"))) { if (viamd::extract_int(data_export.bp_first, arg)) data_export.bp_first = std::max(1, data_export.bp_first); }
+        else if (md_str_eq(key, MD_STR_LIT("ExportBpLast"))) { if (viamd::extract_int(data_export.bp_last, arg)) data_export.bp_last = std::max(1, data_export.bp_last); }
+        else if (md_str_eq(key, MD_STR_LIT("ExportBendThreshold"))) finite(data_export.bend_threshold, 0, 180);
         else if (read_interval(data_export.interval, key, arg, "Export")) {}
         else {
             for (int cls = 0; cls < Class_Count; ++cls) {
                 const std::string name = std::string("RepresentativeMembers") + class_csv_name(cls);
-                if (str_eq(key, str_from_cstr(name.c_str()))) read_text(saved_representative_members[cls], arg);
+                if (md_str_eq(key, md_str_from_cstr(name.c_str()))) read_text(saved_representative_members[cls], arg);
             }
         }
     }
 
     static void write_recipe(viamd::serialization_state_t& state, const ComparisonOverlay& recipe) {
-        viamd::write_str(state, STR_LIT("Name"), str_from_cstr(recipe.name));
-        viamd::write_int(state, STR_LIT("Source"), recipe.source);
-        viamd::write_int(state, STR_LIT("Period"), recipe.period);
-        viamd::write_int(state, STR_LIT("Csv"), (int64_t)recipe.csv);
-        viamd::write_int(state, STR_LIT("BpFirst"), recipe.bp_first);
-        viamd::write_int(state, STR_LIT("BpLast"), recipe.bp_last);
-        viamd::write_int(state, STR_LIT("PairType"), recipe.pair_type);
-        viamd::write_int(state, STR_LIT("Nucleotide"), recipe.nucleotide);
-        viamd::write_bool(state, STR_LIT("Visible"), recipe.visible);
-        viamd::write_vec4(state, STR_LIT("Color"), vec4_set(recipe.color.x, recipe.color.y, recipe.color.z, recipe.color.w));
+        viamd::write_str(state, MD_STR_LIT("Name"), md_str_from_cstr(recipe.name));
+        viamd::write_int(state, MD_STR_LIT("Source"), recipe.source);
+        viamd::write_int(state, MD_STR_LIT("Period"), recipe.period);
+        viamd::write_int(state, MD_STR_LIT("Csv"), (int64_t)recipe.csv);
+        viamd::write_int(state, MD_STR_LIT("BpFirst"), recipe.bp_first);
+        viamd::write_int(state, MD_STR_LIT("BpLast"), recipe.bp_last);
+        viamd::write_int(state, MD_STR_LIT("PairType"), recipe.pair_type);
+        viamd::write_int(state, MD_STR_LIT("Nucleotide"), recipe.nucleotide);
+        viamd::write_bool(state, MD_STR_LIT("Visible"), recipe.visible);
+        viamd::write_vec4(state, MD_STR_LIT("Color"), vec4_set(recipe.color.x, recipe.color.y, recipe.color.z, recipe.color.w));
     }
 
-    static bool read_recipe(ComparisonOverlay& recipe, str_t key, str_t arg) {
-        if (str_eq(key, STR_LIT("Name"))) viamd::extract_to_char_buf(recipe.name, sizeof(recipe.name), arg);
-        else if (str_eq(key, STR_LIT("Source"))) viamd::extract_enum(recipe.source, arg, 4);
-        else if (str_eq(key, STR_LIT("Period"))) extract_period_id(recipe.period, arg);
-        else if (str_eq(key, STR_LIT("Csv"))) {
+    static bool read_recipe(ComparisonOverlay& recipe, md_str_t key, md_str_t arg) {
+        if (md_str_eq(key, MD_STR_LIT("Name"))) viamd::extract_to_char_buf(recipe.name, sizeof(recipe.name), arg);
+        else if (md_str_eq(key, MD_STR_LIT("Source"))) viamd::extract_enum(recipe.source, arg, 4);
+        else if (md_str_eq(key, MD_STR_LIT("Period"))) extract_period_id(recipe.period, arg);
+        else if (md_str_eq(key, MD_STR_LIT("Csv"))) {
             int64_t csv = 0;
             if (viamd::extract_int64(csv, arg) && csv >= 0) recipe.csv = (size_t)csv;
         }
-        else if (str_eq(key, STR_LIT("BpFirst"))) { viamd::extract_int(recipe.bp_first, arg); recipe.bp_first = std::max(1, recipe.bp_first); }
-        else if (str_eq(key, STR_LIT("BpLast"))) { viamd::extract_int(recipe.bp_last, arg); recipe.bp_last = std::max(1, recipe.bp_last); }
-        else if (str_eq(key, STR_LIT("PairType"))) viamd::extract_enum(recipe.pair_type, arg, 4);
-        else if (str_eq(key, STR_LIT("Nucleotide"))) viamd::extract_enum(recipe.nucleotide, arg, 5);
-        else if (str_eq(key, STR_LIT("Visible"))) viamd::extract_bool(recipe.visible, arg);
-        else if (str_eq(key, STR_LIT("Color"))) {
+        else if (md_str_eq(key, MD_STR_LIT("BpFirst"))) { viamd::extract_int(recipe.bp_first, arg); recipe.bp_first = std::max(1, recipe.bp_first); }
+        else if (md_str_eq(key, MD_STR_LIT("BpLast"))) { viamd::extract_int(recipe.bp_last, arg); recipe.bp_last = std::max(1, recipe.bp_last); }
+        else if (md_str_eq(key, MD_STR_LIT("PairType"))) viamd::extract_enum(recipe.pair_type, arg, 4);
+        else if (md_str_eq(key, MD_STR_LIT("Nucleotide"))) viamd::extract_enum(recipe.nucleotide, arg, 5);
+        else if (md_str_eq(key, MD_STR_LIT("Visible"))) viamd::extract_bool(recipe.visible, arg);
+        else if (md_str_eq(key, MD_STR_LIT("Color"))) {
             vec4_t c = {};
             if (viamd::extract_vec4(c, arg)) recipe.color = ImVec4(c.x, c.y, c.z, c.w);
         }
@@ -1374,7 +1373,7 @@ struct Lavery : viamd::EventHandler {
     }
 
     static void write_color(viamd::serialization_state_t& state, const ImVec4& color) {
-        viamd::write_vec4(state, STR_LIT("Color"), vec4_set(color.x, color.y, color.z, color.w));
+        viamd::write_vec4(state, MD_STR_LIT("Color"), vec4_set(color.x, color.y, color.z, color.w));
     }
 
     static bool load_reference_file(ExternalReference* out, const std::string& path, const std::string& fingerprint, std::string* error) {
@@ -1400,11 +1399,11 @@ struct Lavery : viamd::EventHandler {
         const WorkflowReference* setups[] = {&sequence_reference_setup, &export_reference_setup, &ranking_reference_setup, &heatmap_reference_setup};
         for (int i = 0; i < 4; ++i) {
             const auto& setup = *setups[i];
-            viamd::write_section_header(state, STR_LIT("LaveryWorkflowReference"));
-            viamd::write_str(state, STR_LIT("Workflow"), str_from_cstr(names[i]));
-            viamd::write_int(state, STR_LIT("Source"), setup.source);
-            viamd::write_int(state, STR_LIT("Method"), setup.method);
-            viamd::write_bool(state, STR_LIT("ExternalPooled"), setup.external_pooled);
+            viamd::write_section_header(state, MD_STR_LIT("LaveryWorkflowReference"));
+            viamd::write_str(state, MD_STR_LIT("Workflow"), md_str_from_cstr(names[i]));
+            viamd::write_int(state, MD_STR_LIT("Source"), setup.source);
+            viamd::write_int(state, MD_STR_LIT("Method"), setup.method);
+            viamd::write_bool(state, MD_STR_LIT("ExternalPooled"), setup.external_pooled);
             write_interval(state, setup.interval);
             if (!setup.external.path.empty()) {
                 write_text(state, "ExternalPath", setup.external.path);
@@ -1415,36 +1414,36 @@ struct Lavery : viamd::EventHandler {
             }
         }
         for (const auto& csv : comparison_csvs) {
-            viamd::write_section_header(state, STR_LIT("LaveryComparisonCSV"));
+            viamd::write_section_header(state, MD_STR_LIT("LaveryComparisonCSV"));
             write_text(state, "Path", csv.data.path);
             write_text(state, "Fingerprint", csv.data.fingerprint);
         }
         for (const auto& overlay : comparison_overlays) {
-            viamd::write_section_header(state, STR_LIT("LaveryComparisonSeries"));
+            viamd::write_section_header(state, MD_STR_LIT("LaveryComparisonSeries"));
             write_recipe(state, overlay);
         }
         for (const auto& series : profile_series) {
-            viamd::write_section_header(state, STR_LIT("LaveryProfileSeries"));
+            viamd::write_section_header(state, MD_STR_LIT("LaveryProfileSeries"));
             write_recipe(state, series.recipe);
             write_interval(state, series.interval);
-            viamd::write_int(state, STR_LIT("Partner"), series.partner);
-            viamd::write_bool(state, STR_LIT("Spread"), series.spread);
+            viamd::write_int(state, MD_STR_LIT("Partner"), series.partner);
+            viamd::write_bool(state, MD_STR_LIT("Spread"), series.spread);
         }
         for (int kind = 0; kind < 2; ++kind) for (const auto& dataset : data_export.datasets[kind]) {
-            viamd::write_section_header(state, STR_LIT("LaveryExportDataset"));
-            viamd::write_int(state, STR_LIT("Distribution"), kind);
+            viamd::write_section_header(state, MD_STR_LIT("LaveryExportDataset"));
+            viamd::write_int(state, MD_STR_LIT("Distribution"), kind);
             write_recipe(state, dataset.recipe);
             write_interval(state, dataset.interval);
-            viamd::write_int(state, STR_LIT("Partner"), dataset.partner);
-            viamd::write_bool(state, STR_LIT("FromCsv"), dataset.csv);
+            viamd::write_int(state, MD_STR_LIT("Partner"), dataset.partner);
+            viamd::write_bool(state, MD_STR_LIT("FromCsv"), dataset.csv);
         }
         auto write_landmark = [&](const SequenceLandmark& marker) {
-            viamd::write_section_header(state, STR_LIT("LaveryLandmark"));
-            viamd::write_int(state, STR_LIT("Class"), marker.cls);
-            viamd::write_int(state, STR_LIT("Member"), (int64_t)marker.member);
-            viamd::write_str(state, STR_LIT("Name"), str_from_cstr(marker.name));
+            viamd::write_section_header(state, MD_STR_LIT("LaveryLandmark"));
+            viamd::write_int(state, MD_STR_LIT("Class"), marker.cls);
+            viamd::write_int(state, MD_STR_LIT("Member"), (int64_t)marker.member);
+            viamd::write_str(state, MD_STR_LIT("Name"), md_str_from_cstr(marker.name));
             write_color(state, marker.color);
-            viamd::write_bool(state, STR_LIT("Visible"), marker.visible);
+            viamd::write_bool(state, MD_STR_LIT("Visible"), marker.visible);
             write_text(state, "Identity", marker.identity);
             write_text(state, "Note", marker.source);
         };
@@ -1454,19 +1453,19 @@ struct Lavery : viamd::EventHandler {
 
     // Returns true when the current section belonged to the workflow state.
     bool deserialize_workflows(viamd::deserialization_state_t& state) {
-        const str_t section = viamd::section_header(state);
-        str_t key, arg;
-        if (str_eq(section, STR_LIT("LaveryWorkflowReference"))) {
+        const md_str_t section = viamd::section_header(state);
+        md_str_t key, arg;
+        if (md_str_eq(section, MD_STR_LIT("LaveryWorkflowReference"))) {
             WorkflowReference setup;
             std::string workflow, path, fingerprint;
             while (viamd::next_entry(key, arg, state)) {
-                if (str_eq(key, STR_LIT("Workflow"))) read_text(workflow, arg);
-                else if (str_eq(key, STR_LIT("Source"))) viamd::extract_enum(setup.source, arg, 3);
-                else if (str_eq(key, STR_LIT("Method"))) viamd::extract_enum(setup.method, arg, Baseline_Count);
-                else if (str_eq(key, STR_LIT("ExternalPooled"))) viamd::extract_bool(setup.external_pooled, arg);
-                else if (str_eq(key, STR_LIT("ExternalPath"))) read_text(path, arg);
-                else if (str_eq(key, STR_LIT("ExternalFingerprint"))) read_text(fingerprint, arg);
-                else if (str_eq(key, STR_LIT("ExternalMapping"))) read_text(setup.saved_mapping, arg);
+                if (md_str_eq(key, MD_STR_LIT("Workflow"))) read_text(workflow, arg);
+                else if (md_str_eq(key, MD_STR_LIT("Source"))) viamd::extract_enum(setup.source, arg, 3);
+                else if (md_str_eq(key, MD_STR_LIT("Method"))) viamd::extract_enum(setup.method, arg, Baseline_Count);
+                else if (md_str_eq(key, MD_STR_LIT("ExternalPooled"))) viamd::extract_bool(setup.external_pooled, arg);
+                else if (md_str_eq(key, MD_STR_LIT("ExternalPath"))) read_text(path, arg);
+                else if (md_str_eq(key, MD_STR_LIT("ExternalFingerprint"))) read_text(fingerprint, arg);
+                else if (md_str_eq(key, MD_STR_LIT("ExternalMapping"))) read_text(setup.saved_mapping, arg);
                 else read_interval(setup.interval, key, arg);
             }
             WorkflowReference* target = workflow == "Sequence" ? &sequence_reference_setup : workflow == "Export" ? &export_reference_setup :
@@ -1481,11 +1480,11 @@ struct Lavery : viamd::EventHandler {
             *target = std::move(setup);
             return true;
         }
-        if (str_eq(section, STR_LIT("LaveryComparisonCSV"))) {
+        if (md_str_eq(section, MD_STR_LIT("LaveryComparisonCSV"))) {
             std::string path, fingerprint;
             while (viamd::next_entry(key, arg, state)) {
-                if (str_eq(key, STR_LIT("Path"))) read_text(path, arg);
-                else if (str_eq(key, STR_LIT("Fingerprint"))) read_text(fingerprint, arg);
+                if (md_str_eq(key, MD_STR_LIT("Path"))) read_text(path, arg);
+                else if (md_str_eq(key, MD_STR_LIT("Fingerprint"))) read_text(fingerprint, arg);
             }
             ComparisonCSV csv;
             std::string error;
@@ -1494,52 +1493,52 @@ struct Lavery : viamd::EventHandler {
             ++comparison_csv_revision;
             return true;
         }
-        if (str_eq(section, STR_LIT("LaveryComparisonSeries"))) {
+        if (md_str_eq(section, MD_STR_LIT("LaveryComparisonSeries"))) {
             ComparisonOverlay overlay;
             while (viamd::next_entry(key, arg, state)) read_recipe(overlay, key, arg);
             comparison_overlays.push_back(overlay);
             ++comparison_csv_revision;
             return true;
         }
-        if (str_eq(section, STR_LIT("LaveryProfileSeries"))) {
+        if (md_str_eq(section, MD_STR_LIT("LaveryProfileSeries"))) {
             ProfileSeries series;
             while (viamd::next_entry(key, arg, state)) {
-                if (str_eq(key, STR_LIT("Partner"))) viamd::extract_enum(series.partner, arg, 3);
-                else if (str_eq(key, STR_LIT("Spread"))) viamd::extract_bool(series.spread, arg);
+                if (md_str_eq(key, MD_STR_LIT("Partner"))) viamd::extract_enum(series.partner, arg, 3);
+                else if (md_str_eq(key, MD_STR_LIT("Spread"))) viamd::extract_bool(series.spread, arg);
                 else if (!read_interval(series.interval, key, arg)) read_recipe(series.recipe, key, arg);
             }
             profile_series.push_back(std::move(series));
             ++profile_series_revision;
             return true;
         }
-        if (str_eq(section, STR_LIT("LaveryExportDataset"))) {
+        if (md_str_eq(section, MD_STR_LIT("LaveryExportDataset"))) {
             ExportDataset dataset;
             int kind = 0;
             while (viamd::next_entry(key, arg, state)) {
-                if (str_eq(key, STR_LIT("Distribution"))) viamd::extract_enum(kind, arg, 2);
-                else if (str_eq(key, STR_LIT("Partner"))) viamd::extract_enum(dataset.partner, arg, 3);
-                else if (str_eq(key, STR_LIT("FromCsv"))) viamd::extract_bool(dataset.csv, arg);
+                if (md_str_eq(key, MD_STR_LIT("Distribution"))) viamd::extract_enum(kind, arg, 2);
+                else if (md_str_eq(key, MD_STR_LIT("Partner"))) viamd::extract_enum(dataset.partner, arg, 3);
+                else if (md_str_eq(key, MD_STR_LIT("FromCsv"))) viamd::extract_bool(dataset.csv, arg);
                 else if (!read_interval(dataset.interval, key, arg)) read_recipe(dataset.recipe, key, arg);
             }
             data_export.datasets[kind].push_back(dataset);
             return true;
         }
-        if (str_eq(section, STR_LIT("LaveryLandmark"))) {
+        if (md_str_eq(section, MD_STR_LIT("LaveryLandmark"))) {
             SequenceLandmark marker;
             while (viamd::next_entry(key, arg, state)) {
-                if (str_eq(key, STR_LIT("Class"))) viamd::extract_enum(marker.cls, arg, Class_Count);
-                else if (str_eq(key, STR_LIT("Member"))) {
+                if (md_str_eq(key, MD_STR_LIT("Class"))) viamd::extract_enum(marker.cls, arg, Class_Count);
+                else if (md_str_eq(key, MD_STR_LIT("Member"))) {
                     int64_t m = 0;
                     if (viamd::extract_int64(m, arg) && m >= 0) marker.member = (size_t)m;
                 }
-                else if (str_eq(key, STR_LIT("Name"))) viamd::extract_to_char_buf(marker.name, sizeof(marker.name), arg);
-                else if (str_eq(key, STR_LIT("Color"))) {
+                else if (md_str_eq(key, MD_STR_LIT("Name"))) viamd::extract_to_char_buf(marker.name, sizeof(marker.name), arg);
+                else if (md_str_eq(key, MD_STR_LIT("Color"))) {
                     vec4_t c = {};
                     if (viamd::extract_vec4(c, arg)) marker.color = ImVec4(c.x, c.y, c.z, c.w);
                 }
-                else if (str_eq(key, STR_LIT("Visible"))) viamd::extract_bool(marker.visible, arg);
-                else if (str_eq(key, STR_LIT("Identity"))) read_text(marker.identity, arg);
-                else if (str_eq(key, STR_LIT("Note"))) read_text(marker.source, arg);
+                else if (md_str_eq(key, MD_STR_LIT("Visible"))) viamd::extract_bool(marker.visible, arg);
+                else if (md_str_eq(key, MD_STR_LIT("Identity"))) read_text(marker.identity, arg);
+                else if (md_str_eq(key, MD_STR_LIT("Note"))) read_text(marker.source, arg);
             }
             pending_landmarks.push_back(std::move(marker));
             return true;
@@ -1697,7 +1696,7 @@ struct Lavery : viamd::EventHandler {
     }
 
     bool analysis_cancelled() const {
-        return cancel_requested.load() || task_system::task_is_interrupted(calculation);
+        return cancel_requested.load() || task_system::cancelled();
     }
 
     void start_calculation(size_t frame_count) {
@@ -1725,8 +1724,8 @@ struct Lavery : viamd::EventHandler {
             computed = true;
             return;
         }
-        const str_t paths[] = {STR_LIT("atom/position"), STR_LIT("unitcell")};
-        md_system_extract_t* ex = md_system_extract_begin(sys, str_from_cstr(run.c_str()), paths, ARRAY_SIZE(paths), md_get_heap_allocator());
+        const md_str_t paths[] = {MD_STR_LIT("atom/position"), MD_STR_LIT("unitcell")};
+        md_system_extract_t* ex = md_system_extract_begin(sys, md_str_from_cstr(run.c_str()), paths, MD_COUNTOF(paths), md_get_heap_allocator());
         const bool extracted = ex && md_system_extract_frame(ex, 0, &first_state);
         if (ex) md_system_extract_end(ex);
         if (!extracted) {
@@ -1791,17 +1790,17 @@ struct Lavery : viamd::EventHandler {
         steps = gather_steps(*sys, bases, pairs.data(), pairs.size());
         atom_base.assign(sys->atom.count, -1);
         for (size_t b = 0; b < bases.size(); ++b) {
-            const auto range = md_component_atom_range(&sys->component, bases[b].component);
+            const auto range = md_system_residue_atom_range(sys, bases[b].component);
             for (uint32_t atom = range.beg; atom < range.end; ++atom) atom_base[atom] = (int32_t)b;
         }
         base_pair.assign(bases.size(), -1);
         for (size_t p = 0; p < pairs.size(); ++p) base_pair[pairs[p].a] = base_pair[pairs[p].b] = (int32_t)p;
         auto base_label = [&](uint32_t index) {
             const auto& base = bases[index];
-            const str_t name = md_component_name(&sys->component, base.component);
+            const md_str_t name = md_system_residue_name(sys, base.component);
             char buf[128];
-            snprintf(buf, sizeof(buf), "S%u:" STR_FMT "%d", base.strand + 1,
-                STR_ARG(name), (int)md_system_component_seq_id(sys, base.component));
+            snprintf(buf, sizeof(buf), "S%u:" MD_STR_FMT "%d", base.strand + 1,
+                MD_STR_ARG(name), (int)md_system_residue_seq_id(sys, base.component));
             return std::string(buf);
         };
         for (size_t p = 0; p < pairs.size(); ++p) {
@@ -1838,7 +1837,7 @@ struct Lavery : viamd::EventHandler {
         calculating = true;
         calculation_baseline = baseline;
         const Baseline method = (Baseline)baseline;
-        calculation = task_system::create_pool_task(STR_LIT("Lavery trajectory analysis"), [this, sys, frame_count, method]() {
+        calculation.start(MD_STR_LIT("Lavery trajectory analysis"), [this, sys, frame_count, method]() {
             md_temp_scope_t temp_scope = md_temp_begin();
             md_allocator_i* alloc = md_temp_allocator(temp_scope);
             md_system_state_t state = {};
@@ -1849,8 +1848,8 @@ struct Lavery : viamd::EventHandler {
                 return;
             }
 
-            const str_t paths[] = {STR_LIT("atom/position"), STR_LIT("unitcell")};
-            md_system_extract_t* ex = md_system_extract_begin(sys, str_from_cstr(run.c_str()), paths, ARRAY_SIZE(paths), md_get_heap_allocator());
+            const md_str_t paths[] = {MD_STR_LIT("atom/position"), MD_STR_LIT("unitcell")};
+            md_system_extract_t* ex = md_system_extract_begin(sys, md_str_from_cstr(run.c_str()), paths, MD_COUNTOF(paths), md_get_heap_allocator());
             if (!ex) {
                 md_system_state_free(&state);
                 md_temp_end(temp_scope);
@@ -1903,24 +1902,24 @@ struct Lavery : viamd::EventHandler {
             calculation_ok = ok && !analysis_cancelled();
             calculation_ready = true;
         });
-        task_system::enqueue_task(calculation);
     }
 
     void complete_if_ready() {
         if (!calculating) return;
         if (!calculation_ready.load()) {
-            if (task_system::task_is_running(calculation)) return;
+            if (calculation.running()) return;
             analysis_error = "Analysis was interrupted before it could finish. Use Retry analysis.";
             MD_LOG_ERROR("Lavery: trajectory task was interrupted");
         }
-        task_system::task_wait_for(calculation);
-        calculation = task_system::INVALID_ID;
+        calculation.wait();
         calculating = false;
         statistics_baseline = calculation_baseline;
         statistics_reference_scope = Reference_OwnHistory;
         counts_key = 0;
-        if (!calculation_ok.load()) {
-            analysis_error = cancel_requested.load() ? "Analysis cancelled. Use Retry analysis to restart."
+        if (!calculation_ok.load() || calculation.status() != task_system::Status::Completed) {
+            calculation_ok = false;
+            analysis_error = cancel_requested.load() || calculation.status() == task_system::Status::Cancelled
+                ? "Analysis cancelled. Use Retry analysis to restart."
                 : "Trajectory analysis failed or was interrupted. See the application log; use Retry analysis.";
             MD_LOG_ERROR("Lavery: %s", analysis_error.c_str());
             computed = true;
@@ -1941,7 +1940,7 @@ struct Lavery : viamd::EventHandler {
         md_attributes_t* table = &app->mold.sys.attributes;
         wait_for_attribute_readers();
         const std::string prefix_string = run + "/lavery";
-        const str_t prefix = str_from_cstr(prefix_string.c_str());
+        const md_str_t prefix = md_str_from_cstr(prefix_string.c_str());
         md_attributes_remove_prefix(table, prefix);
         app->script.compile_ir = true;
         for (int m = 0; m < (int)Metric_Count; ++m) {
@@ -2064,14 +2063,15 @@ struct Lavery : viamd::EventHandler {
         if (ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift || timeline_periods_dragging())
             ImPlot::GetInputMap().Pan = ImGuiMouseButton_Middle;
         if (ImGui::BeginChild("Analysis workspace", ImVec2(0,0))) {
-            if (frame_count) draw_workspace(frame_count);
-            else ImGui::TextDisabled("No trajectory samples available.");
+            if (!frame_count) ImGui::TextDisabled("No trajectory samples available.");
+            else if (outlier_counts.size() != frame_count) ImGui::TextDisabled("Preparing analysis results...");
+            else draw_workspace(frame_count);
         }
         ImGui::EndChild();
         ImGui::EndGroup();
         ImGui::End();
         ImPlot::GetInputMap() = input;
-        if (!frame_count) {
+        if (!frame_count || outlier_counts.size() != frame_count) {
             clear_highlight();
             return;
         }
@@ -2561,9 +2561,9 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         char path[4096]={};
-        if (!application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,STR_LIT("csv"))) return;
+        if (!application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,MD_STR_LIT("csv"))) return;
         md_file_t file={};
-        if (!md_file_open(&file,str_from_cstr(path),MD_FILE_WRITE|MD_FILE_CREATE|MD_FILE_TRUNCATE)) {
+        if (!md_file_open(&file,md_str_from_cstr(path),MD_FILE_WRITE|MD_FILE_CREATE|MD_FILE_TRUNCATE)) {
             data_export_error="Could not open export file.";
         } else {
             bool ok=md_file_write(file,output.data(),output.size())==output.size();
@@ -2621,7 +2621,7 @@ struct Lavery : viamd::EventHandler {
                 if (dataset.csv) {
                     if (ImGui::Button("Import CSV...")) {
                         char path[4096]={};
-                        if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+                        if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,MD_STR_LIT("csv"))) {
                             ComparisonCSV csv;
                             if (load_external_reference(&csv.data,path,&data_export_error)) {
                                 comparison_csvs.push_back(std::move(csv));
@@ -2927,7 +2927,7 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
-    static void extract_period_id(uint32_t& id, str_t arg) {
+    static void extract_period_id(uint32_t& id, md_str_t arg) {
         int64_t value = 0;
         if (!viamd::extract_int64(value, arg)) return;
         if (value < 0 || value > UINT32_MAX) {
@@ -3613,7 +3613,7 @@ struct Lavery : viamd::EventHandler {
         }
         if (ImGui::Button("Import reference CSV...")) {
             char path[4096] = {};
-            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,MD_STR_LIT("csv"))) {
                 external_path = path;
                 external_load_pending = true;
                 saved_external_mapping.clear();
@@ -3702,12 +3702,11 @@ struct Lavery : viamd::EventHandler {
         std::vector<StateSwitch> switches;
     };
     std::unique_ptr<RecomputeJob> recompute_job;
-    task_system::ID recompute_task = task_system::INVALID_ID;
+    task_system::Job recompute_task;
 
     void cancel_recompute() {
         if (recompute_job) recompute_job->cancel = true;
-        if (recompute_task != task_system::INVALID_ID) task_system::task_wait_for(recompute_task);
-        recompute_task = task_system::INVALID_ID;
+        recompute_task.cancel_and_wait();
         recompute_job.reset();
     }
 
@@ -3798,12 +3797,16 @@ struct Lavery : viamd::EventHandler {
         return key;
     }
 
+    static bool recompute_cancelled(const RecomputeJob& job) {
+        return job.cancel.load() || task_system::cancelled();
+    }
+
     // Worker thread: reads only the job and the analysis data that is immutable while a job runs.
     void run_statistics(RecomputeJob& job) const {
         std::array<std::vector<uint32_t>, Class_Count> groups;
         // Pair loss still requires this pair to have a finite reference sample, not a neighbour's.
         job.pair_has_baseline.assign(pairs.size(), 0);
-        for (size_t p = 0; p < pairs.size() && !job.reference_source; ++p)
+        for (size_t p = 0; p < pairs.size() && !job.reference_source && !recompute_cancelled(job); ++p)
             for (size_t f = job.first_frame; f < job.end_frame; ++f)
                 if (std::isfinite(values[Buckle][f * pairs.size() + p])) {
                     job.pair_has_baseline[p] = 1;
@@ -3811,7 +3814,7 @@ struct Lavery : viamd::EventHandler {
                 }
         if (job.reference_scope == Reference_HelixHistory)
             for (int cls = 0; cls < Class_Count; ++cls) groups[cls] = helix_member_groups(pairs.size(), steps, cls);
-        for (int m = 0; m < (int)Metric_Count && !job.cancel.load(); ++m) {
+        for (int m = 0; m < (int)Metric_Count && !recompute_cancelled(job); ++m) {
             const int cls = metric_class((Metric)m);
             if (!columns[m]) continue;
             if (job.reference_source) {
@@ -4155,7 +4158,7 @@ struct Lavery : viamd::EventHandler {
             frame_outliers[f].push_back(outlier);
         };
         for (size_t f = 0; job.detection_enabled && f < frame_count; ++f) {
-            if (job.cancel.load()) return;
+            if (recompute_cancelled(job)) return;
             if (job.correction) {
                 // The family is every valid member-parameter test of the detection parameters in this frame.
                 family.clear();
@@ -4188,7 +4191,7 @@ struct Lavery : viamd::EventHandler {
                 }
             }
         }
-        if (!job.rebuild_events || !job.valid_options || job.cancel.load()) return;
+        if (!job.rebuild_events || !job.valid_options || recompute_cancelled(job)) return;
         if (job.options.residual_sigma > 0) {
             job.options.member_z = [this, &stats, &job](size_t f, int cls, uint32_t m, int k) {
                 const int id = class_first_metric(cls) + k;
@@ -4198,7 +4201,7 @@ struct Lavery : viamd::EventHandler {
         }
         if (job.detection_enabled) job.events = detect_events(frame_outliers, pairs.size(), steps, job.options);
         job.options.member_z = nullptr;
-        for (int id = (int)Alpha; id <= (int)EpsilonZeta && !job.cancel.load(); ++id) {
+        for (int id = (int)Alpha; id <= (int)EpsilonZeta && !recompute_cancelled(job); ++id) {
             if (!(job.event_parameters & (1u << id)) || !metric_state_count((Metric)id)) continue;
             std::vector<StateSwitch> changes;
             if (!detect_state_switches(&changes, values[id], columns[id], (Metric)id, job.state_options)) {
@@ -4214,7 +4217,7 @@ struct Lavery : viamd::EventHandler {
 
     void run_recompute(RecomputeJob& job) const {
         if (job.statistics) run_statistics(job);
-        if (!job.cancel.load()) run_counts(job);
+        if (!recompute_cancelled(job)) run_counts(job);
     }
 
     // Main thread: replaces the displayed results with a finished job's results.
@@ -4292,11 +4295,11 @@ struct Lavery : viamd::EventHandler {
     // Main thread, once per draw: publishes a finished job and starts a new one when the settings changed.
     // The first result after an analysis (no counts yet) is awaited so the views always have data to draw.
     void update_results(int count, size_t frame_count) {
-        if (recompute_job && !task_system::task_is_running(recompute_task)) {
-            task_system::task_wait_for(recompute_task);
-            recompute_task = task_system::INVALID_ID;
+        if (recompute_job && !recompute_task.running()) {
+            recompute_task.wait();
             auto done = std::move(recompute_job);
-            if (!done->cancel.load()) publish_recompute(*done);
+            if (!done->cancel.load() && recompute_task.status() == task_system::Status::Completed) publish_recompute(*done);
+            else if (!done->cancel.load()) MD_LOG_INFO("Lavery: recomputation was cancelled; it will be retried.");
         }
         auto job = std::make_unique<RecomputeJob>();
         prepare_statistics(frame_count, job.get());
@@ -4318,13 +4321,15 @@ struct Lavery : viamd::EventHandler {
         counts_pending = false;
         recompute_job = std::move(job);
         RecomputeJob* target = recompute_job.get();
-        recompute_task = task_system::create_pool_task(STR_LIT("Lavery recompute"), [this, target]() { run_recompute(*target); });
-        task_system::enqueue_task(recompute_task);
+        recompute_task.start(MD_STR_LIT("Lavery recompute"), [this, target]() { run_recompute(*target); });
         if (initial) {
-            task_system::task_wait_for(recompute_task);
-            recompute_task = task_system::INVALID_ID;
+            recompute_task.wait();
             auto done = std::move(recompute_job);
-            publish_recompute(*done);
+            if (!done->cancel.load() && recompute_task.status() == task_system::Status::Completed) publish_recompute(*done);
+            else {
+                counts_pending = true;
+                MD_LOG_INFO("Lavery: initial recomputation was cancelled; it will be retried.");
+            }
         }
     }
 
@@ -4662,9 +4667,9 @@ struct Lavery : viamd::EventHandler {
 
     void export_state_switches_csv(bool shown_only=false) {
         char path[4096] = {};
-        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) return;
         md_file_t file = {};
-        if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+        if (!md_file_open(&file, md_str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
             MD_LOG_ERROR("Lavery: could not open state-switch CSV '%s'", path);
             return;
         }
@@ -4906,7 +4911,7 @@ struct Lavery : viamd::EventHandler {
         ImGui::BeginDisabled(!fresh);
         if (ImGui::Button("Export XTC + GRO + CSV...")) {
             char path[4096] = {};
-            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,STR_LIT("xtc"))) {
+            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,MD_STR_LIT("xtc"))) {
                 if (export_representative_frames(app->mold.sys,run,path,representative_candidates,representative_provenance,&representative_error))
                     MD_LOG_INFO("Lavery: exported %zu representative frames to '%s'",representative_candidates.size(),path);
             }
@@ -5118,9 +5123,9 @@ struct Lavery : viamd::EventHandler {
 
     void export_pairing_csv(size_t pair, const float* times) {
         char path[4096] = {};
-        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) return;
         md_file_t file = {};
-        if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+        if (!md_file_open(&file, md_str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
             MD_LOG_ERROR("Lavery: could not open pairing-state CSV '%s'", path);
             return;
         }
@@ -5478,7 +5483,7 @@ struct Lavery : viamd::EventHandler {
         ImGui::SameLine();
         if (ImGui::Button("Add CSV...")) {
             char path[4096]={};
-            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,MD_STR_LIT("csv"))) {
                 ComparisonCSV source;
                 if (load_external_reference(&source.data,path,&comparison_error)) {
                     comparison_csvs.push_back(std::move(source));
@@ -5991,7 +5996,7 @@ struct Lavery : viamd::EventHandler {
                 changed|=ImGui::Checkbox("Pool mapped members within each helix",&setup.external_pooled);
                 if (ImGui::Button("Import reference CSV...")) {
                     char path[4096]={};
-                    if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,STR_LIT("csv"))) {
+                    if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,MD_STR_LIT("csv"))) {
                         setup.saved_mapping.clear();
                         if (load_external_reference(&setup.external,path,&setup.error)) match_workflow_reference(setup);
                         changed=true;
@@ -7714,9 +7719,9 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         char path[4096] = {};
-        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) return;
         md_file_t file = {};
-        if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+        if (!md_file_open(&file, md_str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
             MD_LOG_ERROR("Lavery: could not open events CSV export '%s'", path);
             return;
         }
@@ -7845,9 +7850,9 @@ struct Lavery : viamd::EventHandler {
             }
         }
         char path[4096] = {};
-        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) return;
         md_file_t file = {};
-        if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+        if (!md_file_open(&file, md_str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
             data_export_error="Could not open CSV export file.";
             MD_LOG_ERROR("Lavery: could not open CSV export '%s'", path);
             return;
@@ -8407,7 +8412,7 @@ struct Lavery : viamd::EventHandler {
         if (cls == Class_Nucleotide) {
             for (const auto& change : state_switches) {
                 if (change.member != index || frame < change.begin || frame > change.end) continue;
-                tooltip_row(req, STR_LIT("state switch"), "%s: %s -> %s" TOOLTIP_SEP "%+.1f deg" TOOLTIP_SEP "frames %zu-%zu",
+                tooltip_row(req, MD_STR_LIT("state switch"), "%s: %s -> %s" TOOLTIP_SEP "%+.1f deg" TOOLTIP_SEP "frames %zu-%zu",
                     metric_name(change.metric), metric_state_name(change.metric,change.from), metric_state_name(change.metric,change.to),
                     change.angular_change, change.begin,change.end);
             }
@@ -8423,14 +8428,14 @@ struct Lavery : viamd::EventHandler {
                 context |= members_overlap(m.cls, m.member, cls, index);
             }
             if (context) {
-                tooltip_row(req, STR_LIT("event"), "#%zu" TOOLTIP_SEP "%s" TOOLTIP_SEP "frames %zu-%zu",
+                tooltip_row(req, MD_STR_LIT("event"), "#%zu" TOOLTIP_SEP "%s" TOOLTIP_SEP "frames %zu-%zu",
                     e + 1, event_kind(event).c_str(), event.begin, event.end);
-                if (event.truncated_begin || event.truncated_end) tooltip_row(req, STR_LIT("range boundary"),
+                if (event.truncated_begin || event.truncated_end) tooltip_row(req, MD_STR_LIT("range boundary"),
                     "Potentially truncated%s%s", event.truncated_begin ? " at start" : "", event.truncated_end ? " at end" : "");
-                if (event.parent != SIZE_MAX) tooltip_row(req, STR_LIT("hierarchy"),
+                if (event.parent != SIZE_MAX) tooltip_row(req, MD_STR_LIT("hierarchy"),
                     event.residual ? "Stands out from #%zu" TOOLTIP_SEP "%.2f sigma above background" :
                     "Local burst inside #%zu" TOOLTIP_SEP "%.2f sigma", event.parent + 1, event.burst_sigma);
-                tooltip_row(req, STR_LIT("event detail"), "%s", !contribution ? "Context only in this frame" :
+                tooltip_row(req, MD_STR_LIT("event detail"), "%s", !contribution ? "Context only in this frame" :
                     contribution->lost ? "Pairing disruption (not necessarily unpaired)" : "Contributing in this frame");
                 if (contribution) {
                     event_parameters_now |= contribution->parameters;
@@ -8440,20 +8445,20 @@ struct Lavery : viamd::EventHandler {
                         if (!names.empty()) names += ", ";
                         names += metric_name((Metric)(offset + k));
                     }
-                    if (!names.empty()) tooltip_row(req, STR_LIT("event parameters"), "%s", names.c_str());
+                    if (!names.empty()) tooltip_row(req, MD_STR_LIT("event parameters"), "%s", names.c_str());
                 }
             }
         }
         if (detection_enabled) {
-            tooltip_row(req, STR_LIT("frame"), "%zu" TOOLTIP_SEP "%.2f sigma" TOOLTIP_SEP "%s", frame, tolerance_at(frame),
+            tooltip_row(req, MD_STR_LIT("frame"), "%zu" TOOLTIP_SEP "%.2f sigma" TOOLTIP_SEP "%s", frame, tolerance_at(frame),
                 baseline_name((Baseline)statistics_baseline));
-            tooltip_row(req, STR_LIT("reference"), "%s",
+            tooltip_row(req, MD_STR_LIT("reference"), "%s",
                 statistics_reference_scope==Reference_HelixHistory ? "Helix-wide" : "Own history");
-        } else tooltip_row(req, STR_LIT("frame"), "%zu" TOOLTIP_SEP "outlier detection off",frame);
+        } else tooltip_row(req, MD_STR_LIT("frame"), "%zu" TOOLTIP_SEP "outlier detection off",frame);
         for (int k = 0; k < class_parameter_count(cls); ++k) {
             const int id = offset + k;
             const float v = values[id][frame * columns[id] + index];
-            const str_t key = str_from_cstr(metric_name((Metric)id));
+            const md_str_t key = md_str_from_cstr(metric_name((Metric)id));
             const uint16_t parameter_flags = parameter_quality(frame, index, id);
             if (parameter_flags || !std::isfinite(v)) tooltip_row(req, key, "%s", quality_status(parameter_flags, std::isfinite(v)));
             if (cls == Class_Nucleotide) {
@@ -8489,7 +8494,7 @@ struct Lavery : viamd::EventHandler {
         const uint16_t flags = cls == Class_Step ? step_quality_flags[frame * steps.size() + index] :
             cls == Class_Pair ? pair_quality_flags[frame * pairs.size() + index] : 0;
         for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
-            if (flags & bit) tooltip_row(req, STR_LIT("quality"), "%s", quality_description(bit));
+            if (flags & bit) tooltip_row(req, MD_STR_LIT("quality"), "%s", quality_description(bit));
         }
     }
 
@@ -8510,7 +8515,7 @@ struct Lavery : viamd::EventHandler {
         if (hit.domain == PickingDomain_CartoonGlyph) {
             const auto& glyphs = app->mold.cartoon_glyphs;
             const uint32_t point = cartoon_glyphs_picked_point(glyphs, hit.local_idx);
-            const int32_t component = cartoon_glyphs_point_component(glyphs, point);
+            const int32_t component = cartoon_glyphs_point_residue(glyphs, point);
             for (size_t b = 0; b < bases.size(); ++b)
                 if (component >= 0 && bases[b].component == (uint32_t)component) return (int32_t)b;
         }
@@ -8543,33 +8548,33 @@ struct Lavery : viamd::EventHandler {
             if (decode_pick(hit.local_idx, &cls, &index, &parameter)) {
                 if (parameter >= 0) {
                     tooltip_member(req, cls, index, 1u << (parameter - class_first_metric(cls)));
-                    tooltip_row(req, STR_LIT("measurement"), "%s", metric_name((Metric)parameter));
+                    tooltip_row(req, MD_STR_LIT("measurement"), "%s", metric_name((Metric)parameter));
                     if (parameter == MinorGroove || parameter == MajorGroove) {
-                        tooltip_row(req, STR_LIT("groove definition"), "Reported width = %s refined P-P distance minus 5.8 " TOOLTIP_ANGSTROM,
+                        tooltip_row(req, MD_STR_LIT("groove definition"), "Reported width = %s refined P-P distance minus 5.8 " TOOLTIP_ANGSTROM,
                             parameter == MinorGroove ? "mean of two" : "");
                         const auto& spans = display_grooves[parameter - MinorGroove];
                         if (index < spans.size()) for (const auto& span : spans[index]) {
-                            tooltip_row(req, STR_LIT("phosphates"), "%s / %s" TOOLTIP_SEP "%.2f " TOOLTIP_ANGSTROM " P-P",
+                            tooltip_row(req, MD_STR_LIT("phosphates"), "%s / %s" TOOLTIP_SEP "%.2f " TOOLTIP_ANGSTROM " P-P",
                                 measurement_atom_label(span.atoms[0]).c_str(), measurement_atom_label(span.atoms[1]).c_str(),
                                 vec3_distance(span.points[0], span.points[1]));
                         }
                     } else if (parameter >= (int)Alpha && parameter <= (int)Chi) {
                         const auto atoms = nucleotide_torsion_atoms(bases[nucleotide_base(index)], (Metric)parameter);
-                        for (int32_t atom : atoms) if (atom >= 0) tooltip_row(req, STR_LIT("defining atom"), "%s", measurement_atom_label(atom).c_str());
+                        for (int32_t atom : atoms) if (atom >= 0) tooltip_row(req, MD_STR_LIT("defining atom"), "%s", measurement_atom_label(atom).c_str());
                     } else if (HELICAL_PARAMETERS & (1u << parameter)) {
-                        tooltip_row(req, STR_LIT("geometry"), "3DNA local helical %s, relative to the step's local helical axis",
+                        tooltip_row(req, MD_STR_LIT("geometry"), "3DNA local helical %s, relative to the step's local helical axis",
                             metric_is_angular((Metric)parameter) ? "angle" : "distance");
                     } else if (parameter <= (int)Rise) {
-                        tooltip_row(req, STR_LIT("geometry"), "Local mid-frame %s component, not an atom %s",
+                        tooltip_row(req, MD_STR_LIT("geometry"), "Local mid-frame %s component, not an atom %s",
                             metric_is_angular((Metric)parameter) ? "rotation-vector" : "translation",
                             metric_is_angular((Metric)parameter) ? "angle" : "distance");
                     }
                     const auto& stats = statistics[parameter].members[index];
                     const float v = values[parameter][current_frame()*columns[parameter]+index];
                     const auto ref = stats.reference(v);
-                    if (ref.count) tooltip_row(req, STR_LIT("reference"), "center %.3f" TOOLTIP_SEP "scale %.3f" TOOLTIP_SEP "%zu baseline samples",
+                    if (ref.count) tooltip_row(req, MD_STR_LIT("reference"), "center %.3f" TOOLTIP_SEP "scale %.3f" TOOLTIP_SEP "%zu baseline samples",
                         ref.mean, ref.sd, ref.count);
-                    else tooltip_row(req, STR_LIT("reference"), "No baseline for this sample/state");
+                    else tooltip_row(req, MD_STR_LIT("reference"), "No baseline for this sample/state");
                 } else if (cls != Class_Pair) tooltip_member(req, cls, index, marker_mask(cls, index));
                 else tooltip_pair(req, index);
             }
@@ -8590,13 +8595,13 @@ struct Lavery : viamd::EventHandler {
     std::string measurement_atom_label(int32_t atom) const {
         char label[160];
         const int32_t b = atom_base[atom];
-        const str_t name = md_atom_name(&app->mold.sys.atom, atom);
+        const md_str_t name = md_atom_name(&app->mold.sys.atom, atom);
         if (b >= 0) {
             const auto& base = bases[b];
-            const str_t residue = md_component_name(&app->mold.sys.component, base.component);
-            snprintf(label, sizeof(label), "S%u:" STR_FMT "%d/" STR_FMT, base.strand + 1, STR_ARG(residue),
-                (int)md_system_component_seq_id(&app->mold.sys, base.component), STR_ARG(name));
-        } else snprintf(label, sizeof(label), "atom %d/" STR_FMT, atom + 1, STR_ARG(name));
+            const md_str_t residue = md_system_residue_name(&app->mold.sys, base.component);
+            snprintf(label, sizeof(label), "S%u:" MD_STR_FMT "%d/" MD_STR_FMT, base.strand + 1, MD_STR_ARG(residue),
+                (int)md_system_residue_seq_id(&app->mold.sys, base.component), MD_STR_ARG(name));
+        } else snprintf(label, sizeof(label), "atom %d/" MD_STR_FMT, atom + 1, MD_STR_ARG(name));
         return label;
     }
 
@@ -8791,7 +8796,7 @@ struct Lavery : viamd::EventHandler {
         static_assert(EVENT_PALETTE_SIZE+2 == HIGHLIGHT_GROUP_COLORS);
         contour_atom_groups.assign(app->mold.sys.atom.count, 0);
         for (uint32_t base : event_context_bases) {
-            const auto range = md_component_atom_range(&app->mold.sys.component, bases[base].component);
+            const auto range = md_system_residue_atom_range(&app->mold.sys, bases[base].component);
             for (uint32_t atom = range.beg; atom < range.end; ++atom)
                 contour_atom_groups[atom] = event_context_groups[base];
         }
@@ -8921,7 +8926,7 @@ struct Lavery : viamd::EventHandler {
         char expression[160];
         if (count == 2) snprintf(expression, sizeof(expression), "distance(%d,%d);", atoms[0]+1, atoms[1]+1);
         else snprintf(expression, sizeof(expression), "dihedral(%d,%d,%d,%d);", atoms[0]+1, atoms[1]+1, atoms[2]+1, atoms[3]+1);
-        if (!md_script_vis_eval_string(&vis, str_from_cstr(expression), &ctx, MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT)) {
+        if (!md_script_vis_eval_string(&vis, md_str_from_cstr(expression), &ctx, MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT)) {
             MD_LOG_ERROR("Lavery: native measurement visualization failed: %s", expression);
             md_script_vis_free(&vis);
             return;
@@ -9167,9 +9172,9 @@ struct Lavery : viamd::EventHandler {
             return;
         }
         char path[4096] = {};
-        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, STR_LIT("csv"))) return;
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) return;
         md_file_t file = {};
-        if (!md_file_open(&file, str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+        if (!md_file_open(&file, md_str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
             MD_LOG_ERROR("Lavery: could not open displayed-axis CSV '%s'", path);
             return;
         }

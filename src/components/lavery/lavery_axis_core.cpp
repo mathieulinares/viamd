@@ -292,12 +292,12 @@ bool publish_series(md_attributes_t* table, const std::string& run, const char* 
     }
     const std::string path = run + "/lavery/" + leaf;
     const md_attribute_desc_t desc = {
-        .path = str_from_cstr(path.c_str()),
+        .path = md_str_from_cstr(path.c_str()),
         .format = {.type = type, .components = 1, .rank = 2, .shape = {(uint32_t)frames, (uint32_t)members}},
         .flags = MD_ATTRIBUTE_FLAG_TEMPORAL,
         .unit = unit,
-        .label = str_from_cstr(label),
-        .description = STR_INIT("Canonical fixed partners; per-frame geometric and canonical-contact validity; fitted Tsukuba/Curves+ intra/step convention"),
+        .label = md_str_from_cstr(label),
+        .description = MD_STR_INIT("Canonical fixed partners; per-frame geometric and canonical-contact validity; fitted Tsukuba/Curves+ intra/step convention"),
         .data = data,
         .byte_size = bytes,
     };

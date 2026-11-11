@@ -41,7 +41,7 @@ const vec3_t samples[] = {
     } while (0)
 
 UTEST(viamd_color, srgb_oklab_round_trip) {
-    for (size_t i = 0; i < ARRAY_SIZE(samples); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(samples); ++i) {
         const vec3_t back = oklab_to_srgb(srgb_to_oklab(samples[i]));
         EXPECT_VEC3_NEAR(back, samples[i], 1.0e-4);
     }
@@ -69,14 +69,14 @@ UTEST(viamd_color, oklab_anchors) {
 }
 
 UTEST(viamd_color, linear_srgb_round_trip) {
-    for (size_t i = 0; i < ARRAY_SIZE(samples); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(samples); ++i) {
         const vec3_t back = linear_srgb_to_srgb(srgb_to_linear_srgb(samples[i]));
         EXPECT_VEC3_NEAR(back, samples[i], 1.0e-5);
     }
 }
 
 UTEST(viamd_color, xyz_lab_round_trip) {
-    for (size_t i = 0; i < ARRAY_SIZE(samples); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(samples); ++i) {
         const vec3_t xyz  = rgb_to_XYZ(samples[i]);
         const vec3_t back = XYZ_to_rgb(Lab_to_XYZ(XYZ_to_Lab(xyz)));
         EXPECT_VEC3_NEAR(back, samples[i], 1.0e-3);
@@ -84,7 +84,7 @@ UTEST(viamd_color, xyz_lab_round_trip) {
 }
 
 UTEST(viamd_color, rgb_hsv_round_trip) {
-    for (size_t i = 0; i < ARRAY_SIZE(samples); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(samples); ++i) {
         const vec3_t back = hsv_to_rgb(rgb_to_hsv(samples[i]));
         EXPECT_VEC3_NEAR(back, samples[i], 1.0e-5);
     }
@@ -96,7 +96,7 @@ UTEST(viamd_color, rgb_hcl_round_trip_is_approximate) {
     // about 0.015, and black does not return to black. That is the conversion's real behaviour
     // rather than a defect, so it is written down - if a colour path needs to survive repeated
     // conversion, Oklab is the one to use.
-    for (size_t i = 0; i < ARRAY_SIZE(samples); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(samples); ++i) {
         const vec3_t back = hcl_to_rgb(rgb_to_hcl(samples[i]));
         EXPECT_VEC3_NEAR(back, samples[i], 0.02);
     }
@@ -117,7 +117,7 @@ UTEST(viamd_color, oklch_hue_sweep_stays_in_gamut) {
 
 // Res Type: every atom takes the color of the type of its residue, which is that of the standard residue the type is a
 // form of (HIE is one of HIS) until it is given one of its own
-UTEST(viamd_color, comp_type) {
+UTEST(viamd_color, res_type) {
     static const char* pdb =
         "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N\n"
         "ATOM      2  CA  ALA A   1       1.458   0.000   0.000  1.00  0.00           C\n"
@@ -129,23 +129,23 @@ UTEST(viamd_color, comp_type) {
         "ATOM      8  O   HIE A   2       6.009   1.593   0.000  1.00  0.00           O\n"
         "HETATM    9  O   HOH A 101      20.000  20.000  20.000  1.00  0.00           O\n";
 
-    md_allocator_i* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(4));
+    md_allocator_i* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(4));
     md_system_t sys = { .alloc = alloc };
     md_system_state_t st = { .alloc = alloc };
-    ASSERT_TRUE(md_pdb_system_init_from_str(&sys, &st, str_from_cstr(pdb), MD_PDB_OPTION_DISABLE_CACHE_FILE_WRITE));
-    ASSERT_TRUE(md_util_system_infer(&sys, &st, MD_UTIL_INFER_ALL));
-    ASSERT_EQ(3, (int)sys.component.count);
+    ASSERT_TRUE(md_pdb_system_init_from_str(&sys, &st, md_str_from_cstr(pdb), MD_PDB_OPTION_DISABLE_CACHE_FILE_WRITE, NULL));
+    ASSERT_TRUE(md_util_system_infer(&sys, &st, MD_UTIL_INFER_ALL, NULL));
+    ASSERT_EQ(3, (int)sys.residue.count);
 
     uint32_t colors[9] = {};
-    color_atoms_comp_type(colors, 9, sys);
+    color_atoms_res_type(colors, 9, sys);
     for (int a = 0; a < 4; ++a) EXPECT_EQ(md_monomer_color(MD_MONOMER_ALA), colors[a]);
     for (int a = 4; a < 8; ++a) EXPECT_EQ(md_monomer_color(MD_MONOMER_HIS), colors[a]);
-    EXPECT_EQ(md_component_type_color(&sys.component.type, (size_t)md_component_type_idx(&sys.component, 2)) | 0xFF000000u, colors[8]);
+    EXPECT_EQ(md_residue_type_color(&sys.residue.type, (size_t)md_system_residue_type_idx(&sys, 2)) | 0xFF000000u, colors[8]);
 
     // A color of its own, opaque whatever alpha it was given
-    const md_component_type_idx_t his = md_component_type_idx(&sys.component, 1);
-    sys.component.type.color[his] = 0x00102030u;
-    color_atoms_comp_type(colors, 9, sys);
+    const md_residue_type_idx_t his = md_system_residue_type_idx(&sys, 1);
+    sys.residue.type.color[his] = 0x00102030u;
+    color_atoms_res_type(colors, 9, sys);
     for (int a = 4; a < 8; ++a) EXPECT_EQ(0xFF102030u, colors[a]);
 
     md_arena_allocator_destroy(alloc);
@@ -165,7 +165,7 @@ UTEST(viamd_color, oklch_mapped_keeps_lightness_and_hue) {
             EXPECT_NEAR((double)L, (double)lab.x, 2.0e-3);
             const float C = sqrtf(lab.y * lab.y + lab.z * lab.z);
             if (C > 0.02f) {
-                float dh = atan2f(lab.z, lab.y) / (2.0f * (float)PI) - h;
+                float dh = atan2f(lab.z, lab.y) / (2.0f * (float)MD_PI) - h;
                 dh -= roundf(dh);
                 EXPECT_LT(fabsf(dh), 0.01f);
             }
@@ -194,7 +194,7 @@ UTEST(viamd_color, optimize_colors_spreads_alike) {
     float min_d = 1.0f;
     for (int i = 0; i < 12; ++i) {
         EXPECT_EQ(0xFF000000u, items[i].color & 0xFF000000u);
-        for (int j = i + 1; j < 12; ++j) min_d = MIN(min_d, oklab_distance(items[i].color, items[j].color, false));
+        for (int j = i + 1; j < 12; ++j) min_d = MD_MIN(min_d, oklab_distance(items[i].color, items[j].color, false));
     }
     EXPECT_NEAR((double)r.min_distance, (double)min_d, 1.0e-4);
 

@@ -20,27 +20,30 @@ namespace script_editor {
 // Language and palette
 ////////////////////////////////////////////////////////////////////////////////
 
-const TextEditor::Language* language() {
-    static TextEditor::Language lang;
-    static bool initialized = false;
-    if (!initialized) {
-        initialized = true;
-        lang.name = "mdscript";
+const TextEditor::Language* language(script::Language script_lang) {
+    // One for each script language, made the first time it is asked for
+    static TextEditor::Language langs[3];
+    static bool initialized[3] = {};
+    const size_t idx = (size_t)script_lang < 3 ? (size_t)script_lang : 0;
+    TextEditor::Language& lang = langs[idx];
+    if (!initialized[idx]) {
+        initialized[idx] = true;
+        lang.name = script_lang == script::Language::V2 ? "VIAL" : "mdscript";
         lang.caseSensitive = true;
         lang.singleLineComment = "#";
         lang.hasSingleQuotedStrings = true;
         lang.hasDoubleQuotedStrings = true;
         lang.stringEscape = '\\';
 
-        // Keywords and built-in names come from mdlib, so the colouring follows the language
-        const str_t* keywords = md_script_keywords();
-        for (size_t i = 0; i < md_script_num_keywords(); ++i) {
+        // Keywords and built-in names come from the script, so the colouring follows the language
+        const md_str_t* keywords = script::keywords(script_lang);
+        for (size_t i = 0; i < script::num_keywords(script_lang); ++i) {
             lang.keywords.emplace(keywords[i].ptr, keywords[i].len);
         }
-        const size_t num_identifiers = md_script_builtin_identifiers(nullptr, 0);
-        std::vector<str_t> identifiers(num_identifiers);
-        md_script_builtin_identifiers(identifiers.data(), identifiers.size());
-        for (str_t id : identifiers) {
+        const size_t num_identifiers = script::builtin_names(script_lang, nullptr, 0);
+        std::vector<md_str_t> identifiers(num_identifiers);
+        script::builtin_names(script_lang, identifiers.data(), identifiers.size());
+        for (md_str_t id : identifiers) {
             lang.identifiers.emplace(id.ptr, id.len);
         }
 
@@ -115,7 +118,7 @@ std::string word_at_mouse(const TextEditor& editor, ImVec2 mouse_pos) {
     return is_identifier(word) ? word : std::string();
 }
 
-void append_line(TextEditor& editor, str_t line) {
+void append_line(TextEditor& editor, md_str_t line) {
     const TextEditor::DocPos end(editor.GetLineCount() - 1, SIZE_MAX);  // clamped to the end of the last line
     std::string text;
     if (!editor.IsEmpty()) text += '\n';
@@ -123,7 +126,7 @@ void append_line(TextEditor& editor, str_t line) {
     editor.ReplaceSectionText(end, end, text);
 }
 
-void insert_lines_at_cursor(TextEditor& editor, str_t code) {
+void insert_lines_at_cursor(TextEditor& editor, md_str_t code) {
     std::string text;
     if (editor.GetCurrentCursorPosition().index > 0) text += '\n';
     text.append(code.ptr, code.len);
@@ -145,17 +148,17 @@ bool has_focus_after_render() {
 // Dropping text in
 ////////////////////////////////////////////////////////////////////////////////
 
-bool attr_expression(char* buf, size_t cap, const md_attributes_t* attributes, const md_attribute_t* attr) {
-    ASSERT(buf && cap > 0);
+bool attr_expression(char* buf, size_t cap, script::Language lang, const md_attributes_t* attributes, const md_attribute_t* attr) {
+    MD_ASSERT(buf && cap > 0);
     buf[0] = '\0';
-    const str_t path = md_script_attr_path(attributes, attr);
-    if (str_empty(path)) return false;
+    const md_str_t path = script::attr_path(lang, attributes, attr);
+    if (md_str_empty(path)) return false;
     // Nothing in it that the script's lexer ends (or gives up on) a string at
     for (size_t i = 0; i < path.len; ++i) {
         const char c = path.ptr[i];
         if (c == '"' || c == ';' || c == '\n' || c == '\r') return false;
     }
-    const int len = snprintf(buf, cap, "attr(\"" STR_FMT "\")", STR_ARG(path));
+    const int len = snprintf(buf, cap, "attr(\"" MD_STR_FMT "\")", MD_STR_ARG(path));
     if (len < 0 || (size_t)len >= cap) {
         buf[0] = '\0';
         return false;
@@ -163,8 +166,8 @@ bool attr_expression(char* buf, size_t cap, const md_attributes_t* attributes, c
     return true;
 }
 
-bool accept_drop(TextEditor& editor, const char* payload_type, str_t text) {
-    if (editor.IsReadOnlyEnabled() || str_empty(text)) return false;
+bool accept_drop(TextEditor& editor, const char* payload_type, md_str_t text) {
+    if (editor.IsReadOnlyEnabled() || md_str_empty(text)) return false;
 
     const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(payload_type, ImGuiDragDropFlags_AcceptBeforeDelivery);
     if (!payload) return false;
@@ -264,22 +267,22 @@ static bool fuzzy_match(std::string_view pat, std::string_view word, int* out_sc
 }
 
 // The order among equally good matches
-static int kind_order(md_script_completion_kind_t kind) {
+static int kind_order(script::CompletionKind kind) {
     switch (kind) {
-    case MD_SCRIPT_COMPLETION_VALUE:     return 0;
-    case MD_SCRIPT_COMPLETION_PARAMETER: return 1;
-    case MD_SCRIPT_COMPLETION_VARIABLE:  return 2;
-    case MD_SCRIPT_COMPLETION_PROCEDURE: return 3;
-    case MD_SCRIPT_COMPLETION_CONSTANT:  return 4;
-    default:                             return 5;
+    case script::CompletionKind::Value:     return 0;
+    case script::CompletionKind::Parameter: return 1;
+    case script::CompletionKind::Variable:  return 2;
+    case script::CompletionKind::Procedure: return 3;
+    case script::CompletionKind::Constant:  return 4;
+    default:                                return 5;
     }
 }
 
-bool completion_match(std::string_view typed, const md_script_completion_t& item, int* score) {
+bool completion_match(std::string_view typed, const script::Completion& item, int* score) {
     return fuzzy_match(typed, std::string_view(item.label.ptr, item.label.len), score);
 }
 
-bool completion_before(const md_script_completion_t& a, int a_score, const md_script_completion_t& b, int b_score, std::string_view typed) {
+bool completion_before(const script::Completion& a, int a_score, const script::Completion& b, int b_score, std::string_view typed) {
     const std::string_view a_label(a.label.ptr, a.label.len), b_label(b.label.ptr, b.label.len);
     if (a.fits != b.fits) return a.fits;
     const bool a_exact = a_label == typed, b_exact = b_label == typed;
@@ -291,9 +294,9 @@ bool completion_before(const md_script_completion_t& a, int a_score, const md_sc
     return a_label < b_label;
 }
 
-// What can be written at the cursor comes from mdlib (md_script_complete), which knows the language and the system.
+// What can be written at the cursor comes from the script (script::complete), which knows the language and the system.
 // What matches what has been typed, and in which order, is decided here.
-static void suggest(const TextEditor& editor, const md_system_t* sys, TextEditor::AutoCompleteState& state) {
+static void suggest(const TextEditor& editor, script::Language lang, const md_system_t* sys, TextEditor::AutoCompleteState& state) {
     const size_t MAX_SUGGESTIONS = 100;
     state.suggestions.clear();
 
@@ -302,7 +305,7 @@ static void suggest(const TextEditor& editor, const md_system_t* sys, TextEditor
     const int cursor = (int)byte_offset(state.searchTermEnd);
 
     md_temp_scope_t temp = md_temp_begin();
-    const md_script_completions_t completions = md_script_complete({src.data(), src.size()}, cursor, sys, md_temp_allocator(temp));
+    const script::Completions completions = script::complete(lang, {src.data(), src.size()}, cursor, sys, md_temp_allocator(temp));
 
     // mdlib says which bytes a completion replaces: an identifier, or the contents of a string, such as an attribute
     // path. The editor replaces the word the cursor is in, which can be less (the 'potential' of 'edr/potential'), so
@@ -321,13 +324,13 @@ static void suggest(const TextEditor& editor, const md_system_t* sys, TextEditor
     const std::string_view typed(completions.prefix.ptr, completions.prefix.len);
 
     struct Match {
-        const md_script_completion_t* item;
+        const script::Completion* item;
         std::string_view insert;    // what replaces the word
         int score;
     };
     std::vector<Match> matches;
     for (size_t i = 0; word_in_range && i < completions.count; ++i) {
-        const md_script_completion_t& item = completions.items[i];
+        const script::Completion& item = completions.items[i];
         const std::string_view text(item.text.ptr, item.text.len);
         if (text.size() < lead.size() + tail.size() || text.substr(0, lead.size()) != lead || text.substr(text.size() - tail.size()) != tail) continue;
         int score;
@@ -351,11 +354,11 @@ static void suggest(const TextEditor& editor, const md_system_t* sys, TextEditor
     md_temp_end(temp);
 }
 
-void enable_autocomplete(TextEditor& editor, const md_system_t* sys) {
+void enable_autocomplete(TextEditor& editor, script::Language lang, const md_system_t* sys) {
     TextEditor::AutoCompleteConfig config;
     // Strings are for mdlib to judge: it offers the names a selector such as resname() takes, and nothing elsewhere
     config.triggerInStrings = true;
-    config.callback = [ed = &editor, sys](TextEditor::AutoCompleteState& state) { suggest(*ed, sys, state); };
+    config.callback = [ed = &editor, lang, sys](TextEditor::AutoCompleteState& state) { suggest(*ed, lang, sys, state); };
     editor.SetAutoCompleteConfig(&config);
 }
 
@@ -375,7 +378,7 @@ static const ImU32 SQUIGGLE_COLOR_WARNING = IM_COL32(255, 210,   0, 255);
 static const ImU32 SQUIGGLE_COLOR_HOVERED = IM_COL32(255, 255, 255, 255);
 
 void markers_clear(Markers* m) {
-    ASSERT(m);
+    MD_ASSERT(m);
     if (md_array_size(m->list) > 0) m->dirty = true;
     if (m->arena) md_arena_allocator_reset(m->arena);
     m->list = nullptr;
@@ -384,11 +387,12 @@ void markers_clear(Markers* m) {
     m->hovered = -1;
 }
 
-void markers_set_source(Markers* m, str_t source) {
-    ASSERT(m);
+void markers_set_source(Markers* m, md_str_t source) {
+    MD_ASSERT(m);
     markers_clear(m);
-    if (!m->arena) m->arena = md_arena_allocator_create(md_get_heap_allocator(), KILOBYTES(64));
-    m->source = source;
+    if (!m->arena) m->arena = md_arena_allocator_create(md_get_heap_allocator(), MD_KILOBYTES(64));
+    // Kept: markers are also added after the compilation, as the evaluation finds what fails
+    m->source = md_str_copy(source, m->arena);
     md_array_push(m->line_offsets, 0u, m->arena);
     for (size_t i = 0; i < source.len; ++i) {
         if (source.ptr[i] == '\n') md_array_push(m->line_offsets, (uint32_t)(i + 1), m->arena);
@@ -399,7 +403,7 @@ void markers_set_source(Markers* m, str_t source) {
 static TextEditor::DocPos doc_pos(const Markers* m, int offset) {
     const uint32_t* lines = m->line_offsets;
     const size_t num_lines = md_array_size(lines);
-    const uint32_t off = (uint32_t)CLAMP(offset, 0, (int)m->source.len);
+    const uint32_t off = (uint32_t)MD_CLAMP(offset, 0, (int)m->source.len);
     // Last line that starts at or before the offset
     size_t lo = 0, hi = num_lines;
     while (hi - lo > 1) {
@@ -413,16 +417,30 @@ static TextEditor::DocPos doc_pos(const Markers* m, int offset) {
     return TextEditor::DocPos(lo, index);
 }
 
-void markers_add(Markers* m, MarkerType type, int prio, md_script_range_marker_t range, str_t text,
-                 const md_bitset_t* atoms, md_script_vis_ref_t vis_ref) {
-    ASSERT(m);
-    ASSERT(m->arena && "markers_set_source() must be called before markers are added");
+size_t markers_count(const Markers* m) { return m ? md_array_size(m->list) : 0; }
+
+void markers_truncate(Markers* m, size_t count) {
+    if (!m || count >= md_array_size(m->list)) return;
+    md_array_shrink(m->list, count);
+    m->hovered = -1;
+    m->dirty = true;
+}
+
+void markers_set_text(Markers* m, size_t index, md_str_t text) {
+    if (!m || !m->arena || index >= md_array_size(m->list)) return;
+    m->list[index].text = md_str_copy(text, m->arena);
+}
+
+void markers_add(Markers* m, MarkerType type, int prio, script::Range range, md_str_t text,
+                 const md_bitset_t* atoms, script::Ref vis_ref) {
+    MD_ASSERT(m);
+    MD_ASSERT(m->arena && "markers_set_source() must be called before markers are added");
     Marker marker = {};
     marker.type = type;
     marker.prio = prio;
     marker.beg  = doc_pos(m, range.beg);
     marker.end  = doc_pos(m, range.end);
-    marker.text = str_copy(text, m->arena);
+    marker.text = md_str_copy(text, m->arena);
     if (atoms) {
         md_bitset_t* copy = (md_bitset_t*)md_alloc(m->arena, sizeof(md_bitset_t));
         *copy = md_bitset_copy(*atoms, m->arena);
@@ -434,8 +452,8 @@ void markers_add(Markers* m, MarkerType type, int prio, md_script_range_marker_t
 }
 
 const Marker* markers_update(Markers* m, TextEditor* editor, bool editor_hovered) {
-    ASSERT(m);
-    ASSERT(editor);
+    MD_ASSERT(m);
+    MD_ASSERT(editor);
     const int num_markers = (int)md_array_size(m->list);
 
     m->hovered = -1;
@@ -473,7 +491,7 @@ const Marker* markers_update(Markers* m, TextEditor* editor, bool editor_hovered
 }
 
 const Marker* markers_hovered(const Markers* m) {
-    ASSERT(m);
+    MD_ASSERT(m);
     return m->hovered != -1 ? &m->list[m->hovered] : nullptr;
 }
 

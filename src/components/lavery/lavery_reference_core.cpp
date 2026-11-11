@@ -572,8 +572,8 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
     if (error) error->clear();
     if (candidates.empty() || !sys.atom.count || sys.atom.count>INT_MAX) return fail(error,"No frames/atoms to export, or atom count exceeds XTC limits");
     for (size_t a=0; a<sys.atom.count; ++a) {
-        const auto c=md_system_component_find_by_atom_idx(&sys,a);
-        if (c<0 || md_atom_name(&sys.atom,a).len>5 || md_component_name(&sys.component,c).len>5)
+        const auto c=md_system_residue_find_by_atom_idx(&sys,a);
+        if (c<0 || md_atom_name(&sys.atom,a).len>5 || md_system_residue_name(&sys,c).len>5)
             return fail(error,"Matching GRO requires residue membership and atom/residue names of at most five characters");
     }
     std::filesystem::path path(xtc_path);
@@ -587,7 +587,7 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
         if (ec) return fail(error,"Cannot inspect output path: "+file.string()+": "+ec.message());
         if (exists) return fail(error,"Output already exists; choose a new filename: "+file.string());
     }
-    const auto* time_attr = md_attributes_find(&sys.attributes,str_from_cstr((run+"/time").c_str()));
+    const auto* time_attr = md_attributes_find(&sys.attributes,md_str_from_cstr((run+"/time").c_str()));
     if (!time_attr || !time_attr->data || time_attr->format.type!=MD_ATTRIBUTE_TYPE_F64 ||
         !md_unit_base_equal(time_attr->unit,md_unit_second())) return fail(error,"XTC export requires physical F64 trajectory timestamps");
     const size_t frame_count = time_attr->format.shape[0];
@@ -608,8 +608,8 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
     }
     md_system_state_t state = {.alloc=md_get_heap_allocator()};
     if (!md_system_state_init(&state,sys.atom.count)) return fail(error,"Cannot allocate representative-frame coordinates");
-    const str_t paths[] = {STR_LIT("atom/position"),STR_LIT("unitcell")};
-    auto* extract = md_system_extract_begin(&sys,str_from_cstr(run.c_str()),paths,2,md_get_heap_allocator());
+    const md_str_t paths[] = {MD_STR_LIT("atom/position"),MD_STR_LIT("unitcell")};
+    auto* extract = md_system_extract_begin(&sys,md_str_from_cstr(run.c_str()),paths,2,md_get_heap_allocator());
     if (!extract) { md_system_state_free(&state); return fail(error,"Could not begin representative-frame coordinate extraction"); }
     XDRFILE* output = xdrfile_open(xtc_path.c_str(),"w");
     if (!output) { md_system_extract_end(extract); md_system_state_free(&state); return fail(error,"Cannot create XTC: "+xtc_path); }
@@ -645,13 +645,13 @@ bool export_representative_frames(const md_system_t& sys, const std::string& run
         if (!n) {
             gro << "Lavery representative frame " << f << ", t= " << time << " ps\n" << sys.atom.count << '\n';
             for (size_t a = 0; a < sys.atom.count; ++a) {
-                const auto component = md_system_component_find_by_atom_idx(&sys,a);
+                const auto component = md_system_residue_find_by_atom_idx(&sys,a);
                 if (component<0) { ok=false; break; }
-                const str_t res = md_component_name(&sys.component,component), atom = md_atom_name(&sys.atom,a);
+                const md_str_t res = md_system_residue_name(&sys,component), atom = md_atom_name(&sys.atom,a);
                 char line[256];
                 // Five decimals retain the decoded coordinates while remaining valid variable-precision GRO.
                 const int len = snprintf(line,sizeof(line),"%5d%-5.*s%5.*s%5zu%10.5f%10.5f%10.5f\n",
-                    (int)(md_system_component_seq_id(&sys,component)%100000), (int)std::min(size_t(5),res.len),res.ptr,
+                    (int)(md_system_residue_seq_id(&sys,component)%100000), (int)std::min(size_t(5),res.len),res.ptr,
                     (int)std::min(size_t(5),atom.len),atom.ptr,(a+1)%100000,xyz[a][0],xyz[a][1],xyz[a][2]);
                 if (len<0 || len>=(int)sizeof(line)) { ok=false; break; }
                 gro << line;

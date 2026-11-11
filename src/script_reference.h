@@ -1,6 +1,7 @@
 #pragma once
 
-// In-app viewer for the mdlib script reference (ext/mdlib/docs/script_reference.md).
+// In-app viewer for the mdlib script references: mdscript's (ext/mdlib/docs/script_reference.md) and VIAL's
+// (ext/mdlib/docs/vial_reference.md), whichever the workspace's script is written in (set_language).
 //
 // The reference is plain Markdown that lives next to the implementation and is baked into the executable. The viewer
 // parses its outline once (headings, procedure metadata comments, alias anchors), shows one section ("page") at a
@@ -11,17 +12,23 @@
 //   - Every procedure has a `### name` heading followed by `<!-- proc name=... aliases=a,b category=... -->`
 //     and optionally `<a id="alias"></a>` anchors.
 //   - Code blocks tagged `mdscript` are examples that can be copied or inserted into the script editor.
+// VIAL's reference has no procedure comments: its functions and predefined names are the first cells of its tables, and
+// each leads to the section of the first table that has it. Its examples are tagged `python`.
 
 #include <core/md_str.h>
+#include <script_engine.h>
 
 namespace script_reference {
 
+// The reference shown: mdscript's for V1, VIAL's for V2. Each keeps its own place and history.
+void set_language(script::Language lang);
+
 // Shows the entry for a procedure name, alias or heading anchor (case-insensitive).
 // Returns false if there is no such entry, in which case nothing changes.
-bool show(str_t topic);
+bool show(md_str_t topic);
 
 // Puts the query in the search box and lists the matches in the sidebar.
-void search(str_t query);
+void search(md_str_t query);
 
 // Moves keyboard focus to the search box the next time the window is drawn.
 void focus_search();
@@ -32,7 +39,7 @@ void reveal(bool take_focus);
 
 // What the user asked the host to do while the window was drawn.
 struct Action {
-    str_t insert_code = {};  // "Insert" was pressed on an example. Zero terminated, ends with a newline, valid until the next draw_window().
+    md_str_t insert_code = {};  // "Insert" was pressed on an example. Zero terminated, ends with a newline, valid until the next draw_window().
 };
 
 // Draws the viewer as a window named "Script Reference".

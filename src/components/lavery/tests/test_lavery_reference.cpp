@@ -487,23 +487,23 @@ UTEST(lavery_core, pairing_disruption_explanations_do_not_reclassify_chemistry) 
 
 UTEST(lavery_core, representative_xtc_gro_export_preserves_atoms_times_coordinates_and_rank) {
     Files files;
-    auto* alloc=md_arena_allocator_create(md_get_heap_allocator(),MEGABYTES(16));
+    auto* alloc=md_arena_allocator_create(md_get_heap_allocator(),MD_MEGABYTES(16));
     md_system_t sys={.alloc=alloc};
     md_system_state_t state={.alloc=alloc};
-    ASSERT_TRUE(md_gro_system_init_from_file(&sys,&state,STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro")));
+    ASSERT_TRUE(md_gro_system_init_from_file(&sys,&state,MD_STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro"), nullptr));
     const double times[]={100,120,140};
-    const md_attribute_desc_t time={.path=STR_INIT("run/test/time"),
+    const md_attribute_desc_t time={.path=MD_STR_INIT("run/test/time"),
         .format={.type=MD_ATTRIBUTE_TYPE_F64,.components=1,.rank=1,.shape={3}},
         .flags=MD_ATTRIBUTE_FLAG_TEMPORAL,.unit=md_unit_picosecond(),.data=times,.byte_size=sizeof(times)};
     ASSERT_NE(md_attributes_create(&sys.attributes,&time),MD_ATTRIBUTE_INVALID);
     std::vector<vec3_t> xyz;
     for (int f=0; f<3; ++f) for (size_t a=0; a<state.num_atoms; ++a) xyz.push_back(vec3_add(state.xyz[a],{(float)f,0,0}));
-    const md_attribute_desc_t position={.path=STR_INIT("run/test/atom/position"),
+    const md_attribute_desc_t position={.path=MD_STR_INIT("run/test/atom/position"),
         .format={.type=MD_ATTRIBUTE_TYPE_F32,.components=3,.rank=2,.shape={3,(uint32_t)state.num_atoms}},
         .flags=MD_ATTRIBUTE_FLAG_TEMPORAL,.unit=md_unit_angstrom(),.data=xyz.data(),.byte_size=xyz.size()*sizeof(vec3_t)};
     ASSERT_NE(md_attributes_create(&sys.attributes,&position),MD_ATTRIBUTE_INVALID);
     const float cells[]={30,0,0,2,31,0,3,4,32, 30,0,0,2,31,0,3,4,32, 30,0,0,2,31,0,3,4,32};
-    const md_attribute_desc_t cell={.path=STR_INIT("run/test/unitcell"),
+    const md_attribute_desc_t cell={.path=MD_STR_INIT("run/test/unitcell"),
         .format={.type=MD_ATTRIBUTE_TYPE_F32,.components=1,.rank=3,.shape={3,3,3}},
         .flags=MD_ATTRIBUTE_FLAG_TEMPORAL,.unit=md_unit_angstrom(),.data=cells,.byte_size=sizeof(cells)};
     ASSERT_NE(md_attributes_create(&sys.attributes,&cell),MD_ATTRIBUTE_INVALID);
@@ -517,21 +517,21 @@ UTEST(lavery_core, representative_xtc_gro_export_preserves_atoms_times_coordinat
     md_system_t reload={.alloc=alloc};
     md_system_state_t loaded={.alloc=alloc};
     const auto gro=(files.dir/"frames.gro").string();
-    ASSERT_TRUE(md_gro_system_init_from_file(&reload,&loaded,str_from_cstr(gro.c_str())));
+    ASSERT_TRUE(md_gro_system_init_from_file(&reload,&loaded,md_str_from_cstr(gro.c_str()), nullptr));
     ASSERT_EQ(loaded.num_atoms,state.num_atoms);
     for (size_t a=0; a<state.num_atoms; ++a) {
         EXPECT_NEAR(loaded.xyz[a].x,state.xyz[a].x,.0002);
         EXPECT_NEAR(loaded.xyz[a].y,state.xyz[a].y,.0002);
         EXPECT_NEAR(loaded.xyz[a].z,state.xyz[a].z,.0002);
     }
-    ASSERT_TRUE(md_xtc_system_publish_run(&reload,str_from_cstr(path.c_str()),STR_LIT("run/export"),MD_RUN_FLAG_DISABLE_CACHE_WRITE));
-    const auto* time_check=md_attributes_find(&reload.attributes,STR_LIT("run/export/time"));
+    ASSERT_TRUE(md_xtc_system_publish_run(&reload,md_str_from_cstr(path.c_str()),MD_STR_LIT("run/export"),MD_RUN_FLAG_DISABLE_CACHE_WRITE));
+    const auto* time_check=md_attributes_find(&reload.attributes,MD_STR_LIT("run/export/time"));
     ASSERT_TRUE(time_check && time_check->data);
     EXPECT_EQ(time_check->format.shape[0],2u);
     EXPECT_EQ(((const double*)time_check->data)[0],100);
     EXPECT_EQ(((const double*)time_check->data)[1],140);
-    const str_t paths[]={STR_LIT("atom/position"),STR_LIT("unitcell")};
-    auto* extract=md_system_extract_begin(&reload,STR_LIT("run/export"),paths,2,alloc);
+    const md_str_t paths[]={MD_STR_LIT("atom/position"),MD_STR_LIT("unitcell")};
+    auto* extract=md_system_extract_begin(&reload,MD_STR_LIT("run/export"),paths,2,alloc);
     ASSERT_TRUE(extract!=nullptr);
     for (size_t f=0; f<2; ++f) {
         ASSERT_TRUE(md_system_extract_frame(extract,f,&loaded));
@@ -551,7 +551,7 @@ UTEST(lavery_core, representative_xtc_gro_export_preserves_atoms_times_coordinat
     EXPECT_NE(text.find("used_features,total_features,coverage,omitted_features\n"),std::string::npos);
     EXPECT_NE(text.find(",2,3,0.66666666666666663,\"step/roll:1=invalid_scale\""),std::string::npos);
     EXPECT_NE(text.find(",3,3,1,\"\""),std::string::npos);
-    auto* positions=md_attributes_find(&sys.attributes,STR_LIT("run/test/atom/position"));
+    auto* positions=md_attributes_find(&sys.attributes,MD_STR_LIT("run/test/atom/position"));
     ASSERT_TRUE(positions && positions->data);
     ((vec3_t*)positions->data)[0].x=NAN;
     EXPECT_FALSE(export_representative_frames(sys,"run/test",(files.dir/"failed.xtc").string(),{{0,0}},"",&error));

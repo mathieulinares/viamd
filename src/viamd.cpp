@@ -2,10 +2,12 @@
 #include <md_util.h>
 #include <md_dssp.h>
 #include <md_qm.h>
+#include <md_gto_iso.h>
 
+#include <atomic>
 #include <stdarg.h>
 
-#include <md_filter.h>
+#include <script_engine.h>
 
 #include <core/md_log.h>
 #include <core/md_writer.h>
@@ -13,18 +15,21 @@
 
 #include <viamd.h>
 #include <representation.h>
+#include <script_editor.h>
 #include <viamd_event.h>
 #include <event.h>
 #include <loader.h>
 #include <color_utils.h>
 #include <display_units.h>
 #include <serialization_utils.h>
+#include <plot_periodic.h>
 
 #include <gfx/gl_utils.h>
 #include <gfx/volumerender_utils.h>
 
 #include <imgui.h>
 #include <imgui_notify.h>
+#include <es_planes.h>
 #include <implot.h>
 #include <implot_internal.h>
 #include <cmath>
@@ -59,8 +64,8 @@ void calculate_bounds(float out_min[3], float out_max[3], const vec4_t* xyzw, si
     min_v -= pad;
     max_v += pad;
 
-    MEMCPY(out_min, &min_v, sizeof(float) * 3);
-    MEMCPY(out_max, &max_v, sizeof(float) * 3);
+    md_memcpy(out_min, &min_v, sizeof(float) * 3);
+    md_memcpy(out_max, &max_v, sizeof(float) * 3);
 }
 
 // Construct texture to world transformation matrix for Volume
@@ -96,16 +101,16 @@ mat4_t compute_index_to_world_mat(const mat3_t& orientation, const vec3_t& in_or
 
 // Attempts to compute fitting volume dimensions given an input extent and a suggested number of samples per length unit
 void compute_dim(int out_dim[3], const vec3_t& in_ext, double samples_per_unit_length) {
-    out_dim[0] = CLAMP(ALIGN_TO((int)(in_ext.x * samples_per_unit_length), 8), 8, 512);
-    out_dim[1] = CLAMP(ALIGN_TO((int)(in_ext.y * samples_per_unit_length), 8), 8, 512);
-    out_dim[2] = CLAMP(ALIGN_TO((int)(in_ext.z * samples_per_unit_length), 8), 8, 512);
+    out_dim[0] = MD_CLAMP(MD_ALIGN_TO((int)(in_ext.x * samples_per_unit_length), 8), 8, 512);
+    out_dim[1] = MD_CLAMP(MD_ALIGN_TO((int)(in_ext.y * samples_per_unit_length), 8), 8, 512);
+    out_dim[2] = MD_CLAMP(MD_ALIGN_TO((int)(in_ext.z * samples_per_unit_length), 8), 8, 512);
 }
 
 // Grid units are BOHR, matching what md_gto evaluates in; a Volume's transforms are Angstrom,
 // matching the world the camera lives in. init_volume is where the two meet, and it is the only
 // place that conversion belongs.
 void init_grid(md_grid_t* grid, const mat3_t& orientation, const vec3_t& min_ext, const vec3_t& max_ext, double samples_per_unit_length) {
-    ASSERT(grid);
+    MD_ASSERT(grid);
     vec3_t extent = max_ext - min_ext;
     compute_dim(grid->dim, extent, samples_per_unit_length);
     vec3_t voxel_size = vec3_div(extent, vec3_set((float)grid->dim[0], (float)grid->dim[1], (float)grid->dim[2]));
@@ -115,8 +120,8 @@ void init_grid(md_grid_t* grid, const mat3_t& orientation, const vec3_t& min_ext
 }
 
 void init_volume(Volume* vol, const md_grid_t& grid, GLenum format) {
-    ASSERT(vol);
-    MEMCPY(vol->dim, grid.dim, sizeof(vol->dim));
+    MD_ASSERT(vol);
+    md_memcpy(vol->dim, grid.dim, sizeof(vol->dim));
 
     // A grid is in BOHR and a Volume's transforms are in Angstrom; this is where the two meet.
     const float scl = (float)BOHR_TO_ANGSTROM;
@@ -143,7 +148,7 @@ void init_volume(Volume* vol, const md_grid_t& grid, GLenum format) {
 // The font carries Latin-1, Greek and U+2010-2027 (application.cpp): the middle dot, the en dash, Å, °, ², φ and ψ
 // print; an arrow, the minus sign U+2212 and the prime U+2032 do not, so '-', '/' and "'" stand in for them.
 
-static str_t tooltip_vprintf(md_allocator_i* alloc, const char* format, va_list args) {
+static md_str_t tooltip_vprintf(md_allocator_i* alloc, const char* format, va_list args) {
     va_list args_len;
     va_copy(args_len, args);
     const int len = vsnprintf(NULL, 0, format, args_len);
@@ -156,7 +161,7 @@ static str_t tooltip_vprintf(md_allocator_i* alloc, const char* format, va_list 
 }
 
 void tooltip_title(PickingTooltipTextRequest* req, const char* format, ...) {
-    ASSERT(req && req->alloc);
+    MD_ASSERT(req && req->alloc);
     va_list args;
     va_start(args, format);
     const TooltipLine line = {.kind = TooltipLineKind::Title, .text = tooltip_vprintf(req->alloc, format, args)};
@@ -164,8 +169,8 @@ void tooltip_title(PickingTooltipTextRequest* req, const char* format, ...) {
     md_array_push(req->lines, line, req->alloc);
 }
 
-void tooltip_row(PickingTooltipTextRequest* req, str_t key, const char* format, ...) {
-    ASSERT(req && req->alloc);
+void tooltip_row(PickingTooltipTextRequest* req, md_str_t key, const char* format, ...) {
+    MD_ASSERT(req && req->alloc);
     va_list args;
     va_start(args, format);
     const TooltipLine line = {.kind = TooltipLineKind::Row, .key = key, .text = tooltip_vprintf(req->alloc, format, args)};
@@ -174,7 +179,7 @@ void tooltip_row(PickingTooltipTextRequest* req, str_t key, const char* format, 
 }
 
 // A row of a list built in sb, left out when the list is empty
-static void tooltip_row_list(PickingTooltipTextRequest* req, str_t key, const md_str_writer_t& sb) {
+static void tooltip_row_list(PickingTooltipTextRequest* req, md_str_t key, const md_str_writer_t& sb) {
     if (!md_str_writer_empty(&sb)) {
         tooltip_row(req, key, "%s", md_str_writer_to_cstr(&sb));
     }
@@ -186,106 +191,250 @@ static void tooltip_list_add(md_str_writer_t* sb, const char* item) {
 }
 
 // A lower case copy, for names the system spells capitalised ("Carbon") where the tooltip uses them as words
-static str_t tooltip_lower(md_allocator_i* alloc, str_t str) {
-    if (str_empty(str)) return {};
+static md_str_t tooltip_lower(md_allocator_i* alloc, md_str_t str) {
+    if (md_str_empty(str)) return {};
     char* buf = (char*)md_alloc(alloc, str.len + 1);
-    MEMCPY(buf, str.ptr, str.len);
+    md_memcpy(buf, str.ptr, str.len);
     buf[str.len] = '\0';
-    convert_to_lower(buf, str.len);
+    md_convert_to_lower(buf, str.len);
     return {buf, str.len};
 }
 
 // " e", " Å", or nothing for a dimensionless value
 static void tooltip_unit_suffix(char* buf, size_t cap, md_unit_t unit) {
-    ASSERT(buf && cap > 1);
+    MD_ASSERT(buf && cap > 1);
     buf[0] = '\0';
     if (md_unit_print(buf + 1, cap - 1, unit) > 0) {
         buf[0] = ' ';
     }
 }
 
-// Where an atom sits: its residue and its chain, -1 for either it is not in
+// Where an atom sits: its residue and its part, -1 for either it is not in
 struct TooltipPlace {
-    int comp_idx = -1;
-    int inst_idx = -1;
+    int res_idx = -1;
+    int part_idx = -1;
+    int atom_idx = -1;      // An atom of it, which tells its molecule
 };
 
 static TooltipPlace tooltip_place_of_atom(const md_system_t& sys, size_t atom_idx) {
     return {
-        .comp_idx = md_component_find_by_atom_idx(&sys.component, atom_idx),
-        .inst_idx = md_system_instance_find_by_atom_idx(&sys, atom_idx),
+        .res_idx = md_system_residue_find_by_atom_idx(&sys, atom_idx),
+        .part_idx = md_system_part_find_by_atom_idx(&sys, atom_idx),
+        .atom_idx = (int)atom_idx,
     };
 }
 
-// "ALA 42", or the component's index when it has no name
-static void tooltip_append_residue(md_str_writer_t* sb, const md_system_t& sys, int comp_idx) {
-    const str_t name = md_component_name(&sys.component, comp_idx);
-    if (!str_empty(name)) {
-        md_str_writer_fmt(sb, STR_FMT " %d", STR_ARG(name), md_component_seq_id(&sys.component, comp_idx));
+static TooltipPlace tooltip_place_of_residue(const md_system_t& sys, int res_idx) {
+    return {
+        .res_idx = res_idx,
+        .part_idx = res_idx >= 0 ? md_system_part_find_by_residue_idx(&sys, (size_t)res_idx) : -1,
+    };
+}
+
+// "ALA 42", or the residue's index when it has no name
+static void tooltip_append_residue(md_str_writer_t* sb, const md_system_t& sys, int res_idx) {
+    const md_str_t name = md_system_residue_name(&sys, res_idx);
+    if (!md_str_empty(name)) {
+        md_str_writer_fmt(sb, MD_STR_FMT " %d", MD_STR_ARG(name), md_system_residue_seq_id(&sys, res_idx));
     } else {
-        md_str_writer_fmt(sb, "component %d", comp_idx + 1);
+        md_str_writer_fmt(sb, "residue %d", res_idx + 1);
     }
 }
 
-// "chain A", with the author's id where it differs ("chain C (auth A)"), or the instance's index when it has no id
-static void tooltip_append_chain(md_str_writer_t* sb, const md_system_t& sys, int inst_idx) {
-    const str_t id   = md_instance_id(&sys.instance, inst_idx);
-    const str_t auth = md_instance_auth_id(&sys.instance, inst_idx);
-    if (!str_empty(id)) {
-        md_str_writer_fmt(sb, "chain " STR_FMT, STR_ARG(id));
-    } else {
-        md_str_writer_fmt(sb, "instance %d", inst_idx + 1);
+// The chain of a place (md_chain_data_t), -1 for one in none
+static int tooltip_place_chain(const md_system_t& sys, const TooltipPlace& place) {
+    return place.res_idx >= 0 ? md_system_chain_find_by_residue_idx(&sys, (size_t)place.res_idx) : -1;
+}
+
+// The position of the part among the strands of the polymers, as polymer(i) counts them: -1 for a part which is no strand
+static int tooltip_polymer_position(const md_system_t& sys, int part_idx) {
+    if (part_idx < 0 || !md_part_kind_is_polymer(md_system_part_kind(&sys, (size_t)part_idx))) return -1;
+    int pos = 0;
+    for (int p = 0; p < part_idx; ++p) pos += md_part_kind_is_polymer(md_system_part_kind(&sys, (size_t)p)) ? 1 : 0;
+    return pos;
+}
+
+// What a place is filed under: "chain A", the id the data gives; where it gives none, the strand of a polymer it is of,
+// "polymer 2", by its position as polymer(2) finds it. A part of no polymer in no chain (a water the data gives no
+// chain id) is named by its residue alone: -1, nothing appended.
+static bool tooltip_append_label(md_str_writer_t* sb, const md_system_t& sys, const TooltipPlace& place) {
+    const int chain = tooltip_place_chain(sys, place);
+    if (chain >= 0) {
+        md_str_writer_fmt(sb, "chain " MD_STR_FMT, MD_STR_ARG(md_system_chain_id(&sys, (size_t)chain)));
+        return true;
     }
-    if (!str_empty(auth) && !str_eq(auth, id)) {
-        md_str_writer_fmt(sb, " (auth " STR_FMT ")", STR_ARG(auth));
+    const int pos = tooltip_polymer_position(sys, place.part_idx);
+    if (pos >= 0) {
+        md_str_writer_fmt(sb, "polymer %d", pos + 1);
+        return true;
     }
+    return false;
+}
+
+// The label a place is filed under, as an identity to compare: its chain, else its strand, else none
+static int64_t tooltip_label_key(const md_system_t& sys, const TooltipPlace& place) {
+    const int chain = tooltip_place_chain(sys, place);
+    if (chain >= 0) return chain;
+    const int pos = tooltip_polymer_position(sys, place.part_idx);
+    return pos >= 0 ? ((int64_t)1 << 32) + pos : -1;
 }
 
 // The rest of a title: " · ALA 42 · chain A" for one place, and for the two ends of a bond that crosses over
 // " · ALA 42 / GLY 43 · chain A" or " · CYS 10 · chain A / CYS 50 · chain B"
 static void tooltip_append_place(md_str_writer_t* sb, const md_system_t& sys, const TooltipPlace& a, const TooltipPlace* b = nullptr) {
     auto sep = [sb]() { if (!md_str_writer_empty(sb)) *sb += TOOLTIP_SEP; };
-    const bool two_insts = b && b->inst_idx != a.inst_idx;
-    const bool two_comps = b && b->comp_idx != a.comp_idx;
+    const int64_t label_a = tooltip_label_key(sys, a);
+    const int64_t label_b = b ? tooltip_label_key(sys, *b) : -1;
+    const bool two_labels = b && label_b != label_a;
+    const bool two_residues = b && b->res_idx != a.res_idx;
 
-    if (a.comp_idx != -1) {
+    if (a.res_idx != -1) {
         sep();
-        tooltip_append_residue(sb, sys, a.comp_idx);
-        if (two_comps && !two_insts && b->comp_idx != -1) {
+        tooltip_append_residue(sb, sys, a.res_idx);
+        if (two_residues && !two_labels && b->res_idx != -1) {
             *sb += " / ";
-            tooltip_append_residue(sb, sys, b->comp_idx);
+            tooltip_append_residue(sb, sys, b->res_idx);
         }
     }
-    if (a.inst_idx != -1) {
+    if (label_a != -1) {
         sep();
-        tooltip_append_chain(sb, sys, a.inst_idx);
+        tooltip_append_label(sb, sys, a);
     }
-    if (two_insts) {
+    if (two_labels && (b->res_idx != -1 || label_b != -1)) {
         *sb += " / ";
-        if (b->comp_idx != -1) {
-            tooltip_append_residue(sb, sys, b->comp_idx);
-            if (b->inst_idx != -1) *sb += TOOLTIP_SEP;
+        if (b->res_idx != -1) {
+            tooltip_append_residue(sb, sys, b->res_idx);
+            if (label_b != -1) *sb += TOOLTIP_SEP;
         }
-        if (b->inst_idx != -1) {
-            tooltip_append_chain(sb, sys, b->inst_idx);
+        if (label_b != -1) {
+            tooltip_append_label(sb, sys, *b);
         }
     }
 }
 
-// "component(56) instance(1)", after whatever sb holds
-static void tooltip_append_index(md_str_writer_t* sb, const TooltipPlace& place) {
-    if (place.comp_idx != -1) md_str_writer_fmt(sb, "%scomponent(%d)", md_str_writer_empty(sb) ? "" : " ", place.comp_idx + 1);
-    if (place.inst_idx != -1) md_str_writer_fmt(sb, "%sinstance(%d)",  md_str_writer_empty(sb) ? "" : " ", place.inst_idx + 1);
+// "residue(56) part(3) chain(1)", after whatever sb holds: the place in the script's terms. The part is given where it is
+// less than its molecule (a glycan, a strand bonded to another). Then what it is filed under: its chain, else the strand
+// of a polymer it is by its position (polymer(2)), else its molecule by its position among the molecules.
+static void tooltip_append_index(md_str_writer_t* sb, const md_system_t& sys, const TooltipPlace& place) {
+    const int chain = tooltip_place_chain(sys, place);
+    int atom = place.atom_idx;
+    if (atom == -1 && place.res_idx != -1) atom = (int)md_system_residue_atom_range(&sys, place.res_idx).beg;
+    const md_molecule_idx_t mol = atom != -1 ? md_system_molecule_find_by_atom_idx(&sys, (size_t)atom) : -1;
+
+    if (place.res_idx != -1) md_str_writer_fmt(sb, "%sresidue(%d)", md_str_writer_empty(sb) ? "" : " ", place.res_idx + 1);
+    const int32_t part = place.part_idx;
+    if (part != -1 && mol != -1) {
+        const md_urange_t part_atoms = md_system_part_atom_range(&sys, (size_t)part);
+        const size_t mol_size = md_system_molecule_atom_count(&sys, (size_t)mol);
+        if (part_atoms.end - part_atoms.beg < mol_size) {
+            md_str_writer_fmt(sb, "%spart(%d)", md_str_writer_empty(sb) ? "" : " ", part + 1);
+        }
+    }
+    if (chain != -1) {
+        md_str_writer_fmt(sb, "%schain(%d)", md_str_writer_empty(sb) ? "" : " ", chain + 1);
+        return;
+    }
+    const int pos = tooltip_polymer_position(sys, part);
+    if (pos >= 0) {
+        md_str_writer_fmt(sb, "%spolymer(%d)", md_str_writer_empty(sb) ? "" : " ", pos + 1);
+        return;
+    }
+    if (mol != -1) md_str_writer_fmt(sb, "%smolecule(%lld)", md_str_writer_empty(sb) ? "" : " ", (long long)mol + 1);
+}
+
+// What a place is of: its part, by the type of it (an mmCIF entity, or inferred: the kind of a polymer, the residue names
+// of anything else), and its molecule, by its type, where that says more than the part (a glycoprotein, a molecule of a
+// topology, named as the topology names it)
+static void tooltip_part_and_molecule_rows(PickingTooltipTextRequest* req, const md_system_t& sys, const TooltipPlace& place) {
+    md_str_t part_desc = {};
+    if (place.part_idx != -1) {
+        const md_part_type_idx_t type = md_system_part_type_idx(&sys, (size_t)place.part_idx);
+        if (type != -1) {
+            part_desc = md_system_part_type_description(&sys, (size_t)type);
+            const char* kind = md_part_kind_name(md_system_part_type_kind(&sys, (size_t)type));
+            if (md_str_empty(part_desc) || md_str_eq_cstr(part_desc, kind)) {
+                tooltip_row(req, MD_STR_LIT("part"), "%s", kind);
+                part_desc = md_str_from_cstr(kind);
+            } else {
+                tooltip_row(req, MD_STR_LIT("part"), MD_STR_FMT " (%s)", MD_STR_ARG(part_desc), kind);
+            }
+        }
+    }
+    int atom = place.atom_idx;
+    if (atom == -1 && place.res_idx != -1) atom = (int)md_system_residue_atom_range(&sys, place.res_idx).beg;
+    const md_molecule_idx_t mol = atom != -1 ? md_system_molecule_find_by_atom_idx(&sys, (size_t)atom) : -1;
+    if (mol != -1) {
+        const md_molecule_type_idx_t type = md_system_molecule_type_idx(&sys, (size_t)mol);
+        const md_str_t name = type != -1 ? md_system_molecule_type_name(&sys, (size_t)type) : md_str_t{};
+        if (!md_str_empty(name) && !md_str_eq(name, part_desc)) {
+            tooltip_row(req, MD_STR_LIT("molecule"), MD_STR_FMT, MD_STR_ARG(name));
+        }
+    }
+}
+
+// A fragment (md_fragment.h) by its name, then its kind where the name does not say it: "phenyl (ring system)",
+// "amide (functional group)", but "backbone", "C16 tail", "C3 linker"; and a fragment which is all of its molecule
+// (a water, an ion) by its name alone, as it is no piece of anything
+static void tooltip_append_fragment(md_str_writer_t* sb, const md_system_t& sys, md_fragment_idx_t frag) {
+    const md_str_t name = md_system_fragment_name(&sys, frag);
+    const size_t mol = md_system_fragment_molecule(&sys, frag);
+    if (!md_str_empty(name) && md_system_fragment_atom_count(&sys, frag) == md_system_molecule_atom_count(&sys, mol)) {
+        *sb += name;
+        return;
+    }
+    const md_str_t kind = md_str_from_cstr(md_fragment_kind_str(md_system_fragment_kind(&sys, frag)));
+    // The last word of the kind: "tail" of "lipid tail"
+    md_str_t word = kind;
+    for (size_t i = kind.len; i > 0; --i) {
+        if (kind.ptr[i - 1] == ' ') {
+            word = md_str_substr(kind, i, SIZE_MAX);
+            break;
+        }
+    }
+    if (md_str_empty(name)) {
+        *sb += kind;
+    } else if (md_str_empty(word) || md_str_find_str(NULL, name, word)) {
+        *sb += name;
+    } else {
+        md_str_writer_fmt(sb, MD_STR_FMT " (" MD_STR_FMT ")", MD_STR_ARG(name), MD_STR_ARG(kind));
+    }
+}
+
+// The fragment row of an atom: what chemical piece of its molecule it is in, and, as fragments and residues do not
+// nest, the other residues that piece is of: "ester (functional group), with POPC 12". The fragments are of the
+// system's bonds, which the frame shown may have changed.
+static void tooltip_fragment_row(PickingTooltipTextRequest* req, const md_system_t& sys, size_t atom_idx) {
+    const md_fragment_idx_t frag = md_system_fragment_find_by_atom_idx(&sys, atom_idx);
+    if (frag == MD_FRAGMENT_NONE) return;
+
+    md_str_writer_t sb = md_str_writer_create(req->alloc);
+    tooltip_append_fragment(&sb, sys, frag);
+
+    const md_residue_idx_t own = md_system_residue_find_by_atom_idx(&sys, atom_idx);
+    md_residue_idx_t res[4];
+    const size_t num_res = md_system_fragment_residues(res, MD_COUNTOF(res), &sys, frag);
+    size_t shown = 0;
+    for (size_t i = 0; i < MD_MIN(num_res, MD_COUNTOF(res)); ++i) {
+        if (res[i] == own) continue;
+        sb += shown == 0 ? MD_STR_LIT(", with ") : MD_STR_LIT(", ");
+        tooltip_append_residue(&sb, sys, res[i]);
+        shown += 1;
+    }
+    // Of more residues than were looked up (a residue of its own is among them)
+    if (num_res > MD_COUNTOF(res)) {
+        md_str_writer_fmt(&sb, " and %zu more", num_res - MD_COUNTOF(res));
+    }
+    tooltip_row_list(req, MD_STR_LIT("fragment"), sb);
 }
 
 // The atom's name, else its element's symbol, else its index
 static void tooltip_append_atom_name(md_str_writer_t* sb, const md_system_t& sys, size_t atom_idx) {
-    str_t name = md_atom_name(&sys.atom, atom_idx);
-    if (str_empty(name)) {
+    md_str_t name = md_atom_name(&sys.atom, atom_idx);
+    if (md_str_empty(name)) {
         const md_atomic_number_t z = md_atom_atomic_number(&sys.atom, atom_idx);
         if (z) name = md_util_element_symbol(z);
     }
-    if (!str_empty(name)) {
+    if (!md_str_empty(name)) {
         *sb += name;
     } else {
         md_str_writer_fmt(sb, "atom %zu", atom_idx + 1);
@@ -306,7 +455,7 @@ static void tooltip_atom_attribute_rows(PickingTooltipTextRequest* req, const Ap
     size_t num_fields = 0;
 
     auto add = [&](const md_attribute_t* attr, int variant) {
-        if (!attr || num_fields == ARRAY_SIZE(fields)) return;
+        if (!attr || num_fields == MD_COUNTOF(fields)) return;
         for (size_t i = 0; i < num_fields; ++i) {
             if (fields[i].attr == attr && fields[i].variant == variant) return;
         }
@@ -318,16 +467,16 @@ static void tooltip_atom_attribute_rows(PickingTooltipTextRequest* req, const Ap
         if (!representation_shown(state, rep) || rep.color_mapping != ColorMapping::Attribute) continue;
         const md_attribute_t* attr = md_attributes_get(&sys.attributes, rep.atom_attribute.key);
         if (!attr) continue;
-        const int variant = attr->format.rank > 1 ? CLAMP(rep.atom_attribute.variant_idx, 0, atom_attribute_variant_count(attr) - 1) : -1;
+        const int variant = attr->format.rank > 1 ? MD_CLAMP(rep.atom_attribute.variant_idx, 0, atom_attribute_variant_count(attr) - 1) : -1;
         add(attr, variant);
     }
 
     md_attribute_id_t ids[32];
-    const size_t num_ids = MIN(atom_attribute_query(ids, ARRAY_SIZE(ids), sys), ARRAY_SIZE(ids));
+    const size_t num_ids = MD_MIN(atom_attribute_query(ids, MD_COUNTOF(ids), sys), MD_COUNTOF(ids));
     for (size_t i = 0; i < num_ids; ++i) {
         const md_attribute_t* attr = md_attributes_get(&sys.attributes, ids[i]);
         if (!attr || attr->format.rank != 1) continue;
-        if (str_eq(attr->path, STR_LIT("atom/formal_charge")) || str_eq(attr->path, STR_LIT("atom/mass"))) continue;
+        if (md_str_eq(attr->path, MD_STR_LIT("atom/formal_charge")) || md_str_eq(attr->path, MD_STR_LIT("atom/mass"))) continue;
         add(attr, -1);
     }
 
@@ -339,9 +488,9 @@ static void tooltip_atom_attribute_rows(PickingTooltipTextRequest* req, const Ap
         float value = 0.0f;
         if (md_attribute_extract_f32(&value, 1, attr, slice, md_unit_none()) != 1 || atom_attribute_value_absent(value)) continue;
 
-        str_t key = atom_attribute_label(attr);
+        md_str_t key = atom_attribute_label(attr);
         if (variant >= 0) {
-            key = str_printf(req->alloc, STR_FMT " (%d)", STR_ARG(key), variant + 1);
+            key = md_str_printf(req->alloc, MD_STR_FMT " (%d)", MD_STR_ARG(key), variant + 1);
         }
         char unit[32];
         tooltip_unit_suffix(unit, sizeof(unit), attr->unit);
@@ -366,25 +515,25 @@ static void tooltip_atom(PickingTooltipTextRequest* req, const ApplicationState&
     int formal_charge = 0;
     int num_h = 0;
     const md_atom_flags_t    flags    = frame_atom_flags(state, atom_idx, &formal_charge, &num_h);
-    const bool nucleotide = place.comp_idx != -1 && md_component_kind(&sys.component, place.comp_idx) == MD_COMPONENT_KIND_NUCLEOTIDE;
+    const bool nucleotide = place.res_idx != -1 && md_system_residue_kind(&sys, place.res_idx) == MD_RESIDUE_KIND_NUCLEOTIDE;
 
     // What it is
     if (particle != MD_PARTICLE_ATOM) {
-        tooltip_row(req, STR_LIT("particle"), "%s", md_particle_kind_name(particle));
+        tooltip_row(req, MD_STR_LIT("particle"), "%s", md_particle_kind_name(particle));
     }
     if (z) {
-        const str_t symbol = md_util_element_symbol(z);
-        const str_t name   = tooltip_lower(req->alloc, md_util_element_name(z));
-        tooltip_row(req, STR_LIT("element"), STR_FMT " (" STR_FMT ")", STR_ARG(symbol), STR_ARG(name));
+        const md_str_t symbol = md_util_element_symbol(z);
+        const md_str_t name   = tooltip_lower(req->alloc, md_util_element_name(z));
+        tooltip_row(req, MD_STR_LIT("element"), MD_STR_FMT " (" MD_STR_FMT ")", MD_STR_ARG(symbol), MD_STR_ARG(name));
     }
-    const str_t ff_type = md_atom_type_ff_type(&sys.atom.type, (size_t)md_atom_type_idx(&sys.atom, atom_idx));
-    if (!str_empty(ff_type)) {
-        tooltip_row(req, STR_LIT("type"), STR_FMT, STR_ARG(ff_type));
+    const md_str_t ff_type = md_particle_type_ff_type(&sys.atom.type, (size_t)md_atom_particle_type_idx(&sys.atom, atom_idx));
+    if (!md_str_empty(ff_type)) {
+        tooltip_row(req, MD_STR_LIT("type"), MD_STR_FMT, MD_STR_ARG(ff_type));
     }
     if (particle != MD_PARTICLE_ATOM) {
         // An atom weighs what its element does, a bead what its force field says
         const float mass = md_atom_mass(&sys.atom, atom_idx);
-        if (mass > 0.0f) tooltip_row(req, STR_LIT("mass"), "%.3f Da", mass);
+        if (mass > 0.0f) tooltip_row(req, MD_STR_LIT("mass"), "%.3f Da", mass);
     }
 
     // Its part in the residue. A nucleoside is the sugar and the base: what of it is not the base is the sugar.
@@ -398,7 +547,10 @@ static void tooltip_atom(PickingTooltipTextRequest* req, const ApplicationState&
     }
     if (flags & MD_ATOM_FLAG_TERMINAL_BEG) tooltip_list_add(&role, nucleotide ? "5' end" : "N-terminus");
     if (flags & MD_ATOM_FLAG_TERMINAL_END) tooltip_list_add(&role, nucleotide ? "3' end" : "C-terminus");
-    tooltip_row_list(req, STR_LIT("role"), role);
+    tooltip_row_list(req, MD_STR_LIT("role"), role);
+
+    // The chemical piece of its molecule it is in
+    tooltip_fragment_row(req, sys, atom_idx);
 
     // Its chemistry
     md_str_writer_t chem = md_str_writer_create(req->alloc);
@@ -407,24 +559,24 @@ static void tooltip_atom(PickingTooltipTextRequest* req, const ApplicationState&
     if (flags & MD_ATOM_FLAG_AROMATIC)   tooltip_list_add(&chem, "aromatic");
     if (flags & MD_ATOM_FLAG_METALLIC)   tooltip_list_add(&chem, "metallic");
     if (num_h > 0) md_str_writer_fmt(&chem, "%s%d H", md_str_writer_empty(&chem) ? "" : ", ", num_h);
-    tooltip_row_list(req, STR_LIT("chemistry"), chem);
+    tooltip_row_list(req, MD_STR_LIT("chemistry"), chem);
 
     if (formal_charge) {
-        tooltip_row(req, STR_LIT("formal charge"), "%+d", formal_charge);
+        tooltip_row(req, MD_STR_LIT("formal charge"), "%+d", formal_charge);
     }
     if (flags & MD_ATOM_FLAG_QM) {
-        tooltip_row(req, STR_LIT("region"), "QM");
+        tooltip_row(req, MD_STR_LIT("region"), "QM");
     }
 
     tooltip_atom_attribute_rows(req, state, atom_idx);
 
     const vec3_t pos = md_state_coord(&state.mold.state, atom_idx);
-    tooltip_row(req, STR_LIT("position"), "%.3f, %.3f, %.3f " TOOLTIP_ANGSTROM, pos.x, pos.y, pos.z);
+    tooltip_row(req, MD_STR_LIT("position"), "%.3f, %.3f, %.3f " TOOLTIP_ANGSTROM, pos.x, pos.y, pos.z);
 
     md_str_writer_t index = md_str_writer_create(req->alloc);
     md_str_writer_fmt(&index, "atom(%u)", atom_idx + 1);
-    tooltip_append_index(&index, place);
-    tooltip_row_list(req, STR_LIT("index"), index);
+    tooltip_append_index(&index, sys, place);
+    tooltip_row_list(req, MD_STR_LIT("index"), index);
 }
 
 // A bond of the system, or one formed in the frame shown (picked_bond)
@@ -458,7 +610,7 @@ static void tooltip_bond(PickingTooltipTextRequest* req, const ApplicationState&
         tooltip_list_add(&kind, "aromatic");
     } else if (flags & MD_BOND_FLAG_DELOCALIZED) {
         tooltip_list_add(&kind, "delocalized");
-    } else if (0 < order && order < (int)ARRAY_SIZE(order_names)) {
+    } else if (0 < order && order < (int)MD_COUNTOF(order_names)) {
         tooltip_list_add(&kind, order_names[order]);
     }
     switch (md_bond_kind(flags)) {
@@ -469,12 +621,27 @@ static void tooltip_bond(PickingTooltipTextRequest* req, const ApplicationState&
     case MD_BOND_KIND_HYDROGEN:    tooltip_list_add(&kind, "hydrogen bond"); break;
     default: break;
     }
-    tooltip_row_list(req, STR_LIT("kind"), kind);
+    tooltip_row_list(req, MD_STR_LIT("kind"), kind);
+
+    // The fragment it is within, or the two it joins: "amine / phenyl"
+    if (!formed) {
+        const md_fragment_idx_t f0 = md_system_fragment_find_by_atom_idx(&sys, pair.idx[0]);
+        const md_fragment_idx_t f1 = md_system_fragment_find_by_atom_idx(&sys, pair.idx[1]);
+        if (f0 != MD_FRAGMENT_NONE && f0 == f1) {
+            tooltip_fragment_row(req, sys, pair.idx[0]);
+        } else if (f0 != MD_FRAGMENT_NONE && f1 != MD_FRAGMENT_NONE) {
+            md_str_writer_t frags = md_str_writer_create(req->alloc);
+            tooltip_append_fragment(&frags, sys, f0);
+            frags += " / ";
+            tooltip_append_fragment(&frags, sys, f1);
+            tooltip_row_list(req, MD_STR_LIT("fragments"), frags);
+        }
+    }
 
     // Across a periodic boundary the bond is the short way round
     vec3_t d = vec3_sub(md_state_coord(&sys_state, pair.idx[1]), md_state_coord(&sys_state, pair.idx[0]));
     md_util_min_image_vec3(&d, 1, &sys_state.unitcell);
-    tooltip_row(req, STR_LIT("length"), "%.3f " TOOLTIP_ANGSTROM, vec3_length(d));
+    tooltip_row(req, MD_STR_LIT("length"), "%.3f " TOOLTIP_ANGSTROM, vec3_length(d));
 
     md_str_writer_t source = md_str_writer_create(req->alloc);
     if (formed) {
@@ -484,9 +651,9 @@ static void tooltip_bond(PickingTooltipTextRequest* req, const ApplicationState&
         tooltip_list_add(&source, md_bond_origin_name(md_bond_origin(flags)));
         if (flags & MD_BOND_FLAG_ORDER_PERCEIVED) tooltip_list_add(&source, "order perceived");
     }
-    tooltip_row_list(req, STR_LIT("source"), source);
+    tooltip_row_list(req, MD_STR_LIT("source"), source);
 
-    tooltip_row(req, STR_LIT("index"), "atom(%d) atom(%d)", pair.idx[0] + 1, pair.idx[1] + 1);
+    tooltip_row(req, MD_STR_LIT("index"), "atom(%d) atom(%d)", pair.idx[0] + 1, pair.idx[1] + 1);
 }
 
 // A backbone segment stands for its residue: the cartoon and ribbons have no atoms to speak of. What the segment adds is
@@ -498,7 +665,7 @@ static void tooltip_backbone_segment_geometry(PickingTooltipTextRequest* req, co
     const md_protein_backbone_data_t& bb = sys.protein_backbone;
 
     if (const md_secondary_structure_t* ss = displayed_secondary_structure(&state)) {
-        tooltip_row(req, STR_LIT("sec. structure"), "%s", md_secondary_structure_name(ss[seg_idx]));
+        tooltip_row(req, MD_STR_LIT("sec. structure"), "%s", md_secondary_structure_name(ss[seg_idx]));
     }
 
     const md_backbone_angles_t* angles = md_util_state_backbone_angles(&state.mold.state, &sys);
@@ -509,7 +676,7 @@ static void tooltip_backbone_segment_geometry(PickingTooltipTextRequest* req, co
             if (seg_idx < beg || end <= seg_idx) continue;
             if (end - beg >= 4 && beg < seg_idx && seg_idx + 1 < end && !md_protein_backbone_range_is_trace(&bb, i)) {
                 // phi, psi and the degree sign in UTF-8 escapes
-                tooltip_row(req, STR_LIT("\xCF\x86, \xCF\x88"), "%.1f\xC2\xB0, %.1f\xC2\xB0", RAD_TO_DEG(angles[seg_idx].phi), RAD_TO_DEG(angles[seg_idx].psi));
+                tooltip_row(req, MD_STR_LIT("\xCF\x86, \xCF\x88"), "%.1f\xC2\xB0, %.1f\xC2\xB0", MD_RAD_TO_DEG(angles[seg_idx].phi), MD_RAD_TO_DEG(angles[seg_idx].psi));
             }
             break;
         }
@@ -519,80 +686,62 @@ static void tooltip_backbone_segment_geometry(PickingTooltipTextRequest* req, co
 static void tooltip_backbone_segment(PickingTooltipTextRequest* req, const ApplicationState& state, uint32_t seg_idx) {
     const md_system_t& sys = state.mold.sys;
     const md_protein_backbone_data_t& bb = sys.protein_backbone;
-    ASSERT(seg_idx < bb.segment.count && bb.segment.comp_idx);
+    MD_ASSERT(seg_idx < bb.segment.count && bb.segment.res_idx);
 
-    const int comp_idx = bb.segment.comp_idx[seg_idx];
-    if (comp_idx < 0 || (size_t)comp_idx >= sys.component.count) {
-        // No component (a backbone found from the bonds alone, as for an XYZ file): no residue to name, only what the
+    const int res_idx = bb.segment.res_idx[seg_idx];
+    if (res_idx < 0 || (size_t)res_idx >= sys.residue.count) {
+        // No residue (a backbone found from the bonds alone, as for an XYZ file): no residue to name, only what the
         // segment adds, and the atom of its CA
         tooltip_title(req, "amino acid");
         tooltip_backbone_segment_geometry(req, state, seg_idx);
-        tooltip_row(req, STR_LIT("index"), "atom(%d)", bb.segment.atoms[seg_idx].ca + 1);
+        tooltip_row(req, MD_STR_LIT("index"), "atom(%d)", bb.segment.atoms[seg_idx].ca + 1);
         return;
     }
-    const md_urange_t range = md_component_atom_range(&sys.component, comp_idx);
-    const TooltipPlace place = {
-        .comp_idx = comp_idx,
-        .inst_idx = range.beg < range.end ? md_system_instance_find_by_atom_idx(&sys, range.beg) : -1,
-    };
+    const md_urange_t range = md_system_residue_atom_range(&sys, res_idx);
+    const TooltipPlace place = tooltip_place_of_residue(sys, res_idx);
 
     md_str_writer_t title = md_str_writer_create(req->alloc);
     tooltip_append_place(&title, sys, place);
     tooltip_title(req, "%s", md_str_writer_to_cstr(&title));
 
-    const md_component_kind_t  kind  = md_component_kind(&sys.component, comp_idx);
-    const md_component_flags_t flags = md_system_component_flags(&sys, comp_idx);
-    const bool nucleotide = kind == MD_COMPONENT_KIND_NUCLEOTIDE;
+    const md_residue_kind_t    kind  = md_system_residue_kind(&sys, res_idx);
+    const md_residue_flags_t flags = md_system_residue_flags(&sys, res_idx);
+    const bool nucleotide = kind == MD_RESIDUE_KIND_NUCLEOTIDE;
 
     md_str_writer_t kind_list = md_str_writer_create(req->alloc);
-    if (kind != MD_COMPONENT_KIND_OTHER) tooltip_list_add(&kind_list, md_component_kind_name(kind));
-    if ((kind == MD_COMPONENT_KIND_AMINO_ACID || nucleotide) && !(flags & MD_COMPONENT_FLAG_RESOLVED)) tooltip_list_add(&kind_list, "unresolved");
-    if (flags & MD_COMPONENT_FLAG_TERMINAL_BEG) tooltip_list_add(&kind_list, nucleotide ? "5' end" : "N-terminus");
-    if (flags & MD_COMPONENT_FLAG_TERMINAL_END) tooltip_list_add(&kind_list, nucleotide ? "3' end" : "C-terminus");
-    if (flags & MD_COMPONENT_FLAG_BREAK_BEFORE) tooltip_list_add(&kind_list, "chain break before");
-    if (flags & MD_COMPONENT_FLAG_BREAK_AFTER)  tooltip_list_add(&kind_list, "chain break after");
-    tooltip_row_list(req, STR_LIT("kind"), kind_list);
+    if (kind != MD_RESIDUE_KIND_OTHER) tooltip_list_add(&kind_list, md_residue_kind_name(kind));
+    if ((kind == MD_RESIDUE_KIND_AMINO_ACID || nucleotide) && !(flags & MD_RESIDUE_FLAG_RESOLVED)) tooltip_list_add(&kind_list, "unresolved");
+    if (flags & MD_RESIDUE_FLAG_TERMINAL_BEG) tooltip_list_add(&kind_list, nucleotide ? "5' end" : "N-terminus");
+    if (flags & MD_RESIDUE_FLAG_TERMINAL_END) tooltip_list_add(&kind_list, nucleotide ? "3' end" : "C-terminus");
+    if (flags & MD_RESIDUE_FLAG_BREAK_BEFORE) tooltip_list_add(&kind_list, "chain break before");
+    if (flags & MD_RESIDUE_FLAG_BREAK_AFTER)    tooltip_list_add(&kind_list, "chain break after");
+    tooltip_row_list(req, MD_STR_LIT("kind"), kind_list);
 
     tooltip_backbone_segment_geometry(req, state, seg_idx);
 
-    tooltip_row(req, STR_LIT("atoms"), "%u", range.end - range.beg);
+    tooltip_row(req, MD_STR_LIT("atoms"), "%u", range.end - range.beg);
 
-    // The molecule it is part of, which the title names only by its chain
-    if (place.inst_idx != -1) {
-        const md_entity_idx_t ent_idx = md_instance_entity_idx(&sys.instance, place.inst_idx);
-        if (ent_idx != -1) {
-            const str_t desc = md_entity_description(&sys.entity, ent_idx);
-            const md_entity_flags_t ent_flags = md_entity_flags(&sys.entity, ent_idx);
-            const char* ent_kind = md_entity_kind_name(md_entity_kind(&sys.entity, ent_idx));
-            const char* inferred = (ent_flags & MD_ENTITY_FLAG_INFERRED) ? ", inferred" : "";
-            if (!str_empty(desc)) {
-                tooltip_row(req, STR_LIT("entity"), STR_FMT " (%s%s)", STR_ARG(desc), ent_kind, inferred);
-            } else {
-                tooltip_row(req, STR_LIT("entity"), "%s%s", ent_kind, inferred);
-            }
-        }
-    }
+    tooltip_part_and_molecule_rows(req, sys, place);
 
     md_str_writer_t index = md_str_writer_create(req->alloc);
-    tooltip_append_index(&index, place);
-    tooltip_row_list(req, STR_LIT("index"), index);
+    tooltip_append_index(&index, sys, place);
+    tooltip_row_list(req, MD_STR_LIT("index"), index);
 }
 
-// The gap of a chain over a break after the component comp_idx (md_gl_mol_set_chain_gaps): the residues on either side,
+// The gap of a chain over a break after the residue res_idx (md_gl_mol_set_chain_gaps): the residues on either side,
 // how many residues are missing between them by their numbering, and how far apart the atoms a link would join are in
 // the current frame. The numbering is that of the residues of the sequence in an mmCIF file, which counts the missing
 // ones exactly, but the author's in a PDB file, which may skip where nothing is missing; a model built in pieces may
 // number on over a break where something is.
-static void tooltip_chain_gap(PickingTooltipTextRequest* req, const ApplicationState& state, uint32_t comp_idx) {
+static void tooltip_chain_gap(PickingTooltipTextRequest* req, const ApplicationState& state, uint32_t res_idx) {
     const md_system_t& sys = state.mold.sys;
-    ASSERT((size_t)comp_idx + 1 < sys.component.count);
-    if (!(md_system_component_flags(&sys, comp_idx) & MD_COMPONENT_FLAG_BREAK_AFTER)) return;
+    MD_ASSERT((size_t)res_idx + 1 < sys.residue.count);
+    if (!(md_system_residue_flags(&sys, res_idx) & MD_RESIDUE_FLAG_BREAK_AFTER)) return;
 
-    const md_urange_t range = md_component_atom_range(&sys.component, comp_idx);
-    const int inst_idx = range.beg < range.end ? md_system_instance_find_by_atom_idx(&sys, range.beg) : -1;
+    const md_urange_t range = md_system_residue_atom_range(&sys, res_idx);
     const TooltipPlace place[2] = {
-        {.comp_idx = (int)comp_idx,     .inst_idx = inst_idx},
-        {.comp_idx = (int)comp_idx + 1, .inst_idx = inst_idx},
+        tooltip_place_of_residue(sys, (int)res_idx),
+        tooltip_place_of_residue(sys, (int)res_idx + 1),
     };
 
     md_str_writer_t title = md_str_writer_create(req->alloc);
@@ -600,15 +749,15 @@ static void tooltip_chain_gap(PickingTooltipTextRequest* req, const ApplicationS
     tooltip_append_place(&title, sys, place[0], &place[1]);
     tooltip_title(req, "%s", md_str_writer_to_cstr(&title));
 
-    const int missing = md_component_seq_id(&sys.component, comp_idx + 1) - md_component_seq_id(&sys.component, comp_idx) - 1;
+    const int missing = md_system_residue_seq_id(&sys, res_idx + 1) - md_system_residue_seq_id(&sys, res_idx) - 1;
     if (missing > 0) {
-        tooltip_row(req, STR_LIT("missing"), "%d residue%s by the numbering", missing, missing == 1 ? "" : "s");
+        tooltip_row(req, MD_STR_LIT("missing"), "%d residue%s by the numbering", missing, missing == 1 ? "" : "s");
     } else {
-        tooltip_row(req, STR_LIT("missing"), "none by the numbering");
+        tooltip_row(req, MD_STR_LIT("missing"), "none by the numbering");
     }
 
     md_atom_idx_t atoms[2];
-    if (md_util_chain_break_atoms(atoms, &sys, comp_idx)) {
+    if (md_util_chain_break_atoms(atoms, &sys, res_idx)) {
         const md_system_state_t& sys_state = state.mold.state;
         vec3_t d = vec3_sub(md_state_coord(&sys_state, atoms[1]), md_state_coord(&sys_state, atoms[0]));
         md_util_min_image_vec3(&d, 1, &sys_state.unitcell);
@@ -618,13 +767,18 @@ static void tooltip_chain_gap(PickingTooltipTextRequest* req, const ApplicationS
         span += " - ";
         tooltip_append_atom_name(&span, sys, atoms[1]);
         span += ")";
-        tooltip_row(req, STR_LIT("span"), "%s", md_str_writer_to_cstr(&span));
+        tooltip_row(req, MD_STR_LIT("span"), "%s", md_str_writer_to_cstr(&span));
     }
 
     md_str_writer_t index = md_str_writer_create(req->alloc);
-    md_str_writer_fmt(&index, "component(%u) component(%u)", comp_idx + 1, comp_idx + 2);
-    if (inst_idx != -1) md_str_writer_fmt(&index, " instance(%d)", inst_idx + 1);
-    tooltip_row_list(req, STR_LIT("index"), index);
+    md_str_writer_fmt(&index, "residue(%u) residue(%u)", res_idx + 1, res_idx + 2);
+    const md_chain_idx_t chain = md_system_chain_find_by_residue_idx(&sys, res_idx);
+    const int strand = tooltip_polymer_position(sys, place[0].part_idx);
+    const md_molecule_idx_t mol = range.beg < range.end ? md_system_molecule_find_by_atom_idx(&sys, range.beg) : -1;
+    if (chain != -1)       md_str_writer_fmt(&index, " chain(%d)", chain + 1);
+    else if (strand != -1) md_str_writer_fmt(&index, " polymer(%d)", strand + 1);
+    else if (mol != -1)    md_str_writer_fmt(&index, " molecule(%lld)", (long long)mol + 1);
+    tooltip_row_list(req, MD_STR_LIT("index"), index);
 }
 
 // A ring (the circle of an aromatic ring): what it is, its atoms around it and their elements, and how flat it is in the
@@ -640,21 +794,21 @@ static void tooltip_ring(PickingTooltipTextRequest* req, const ApplicationState&
     for (size_t i = 0; i < count; ++i) {
         if (atoms[i] < 0 || (size_t)atoms[i] >= sys.atom.count) return;
     }
-    const bool frame_ring = ring_idx >= md_index_data_num_ranges(&sys.ring);
+    const bool frame_ring = ring_idx >= md_ring_data_count(&sys.ring);
 
     // Where it is: the place of its first atom, and of another where the ring reaches over (a ring is mostly in one)
     const TooltipPlace place = tooltip_place_of_atom(sys, (size_t)atoms[0]);
     TooltipPlace other = place;
     for (size_t i = 1; i < count; ++i) {
         const TooltipPlace p = tooltip_place_of_atom(sys, (size_t)atoms[i]);
-        if (p.comp_idx != place.comp_idx || p.inst_idx != place.inst_idx) {
+        if (p.res_idx != place.res_idx || p.part_idx != place.part_idx) {
             other = p;
             break;
         }
     }
 
     md_str_writer_t title = md_str_writer_create(req->alloc);
-    title += (flags & MD_RING_FLAG_AROMATIC) ? STR_LIT("aromatic ring") : STR_LIT("ring");
+    title += (flags & MD_RING_FLAG_AROMATIC) ? MD_STR_LIT("aromatic ring") : MD_STR_LIT("ring");
     tooltip_append_place(&title, sys, place, &other);
     tooltip_title(req, "%s", md_str_writer_to_cstr(&title));
 
@@ -668,7 +822,12 @@ static void tooltip_ring(PickingTooltipTextRequest* req, const ApplicationState&
         tooltip_list_add(&kind, "fused");
     }
     if (flags & MD_RING_FLAG_SUGAR)    tooltip_list_add(&kind, "sugar");
-    tooltip_row_list(req, STR_LIT("kind"), kind);
+    tooltip_row_list(req, MD_STR_LIT("kind"), kind);
+
+    // The ring system it is of, as a fragment: "indolyl"
+    if (!frame_ring) {
+        tooltip_fragment_row(req, sys, (size_t)atoms[0]);
+    }
 
     // The atoms in order around the ring, then its composition: C first, the other elements by atomic number
     md_str_writer_t names = md_str_writer_create(req->alloc);
@@ -677,26 +836,26 @@ static void tooltip_ring(PickingTooltipTextRequest* req, const ApplicationState&
         if (i > 0) names += ' ';
         tooltip_append_atom_name(&names, sys, (size_t)atoms[i]);
         const md_atomic_number_t z = md_atom_atomic_number(&sys.atom, (size_t)atoms[i]);
-        if (0 < z && z < (int)ARRAY_SIZE(element_count)) element_count[z] += 1;
+        if (0 < z && z < (int)MD_COUNTOF(element_count)) element_count[z] += 1;
     }
     md_str_writer_t formula = md_str_writer_create(req->alloc);
     for (int pass = 0; pass < 2; ++pass) {
-        for (int z = 1; z < (int)ARRAY_SIZE(element_count); ++z) {
+        for (int z = 1; z < (int)MD_COUNTOF(element_count); ++z) {
             if (!element_count[z] || (pass == 0) != (z == 6)) continue;
             formula += md_util_element_symbol((md_element_t)z);
             if (element_count[z] > 1) md_str_writer_fmt(&formula, "%d", element_count[z]);
         }
     }
     if (!md_str_writer_empty(&formula)) {
-        tooltip_row(req, STR_LIT("atoms"), "%s (%s)", md_str_writer_to_cstr(&names), md_str_writer_to_cstr(&formula));
+        tooltip_row(req, MD_STR_LIT("atoms"), "%s (%s)", md_str_writer_to_cstr(&names), md_str_writer_to_cstr(&formula));
     } else {
-        tooltip_row(req, STR_LIT("atoms"), "%s", md_str_writer_to_cstr(&names));
+        tooltip_row(req, MD_STR_LIT("atoms"), "%s", md_str_writer_to_cstr(&names));
     }
 
     // Planarity: the atoms the short way round from the first across a periodic boundary, the plane through their
     // centroid with Newell's normal
     vec3_t p[MD_RING_MAX_SIZE];
-    if (count <= ARRAY_SIZE(p)) {
+    if (count <= MD_COUNTOF(p)) {
         const vec3_t p0 = md_state_coord(&sys_state, (size_t)atoms[0]);
         vec3_t c = {0, 0, 0};
         for (size_t i = 0; i < count; ++i) {
@@ -718,7 +877,7 @@ static void tooltip_ring(PickingTooltipTextRequest* req, const ApplicationState&
                 const float h = vec3_dot(vec3_sub(p[i], c), n);
                 sum2 += h * h;
             }
-            tooltip_row(req, STR_LIT("planarity"), "%.3f " TOOLTIP_ANGSTROM " RMS", sqrtf(sum2 / (float)count));
+            tooltip_row(req, MD_STR_LIT("planarity"), "%.3f " TOOLTIP_ANGSTROM " RMS", sqrtf(sum2 / (float)count));
         }
     }
 
@@ -730,42 +889,39 @@ static void tooltip_ring(PickingTooltipTextRequest* req, const ApplicationState&
     } else {
         md_str_writer_fmt(&index, "ring(%u)", ring_idx + 1);
     }
-    tooltip_append_index(&index, place);
-    tooltip_row_list(req, STR_LIT("index"), index);
+    tooltip_append_index(&index, sys, place);
+    tooltip_row_list(req, MD_STR_LIT("index"), index);
 }
 
-// A point of the cartoon of the lipids and nucleic acids stands for its component: the component, and what part of it
+// A point of the cartoon of the lipids and nucleic acids stands for its residue: the residue, and what part of it
 // the point is
 static void tooltip_cartoon_glyph(PickingTooltipTextRequest* req, const ApplicationState& state, uint32_t point_idx) {
     const md_system_t& sys = state.mold.sys;
     const CartoonGlyphs& glyphs = state.mold.cartoon_glyphs;
     // Indexed by CartoonGlyphKind
     static const char* parts[] = { "head", "backbone", "tail", "sterol skeleton", "backbone", "sugar", "base" };
-    static_assert(ARRAY_SIZE(parts) == CartoonGlyph_Count, "A name for every kind of glyph");
+    static_assert(MD_COUNTOF(parts) == CartoonGlyph_Count, "A name for every kind of glyph");
 
-    const int32_t comp_idx = cartoon_glyphs_point_component(glyphs, point_idx);
-    if (comp_idx < 0 || (size_t)comp_idx >= sys.component.count) {
-        // No component (a nucleic backbone found from the bonds alone, as for an XYZ file): only what part it is
-        if (glyphs.point_kind[point_idx] < ARRAY_SIZE(parts)) tooltip_title(req, "nucleotide" TOOLTIP_SEP "%s", parts[glyphs.point_kind[point_idx]]);
+    const int32_t res_idx = cartoon_glyphs_point_residue(glyphs, point_idx);
+    if (res_idx < 0 || (size_t)res_idx >= sys.residue.count) {
+        // No residue (a nucleic backbone found from the bonds alone, as for an XYZ file): only what part it is
+        if (glyphs.point_kind[point_idx] < MD_COUNTOF(parts)) tooltip_title(req, "nucleotide" TOOLTIP_SEP "%s", parts[glyphs.point_kind[point_idx]]);
         return;
     }
-    const md_urange_t range = md_component_atom_range(&sys.component, comp_idx);
-    const TooltipPlace place = {
-        .comp_idx = comp_idx,
-        .inst_idx = range.beg < range.end ? md_system_instance_find_by_atom_idx(&sys, range.beg) : -1,
-    };
+    const md_urange_t range = md_system_residue_atom_range(&sys, res_idx);
+    const TooltipPlace place = tooltip_place_of_residue(sys, res_idx);
 
     md_str_writer_t title = md_str_writer_create(req->alloc);
     tooltip_append_place(&title, sys, place);
     tooltip_title(req, "%s", md_str_writer_to_cstr(&title));
 
     md_str_writer_t kind_list = md_str_writer_create(req->alloc);
-    const md_component_kind_t kind = md_component_kind(&sys.component, comp_idx);
-    if (kind != MD_COMPONENT_KIND_OTHER) tooltip_list_add(&kind_list, md_component_kind_name(kind));
-    if (glyphs.point_kind[point_idx] < ARRAY_SIZE(parts)) tooltip_list_add(&kind_list, parts[glyphs.point_kind[point_idx]]);
-    tooltip_row_list(req, STR_LIT("kind"), kind_list);
+    const md_residue_kind_t kind = md_system_residue_kind(&sys, res_idx);
+    if (kind != MD_RESIDUE_KIND_OTHER) tooltip_list_add(&kind_list, md_residue_kind_name(kind));
+    if (glyphs.point_kind[point_idx] < MD_COUNTOF(parts)) tooltip_list_add(&kind_list, parts[glyphs.point_kind[point_idx]]);
+    tooltip_row_list(req, MD_STR_LIT("kind"), kind_list);
 
-    tooltip_row(req, STR_LIT("atoms"), "%u", range.end - range.beg);
+    tooltip_row(req, MD_STR_LIT("atoms"), "%u", range.end - range.beg);
 }
 
 // The hit names the group and the element outright - its range was reserved against that group's attribute - so there
@@ -787,13 +943,13 @@ static void tooltip_dipole(PickingTooltipTextRequest* req, const ApplicationStat
         } else {
             tooltip_unit_suffix(unit, sizeof(unit), group.unit);
         }
-        tooltip_row(req, STR_LIT("magnitude"), "%.3f%s", vec3_length(vec), unit);
-        tooltip_row(req, STR_LIT("vector"), "%.3f, %.3f, %.3f%s", vec.x, vec.y, vec.z, unit);
+        tooltip_row(req, MD_STR_LIT("magnitude"), "%.3f%s", vec3_length(vec), unit);
+        tooltip_row(req, MD_STR_LIT("vector"), "%.3f, %.3f, %.3f%s", vec.x, vec.y, vec.z, unit);
     }
 }
 
 static void fill_picking_tooltip(PickingTooltipTextRequest* req, const ApplicationState& state, const PickingHit& hit) {
-    ASSERT(req);
+    MD_ASSERT(req);
     const md_system_t& sys = state.mold.sys;
 
     if (hit.domain == PickingDomain_Atom) {
@@ -804,21 +960,21 @@ static void fill_picking_tooltip(PickingTooltipTextRequest* req, const Applicati
         bool formed;
         if (picked_bond(state, hit.local_idx, &pair, &flags, &formed)) tooltip_bond(req, state, pair, flags, formed);
     } else if (hit.domain == PickingDomain_BackboneSegment) {
-        if (hit.local_idx < sys.protein_backbone.segment.count && sys.protein_backbone.segment.comp_idx) tooltip_backbone_segment(req, state, hit.local_idx);
+        if (hit.local_idx < sys.protein_backbone.segment.count && sys.protein_backbone.segment.res_idx) tooltip_backbone_segment(req, state, hit.local_idx);
     } else if (hit.domain == PickingDomain_Ring) {
         tooltip_ring(req, state, hit.local_idx);
     } else if (hit.domain == PickingDomain_CartoonGlyph) {
         const uint32_t point_idx = cartoon_glyphs_picked_point(state.mold.cartoon_glyphs, hit.local_idx);
         if (point_idx < state.mold.cartoon_glyphs.num_points) tooltip_cartoon_glyph(req, state, point_idx);
     } else if (hit.domain == PickingDomain_ChainGap) {
-        if ((size_t)hit.local_idx + 1 < sys.component.count) tooltip_chain_gap(req, state, hit.local_idx);
+        if ((size_t)hit.local_idx + 1 < sys.residue.count) tooltip_chain_gap(req, state, hit.local_idx);
     } else if (hit.domain == PickingDomain_Dipole) {
         tooltip_dipole(req, state, hit);
     }
 }
 
-static void tooltip_text(str_t str) {
-    if (str_empty(str)) {
+static void tooltip_text(md_str_t str) {
+    if (md_str_empty(str)) {
         ImGui::TextUnformatted("");
     } else {
         ImGui::TextUnformatted(str.ptr, str.ptr + str.len);
@@ -829,7 +985,7 @@ void draw_picking_tooltip_window(const PickingHit& hit, const ApplicationState& 
     if (hit.raw_idx == INVALID_PICKING_IDX) return;
     
 	md_temp_scope_t temp = md_temp_begin_in(state.allocator.frame);
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     PickingTooltipTextRequest tooltip_request = {
         .app = state,
@@ -884,11 +1040,11 @@ void draw_picking_tooltip_window(const PickingHit& hit, const ApplicationState& 
 }
 
 void interrupt_async_tasks(ApplicationState* state) {
-    task_system::pool_interrupt_running_tasks();
+    task_system::cancel_all();
 
-    if (state->script.eval) md_script_eval_interrupt(state->script.eval);
+    if (state->script.eval) script::eval_interrupt(state->script.eval);
 
-    task_system::pool_wait_for_completion();
+    task_system::wait_all();
 }
 
 static inline void clear_frame_cache(FrameCache* cache) {
@@ -903,7 +1059,7 @@ static inline void clear_frame_cache(FrameCache* cache) {
 
 static inline void init_frame_cache(FrameCache* cache, size_t num_atoms, md_allocator_i* alloc) {
     clear_frame_cache(cache);
-    size_t capacity = ALIGN_TO(num_atoms, 16);
+    size_t capacity = MD_ALIGN_TO(num_atoms, 16);
     for (size_t i = 0; i < FRAME_CACHE_SIZE; ++i) {
         md_array_resize(cache->states[i].xyz, capacity, alloc);
     }
@@ -917,18 +1073,18 @@ static inline void free_frame_cache(FrameCache* cache, md_allocator_i* alloc) {
 }
 
 static inline bool find_frame_in_cache(int* out_slot_idx, int64_t frame_idx, const FrameCache* cache) {
-    ASSERT(out_slot_idx);
+    MD_ASSERT(out_slot_idx);
 #if FRAME_CACHE_SIZE == 4
     md_128i frame_indices = md_mm_loadu_epi32(cache->frame_idx);
     md_128i cmp_mask = md_mm_cmpeq_epi32(frame_indices, md_mm_set1_epi32((int32_t)frame_idx));
     int mask = md_mm_movemask_epi8(cmp_mask);
-    *out_slot_idx = ctz32(mask) >> 2; // Each int32 comparison results in 4 bytes in the mask
+    *out_slot_idx = md_ctz32(mask) >> 2; // Each int32 comparison results in 4 bytes in the mask
     return mask != 0;
 #elif FRAME_CACHE_SIZE == 8
     md_256i frame_indices = md_mm256_loadu_epi32(cache->frame_idx);
     md_256i cmp_mask = md_mm256_cmpeq_epi32(frame_indices, md_mm256_set1_epi32((int32_t)frame_idx));
     int mask = md_mm256_movemask_epi8(cmp_mask);
-    *out_slot_idx = ctz32(mask) >> 2; // Each int32 comparison results in 4 bytes in the mask
+    *out_slot_idx = md_ctz32(mask) >> 2; // Each int32 comparison results in 4 bytes in the mask
     return mask != 0;
 #endif
 }
@@ -950,7 +1106,7 @@ static inline void set_mru_cache_slot(FrameCache* cache, int slot_idx) {
 }
 
 void clear_system_frame_cache(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     clear_frame_cache(&state->mold.frame_cache);
 }
 
@@ -1018,7 +1174,7 @@ static void upload_secondary_structure_weights(ApplicationState* data) {
     if (!ss || num_segments == 0) return;
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     md_gl_secondary_structure_t* weights = md_temp_alloc_array(temp, md_gl_secondary_structure_t, num_segments);
     for (size_t i = 0; i < num_segments; ++i) {
         weights[i] = md_gl_secondary_structure_convert(ss[i]);
@@ -1028,15 +1184,15 @@ static void upload_secondary_structure_weights(ApplicationState* data) {
 }
 
 static void secondary_structure_render_denoise(md_secondary_structure_t* dst, const md_secondary_structure_t* src, size_t num_frames, size_t stride) {
-    ASSERT(dst);
-    ASSERT(src);
+    MD_ASSERT(dst);
+    MD_ASSERT(src);
 
     if (num_frames == 0 || stride == 0) {
         return;
     }
 
     md_temp_scope_t temp_scope = md_temp_begin();
-    defer { md_temp_end(temp_scope); };
+    MD_DEFER { md_temp_end(temp_scope); };
 
     SecondaryStructureRenderClass* classes  = md_temp_alloc_array(temp_scope, SecondaryStructureRenderClass, num_frames);
     SecondaryStructureRenderClass* filtered = md_temp_alloc_array(temp_scope, SecondaryStructureRenderClass, num_frames);
@@ -1051,7 +1207,7 @@ static void secondary_structure_render_denoise(md_secondary_structure_t* dst, co
         for (size_t frame_idx = 0; frame_idx < num_frames; ++frame_idx) {
             int counts[3] = {0, 0, 0};
             size_t beg = frame_idx > window_radius ? frame_idx - window_radius : 0;
-            size_t end = MIN(frame_idx + window_radius + 1, num_frames);
+            size_t end = MD_MIN(frame_idx + window_radius + 1, num_frames);
             for (size_t j = beg; j < end; ++j) {
                 counts[(int)classes[j]] += 1;
             }
@@ -1098,13 +1254,13 @@ static void secondary_structure_render_denoise(md_secondary_structure_t* dst, co
 
 // #trajectorydata
 
-str_t run_attribute_path(char* buf, size_t cap, const ApplicationState* app, str_t leaf) {
-    ASSERT(buf && cap > 0);
+md_str_t run_attribute_path(char* buf, size_t cap, const ApplicationState* app, md_str_t leaf) {
+    MD_ASSERT(buf && cap > 0);
     buf[0] = '\0';
     if (app->mold.run[0] == '\0') {
         return {};
     }
-    const int len = snprintf(buf, cap, "%s/" STR_FMT, app->mold.run, STR_ARG(leaf));
+    const int len = snprintf(buf, cap, "%s/" MD_STR_FMT, app->mold.run, MD_STR_ARG(leaf));
     if (len <= 0 || (size_t)len >= cap) {
         buf[0] = '\0';
         return {};
@@ -1112,14 +1268,14 @@ str_t run_attribute_path(char* buf, size_t cap, const ApplicationState* app, str
     return {buf, (size_t)len};
 }
 
-const md_attribute_t* run_attribute(const ApplicationState* app, str_t leaf) {
-    ASSERT(app);
+const md_attribute_t* run_attribute(const ApplicationState* app, md_str_t leaf) {
+    MD_ASSERT(app);
     if (app->mold.run[0] == '\0') return nullptr;
-    return md_attributes_find_in(&app->mold.sys.attributes, str_from_cstr(app->mold.run), leaf);
+    return md_attributes_find_in(&app->mold.sys.attributes, md_str_from_cstr(app->mold.run), leaf);
 }
 
 const md_attribute_t* run_time_axis(const ApplicationState* app) {
-    const md_attribute_t* axis = run_attribute(app, STR_LIT("time"));
+    const md_attribute_t* axis = run_attribute(app, MD_STR_LIT("time"));
     return md_attribute_view(axis, MD_ATTRIBUTE_TYPE_F64, 1, 1) ? axis : nullptr;
 }
 
@@ -1138,7 +1294,7 @@ md_unit_t run_time_unit(const ApplicationState* app) {
 }
 
 const md_secondary_structure_t* displayed_secondary_structure(const ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
     const md_system_state_t* state = &app->mold.state;
     const auto& render = app->trajectory_data.secondary_structure_render;
     if (render.data && render.stride == app->mold.sys.protein_backbone.segment.count && md_state_has_frame(state)) {
@@ -1150,12 +1306,12 @@ const md_secondary_structure_t* displayed_secondary_structure(const ApplicationS
     return md_util_state_secondary_structure(state, &app->mold.sys);
 }
 
-static const str_t frame_extract_paths[] = { STR_INIT("atom/position"), STR_INIT("unitcell") };
+static const md_str_t frame_extract_paths[] = { MD_STR_INIT("atom/position"), MD_STR_INIT("unitcell") };
 
 bool extract_frame(const ApplicationState* app, int64_t frame, md_system_state_t* out) {
-    ASSERT(app && out);
-    md_system_extract_t* ex = md_system_extract_begin(&app->mold.sys, str_from_cstr(app->mold.run),
-        frame_extract_paths, ARRAY_SIZE(frame_extract_paths), md_get_heap_allocator());
+    MD_ASSERT(app && out);
+    md_system_extract_t* ex = md_system_extract_begin(&app->mold.sys, md_str_from_cstr(app->mold.run),
+        frame_extract_paths, MD_COUNTOF(frame_extract_paths), md_get_heap_allocator());
     if (!ex) {
         return false;
     }
@@ -1165,7 +1321,7 @@ bool extract_frame(const ApplicationState* app, int64_t frame, md_system_state_t
 }
 
 static void end_frame_extracts(ApplicationState* app) {
-    for (size_t i = 0; i < ARRAY_SIZE(app->mold.frame_extract); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(app->mold.frame_extract); ++i) {
         md_system_extract_end(app->mold.frame_extract[i]);
         app->mold.frame_extract[i] = nullptr;
     }
@@ -1174,12 +1330,12 @@ static void end_frame_extracts(ApplicationState* app) {
 // "run/<stem>" for a trajectory file. The stem is folded to letters, digits, '_' and '-' so that it
 // is one path segment whatever the file is called, and it is taken from the file name alone so the
 // same file gives the same run - and the same attribute ids - every time it is loaded.
-static void run_path_from_file(char* buf, size_t cap, str_t path) {
-    str_t file = path;
-    extract_file(&file, path);
+static void run_path_from_file(char* buf, size_t cap, md_str_t path) {
+    md_str_t file = path;
+    md_extract_file(&file, path);
     size_t dot;
-    if (str_rfind_char(&dot, file, '.') && dot > 0) {
-        file = str_substr(file, 0, dot);
+    if (md_str_rfind_char(&dot, file, '.') && dot > 0) {
+        file = md_str_substr(file, 0, dot);
     }
     size_t len = (size_t)snprintf(buf, cap, "run/");
     for (size_t i = 0; i < file.len && len + 1 < cap; ++i) {
@@ -1190,11 +1346,11 @@ static void run_path_from_file(char* buf, size_t cap, str_t path) {
     if (len == 4) {
         len += (size_t)snprintf(buf + len, cap - len, "trajectory");
     }
-    buf[MIN(len, cap - 1)] = '\0';
+    buf[MD_MIN(len, cap - 1)] = '\0';
 }
 
 void free_trajectory_data(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 
     // The orientation reference was read from this run's first frame. A run loaded in its place, on the
     // same topology, has a first frame of its own.
@@ -1216,10 +1372,10 @@ void free_trajectory_data(ApplicationState* state) {
     series_cache_free(state);
 
     // The evaluation is of this run. Another run may have as many frames, and taking over from an evaluation of
-    // this one (md_script_eval_create_from) would carry its values over to the other: the next one starts afresh.
+    // this one (script::eval_create) would carry its values over to the other: the next one starts afresh.
     // The tasks which use it were stopped by the caller.
     if (state->script.eval) {
-        md_script_eval_free(state->script.eval);
+        script::eval_free(state->script.eval);
         state->script.eval = nullptr;
     }
 
@@ -1245,14 +1401,151 @@ void free_trajectory_data(ApplicationState* state) {
     // The views above are dropped first; now the storage they pointed at goes with the run - its
     // frame axis, the quantities derived per frame, and whatever was loaded against it.
     if (state->mold.run[0]) {
-        md_attributes_remove_prefix(&state->mold.sys.attributes, str_from_cstr(state->mold.run));
+        md_attributes_remove_prefix(&state->mold.sys.attributes, md_str_from_cstr(state->mold.run));
         state->mold.run[0] = '\0';
     }
 
     free_frame_cache(&state->mold.frame_cache, state->allocator.persistent);
 }
 
-void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_flags) {
+// The backbone angles and secondary structure of every frame of the run, computed on the pool. Started when the run is
+// opened, and again once the backbones are inferred (they are not there before: SystemInference)
+static void trajectory_backbone_start(ApplicationState* data) {
+    const size_t num_frames = run_num_frames(data);
+    if (num_frames == 0) return;
+    char path_buf[256];
+    if (data->mold.sys.protein_backbone.segment.count > 0) {
+        // The angles and the per frame secondary structure are TEMPORAL attributes: the table
+        // owns the storage and the trajectory_data fields below are views onto it. That is the
+        // point of the move - 'stride' and 'count' were a hand rolled shape {F,S}, and the one
+        // place they could disagree with the buffer was here, in three lines repeated per
+        // quantity. Now the shape IS the declaration, and md_attributes_iter answers "what
+        // varies over time in this dataset" without anybody maintaining a second list.
+        //
+        // Both are declared together so the frame axis and the segment axis are stated once for
+        // the pair. Resident rather than computed on demand, because the ramachandran density
+        // reads EVERY frame at once - a per plane provider would recompute the whole trajectory
+        // each time the window redraws. Reserved-and-filled-lazily is the interesting third
+        // option, and it only starts paying at trajectory lengths where this allocation hurts.
+        const size_t num_segments = data->mold.sys.protein_backbone.segment.count;
+        md_attributes_t* attributes = &data->mold.sys.attributes;
+
+        // One still under way writes through the pointers replaced below: stopped first
+        data->tasks.backbone_computations.cancel_and_wait();
+
+        // Both are checked against "<run>/time", published above, so a declaration whose
+        // outermost extent disagrees is refused at the point the mistake is made rather than
+        // surviving until something reads past the end of it.
+
+        // md_secondary_structure_t is a 4 byte enum, so I32 is the storage and the PATH is what
+        // tells a consumer these are labels rather than numbers to average - which is the rule
+        // md_system.h already states for integral attributes.
+        const md_attribute_desc_t ss_desc = {
+            .path   = run_attribute_path(path_buf, sizeof(path_buf), data, MD_STR_LIT("backbone/secondary_structure")),
+            .format = {
+                .type = MD_ATTRIBUTE_TYPE_I32, .components = 1,
+                .rank = 2, .shape = { (uint32_t)num_frames, (uint32_t)num_segments },
+            },
+            .flags  = MD_ATTRIBUTE_FLAG_TEMPORAL,
+            .unit   = md_unit_none(),
+            .label  = MD_STR_INIT("Secondary Structure"),
+        };
+        md_attribute_id_t ss_id = md_attributes_replace(attributes, &ss_desc);
+
+        data->trajectory_data.secondary_structure.data   = (md_secondary_structure_t*)md_attributes_data(attributes, ss_id, MD_ATTRIBUTE_TYPE_I32);
+        data->trajectory_data.secondary_structure.stride = num_segments;
+        data->trajectory_data.secondary_structure.count  = num_segments * num_frames;
+
+        const md_attribute_format_t angle_format = {
+            .type = MD_ATTRIBUTE_TYPE_F32, .components = 2,   // phi, psi - one value, two parts
+            .rank = 2, .shape = { (uint32_t)num_frames, (uint32_t)num_segments },
+        };
+        const md_attribute_desc_t angle_desc = {
+            .path   = run_attribute_path(path_buf, sizeof(path_buf), data, MD_STR_LIT("backbone/angle")),
+            .format = angle_format,
+            .flags  = MD_ATTRIBUTE_FLAG_TEMPORAL,
+            .unit   = md_unit_radian(),
+            .label  = MD_STR_INIT("Backbone Angles"),
+        };
+        md_attribute_id_t angle_id = md_attributes_replace(attributes, &angle_desc);
+
+        // md_backbone_angles_t is exactly {float phi; float psi;}, so the table's storage IS a
+        // md_backbone_angles_t array - no repacking, and the existing consumers keep their type.
+        data->trajectory_data.backbone_angles.data   = (md_backbone_angles_t*)md_attributes_data(attributes, angle_id, MD_ATTRIBUTE_TYPE_F32);
+        data->trajectory_data.backbone_angles.stride = num_segments;
+        data->trajectory_data.backbone_angles.count  = num_segments * num_frames;
+
+        // The denoised copy stays an ordinary array: it is a PRESENTATION smoothing of the one
+        // above, read only by the renderer, and publishing it would put two answers to "what is
+        // the secondary structure at frame f" in the same table.
+        data->trajectory_data.secondary_structure_render.stride = data->mold.sys.protein_backbone.segment.count;
+        data->trajectory_data.secondary_structure_render.count = data->mold.sys.protein_backbone.segment.count * num_frames;
+        md_array_resize(data->trajectory_data.secondary_structure_render.data, data->mold.sys.protein_backbone.segment.count * num_frames, data->allocator.persistent);
+        md_memset(data->trajectory_data.secondary_structure_render.data, 0, md_array_bytes(data->trajectory_data.secondary_structure_render.data));
+
+        // Launch work to compute the values
+        uint64_t time = (uint64_t)md_tick_now();
+        data->tasks.backbone_computations.start_for(MD_STR_LIT("Backbone Operations"), (uint32_t)num_frames, 1, [data](uint32_t range_beg, uint32_t range_end) {
+            const md_system_t* sys = &data->mold.sys;
+
+            md_temp_scope_t temp = md_temp_begin();
+            MD_DEFER { md_temp_end(temp); };
+
+            md_system_state_t frame_state = { .alloc = temp.arena };
+				md_system_state_init(&frame_state, sys->atom.count);
+
+            // One context for the range, so the run's files stay open across its frames.
+            md_system_extract_t* ex = md_system_extract_begin(sys, md_str_from_cstr(data->mold.run),
+                frame_extract_paths, MD_COUNTOF(frame_extract_paths), md_get_heap_allocator());
+            if (!ex) {
+                return;
+            }
+            for (uint32_t frame_idx = range_beg; frame_idx < range_end && !task_system::cancelled(); ++frame_idx) {
+                md_backbone_angles_t* bb_dst = data->trajectory_data.backbone_angles.data + data->trajectory_data.backbone_angles.stride * frame_idx;
+                md_secondary_structure_t* ss_dst = data->trajectory_data.secondary_structure.data + data->trajectory_data.secondary_structure.stride * frame_idx;
+
+                if (!md_system_extract_frame(ex, frame_idx, &frame_state)) {
+                    continue;
+                }
+                md_util_backbone_angles_compute(bb_dst, data->trajectory_data.backbone_angles.stride, frame_state.xyz, &frame_state.unitcell, &sys->protein_backbone);
+                md_dssp_compute(ss_dst, data->trajectory_data.secondary_structure.stride, frame_state.xyz, &frame_state.unitcell, &sys->protein_backbone);
+            }
+            md_system_extract_end(ex);
+        }, [data, t0 = time, num_frames](task_system::Status status) {
+            // Stopped part of the way (a load, or the next trajectory): the data is not for this one, or not all there
+            if (status != task_system::Status::Completed) return;
+            secondary_structure_render_denoise(
+                data->trajectory_data.secondary_structure_render.data,
+                data->trajectory_data.secondary_structure.data,
+                num_frames,
+                data->trajectory_data.secondary_structure.stride);
+
+            uint64_t t1 = (uint64_t)md_tick_now();
+            double elapsed = md_tick_to_seconds(t1 - t0);
+            MD_LOG_INFO("Finished computing trajectory data (%.2fs)", elapsed);
+            // The fill is finished, so the two temporal attributes have changed - which is the
+            // one moment a consumer caching something derived from them needs to hear about.
+            // The table carries that now; the hand rolled fingerprints beside the data are gone,
+            // because a stamp that lives next to storage the table owns is a second answer
+            // waiting to disagree with it.
+            md_attributes_t* attributes = &data->mold.sys.attributes;
+            char buf[256];
+            md_attributes_touch(attributes, md_attributes_id_from_path(run_attribute_path(buf, sizeof(buf), data, MD_STR_LIT("backbone/angle"))));
+            md_attributes_touch(attributes, md_attributes_id_from_path(run_attribute_path(buf, sizeof(buf), data, MD_STR_LIT("backbone/secondary_structure"))));
+            data->trajectory_data.secondary_structure_render.fingerprint = generate_fingerprint();
+
+				// The data just went from placeholder to real values for every frame - force the
+				// next interpolate_system_state to actually push it, even if playback is paused on
+				// the same nearest frame it was on before this task started.
+				data->mold.last_interpolated_nearest_frame = -1;
+				data->mold.interpolate_system_state = true;
+            data->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
+            flag_all_representations_as_dirty(data);
+        });
+    }
+}
+
+void init_trajectory_data(ApplicationState* data, md_str_t run_file, uint32_t traj_flags) {
     // The trajectory is a RUN in the attribute table: "<run>/time" is its frame axis, and everything
     // sampled along it lives below the same prefix - the positions streamed from the file, the per
     // frame backbone data below, an energy file loaded later - so that freeing the trajectory is
@@ -1260,7 +1553,7 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
     // named after that; a structure of one frame publishes nothing and has no run.
     {
         run_path_from_file(data->mold.run, sizeof(data->mold.run), run_file);
-        const str_t run = str_from_cstr(data->mold.run);
+        const md_str_t run = md_str_from_cstr(data->mold.run);
         if (!loader::publish_run(&data->mold.sys, run_file, run, traj_flags)) {
             md_attributes_remove_prefix(&data->mold.sys.attributes, run);
             data->mold.run[0] = '\0';
@@ -1272,11 +1565,10 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
         size_t min_frame = 0;
         size_t max_frame = num_frames - 1;
         const double* frame_times = run_frame_times(data);
-        char path_buf[256];
 
         init_frame_cache(&data->mold.frame_cache, data->mold.sys.atom.count, data->allocator.persistent);
 
-        ASSERT(frame_times);
+        MD_ASSERT(frame_times);
 
         // The timeline carries time in the unit the user asked to see it in. Everything downstream
         // reads x_values and view_range, so this is the one place the conversion happens; a later
@@ -1295,143 +1587,12 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
             data->timeline.x_values[i] = (float)(frame_times[i] * time_scl);
         }
 
-        data->animation.frame = CLAMP(data->animation.frame, (double)min_frame, (double)max_frame);
-        int64_t frame_idx = CLAMP((int64_t)(data->animation.frame + 0.5), 0, (int64_t)max_frame);
+        data->animation.frame = MD_CLAMP(data->animation.frame, (double)min_frame, (double)max_frame);
+        int64_t frame_idx = MD_CLAMP((int64_t)(data->animation.frame + 0.5), 0, (int64_t)max_frame);
 
         extract_frame(data, frame_idx, &data->mold.state);
 
-        if (data->mold.sys.protein_backbone.segment.count > 0) {
-            // The angles and the per frame secondary structure are TEMPORAL attributes: the table
-            // owns the storage and the trajectory_data fields below are views onto it. That is the
-            // point of the move - 'stride' and 'count' were a hand rolled shape {F,S}, and the one
-            // place they could disagree with the buffer was here, in three lines repeated per
-            // quantity. Now the shape IS the declaration, and md_attributes_iter answers "what
-            // varies over time in this dataset" without anybody maintaining a second list.
-            //
-            // Both are declared together so the frame axis and the segment axis are stated once for
-            // the pair. Resident rather than computed on demand, because the ramachandran density
-            // reads EVERY frame at once - a per plane provider would recompute the whole trajectory
-            // each time the window redraws. Reserved-and-filled-lazily is the interesting third
-            // option, and it only starts paying at trajectory lengths where this allocation hurts.
-            const size_t num_segments = data->mold.sys.protein_backbone.segment.count;
-            md_attributes_t* attributes = &data->mold.sys.attributes;
-
-            // Both are checked against "<run>/time", published above, so a declaration whose
-            // outermost extent disagrees is refused at the point the mistake is made rather than
-            // surviving until something reads past the end of it.
-
-            // md_secondary_structure_t is a 4 byte enum, so I32 is the storage and the PATH is what
-            // tells a consumer these are labels rather than numbers to average - which is the rule
-            // md_system.h already states for integral attributes.
-            const md_attribute_desc_t ss_desc = {
-                .path   = run_attribute_path(path_buf, sizeof(path_buf), data, STR_LIT("backbone/secondary_structure")),
-                .format = {
-                    .type = MD_ATTRIBUTE_TYPE_I32, .components = 1,
-                    .rank = 2, .shape = { (uint32_t)num_frames, (uint32_t)num_segments },
-                },
-                .flags  = MD_ATTRIBUTE_FLAG_TEMPORAL,
-                .unit   = md_unit_none(),
-                .label  = STR_INIT("Secondary Structure"),
-            };
-            md_attribute_id_t ss_id = md_attributes_replace(attributes, &ss_desc);
-
-            data->trajectory_data.secondary_structure.data   = (md_secondary_structure_t*)md_attributes_data(attributes, ss_id, MD_ATTRIBUTE_TYPE_I32);
-            data->trajectory_data.secondary_structure.stride = num_segments;
-            data->trajectory_data.secondary_structure.count  = num_segments * num_frames;
-
-            const md_attribute_format_t angle_format = {
-                .type = MD_ATTRIBUTE_TYPE_F32, .components = 2,   // phi, psi - one value, two parts
-                .rank = 2, .shape = { (uint32_t)num_frames, (uint32_t)num_segments },
-            };
-            const md_attribute_desc_t angle_desc = {
-                .path   = run_attribute_path(path_buf, sizeof(path_buf), data, STR_LIT("backbone/angle")),
-                .format = angle_format,
-                .flags  = MD_ATTRIBUTE_FLAG_TEMPORAL,
-                .unit   = md_unit_radian(),
-                .label  = STR_INIT("Backbone Angles"),
-            };
-            md_attribute_id_t angle_id = md_attributes_replace(attributes, &angle_desc);
-
-            // md_backbone_angles_t is exactly {float phi; float psi;}, so the table's storage IS a
-            // md_backbone_angles_t array - no repacking, and the existing consumers keep their type.
-            data->trajectory_data.backbone_angles.data   = (md_backbone_angles_t*)md_attributes_data(attributes, angle_id, MD_ATTRIBUTE_TYPE_F32);
-            data->trajectory_data.backbone_angles.stride = num_segments;
-            data->trajectory_data.backbone_angles.count  = num_segments * num_frames;
-
-            // The denoised copy stays an ordinary array: it is a PRESENTATION smoothing of the one
-            // above, read only by the renderer, and publishing it would put two answers to "what is
-            // the secondary structure at frame f" in the same table.
-            data->trajectory_data.secondary_structure_render.stride = data->mold.sys.protein_backbone.segment.count;
-            data->trajectory_data.secondary_structure_render.count = data->mold.sys.protein_backbone.segment.count * num_frames;
-            md_array_resize(data->trajectory_data.secondary_structure_render.data, data->mold.sys.protein_backbone.segment.count * num_frames, data->allocator.persistent);
-            MEMSET(data->trajectory_data.secondary_structure_render.data, 0, md_array_bytes(data->trajectory_data.secondary_structure_render.data));
-
-            // Launch work to compute the values
-            task_system::task_interrupt_and_wait_for(data->tasks.backbone_computations);
-
-            data->tasks.backbone_computations = task_system::create_pool_task(STR_LIT("Backbone Operations"), (uint32_t)num_frames, [data](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                (void)thread_num;
-                const md_system_t* sys = &data->mold.sys;
-
-                md_temp_scope_t temp = md_temp_begin();
-                defer { md_temp_end(temp); };
-
-                md_system_state_t frame_state = { .alloc = temp.arena };
-				md_system_state_init(&frame_state, sys->atom.count);
-
-                // One context for the range, so the run's files stay open across its frames.
-                md_system_extract_t* ex = md_system_extract_begin(sys, str_from_cstr(data->mold.run),
-                    frame_extract_paths, ARRAY_SIZE(frame_extract_paths), md_get_heap_allocator());
-                if (!ex) {
-                    return;
-                }
-                for (uint32_t frame_idx = range_beg; frame_idx < range_end; ++frame_idx) {
-                    md_backbone_angles_t* bb_dst = data->trajectory_data.backbone_angles.data + data->trajectory_data.backbone_angles.stride * frame_idx;
-                    md_secondary_structure_t* ss_dst = data->trajectory_data.secondary_structure.data + data->trajectory_data.secondary_structure.stride * frame_idx;
-
-                    if (!md_system_extract_frame(ex, frame_idx, &frame_state)) {
-                        continue;
-                    }
-                    md_util_backbone_angles_compute(bb_dst, data->trajectory_data.backbone_angles.stride, frame_state.xyz, &frame_state.unitcell, &sys->protein_backbone);
-                    md_dssp_compute(ss_dst, data->trajectory_data.secondary_structure.stride, frame_state.xyz, &frame_state.unitcell, &sys->protein_backbone);
-                }
-                md_system_extract_end(ex);
-            });
-
-            uint64_t time = (uint64_t)md_tick_now();
-            task_system::ID main_task = task_system::create_main_task(STR_LIT("Update Trajectory Data"), [data, t0 = time, num_frames]() {
-                secondary_structure_render_denoise(
-                    data->trajectory_data.secondary_structure_render.data,
-                    data->trajectory_data.secondary_structure.data,
-                    num_frames,
-                    data->trajectory_data.secondary_structure.stride);
-
-                uint64_t t1 = (uint64_t)md_tick_now();
-                double elapsed = md_tick_to_seconds(t1 - t0);
-                MD_LOG_INFO("Finished computing trajectory data (%.2fs)", elapsed);
-                // The fill is finished, so the two temporal attributes have changed - which is the
-                // one moment a consumer caching something derived from them needs to hear about.
-                // The table carries that now; the hand rolled fingerprints beside the data are gone,
-                // because a stamp that lives next to storage the table owns is a second answer
-                // waiting to disagree with it.
-                md_attributes_t* attributes = &data->mold.sys.attributes;
-                char buf[256];
-                md_attributes_touch(attributes, md_attributes_id_from_path(run_attribute_path(buf, sizeof(buf), data, STR_LIT("backbone/angle"))));
-                md_attributes_touch(attributes, md_attributes_id_from_path(run_attribute_path(buf, sizeof(buf), data, STR_LIT("backbone/secondary_structure"))));
-                data->trajectory_data.secondary_structure_render.fingerprint = generate_fingerprint();
-
-				// The data just went from placeholder to real values for every frame - force the
-				// next interpolate_system_state to actually push it, even if playback is paused on
-				// the same nearest frame it was on before this task started.
-				data->mold.last_interpolated_nearest_frame = -1;
-				data->mold.interpolate_system_state = true;
-                data->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
-                flag_all_representations_as_dirty(data);
-            });
-
-            task_system::set_task_dependency(main_task, data->tasks.backbone_computations);
-            task_system::enqueue_task(data->tasks.backbone_computations);
-        }
+        trajectory_backbone_start(data);
 
         data->mold.dirty_gpu_buffers |= MolBit_DirtyPosition;
         data->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
@@ -1442,16 +1603,16 @@ void init_trajectory_data(ApplicationState* data, str_t run_file, uint32_t traj_
 }
 
 void assembly_transforms(md_array(mat4_t)* transforms, md_array(uint32_t)* copy_offset, const md_system_t& sys, int assembly, md_allocator_i* alloc) {
-    ASSERT(transforms);
+    MD_ASSERT(transforms);
     md_array_shrink(*transforms, 0);
     if (copy_offset) md_array_shrink(*copy_offset, 0);
     const md_assembly_data_t& a = sys.assembly;
     if (assembly < 0 || (size_t)assembly >= a.count) return;
     if (copy_offset) md_array_push(*copy_offset, 0, alloc);
-    // The parts and their operators from the offsets as they are (assembly_part)
-    for (size_t p = a.part_offset[assembly]; p < a.part_offset[assembly + 1]; ++p) {
-        const AssemblyPart part = assembly_part(a, p);
-        for (const uint32_t* o = part.oper; o < part.oper_end; ++o) {
+    // The groups and their operators from the offsets as they are (assembly_group)
+    for (size_t p = a.group_offset[assembly]; p < a.group_offset[assembly + 1]; ++p) {
+        const AssemblyGroup group = assembly_group(a, p);
+        for (const uint32_t* o = group.oper; o < group.oper_end; ++o) {
             md_array_push(*transforms, a.oper_transform[*o], alloc);
         }
         if (copy_offset) md_array_push(*copy_offset, (uint32_t)md_array_size(*transforms), alloc);
@@ -1459,7 +1620,7 @@ void assembly_transforms(md_array(mat4_t)* transforms, md_array(uint32_t)* copy_
 }
 
 void assembly_subsets_free(ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
     for (size_t i = 0; i < md_array_size(app->view.assembly_subsets); ++i) {
         if (app->view.assembly_subsets[i].id) md_gl_subset_destroy(app->view.assembly_subsets[i]);
     }
@@ -1473,7 +1634,7 @@ void assembly_subsets_free(ApplicationState* app) {
 }
 
 void assembly_subsets_update(ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
     const int assembly = app->view.assembly;
     const uint32_t mol_id = app->mold.gl_mol.id;
     if (assembly == app->view.assembly_subsets_of && mol_id == app->view.assembly_subsets_mol) return;
@@ -1484,21 +1645,21 @@ void assembly_subsets_update(ApplicationState* app) {
     app->view.assembly_subsets_mol = mol_id;
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     md_allocator_i* alloc = app->allocator.persistent;
     const md_assembly_data_t& a = sys.assembly;
     const CartoonGlyphs& glyphs = app->mold.cartoon_glyphs;
     const bool has_glyphs = cartoon_glyphs_valid(glyphs);
-    uint32_t* atoms = md_temp_alloc_array(temp, uint32_t, MAX(sys.atom.count, (size_t)1));
-    // The parts and their instances from the offsets as they are (assembly_part), not from a range of them
-    for (size_t p = a.part_offset[assembly]; p < a.part_offset[assembly + 1]; ++p) {
-        const AssemblyPart part = assembly_part(a, p);
+    uint32_t* atoms = md_temp_alloc_array(temp, uint32_t, MD_MAX(sys.atom.count, (size_t)1));
+    // The groups and their instances from the offsets as they are (assembly_group), not from a range of them
+    for (size_t p = a.group_offset[assembly]; p < a.group_offset[assembly + 1]; ++p) {
+        const AssemblyGroup group = assembly_group(a, p);
         md_gl_subset_t subset = {};
         md_gl_subset_t glyph_subset = {};
-        // A part of all instances (each once) shows the whole molecule
-        if ((size_t)(part.inst_end - part.inst) < sys.instance.count) {
+        // A group of all instances (each once) shows the whole system
+        if ((size_t)(group.inst_end - group.inst) < sys.instance.count) {
             uint32_t count = 0;
-            for (const md_instance_idx_t* k = part.inst; k < part.inst_end; ++k) {
+            for (const md_instance_idx_t* k = group.inst; k < group.inst_end; ++k) {
                 const md_urange_t r = md_system_instance_atom_range(&sys, (size_t)*k);
                 const uint32_t num = r.end > r.beg ? r.end - r.beg : 0;
                 for (uint32_t i = 0; i < num; ++i) atoms[count++] = r.beg + i;
@@ -1572,7 +1733,7 @@ void init_system_data(ApplicationState* data) {
 
         data->view.camera.near_plane = 1.0f;
         data->view.camera.far_plane = 100000.0f;
-        data->view.trackball_param.max_distance = MAX(max_cell_ext, max_aabb_ext) * 10.0f;
+        data->view.trackball_param.max_distance = MD_MAX(max_cell_ext, max_aabb_ext) * 10.0f;
 
         data->view.target = default_view;
         data->view.camera = default_view;
@@ -1593,24 +1754,37 @@ void init_system_data(ApplicationState* data) {
         }
 #endif
     }
-    viamd::event_system_broadcast_event(viamd::EventType_ViamdSystemInit, viamd::EventPayloadType_ApplicationState, data);
+    // The components are told once the system is inferred, when it is inferred in the background: what they derive from
+    // it (the particle and residue types of the dataset window and its overrides, the pucker rows) is of the inferred one
+    if (!data->mold.inference.pending) {
+        viamd::event_system_broadcast_event(viamd::EventType_ViamdSystemInit, viamd::EventPayloadType_ApplicationState, data);
+    }
 
     init_all_representations(data);
     data->script.compile_ir = true;
+
+    // The first excited state's natural transition orbitals, read on a worker thread while the geometry is
+    // shown: the state a representation of them starts at
+    es_nto_ready(data, 0);
 }
 
+static void system_inference_free(ApplicationState* app);
+
 void free_system_data(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
     interrupt_async_tasks(data);
+    // Before the arena is rewound: the inferred arrays live in arenas of their own, which go with the system
+    system_inference_free(data);
+    es_nto_warm_free(data);     // its tasks were waited for above
 
     // The arena OUTLIVES the system it backs, and the zeroing below is why there used to be a
-    // second handle to it: MEMSET over md_system_t clears sys.alloc along with everything else, so
+    // second handle to it: md_memset over md_system_t clears sys.alloc along with everything else, so
     // the only pointer to the arena has to be carried across by hand. Rewound, not destroyed - the
     // next load reuses it.
     md_allocator_i* sys_alloc = data->mold.sys.alloc;
     md_arena_allocator_reset(sys_alloc);
-    MEMSET(&data->mold.sys, 0, sizeof(data->mold.sys));
-    MEMSET(&data->mold.state, 0, sizeof(data->mold.state));
+    md_memset(&data->mold.sys, 0, sizeof(data->mold.sys));
+    md_memset(&data->mold.state, 0, sizeof(data->mold.state));
     data->mold.sys.alloc   = sys_alloc;
     data->mold.state.alloc = sys_alloc;
 
@@ -1633,7 +1807,7 @@ void free_system_data(ApplicationState* data) {
     file_list_clear(&data->files.list);
 
 
-    MEMSET(data->mold.frame_cache.states, 0, sizeof(data->mold.frame_cache.states));
+    md_memset(data->mold.frame_cache.states, 0, sizeof(data->mold.frame_cache.states));
     clear_frame_cache(&data->mold.frame_cache);
 
     md_bitmask_clear(&data->selection.selection_mask);
@@ -1646,26 +1820,17 @@ void free_system_data(ApplicationState* data) {
     data->script.eval_ir = nullptr;
     script_ir_collect(data);
     if (data->script.eval) {
-        md_script_eval_free(data->script.eval);
+        script::eval_free(data->script.eval);
         data->script.eval = nullptr;
     }
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdSystemFree, viamd::EventPayloadType_ApplicationState, data);
 }
 
-// The entry a loaded file takes in files.list
-static FileEntry file_entry(str_t path, const loader::LoaderState& load_state) {
-    FileEntry e = {};
-    str_copy_to_char_buf(e.path, sizeof(e.path), path);
-    e.type = load_state.type;
-    e.explicit_type = (load_state.flags & LoaderFlag_ExplicitType) != 0;
-    str_copy_to_char_buf(e.arg, sizeof(e.arg), str_from_cstr(load_state.arg));
-    return e;
-}
 
 // Opens the run in path for the loaded system, replacing the one it has (one run per system for now).
 // False when the file holds no frames to make a run of, which is not an error for a structure file.
-static bool open_run(ApplicationState* state, str_t path, const loader::LoaderState& load_state) {
+static bool open_run(ApplicationState* state, md_str_t path, const loader::LoaderState& load_state) {
     interrupt_async_tasks(state);
     free_trajectory_data(state);
     state->animation.frame = 0;
@@ -1677,37 +1842,228 @@ static bool open_run(ApplicationState* state, str_t path, const loader::LoaderSt
     if (num_frames == 0) {
         return false;
     }
-    file_list_record(&state->files.list, file_entry(path, load_state), FileRole_Trajectory, state->allocator.persistent);
+    file_list_record(&state->files.list, file_entry_from(path, load_state), FileRole_Trajectory, state->allocator.persistent);
     md_array_last(state->files.list.runs)->frame_count = num_frames;
     viamd::event_system_broadcast_event(viamd::EventType_ViamdTrajectoryInit,
         viamd::EventPayloadType_ApplicationState, state);
     return true;
 }
 
-LoadResult load_data_from_file(ApplicationState* state, str_t filepath, const loader::LoaderState& load_state) {
-    // On its own the role follows from the loader flags, and a structure file opens its own frames as the run:
-    // a multi model PDB or an XYZ trajectory is a system and a run in one file
-    const FileRole role = file_role(load_state.flags);
-    return load_data(state, filepath, load_state, role, role == FileRole_System);
+// ## A topology and its coordinates, in either order (load_order.h): what loading is, for it
+
+static LoadResult ops_load(void* user, md_str_t path, const loader::LoaderState& ls, FileRole role, bool opens_own_run) {
+    return load_data((ApplicationState*)user, path, ls, role, opens_own_run);
+}
+static size_t ops_system_atoms(void* user) { return ((ApplicationState*)user)->mold.sys.atom.count; }
+static size_t ops_run_frames(void* user) { return run_num_frames((ApplicationState*)user); }
+static const FileList* ops_files(void* user) { return &((ApplicationState*)user)->files.list; }
+
+LoadResult load_data_from_file(ApplicationState* state, md_str_t filepath, const loader::LoaderState& load_state) {
+    LoadOps ops = {};
+    ops.user = state;
+    ops.load = ops_load;
+    ops.system_atoms = ops_system_atoms;
+    ops.run_frames = ops_run_frames;
+    ops.files = ops_files;
+    return load_in_order(&state->files.pending, ops, filepath, load_state);
 }
 
-LoadResult load_data(ApplicationState* state, str_t filepath, const loader::LoaderState& load_state, FileRole role, bool opens_own_run) {
-    ASSERT(state);
+// ### INFERENCE IN THE BACKGROUND ###
+//
+// The work (md_util_system_infer_prepare) shares the core of the system, which nothing writes until it is published or
+// discarded, and has of its own what inference writes and the coordinates shown when it was made, which become the
+// system's reference state. It is inferred on a worker with its loops on the pool. Published, its arrays become the
+// system's (its arena is kept with the system, freed with it); the system keeps its core, its attribute table and its
+// force field. The work of a topology which changed meanwhile (a supplement, an edit) is dropped and made again.
+
+static void inference_discard_work(SystemInference& inf) {
+    if (inf.arena) {
+        md_arena_allocator_destroy(inf.arena);
+        inf.arena = nullptr;
+    }
+    inf.work = {};
+}
+
+static void system_inference_on_main(ApplicationState* app, task_system::Status status);
+
+void system_inference_start(ApplicationState* app, md_infer_flags_t flags) {
+    MD_ASSERT(app);
+    SystemInference& inf = app->mold.inference;
+    inf.job.cancel_and_wait();
+    inference_discard_work(inf);
+    const md_system_t& sys = app->mold.sys;
+    if (sys.atom.count == 0) {
+        inf.pending = false;
+        return;
+    }
+
+    inf.arena = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(4));
+    if (!md_util_system_infer_prepare(&inf.work, &sys, &app->mold.state, inf.arena)) {
+        VIAMD_LOG_ERROR("Could not prepare the inference of the structure of the system");
+        inference_discard_work(inf);
+        inf.pending = false;
+        return;
+    }
+
+    inf.flags = flags;
+    inf.done = false;
+    inf.pending = true;
+    inf.restart = false;
+
+    SystemInference* p = &inf;
+    inf.job.start(MD_STR_LIT("Inferring structure"),
+        [p]() {
+            md_util_system_infer_run(&p->work, p->flags, task_system::executor());
+            // Bond inference leaves its scratch committed in this thread's arenas (it rewinds them, which keeps the
+            // pages): given back, as this was large and is done
+            md_temp_trim();
+            if (!task_system::cancelled()) p->done = true;
+        },
+        [app](task_system::Status status) { system_inference_on_main(app, status); });
+}
+
+bool system_inference_pending(const ApplicationState& app) {
+    return app.mold.inference.pending;
+}
+
+// What the system shown is built of, made again of the inferred one: the molecule on the GPU (its bonds, backbones and
+// chain gaps), the glyphs of the cartoon, the secondary structure of the coordinates shown, the representations of
+// them, and what the components derived from the system (ViamdSystemInit)
+static void system_inferred_refresh(ApplicationState* app) {
+    for (size_t i = 0; i < md_array_size(app->representation.reps); ++i) {
+        md_gl_rep_destroy(app->representation.reps[i].md_rep);
+        app->representation.reps[i].md_rep = {};
+    }
+    assembly_subsets_free(app);
+    cartoon_glyphs_free(&app->mold.cartoon_glyphs);
+    // Made again in place: the handle stays, so what components made of the molecule when the system was loaded (the
+    // representations of the QM windows) stays valid without their knowing it was. Destroyed and created, it had a new
+    // id, and those were left drawing a molecule which no longer existed. The atoms are those it was made of; should
+    // they not be, it is a new molecule after all.
+    if (!md_gl_mol_rebuild(app->mold.gl_mol, &app->mold.sys)) {
+        md_gl_mol_destroy(app->mold.gl_mol);
+        app->mold.gl_mol = md_gl_mol_create(&app->mold.sys);
+    }
+    cartoon_glyphs_init(&app->mold.cartoon_glyphs, app->mold.sys, app->mold.gl_mol, app->allocator.persistent);
+    if (md_util_state_backbone_compute(&app->mold.state, &app->mold.sys)) {
+        upload_secondary_structure_weights(app);
+    }
+    app->mold.dirty_gpu_buffers |= MolBit_DirtyPosition | MolBit_DirtyRadius | MolBit_DirtyFlags | MolBit_DirtyBonds | MolBit_ClearVelocity;
+    app->mold.interpolate_system_state = true;
+    app->mold.last_interpolated_nearest_frame = -1;
+    app->mold.gpu_buffers_version += 1;
+
+    viamd::event_system_broadcast_event(viamd::EventType_ViamdSystemInit, viamd::EventPayloadType_ApplicationState, app);
+    init_all_representations(app);
+    flag_all_representations_as_dirty(app);
+    app->script.compile_ir = true;
+    app->script.time_since_last_change = 1.0e9;
+}
+
+// The work published: the main thread, nothing else running which reads the system. False when the topology changed
+// since the work was made of it, and then nothing is done.
+static bool inference_publish(ApplicationState* app) {
+    SystemInference& inf = app->mold.inference;
+    md_system_t& sys = app->mold.sys;
+
+    // A version of its own: what was derived from the core is stale
+    if (!md_util_system_infer_publish(&sys, &inf.work)) return false;
+
+    md_array_push(inf.kept, inf.arena, app->allocator.persistent);
+    inf.arena = nullptr;
+    inf.work = {};
+    inf.pending = false;
+    inf.restart = false;
+
+    system_inferred_refresh(app);
+    // The run's backbones, which there were none of before
+    if (app->mold.run[0]) trajectory_backbone_start(app);
+
+    // The default representations, decided from what is now known of the system, in place of the placeholder unless
+    // it was changed or others were made meanwhile
+    if (inf.defaults_pending) {
+        inf.defaults_pending = false;
+        const size_t num_reps = md_array_size(app->representation.reps);
+        const Representation* rep = num_reps == 1 ? &app->representation.reps[0] : nullptr;
+        const bool untouched = rep && strcmp(rep->name, inf.placeholder_name) == 0 && rep->type == RepresentationType::SpaceFill &&
+            rep->color_mapping == ColorMapping::Type && rep->enabled && rep->filter.text[0] == '\0' && rep->scale.x == 1.0f;
+        if (untouched) {
+            remove_all_representations(app);
+            create_default_representations(app);
+            recompute_atom_visibility_mask(app);
+        }
+    }
+    md_temp_trim();
+    VIAMD_LOG_INFO("The structure of the system is inferred: %zu bonds, %zu molecules", sys.bond.count, md_system_molecule_count(&sys));
+    return true;
+}
+
+static void system_inference_on_main(ApplicationState* app, task_system::Status status) {
+    SystemInference& inf = app->mold.inference;
+    if (!inf.pending) return;
+    if (status == task_system::Status::Completed && inf.done && app->mold.sys.topology_version == inf.work.base_version) {
+        if (app->script.eval) script::eval_interrupt(app->script.eval);
+        task_system::wait_all();
+        inference_publish(app);
+    } else {
+        // Interrupted, or of a topology which changed meanwhile: made again of the system as it is, next frame
+        inf.restart = true;
+    }
+}
+
+void system_inference_update(ApplicationState* app) {
+    SystemInference& inf = app->mold.inference;
+    if (inf.pending && inf.restart && !inf.job.running()) {
+        system_inference_start(app, inf.flags);
+    }
+}
+
+void system_inference_finish(ApplicationState* app) {
+    SystemInference& inf = app->mold.inference;
+    if (!inf.pending) return;
+    inf.job.wait();
+    if (app->script.eval) script::eval_interrupt(app->script.eval);
+    task_system::wait_all();
+    if (!(inf.done && inference_publish(app))) {
+        // Inferred on the system itself, here and now
+        inf.job.cancel_and_wait();
+        inference_discard_work(inf);
+        md_util_system_infer(&app->mold.sys, &app->mold.state, inf.flags, task_system::executor());
+        inf.pending = false;
+        inf.restart = false;
+        system_inferred_refresh(app);
+        inf.defaults_pending = false;
+    }
+}
+
+static void system_inference_free(ApplicationState* app) {
+    SystemInference& inf = app->mold.inference;
+    inf.job.cancel_and_wait();
+    inference_discard_work(inf);
+    for (size_t i = 0; i < md_array_size(inf.kept); ++i) md_arena_allocator_destroy(inf.kept[i]);
+    md_array_shrink(inf.kept, 0);
+    inf.pending = false;
+    inf.restart = false;
+    inf.defaults_pending = false;
+}
+
+LoadResult load_data(ApplicationState* state, md_str_t filepath, const loader::LoaderState& load_state, FileRole role, bool opens_own_run) {
+    MD_ASSERT(state);
 
     LoadResult result = LoadResult_Failed;
-    str_t path_to_file = md_path_make_canonical(filepath, state->allocator.frame);
+    md_str_t path_to_file = md_path_make_canonical(filepath, state->allocator.frame);
     if (path_to_file) {
         if (role == FileRole_Supplement || role == FileRole_Series) {
             // Neither the system nor the trajectory is touched - this file only adds to what is
             // already loaded, and the loader merges it into the system's attribute table. A
             // component picks it up from there, off the ViamdLoadData event below.
-            const str_t run = str_from_cstr(state->mold.run);
+            const md_str_t run = md_str_from_cstr(state->mold.run);
             if (role == FileRole_Supplement && state->mold.sys.atom.count == 0) {
-                VIAMD_LOG_ERROR("'" STR_FMT "' adds to a system; load the system first", STR_ARG(path_to_file));
+                VIAMD_LOG_ERROR("'" MD_STR_FMT "' adds to a system; load the system first", MD_STR_ARG(path_to_file));
                 return LoadResult_Failed;
             }
-            if (role == FileRole_Series && str_empty(run)) {
-                VIAMD_LOG_ERROR("'" STR_FMT "' holds data along a trajectory; load the trajectory first", STR_ARG(path_to_file));
+            if (role == FileRole_Series && md_str_empty(run)) {
+                VIAMD_LOG_ERROR("'" MD_STR_FMT "' holds data along a trajectory; load the trajectory first", MD_STR_ARG(path_to_file));
                 return LoadResult_Failed;
             }
 
@@ -1717,21 +2073,23 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             // below and they would start over anyway; the rest are left to FINISH rather than
             // interrupted - an interrupted backbone task leaves a just loaded trajectory without its
             // backbone data.
-            if (state->script.eval) md_script_eval_interrupt(state->script.eval);
-            task_system::pool_wait_for_completion();
+            if (state->script.eval) script::eval_interrupt(state->script.eval);
+            // A supplement adds to the system as inferred, as it did before inference went to the background
+            system_inference_finish(state);
+            task_system::wait_all();
 
             const size_t num_atoms = state->mold.sys.atom.count;
             if (loader::load_supplemental(&state->mold.sys, path_to_file, load_state, run)) {
                 // The contract of a supplement: it adds to the atoms, and never changes how many there are.
-                // What is kept by atom index (selections, user bonds, atom type edits, and all of it in a
+                // What is kept by atom index (selections, user bonds, particle type edits, and all of it in a
                 // workspace) would silently apply to other atoms. The loaders check their file against the
                 // system before they change it; this is where one that does not would show.
-                ASSERT(state->mold.sys.atom.count == num_atoms);
+                MD_ASSERT(state->mold.sys.atom.count == num_atoms);
                 if (state->mold.sys.atom.count != num_atoms) {
-                    VIAMD_LOG_ERROR("'" STR_FMT "' changed the number of atoms from %zu to %zu; what is kept by atom index no longer applies", STR_ARG(path_to_file), num_atoms, state->mold.sys.atom.count);
+                    VIAMD_LOG_ERROR("'" MD_STR_FMT "' changed the number of atoms from %zu to %zu; what is kept by atom index no longer applies", MD_STR_ARG(path_to_file), num_atoms, state->mold.sys.atom.count);
                 }
                 result = LoadResult_Supplement;
-                file_list_record(&state->files.list, file_entry(path_to_file, load_state), role, state->allocator.persistent);
+                file_list_record(&state->files.list, file_entry_from(path_to_file, load_state), role, state->allocator.persistent);
 
                 // A topology replaces bonds (and with them structures), which the GPU holds a copy of
                 state->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
@@ -1739,14 +2097,19 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
                 state->script.compile_ir = true;
                 if (role == FileRole_Series) {
                     const char* hint = (load_state.type == LoaderType_EDR) ? "edr/<term>" :
+                                       (load_state.type == LoaderType_AMBER_ENERGY) ? "amber_energy/<term>" :
                                        (load_state.type == LoaderType_XVG) ? "xvg/<file>/<legend>" : "csv/<file>/<column>";
-                    VIAMD_LOG_SUCCESS("Loaded '" STR_FMT "' into '" STR_FMT "'; plot it from System > Series, or read it in the script with attr(\"%s\")", STR_ARG(path_to_file), STR_ARG(run), hint);
+                    VIAMD_LOG_SUCCESS("Loaded '" MD_STR_FMT "' into '" MD_STR_FMT "'; plot it from System > Series, or read it in the script with attr(\"%s\")", MD_STR_ARG(path_to_file), MD_STR_ARG(run), hint);
                 } else {
-                    VIAMD_LOG_SUCCESS("Successfully loaded supplemental data from file '" STR_FMT "'", STR_ARG(path_to_file));
+                    VIAMD_LOG_SUCCESS("Successfully loaded supplemental data from file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
                 }
             } else {
-                VIAMD_LOG_ERROR("Failed to load supplemental data from file '" STR_FMT "'", STR_ARG(path_to_file));
+                VIAMD_LOG_ERROR("Failed to load supplemental data from file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
             }
+        } else if (role == FileRole_System && (load_state.flags & LoaderFlag_NeedsCoordinates) && !(load_state.coordinates && load_state.coordinates[0])) {
+            state->files.pending.topology = file_entry_from(path_to_file, load_state);
+            VIAMD_LOG_INFO("'" MD_STR_FMT "' is a topology without coordinates; it waits for a restart, a structure file or a trajectory of its atoms", MD_STR_ARG(path_to_file));
+            return LoadResult_Pending;
         } else if (role == FileRole_System) {
             interrupt_async_tasks(state);
             free_trajectory_data(state);
@@ -1755,16 +2118,20 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             // sys.alloc and state.alloc are already the dataset arena - set at startup and put
             // back by free_system_data above. The loaded coordinates are the initial current state;
             // inference copies them into sys.reference, so the two stay independent.
-            ASSERT(state->mold.sys.alloc && state->mold.state.alloc == state->mold.sys.alloc);
+            MD_ASSERT(state->mold.sys.alloc && state->mold.state.alloc == state->mold.sys.alloc);
             if (!loader::load(&state->mold.sys, &state->mold.state, path_to_file, load_state)) {
-                VIAMD_LOG_ERROR("Failed to load molecular data from file '" STR_FMT "'", STR_ARG(path_to_file));
+                VIAMD_LOG_ERROR("Failed to load molecular data from file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
+                md_temp_trim();
                 return LoadResult_Failed;
             }
+            // A loader's scratch is in this thread's temp arenas (its read buffer, what it holds per block), which keep
+            // their pages once rewound: given back, as a load is large and is done
+            md_temp_trim();
             result = LoadResult_System;
-            VIAMD_LOG_SUCCESS("Successfully loaded molecular data from file '" STR_FMT "'", STR_ARG(path_to_file));
+            VIAMD_LOG_SUCCESS("Successfully loaded molecular data from file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
 
             // In the list before the system is initialized, so that what handles that sees what it was built from
-            file_list_record(&state->files.list, file_entry(path_to_file, load_state), role, state->allocator.persistent);
+            file_list_record(&state->files.list, file_entry_from(path_to_file, load_state), role, state->allocator.persistent);
             state->files.list.atom_count = state->mold.sys.atom.count;
 
             // Inferred whatever the data is, coarse grained or not: mdlib tells beads from atoms (and Martini from
@@ -1776,11 +2143,12 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
                 // carried no bonds at all (an H5MD file without connectivity) has none to protect, and
                 // gets them inferred like any other structure.
                 flags &= ~MD_UTIL_INFER_BOND_BIT;
-                flags |= MD_UTIL_INFER_STRUCTURE_BIT;
+                flags |= MD_UTIL_INFER_MOLECULE_BIT;
             }
-            if (!md_util_system_infer(&state->mold.sys, &state->mold.state, flags)) {
-                VIAMD_LOG_ERROR("Nothing could be inferred for the data in '" STR_FMT "'; it is shown as loaded", STR_ARG(path_to_file));
-            }
+            // The colours of the particle types now, which the core is shown with; the rest in the background, put in
+            // place when it is done (system_inference_start)
+            md_util_system_infer(&state->mold.sys, &state->mold.state, MD_UTIL_INFER_COLOR_BIT, nullptr);
+            state->mold.inference.pending = true;
             init_system_data(state);
 
             // A structure file of several frames (a multi model PDB, an XYZ trajectory) is its own run as well. Here
@@ -1788,6 +2156,8 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             if (opens_own_run) {
                 open_run(state, path_to_file, load_state);
             }
+            // After the run is opened, which interrupts what runs on the pool
+            system_inference_start(state, flags & ~MD_UTIL_INFER_COLOR_BIT);
         } else if (role == FileRole_Trajectory) {
             if (!state->mold.sys.atom.count) {
                 VIAMD_LOG_ERROR("Before loading a trajectory, molecular data needs to be present");
@@ -1795,12 +2165,12 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
             }
             if (open_run(state, path_to_file, load_state)) {
                 result = LoadResult_Trajectory;
-                VIAMD_LOG_SUCCESS("Successfully opened trajectory from file '" STR_FMT "'", STR_ARG(path_to_file));
+                VIAMD_LOG_SUCCESS("Successfully opened trajectory from file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
             } else {
-                VIAMD_LOG_ERROR("Failed to open trajectory from file '" STR_FMT "'", STR_ARG(path_to_file));
+                VIAMD_LOG_ERROR("Failed to open trajectory from file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
             }
         } else {
-            VIAMD_LOG_ERROR("No loader for the file '" STR_FMT "'", STR_ARG(path_to_file));
+            VIAMD_LOG_ERROR("No loader for the file '" MD_STR_FMT "'", MD_STR_ARG(path_to_file));
             return LoadResult_Failed;
         }
 #if MD_ENABLE_GPU
@@ -1824,15 +2194,15 @@ LoadResult load_data(ApplicationState* state, str_t filepath, const loader::Load
 }
 
 // The next name of a list of them separated by commas, trimmed. False at the end.
-static bool next_list_name(str_t* tok, str_t* list) {
-    if (str_empty(*list)) return false;
+static bool next_list_name(md_str_t* tok, md_str_t* list) {
+    if (md_str_empty(*list)) return false;
     size_t loc = 0;
-    if (str_find_char(&loc, *list, ',')) {
-        *tok  = str_trim(str_substr(*list, 0, loc));
-        *list = str_substr(*list, loc + 1);
+    if (md_str_find_char(&loc, *list, ',')) {
+        *tok  = md_str_trim(md_str_substr(*list, 0, loc));
+        *list = md_str_substr(*list, loc + 1);
     } else {
-        *tok  = str_trim(*list);
-        *list = str_t{};
+        *tok  = md_str_trim(*list);
+        *list = md_str_t{};
     }
     return true;
 }
@@ -1851,13 +2221,13 @@ const char* bond_kind_str(md_bond_flags_t flags) {
     return "";
 }
 
-bool bond_kind_parse(md_bond_flags_t* out, str_t str) {
-    ASSERT(out);
-    str = str_trim(str);
+bool bond_kind_parse(md_bond_flags_t* out, md_str_t str) {
+    MD_ASSERT(out);
+    str = md_str_trim(str);
     size_t count = 0;
     const md_bond_kind_name_t* kinds = md_bond_kind_names(&count);
     for (size_t i = 0; i < count; ++i) {
-        if (bond_kind_proper(kinds[i]) && str_eq_cstr(str, kinds[i].name)) {
+        if (bond_kind_proper(kinds[i]) && md_str_eq_cstr(str, kinds[i].name)) {
             *out = kinds[i].value;
             return true;
         }
@@ -1867,7 +2237,7 @@ bool bond_kind_parse(md_bond_flags_t* out, str_t str) {
 
 // Origins (a mask of 1 << md_bond_origin_t) by name, "file,inferred"
 const char* bond_origins_str(char* buf, size_t cap, uint32_t origins) {
-    ASSERT(buf && cap > 0);
+    MD_ASSERT(buf && cap > 0);
     buf[0] = '\0';
     size_t len = 0;
     for (int o = MD_BOND_ORIGIN_FILE; o <= MD_BOND_ORIGIN_INFERRED; ++o) {
@@ -1879,15 +2249,15 @@ const char* bond_origins_str(char* buf, size_t cap, uint32_t origins) {
     return buf;
 }
 
-bool bond_origins_parse(uint32_t* out, str_t str) {
-    ASSERT(out);
+bool bond_origins_parse(uint32_t* out, md_str_t str) {
+    MD_ASSERT(out);
     uint32_t mask = 0;
-    str_t tok;
+    md_str_t tok;
     while (next_list_name(&tok, &str)) {
-        if (str_empty(tok)) continue;
+        if (md_str_empty(tok)) continue;
         bool found = false;
         for (int o = MD_BOND_ORIGIN_FILE; o <= MD_BOND_ORIGIN_INFERRED && !found; ++o) {
-            if (str_eq_cstr(tok, md_bond_origin_name((md_bond_origin_t)o))) {
+            if (md_str_eq_cstr(tok, md_bond_origin_name((md_bond_origin_t)o))) {
                 mask |= 1u << o;
                 found = true;
             }
@@ -1931,14 +2301,14 @@ static WorkspaceWindow workspace_windows[64];
 static size_t num_workspace_windows = 0;
 
 void workspace_register_window(const char* name, bool* show) {
-    ASSERT(name && show);
+    MD_ASSERT(name && show);
     for (size_t i = 0; i < num_workspace_windows; ++i) {
         if (strcmp(workspace_windows[i].name, name) == 0) {
             workspace_windows[i].show = show;
             return;
         }
     }
-    if (num_workspace_windows < ARRAY_SIZE(workspace_windows)) {
+    if (num_workspace_windows < MD_COUNTOF(workspace_windows)) {
         WorkspaceWindow& w = workspace_windows[num_workspace_windows++];
         snprintf(w.name, sizeof(w.name), "%s", name);
         w.show = show;
@@ -1951,9 +2321,9 @@ void workspace_register_window(const char* name, bool* show) {
 static double workspace_frame_to_time(const ApplicationState* app, double frame) {
     const int64_t n = (int64_t)md_array_size(app->timeline.x_values);
     if (n == 0) return frame;
-    const int64_t f0 = CLAMP((int64_t)frame, (int64_t)0, n - 1);
-    const int64_t f1 = CLAMP(f0 + 1, (int64_t)0, n - 1);
-    const double t = CLAMP(frame - (double)f0, 0.0, 1.0);
+    const int64_t f0 = MD_CLAMP((int64_t)frame, (int64_t)0, n - 1);
+    const int64_t f1 = MD_CLAMP(f0 + 1, (int64_t)0, n - 1);
+    const double t = MD_CLAMP(frame - (double)f0, 0.0, 1.0);
     return lerp((double)app->timeline.x_values[f0], (double)app->timeline.x_values[f1], t);
 }
 
@@ -2061,6 +2431,7 @@ static void workspace_reset(ApplicationState* data) {
 
     plot_clear(data->timeline.subplots, PLOT_MAX_SUBPLOTS);
     plot_clear(data->distributions.subplots, PLOT_MAX_SUBPLOTS);
+    periodic_views_clear();
     data->timeline.num_subplots = 1;
     data->distributions.num_subplots = 1;
     data->timeline.periods = TimelinePeriods{};
@@ -2104,24 +2475,24 @@ static void workspace_reset(ApplicationState* data) {
 
 // A mask by the atoms it holds. Base64 now; a workspace written before that holds the raw bytes,
 // which is read when it survived the text format (a mask whose bytes held no line break).
-static bool deserialize_mask(md_bitset_t* mask, str_t arg, md_allocator_i* alloc) {
-    if (str_begins_with(arg, STR_LIT("###"))) {
+static bool deserialize_mask(md_bitset_t* mask, md_str_t arg, md_allocator_i* alloc) {
+    if (md_str_begins_with(arg, MD_STR_LIT("###"))) {
         return viamd::extract_bitset(mask, arg, alloc);
     }
-    str_t raw;
+    md_str_t raw;
     viamd::extract_str(raw, arg);
-    return !str_empty(raw) && md_bitset_deserialize(mask, raw.ptr, raw.len, alloc);
+    return !md_str_empty(raw) && md_bitset_deserialize(mask, raw.ptr, raw.len, alloc);
 }
 
-void load_workspace(ApplicationState* data, str_t filename) {
+void load_workspace(ApplicationState* data, md_str_t filename) {
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     md_allocator_i* temp_alloc = md_temp_allocator(temp);
 
-    str_t txt = load_textfile(filename, temp_alloc);
+    md_str_t txt = md_load_textfile(filename, temp_alloc);
 
-    if (str_empty(txt)) {
-        VIAMD_LOG_ERROR("Could not open workspace file: '" STR_FMT "'", STR_ARG(filename));
+    if (md_str_empty(txt)) {
+        VIAMD_LOG_ERROR("Could not open workspace file: '" MD_STR_FMT "'", MD_STR_ARG(filename));
         return;
     }
 
@@ -2139,15 +2510,15 @@ void load_workspace(ApplicationState* data, str_t filename) {
     pending.selection_mask = md_bitset_empty_set();
     pending.recenter_target = md_bitset_empty_set();
 
-    str_t folder = {};
-    extract_folder_path(&folder, filename);
+    md_str_t folder = {};
+    md_extract_folder_path(&folder, filename);
 
-    str_t section;
+    md_str_t section;
     while (viamd::next_section_header(section, state)) {
-        str_t ident, arg;
-        if (str_eq(section, STR_LIT("Workspace"))) {
+        md_str_t ident, arg;
+        if (md_str_eq(section, MD_STR_LIT("Workspace"))) {
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("Version"))) {
+                if (md_str_eq(ident, MD_STR_LIT("Version"))) {
                     viamd::extract_int(pending.version, arg);
                 }
             }
@@ -2156,42 +2527,42 @@ void load_workspace(ApplicationState* data, str_t filename) {
             }
         } else if (workspace_files_read(&pending.files, state, folder, temp_alloc)) {
             // The systems and their files
-        } else if (str_eq(section, STR_LIT("Animation"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("Animation"))) {
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("Frame"))) {
+                if (md_str_eq(ident, MD_STR_LIT("Frame"))) {
                     pending.has_frame = viamd::extract_dbl(pending.frame, arg);
-                } else if (str_eq(ident, STR_LIT("Fps"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Fps"))) {
                     viamd::extract_flt(data->animation.fps, arg);
-                } else if (str_eq(ident, STR_LIT("Tension"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Tension"))) {
                     viamd::extract_flt(data->animation.tension, arg);
-                } else if (str_eq(ident, STR_LIT("Stride"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Stride"))) {
                     if (viamd::extract_int(data->animation.stride, arg)) {
-                        data->animation.stride = MAX(1, data->animation.stride);
+                        data->animation.stride = MD_MAX(1, data->animation.stride);
                     }
-                } else if (str_eq(ident, STR_LIT("Interpolation"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Interpolation"))) {
                     viamd::extract_enum(data->animation.interpolation, arg, (int)InterpolationMode::Count);
                 }
             }
-        } else if (str_eq(section, STR_LIT("TimelineView"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("TimelineView"))) {
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("FilterEnabled"))) {
+                if (md_str_eq(ident, MD_STR_LIT("FilterEnabled"))) {
                     viamd::extract_bool(pending.filter_enabled, arg);
-                } else if (str_eq(ident, STR_LIT("FilterFrames"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("FilterFrames"))) {
                     float r[2];
                     if (viamd::extract_flt_vec(r, 2, arg)) {
                         pending.has_filter_range = true;
                         pending.filter_beg_frame = r[0];
                         pending.filter_end_frame = r[1];
                     }
-                } else if (str_eq(ident, STR_LIT("TemporalWindowEnabled"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("TemporalWindowEnabled"))) {
                     viamd::extract_bool(pending.temporal_window_enabled, arg);
-                } else if (str_eq(ident, STR_LIT("TemporalWindowExtent"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("TemporalWindowExtent"))) {
                     viamd::extract_dbl(pending.temporal_window_extent, arg);
-                } else if (str_eq(ident, STR_LIT("PeriodLayout"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("PeriodLayout"))) {
                     viamd::extract_enum(data->timeline.periods.layout, arg, (int)TimelinePeriodLayout_Count);
-                } else if (str_eq(ident, STR_LIT("PeriodShadeAll"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("PeriodShadeAll"))) {
                     viamd::extract_bool(data->timeline.periods.shade_all, arg);
-                } else if (str_eq(ident, STR_LIT("ViewFrames"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("ViewFrames"))) {
                     float r[2];
                     if (viamd::extract_flt_vec(r, 2, arg)) {
                         pending.has_view_range = true;
@@ -2200,100 +2571,100 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     }
                 }
             }
-        } else if (str_eq(section, STR_LIT("TimelinePeriod"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("TimelinePeriod"))) {
             pending.has_periods = true;
             if (!timeline_periods_deserialize_period(state, &data->timeline.periods)) {
                 VIAMD_LOG_ERROR("Workspace: more than %d timeline periods, the rest are left out", TIMELINE_MAX_PERIODS);
             }
-        } else if (str_eq(section, STR_LIT("RenderSettings"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("RenderSettings"))) {
             auto& v = data->visuals;
             while (viamd::next_entry(ident, arg, state)) {
-                if      (str_eq(ident, STR_LIT("BackgroundColor")))      viamd::extract_vec3(v.background.color, arg);
+                if      (md_str_eq(ident, MD_STR_LIT("BackgroundColor")))      viamd::extract_vec3(v.background.color, arg);
                 // BackgroundIntensity scaled the background radiance up to the white point of the tone mappers.
                 // The background now shows as picked, so it is ignored.
-                else if (str_eq(ident, STR_LIT("ShadingMode")))          viamd::extract_enum(v.shading.mode, arg, (int)postprocess_pipeline::ShadingMode_Count);
-                else if (str_eq(ident, STR_LIT("ShadingColors")))        viamd::extract_enum(v.shading.colors, arg, (int)postprocess_pipeline::ColorSpace_Count);
-                else if (str_eq(ident, STR_LIT("ShadingLight")))         viamd::extract_flt(v.shading.light, arg);
-                else if (str_eq(ident, STR_LIT("ShadingEnvironment")))   viamd::extract_flt(v.shading.environment, arg);
-                else if (str_eq(ident, STR_LIT("ShadingAmbient")))       viamd::extract_flt(v.shading.ambient, arg);
-                else if (str_eq(ident, STR_LIT("ShadingSpecular")))      viamd::extract_flt(v.shading.specular, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("ShadingMode")))          viamd::extract_enum(v.shading.mode, arg, (int)postprocess_pipeline::ShadingMode_Count);
+                else if (md_str_eq(ident, MD_STR_LIT("ShadingColors")))        viamd::extract_enum(v.shading.colors, arg, (int)postprocess_pipeline::ColorSpace_Count);
+                else if (md_str_eq(ident, MD_STR_LIT("ShadingLight")))         viamd::extract_flt(v.shading.light, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("ShadingEnvironment")))   viamd::extract_flt(v.shading.environment, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("ShadingAmbient")))       viamd::extract_flt(v.shading.ambient, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("ShadingSpecular")))      viamd::extract_flt(v.shading.specular, arg);
                 // The ambient occlusion and the anti-aliasing (Ssao*, Fxaa*, Taa*, MotionBlur*, Sharpen*) were written by
                 // earlier versions and are ignored: they are the computer's settings (the .ini), not the figure's. Without
                 // a radius of the scene, nothing of the ambient occlusion is the figure's. DofFocusScale belonged to the
                 // previous scale-dependent DOF and is ignored too.
-                else if (str_eq(ident, STR_LIT("TonemapEnabled")))       viamd::extract_bool(v.tonemapping.enabled, arg);
-                else if (str_eq(ident, STR_LIT("Tonemapper")))           viamd::extract_enum(v.tonemapping.tonemapper, arg, (int)postprocess_pipeline::Tonemapper_Count);
-                else if (str_eq(ident, STR_LIT("TonemapExposure")))      viamd::extract_flt(v.tonemapping.exposure, arg);
-                else if (str_eq(ident, STR_LIT("TonemapGamma")))         viamd::extract_flt(v.tonemapping.gamma, arg);
-                else if (str_eq(ident, STR_LIT("DofEnabled")))           viamd::extract_bool(v.dof.enabled, arg);
-                else if (str_eq(ident, STR_LIT("DofAperture")))          viamd::extract_flt(v.dof.aperture, arg);
-                else if (str_eq(ident, STR_LIT("PeriodicImages"))) {
+                else if (md_str_eq(ident, MD_STR_LIT("TonemapEnabled")))       viamd::extract_bool(v.tonemapping.enabled, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("Tonemapper")))           viamd::extract_enum(v.tonemapping.tonemapper, arg, (int)postprocess_pipeline::Tonemapper_Count);
+                else if (md_str_eq(ident, MD_STR_LIT("TonemapExposure")))      viamd::extract_flt(v.tonemapping.exposure, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("TonemapGamma")))         viamd::extract_flt(v.tonemapping.gamma, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("DofEnabled")))           viamd::extract_bool(v.dof.enabled, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("DofAperture")))          viamd::extract_flt(v.dof.aperture, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("PeriodicImages"))) {
                     float n[3];
                     if (viamd::extract_flt_vec(n, 3, arg)) {
-                        for (int k = 0; k < 3; ++k) data->view.periodic_images[k] = CLAMP((int)n[k], 0, PERIODIC_IMAGES_MAX);
+                        for (int k = 0; k < 3; ++k) data->view.periodic_images[k] = MD_CLAMP((int)n[k], 0, PERIODIC_IMAGES_MAX);
                     }
                 }
-                else if (str_eq(ident, STR_LIT("Assembly"))) {
-                    str_t id = {};
-                    if (viamd::extract_str(id, arg)) str_copy_to_char_buf(pending.assembly_id, sizeof(pending.assembly_id), id);
+                else if (md_str_eq(ident, MD_STR_LIT("Assembly"))) {
+                    md_str_t id = {};
+                    if (viamd::extract_str(id, arg)) md_str_copy_to_char_buf(pending.assembly_id, sizeof(pending.assembly_id), id);
                 }
-                else if (str_eq(ident, STR_LIT("SimulationBoxEnabled"))) viamd::extract_bool(pending.box_enabled, arg);
-                else if (str_eq(ident, STR_LIT("SimulationBoxColor")))   viamd::extract_vec4(pending.box_color, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("SimulationBoxEnabled"))) viamd::extract_bool(pending.box_enabled, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("SimulationBoxColor")))   viamd::extract_vec4(pending.box_color, arg);
             }
-        } else if (str_eq(section, STR_LIT("Camera"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("Camera"))) {
             // A transform is only restored whole: half of one mixed with the default view is neither
             bool has_position = false, has_orientation = false, has_distance = false;
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("Position"))) {
+                if (md_str_eq(ident, MD_STR_LIT("Position"))) {
                     has_position = viamd::extract_vec3(pending.camera.position, arg);
-                } else if (str_eq(ident, STR_LIT("Orientation")) || str_eq(ident, STR_LIT("Rotation"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Orientation")) || md_str_eq(ident, MD_STR_LIT("Rotation"))) {
                     // Rotation: DEPRECATED name
                     has_orientation = viamd::extract_quat(pending.camera.orientation, arg);
-                } else if (str_eq(ident, STR_LIT("Distance"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Distance"))) {
                     has_distance = viamd::extract_flt(pending.camera.distance, arg);
-                } else if (str_eq(ident, STR_LIT("Mode"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Mode"))) {
                     viamd::extract_enum(data->view.mode, arg, (int)CameraMode::Count);
-                } else if (str_eq(ident, STR_LIT("FovY"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("FovY"))) {
                     viamd::extract_flt(data->view.camera.fov_y, arg);
                 }
             }
             pending.has_camera = has_position && has_orientation && has_distance;
-        } else if (str_eq(section, STR_LIT("Operations"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("Operations"))) {
             auto& op = data->operations;
             while (viamd::next_entry(ident, arg, state)) {
-                if      (str_eq(ident, STR_LIT("Recenter")))            viamd::extract_bool(op.recenter, arg);
-                else if (str_eq(ident, STR_LIT("FixateOrientation")))   viamd::extract_bool(op.fixate_orientation, arg);
-                else if (str_eq(ident, STR_LIT("ApplyPbc")))            viamd::extract_bool(op.apply_pbc, arg);
-                else if (str_eq(ident, STR_LIT("UnwrapStructures")))    viamd::extract_bool(op.unwrap_structures, arg);
+                if      (md_str_eq(ident, MD_STR_LIT("Recenter")))            viamd::extract_bool(op.recenter, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("FixateOrientation")))   viamd::extract_bool(op.fixate_orientation, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("ApplyPbc")))            viamd::extract_bool(op.apply_pbc, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("UnwrapStructures")))    viamd::extract_bool(op.unwrap_structures, arg);
                 // What a workspace from before the bond changes were tracked had: the bonds of every frame guessed anew
-                else if (str_eq(ident, STR_LIT("RecalcBonds")))         viamd::extract_bool(op.bond_tracking.enabled, arg);
-                else if (str_eq(ident, STR_LIT("TrackBonds")))          viamd::extract_bool(op.bond_tracking.enabled, arg);
-                else if (str_eq(ident, STR_LIT("TrackBondsScope"))) {
+                else if (md_str_eq(ident, MD_STR_LIT("RecalcBonds")))         viamd::extract_bool(op.bond_tracking.enabled, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("TrackBonds")))          viamd::extract_bool(op.bond_tracking.enabled, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("TrackBondsScope"))) {
                     viamd::extract_to_char_buf(op.bond_tracking.scope.text, sizeof(op.bond_tracking.scope.text), arg);
                     op.bond_tracking.scope_dirty = true;
                 }
-                else if (str_eq(ident, STR_LIT("TrackBondsTolerance"))) {
+                else if (md_str_eq(ident, MD_STR_LIT("TrackBondsTolerance"))) {
                     float tolerance = MD_BOND_DELTA_TOLERANCE;
-                    if (viamd::extract_flt(tolerance, arg)) op.bond_tracking.tolerance = CLAMP(tolerance, 0.0f, 0.45f);
+                    if (viamd::extract_flt(tolerance, arg)) op.bond_tracking.tolerance = MD_CLAMP(tolerance, 0.0f, 0.45f);
                 }
-                else if (str_eq(ident, STR_LIT("TrackBondsBreakable"))) {
-                    str_t str;
+                else if (md_str_eq(ident, MD_STR_LIT("TrackBondsBreakable"))) {
+                    md_str_t str;
                     uint32_t mask = 0;
                     if (viamd::extract_str(str, arg) && bond_origins_parse(&mask, str)) op.bond_tracking.breakable = mask;
                 }
-                else if (str_eq(ident, STR_LIT("RecenterQueryEnabled"))) viamd::extract_bool(op.recenter_query.enabled, arg);
-                else if (str_eq(ident, STR_LIT("RecenterQuery"))) {
+                else if (md_str_eq(ident, MD_STR_LIT("RecenterQueryEnabled"))) viamd::extract_bool(op.recenter_query.enabled, arg);
+                else if (md_str_eq(ident, MD_STR_LIT("RecenterQuery"))) {
                     viamd::extract_to_char_buf(op.recenter_query.filter.text, sizeof(op.recenter_query.filter.text), arg);
                     recenter_mark_query_dirty(data);
                 }
-                else if (str_eq(ident, STR_LIT("RecenterTarget")))      pending.has_recenter_target = deserialize_mask(&pending.recenter_target, arg, temp_alloc);
+                else if (md_str_eq(ident, MD_STR_LIT("RecenterTarget")))      pending.has_recenter_target = deserialize_mask(&pending.recenter_target, arg, temp_alloc);
             }
         } else if (representations_deserialize(data, section, state)) {
-        } else if (str_eq(section, STR_LIT("UserBonds"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("UserBonds"))) {
             // Each bond its atoms, and the kind it was given after them, if one was
             bool last_taken = false;
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("atoms"))) {
+                if (md_str_eq(ident, MD_STR_LIT("atoms"))) {
                     int atom_indices[2] = {-1, -1};
                     last_taken = viamd::extract_int_vec(atom_indices, 2, arg) && atom_indices[0] >= 0 && atom_indices[1] >= 0;
                     if (last_taken) {
@@ -2301,8 +2672,8 @@ void load_workspace(ApplicationState* data, str_t filename) {
                         md_array_push(pending.user_bonds, pair, temp_alloc);
                         md_array_push(pending.user_bond_flags, md_bond_flags_set_origin(MD_BOND_FLAG_NONE, MD_BOND_ORIGIN_USER), temp_alloc);
                     }
-                } else if (str_eq(ident, STR_LIT("kind")) && last_taken) {
-                    str_t str;
+                } else if (md_str_eq(ident, MD_STR_LIT("kind")) && last_taken) {
+                    md_str_t str;
                     md_bond_flags_t kind = MD_BOND_FLAG_NONE;
                     if (!viamd::extract_str(str, arg) || !bond_kind_parse(&kind, str)) {
                         // An interaction, which is no particular kind and leaves the molecules as they are
@@ -2313,69 +2684,76 @@ void load_workspace(ApplicationState* data, str_t filename) {
                     *flags = md_bond_flags_set_origin(kind | MD_BOND_FLAG_KIND_GIVEN, MD_BOND_ORIGIN_USER);
                 }
             }
-        } else if (str_eq(section, STR_LIT("Script"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("Script"))) {
+            // A workspace without the key is v1, as every workspace was before v2
+            script::Language lang = script::Language::V1;
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("Text"))) {
-                    str_t str;
+                if (md_str_eq(ident, MD_STR_LIT("Language"))) {
+                    md_str_t str;
+                    if (viamd::extract_str(str, arg) && md_str_eq(str, MD_STR_LIT("VIAL"))) lang = script::Language::V2;
+                } else if (md_str_eq(ident, MD_STR_LIT("Text"))) {
+                    md_str_t str;
                     viamd::extract_str(str, arg);
                     data->editor.SetText(std::string(str.ptr, str.len));
-                } else if (str_eq(ident, STR_LIT("MeasurementLineWidth"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("MeasurementLineWidth"))) {
                     float width = data->script.line_width;
                     if (!viamd::extract_flt(width, arg) || !std::isfinite(width) || width < 1 || width > 6)
                         MD_LOG_ERROR("Workspace: measurement line width must be finite and between 1 and 6");
                     else data->script.line_width = width;
-                } else if (str_eq(ident, STR_LIT("MeasurementPointColor")) ||
-                           str_eq(ident, STR_LIT("MeasurementLineColor")) ||
-                           str_eq(ident, STR_LIT("MeasurementPlaneColor"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("MeasurementPointColor")) ||
+                           md_str_eq(ident, MD_STR_LIT("MeasurementLineColor")) ||
+                           md_str_eq(ident, MD_STR_LIT("MeasurementPlaneColor"))) {
                     vec4_t color = {};
                     bool valid = viamd::extract_vec4(color, arg);
                     for (float c : color.elem) valid &= std::isfinite(c) && c >= 0 && c <= 1;
                     if (!valid) MD_LOG_ERROR("Workspace: measurement colours must be finite and between 0 and 1");
-                    else if (str_eq(ident, STR_LIT("MeasurementPointColor"))) data->script.point_color = color;
-                    else if (str_eq(ident, STR_LIT("MeasurementLineColor"))) data->script.line_color = color;
+                    else if (md_str_eq(ident, MD_STR_LIT("MeasurementPointColor"))) data->script.point_color = color;
+                    else if (md_str_eq(ident, MD_STR_LIT("MeasurementLineColor"))) data->script.line_color = color;
                     else data->script.triangle_color = color;
                 }
             }
-        } else if (str_eq(section, STR_LIT("Selection"))) {
-            str_t label = {};
+            script_set_language(data, lang);
+        } else if (md_str_eq(section, MD_STR_LIT("Selection"))) {
+            md_str_t label = {};
             md_bitset_t mask = {};
             bool has_mask = false;
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("Label"))) {
+                if (md_str_eq(ident, MD_STR_LIT("Label"))) {
                     viamd::extract_str(label, arg);
-                } else if (str_eq(ident, STR_LIT("Mask"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Mask"))) {
                     has_mask = deserialize_mask(&mask, arg, temp_alloc);
                 }
             }
-            if (!str_empty(label) && has_mask) {
+            if (!md_str_empty(label) && has_mask) {
                 create_selection(data, label, mask);
             }
-        } else if (str_eq(section, STR_LIT("ActiveSelection"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("ActiveSelection"))) {
             while (viamd::next_entry(ident, arg, state)) {
-                if (str_eq(ident, STR_LIT("Granularity"))) {
+                if (md_str_eq(ident, MD_STR_LIT("Granularity"))) {
                     viamd::extract_enum(data->selection.granularity, arg, (int)SelectionGranularity::Count);
-                } else if (str_eq(ident, STR_LIT("Mask"))) {
+                } else if (md_str_eq(ident, MD_STR_LIT("Mask"))) {
                     pending.has_selection_mask = deserialize_mask(&pending.selection_mask, arg, temp_alloc);
                 }
             }
-        } else if (str_eq(section, STR_LIT("Windows"))) {
+        } else if (md_str_eq(section, MD_STR_LIT("Windows"))) {
             // Windows not named keep their state: a workspace older than this section says nothing about them
             while (viamd::next_entry(ident, arg, state)) {
                 for (size_t i = 0; i < num_workspace_windows; ++i) {
-                    if (str_eq_cstr(ident, workspace_windows[i].name)) {
+                    if (md_str_eq_cstr(ident, workspace_windows[i].name)) {
                         viamd::extract_bool(*workspace_windows[i].show, arg);
                         break;
                     }
                 }
             }
-        } else if (plot_layout_deserialize(state, STR_LIT("Timeline"), STR_LIT("TimelineSeries"), data, data->timeline.subplots, &data->timeline.num_subplots)) {
-        } else if (plot_layout_deserialize(state, STR_LIT("Distributions"), STR_LIT("DistributionSeries"), data, data->distributions.subplots, &data->distributions.num_subplots)) {
+        } else if (plot_layout_deserialize(state, MD_STR_LIT("Timeline"), MD_STR_LIT("TimelineSeries"), data, data->timeline.subplots, &data->timeline.num_subplots)) {
+        } else if (plot_layout_deserialize(state, MD_STR_LIT("Distributions"), MD_STR_LIT("DistributionSeries"), data, data->distributions.subplots, &data->distributions.num_subplots)) {
+        } else if (periodic_views_deserialize(state)) {
         } else {
             const char* before = state.text.ptr;
             viamd::event_system_broadcast_event(viamd::EventType_ViamdDeserialize, viamd::EventPayloadType_DeserializationState, &state);
             if (state.text.ptr == before && viamd::next_entry(ident, arg, state)) {
                 // Written by a component this build does not have, or by a newer version
-                MD_LOG_DEBUG("Workspace: nothing reads the section [" STR_FMT "], it is skipped", STR_ARG(section));
+                MD_LOG_DEBUG("Workspace: nothing reads the section [" MD_STR_FMT "], it is skipped", MD_STR_ARG(section));
             }
         }
     }
@@ -2389,7 +2767,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
     }
 
     // ## 3. Load the files, then apply what refers to them
-    str_copy_to_char_buf(data->files.workspace, sizeof(data->files.workspace), filename);
+    md_str_copy_to_char_buf(data->files.workspace, sizeof(data->files.workspace), filename);
 
     // The system's own files in order, then those of its run: a run is opened on the complete system. This
     // build loads one system with one run; what the workspace names beyond that is reported and left out.
@@ -2401,7 +2779,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
 
     for (size_t i = 0; i < md_array_size(plan.inputs); ++i) {
         const SystemPlan::Input& in = plan.inputs[i];
-        const str_t path = str_from_cstr(in.entry.path);
+        const md_str_t path = md_str_from_cstr(in.entry.path);
 
         // The role is the file's place; the loader is the one stored, or the one the file tells
         loader::LoaderState loader_state = {};
@@ -2414,10 +2792,15 @@ void load_workspace(ApplicationState* data, str_t filename) {
         if (in.entry.arg[0] != '\0') {
             loader_state.arg = in.entry.arg;
         }
+        if (in.entry.coordinates[0] != '\0') {
+            loader_state.coordinates = in.entry.coordinates;
+        }
 
         LoadResult result = LoadResult_Failed;
         if (!md_path_is_valid(path)) {
             VIAMD_LOG_ERROR("Workspace: the file '%s' is not there", in.entry.path);
+        } else if (in.entry.coordinates[0] != '\0' && !md_path_is_valid(md_str_from_cstr(in.entry.coordinates))) {
+            VIAMD_LOG_ERROR("Workspace: the coordinates '%s' of '%s' are not there", in.entry.coordinates, in.entry.path);
         } else if ((loader_state.flags & LoaderFlag_RequiresDialogue) && !loader_state.arg) {
             // What the dialog would have asked (the LAMMPS atom format) is not stored with the file
             VIAMD_LOG_ERROR("Workspace: '%s' has to be loaded through File > Open File..., the workspace does not say how to read it", in.entry.path);
@@ -2434,6 +2817,10 @@ void load_workspace(ApplicationState* data, str_t filename) {
             file_list_record(&data->files.list, missing, in.role, data->allocator.persistent);
         }
     }
+
+    // What follows refers to the system as inferred (its bonds, residue types, structures): waited for here, as the
+    // workspace's steps were applied after inference when it was not in the background
+    system_inference_finish(data);
 
     // What the workspace was saved with stays the reference while the files are missing, so that a save keeps it
     FileList& list = data->files.list;
@@ -2461,7 +2848,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
     }
 
     if (pending.has_frame && num_frames > 0 && frames_as_saved) {
-        data->animation.frame = CLAMP(pending.frame, 0.0, (double)(num_frames - 1));
+        data->animation.frame = MD_CLAMP(pending.frame, 0.0, (double)(num_frames - 1));
     }
 
     // Loading a trajectory sets the filter and the view to all of it; the workspace's come after
@@ -2476,15 +2863,15 @@ void load_workspace(ApplicationState* data, str_t filename) {
                 const int32_t half = (int32_t)round(extent * 0.5);
                 r = timeline_periods_add(&data->timeline.periods, "Filter", -half, half, true);
             } else {
-                const double beg = pending.has_filter_range ? CLAMP(pending.filter_beg_frame, 0.0, last) : 0.0;
-                const double end = pending.has_filter_range ? CLAMP(pending.filter_end_frame, beg, last) : last;
+                const double beg = pending.has_filter_range ? MD_CLAMP(pending.filter_beg_frame, 0.0, last) : 0.0;
+                const double end = pending.has_filter_range ? MD_CLAMP(pending.filter_end_frame, beg, last) : last;
                 r = timeline_periods_add(&data->timeline.periods, "Filter", (int32_t)round(beg), (int32_t)round(end), false);
             }
             if (r) data->timeline.periods.legacy_filter_id = r->id;
         }
         if (pending.has_view_range && pending.view_end_frame > pending.view_beg_frame) {
-            data->timeline.view_range.beg_x = workspace_frame_to_time(data, CLAMP(pending.view_beg_frame, 0.0, last));
-            data->timeline.view_range.end_x = workspace_frame_to_time(data, CLAMP(pending.view_end_frame, 0.0, last));
+            data->timeline.view_range.beg_x = workspace_frame_to_time(data, MD_CLAMP(pending.view_beg_frame, 0.0, last));
+            data->timeline.view_range.end_x = workspace_frame_to_time(data, MD_CLAMP(pending.view_end_frame, 0.0, last));
         }
     }
 
@@ -2525,7 +2912,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
     if (pending.assembly_id[0]) {
         const md_assembly_data_t& a = data->mold.sys.assembly;
         for (size_t i = 0; i < a.count; ++i) {
-            if (str_eq(md_assembly_id(&a, i), str_from_cstr(pending.assembly_id))) data->view.assembly = (int)i;
+            if (md_str_eq(md_assembly_id(&a, i), md_str_from_cstr(pending.assembly_id))) data->view.assembly = (int)i;
         }
         if (data->view.assembly < 0) {
             VIAMD_LOG_ERROR("Workspace: the system has no assembly '%s'; it is shown as it is", pending.assembly_id);
@@ -2537,12 +2924,12 @@ void load_workspace(ApplicationState* data, str_t filename) {
     reset_view(&data->view.camera, data->mold.state, &data->representation.visibility_mask, data->view.camera.fov_y, data->view.region, &data->mold.sys, data->view.assembly);
     if (data->view.assembly >= 0) {
         // Room to zoom out to all of the assembly
-        data->view.trackball_param.max_distance = MAX(data->view.trackball_param.max_distance, data->view.camera.distance * 10.0f);
+        data->view.trackball_param.max_distance = MD_MAX(data->view.trackball_param.max_distance, data->view.camera.distance * 10.0f);
     }
     data->view.target = pending.has_camera ? pending.camera : (ViewTransform)data->view.camera;
 
     // What was shown over the timeline filter, before there were periods, is shown over the period the filter followed.
-    // The components take theirs on the end of the load, after which there is no filter to speak of.
+    // The residues take theirs on the end of the load, after which there is no filter to speak of.
     plot_resolve_legacy_periods(data, data->timeline.subplots, PLOT_MAX_SUBPLOTS);
     plot_resolve_legacy_periods(data, data->distributions.subplots, PLOT_MAX_SUBPLOTS);
 
@@ -2550,7 +2937,7 @@ void load_workspace(ApplicationState* data, str_t filename) {
     data->timeline.periods.legacy_filter_id = 0;
 }
 
-bool save_workspace(ApplicationState* app_state, str_t filename) {
+bool save_workspace(ApplicationState* app_state, md_str_t filename) {
     md_allocator_i* temp_alloc = app_state->allocator.frame;
 
     viamd::serialization_state_t state {
@@ -2558,7 +2945,7 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         .sw = md_str_writer_create(temp_alloc),
     };
 
-    constexpr str_t header_snippet = STR_LIT(
+    constexpr md_str_t header_snippet = MD_STR_LIT(
         R"(
         #01010110#01001001#01000001#01001101#01000100#01001101#01000001#01001001#01010110#
         #                                                                                #
@@ -2582,8 +2969,8 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
     state.sw += header_snippet;
     state.sw += '\n';
 
-    viamd::write_section_header(state, STR_LIT("Workspace"));
-    viamd::write_int(state, STR_LIT("Version"), WORKSPACE_VERSION);
+    viamd::write_section_header(state, MD_STR_LIT("Workspace"));
+    viamd::write_int(state, MD_STR_LIT("Version"), WORKSPACE_VERSION);
 
     // The system, its run and their files, missing ones too: what could not be loaded is still what the
     // workspace is of. Its id is the one every section which refers to the system uses.
@@ -2591,54 +2978,55 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         file_list_serialize(state, &app_state->files.list, 0, 0);
     }
 
-    viamd::write_section_header(state, STR_LIT("Animation"));
-    viamd::write_dbl(state, STR_LIT("Frame"), app_state->animation.frame);
-    viamd::write_flt(state, STR_LIT("Fps"), app_state->animation.fps);
-    viamd::write_flt(state, STR_LIT("Tension"), app_state->animation.tension);
-    viamd::write_int(state, STR_LIT("Stride"), app_state->animation.stride);
-    viamd::write_int(state, STR_LIT("Interpolation"), (int)app_state->animation.interpolation);
+    viamd::write_section_header(state, MD_STR_LIT("Animation"));
+    viamd::write_dbl(state, MD_STR_LIT("Frame"), app_state->animation.frame);
+    viamd::write_flt(state, MD_STR_LIT("Fps"), app_state->animation.fps);
+    viamd::write_flt(state, MD_STR_LIT("Tension"), app_state->animation.tension);
+    viamd::write_int(state, MD_STR_LIT("Stride"), app_state->animation.stride);
+    viamd::write_int(state, MD_STR_LIT("Interpolation"), (int)app_state->animation.interpolation);
 
-    plot_layout_serialize(state, STR_LIT("Timeline"), STR_LIT("TimelineSeries"), app_state->timeline.subplots, app_state->timeline.num_subplots);
-    plot_layout_serialize(state, STR_LIT("Distributions"), STR_LIT("DistributionSeries"), app_state->distributions.subplots, app_state->distributions.num_subplots);
+    plot_layout_serialize(state, MD_STR_LIT("Timeline"), MD_STR_LIT("TimelineSeries"), app_state->timeline.subplots, app_state->timeline.num_subplots);
+    plot_layout_serialize(state, MD_STR_LIT("Distributions"), MD_STR_LIT("DistributionSeries"), app_state->distributions.subplots, app_state->distributions.num_subplots);
+    periodic_views_serialize(state);
 
     {
         // In frames: a time is in whatever unit it happens to be shown in
         const auto& tl = app_state->timeline;
-        viamd::write_section_header(state, STR_LIT("TimelineView"));
-        viamd::write_int(state, STR_LIT("PeriodLayout"), (int)tl.periods.layout);
-        viamd::write_bool(state, STR_LIT("PeriodShadeAll"), tl.periods.shade_all);
+        viamd::write_section_header(state, MD_STR_LIT("TimelineView"));
+        viamd::write_int(state, MD_STR_LIT("PeriodLayout"), (int)tl.periods.layout);
+        viamd::write_bool(state, MD_STR_LIT("PeriodShadeAll"), tl.periods.shade_all);
         if (md_array_size(tl.x_values) > 0) {
             const float view[2] = {
                 (float)workspace_time_to_frame(app_state, tl.view_range.beg_x),
                 (float)workspace_time_to_frame(app_state, tl.view_range.end_x),
             };
-            viamd::write_flt_vec(state, STR_LIT("ViewFrames"), view, 2);
+            viamd::write_flt_vec(state, MD_STR_LIT("ViewFrames"), view, 2);
         }
         timeline_periods_serialize(state, &tl.periods);
     }
 
     {
         const auto& v = app_state->visuals;
-        viamd::write_section_header(state, STR_LIT("RenderSettings"));
-        viamd::write_vec3(state, STR_LIT("BackgroundColor"), v.background.color);
-        viamd::write_int(state,  STR_LIT("ShadingMode"), (int)v.shading.mode);
-        viamd::write_int(state,  STR_LIT("ShadingColors"), (int)v.shading.colors);
-        viamd::write_flt(state,  STR_LIT("ShadingLight"), v.shading.light);
-        viamd::write_flt(state,  STR_LIT("ShadingEnvironment"), v.shading.environment);
-        viamd::write_flt(state,  STR_LIT("ShadingAmbient"), v.shading.ambient);
-        viamd::write_flt(state,  STR_LIT("ShadingSpecular"), v.shading.specular);
-        viamd::write_bool(state, STR_LIT("TonemapEnabled"), v.tonemapping.enabled);
-        viamd::write_int(state,  STR_LIT("Tonemapper"), (int)v.tonemapping.tonemapper);
-        viamd::write_flt(state,  STR_LIT("TonemapExposure"), v.tonemapping.exposure);
-        viamd::write_flt(state,  STR_LIT("TonemapGamma"), v.tonemapping.gamma);
-        viamd::write_bool(state, STR_LIT("DofEnabled"), v.dof.enabled);
-        viamd::write_flt(state,  STR_LIT("DofAperture"), v.dof.aperture);
+        viamd::write_section_header(state, MD_STR_LIT("RenderSettings"));
+        viamd::write_vec3(state, MD_STR_LIT("BackgroundColor"), v.background.color);
+        viamd::write_int(state,  MD_STR_LIT("ShadingMode"), (int)v.shading.mode);
+        viamd::write_int(state,  MD_STR_LIT("ShadingColors"), (int)v.shading.colors);
+        viamd::write_flt(state,  MD_STR_LIT("ShadingLight"), v.shading.light);
+        viamd::write_flt(state,  MD_STR_LIT("ShadingEnvironment"), v.shading.environment);
+        viamd::write_flt(state,  MD_STR_LIT("ShadingAmbient"), v.shading.ambient);
+        viamd::write_flt(state,  MD_STR_LIT("ShadingSpecular"), v.shading.specular);
+        viamd::write_bool(state, MD_STR_LIT("TonemapEnabled"), v.tonemapping.enabled);
+        viamd::write_int(state,  MD_STR_LIT("Tonemapper"), (int)v.tonemapping.tonemapper);
+        viamd::write_flt(state,  MD_STR_LIT("TonemapExposure"), v.tonemapping.exposure);
+        viamd::write_flt(state,  MD_STR_LIT("TonemapGamma"), v.tonemapping.gamma);
+        viamd::write_bool(state, MD_STR_LIT("DofEnabled"), v.dof.enabled);
+        viamd::write_flt(state,  MD_STR_LIT("DofAperture"), v.dof.aperture);
         {
             const float n[3] = { (float)app_state->view.periodic_images[0], (float)app_state->view.periodic_images[1], (float)app_state->view.periodic_images[2] };
-            viamd::write_flt_vec(state, STR_LIT("PeriodicImages"), n, 3);
+            viamd::write_flt_vec(state, MD_STR_LIT("PeriodicImages"), n, 3);
         }
         if (app_state->view.assembly >= 0 && (size_t)app_state->view.assembly < app_state->mold.sys.assembly.count) {
-            viamd::write_str(state, STR_LIT("Assembly"), md_assembly_id(&app_state->mold.sys.assembly, (size_t)app_state->view.assembly));
+            viamd::write_str(state, MD_STR_LIT("Assembly"), md_assembly_id(&app_state->mold.sys.assembly, (size_t)app_state->view.assembly));
         }
         // The ambient occlusion and the anti-aliasing are the computer's settings (the .ini), the simulation box a
         // representation
@@ -2646,29 +3034,29 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
 
     // The target, not the camera: the camera eases towards it over several frames (camera_animate),
     // so saving during a fly-in or right after a drag would store a point along the way
-    viamd::write_section_header(state, STR_LIT("Camera"));
-    viamd::write_vec3(state, STR_LIT("Position"), app_state->view.target.position);
-    viamd::write_quat(state, STR_LIT("Orientation"), app_state->view.target.orientation);
-    viamd::write_flt(state,  STR_LIT("Distance"), app_state->view.target.distance);
-    viamd::write_int(state,  STR_LIT("Mode"), (int)app_state->view.mode);
-    viamd::write_flt(state,  STR_LIT("FovY"), app_state->view.camera.fov_y);
+    viamd::write_section_header(state, MD_STR_LIT("Camera"));
+    viamd::write_vec3(state, MD_STR_LIT("Position"), app_state->view.target.position);
+    viamd::write_quat(state, MD_STR_LIT("Orientation"), app_state->view.target.orientation);
+    viamd::write_flt(state,  MD_STR_LIT("Distance"), app_state->view.target.distance);
+    viamd::write_int(state,  MD_STR_LIT("Mode"), (int)app_state->view.mode);
+    viamd::write_flt(state,  MD_STR_LIT("FovY"), app_state->view.camera.fov_y);
 
     {
         const auto& op = app_state->operations;
-        viamd::write_section_header(state, STR_LIT("Operations"));
-        viamd::write_bool(state, STR_LIT("Recenter"), op.recenter);
-        viamd::write_bool(state, STR_LIT("FixateOrientation"), op.fixate_orientation);
-        viamd::write_bool(state, STR_LIT("ApplyPbc"), op.apply_pbc);
-        viamd::write_bool(state, STR_LIT("UnwrapStructures"), op.unwrap_structures);
-        viamd::write_bool(state, STR_LIT("TrackBonds"), op.bond_tracking.enabled);
-        viamd::write_str(state,  STR_LIT("TrackBondsScope"), str_from_cstr(op.bond_tracking.scope.text));
-        viamd::write_flt(state,  STR_LIT("TrackBondsTolerance"), op.bond_tracking.tolerance);
+        viamd::write_section_header(state, MD_STR_LIT("Operations"));
+        viamd::write_bool(state, MD_STR_LIT("Recenter"), op.recenter);
+        viamd::write_bool(state, MD_STR_LIT("FixateOrientation"), op.fixate_orientation);
+        viamd::write_bool(state, MD_STR_LIT("ApplyPbc"), op.apply_pbc);
+        viamd::write_bool(state, MD_STR_LIT("UnwrapStructures"), op.unwrap_structures);
+        viamd::write_bool(state, MD_STR_LIT("TrackBonds"), op.bond_tracking.enabled);
+        viamd::write_str(state,  MD_STR_LIT("TrackBondsScope"), md_str_from_cstr(op.bond_tracking.scope.text));
+        viamd::write_flt(state,  MD_STR_LIT("TrackBondsTolerance"), op.bond_tracking.tolerance);
         char origins[64];
-        viamd::write_str(state,  STR_LIT("TrackBondsBreakable"), str_from_cstr(bond_origins_str(origins, sizeof(origins), op.bond_tracking.breakable)));
-        viamd::write_bool(state, STR_LIT("RecenterQueryEnabled"), op.recenter_query.enabled);
-        viamd::write_str(state,  STR_LIT("RecenterQuery"), str_from_cstr(op.recenter_query.filter.text));
+        viamd::write_str(state,  MD_STR_LIT("TrackBondsBreakable"), md_str_from_cstr(bond_origins_str(origins, sizeof(origins), op.bond_tracking.breakable)));
+        viamd::write_bool(state, MD_STR_LIT("RecenterQueryEnabled"), op.recenter_query.enabled);
+        viamd::write_str(state,  MD_STR_LIT("RecenterQuery"), md_str_from_cstr(op.recenter_query.filter.text));
         if (!md_bitset_empty(op.selection_mask)) {
-            viamd::write_bitset(state, STR_LIT("RecenterTarget"), &op.selection_mask);
+            viamd::write_bitset(state, MD_STR_LIT("RecenterTarget"), &op.selection_mask);
         }
     }
 
@@ -2676,26 +3064,28 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
 
     {
         std::string text = app_state->editor.GetText();
-        viamd::write_section_header(state, STR_LIT("Script"));
-        viamd::write_str(state, STR_LIT("Text"), str_t{text.c_str(), text.size()});
-        viamd::write_flt(state, STR_LIT("MeasurementLineWidth"), app_state->script.line_width);
-        viamd::write_vec4(state, STR_LIT("MeasurementPointColor"), app_state->script.point_color);
-        viamd::write_vec4(state, STR_LIT("MeasurementLineColor"), app_state->script.line_color);
-        viamd::write_vec4(state, STR_LIT("MeasurementPlaneColor"), app_state->script.triangle_color);
+        viamd::write_section_header(state, MD_STR_LIT("Script"));
+        // Written for v2 alone, so a v1 workspace is as it was
+        if (app_state->script.language == script::Language::V2) viamd::write_str(state, MD_STR_LIT("Language"), MD_STR_LIT("VIAL"));
+        viamd::write_str(state, MD_STR_LIT("Text"), md_str_t{text.c_str(), text.size()});
+        viamd::write_flt(state, MD_STR_LIT("MeasurementLineWidth"), app_state->script.line_width);
+        viamd::write_vec4(state, MD_STR_LIT("MeasurementPointColor"), app_state->script.point_color);
+        viamd::write_vec4(state, MD_STR_LIT("MeasurementLineColor"), app_state->script.line_color);
+        viamd::write_vec4(state, MD_STR_LIT("MeasurementPlaneColor"), app_state->script.triangle_color);
     }
 
     for (size_t i = 0; i < md_array_size(app_state->selection.stored_selections); ++i) {
         const Selection& sel = app_state->selection.stored_selections[i];
-        viamd::write_section_header(state, STR_LIT("Selection"));
-        viamd::write_str(state, STR_LIT("Label"), str_from_cstr(sel.name));
-        viamd::write_bitset(state, STR_LIT("Mask"), &sel.atom_mask);
+        viamd::write_section_header(state, MD_STR_LIT("Selection"));
+        viamd::write_str(state, MD_STR_LIT("Label"), md_str_from_cstr(sel.name));
+        viamd::write_bitset(state, MD_STR_LIT("Mask"), &sel.atom_mask);
     }
 
-    viamd::write_section_header(state, STR_LIT("ActiveSelection"));
-    viamd::write_int(state, STR_LIT("Granularity"), (int)app_state->selection.granularity);
+    viamd::write_section_header(state, MD_STR_LIT("ActiveSelection"));
+    viamd::write_int(state, MD_STR_LIT("Granularity"), (int)app_state->selection.granularity);
     const md_bitset_t selection = md_bitmask_view(&app_state->selection.selection_mask);
     if (!md_bitset_empty(selection)) {
-        viamd::write_bitset(state, STR_LIT("Mask"), &selection);
+        viamd::write_bitset(state, MD_STR_LIT("Mask"), &selection);
     }
 
     // Save user defined bonds, of the graph and non-covalent, with the kind they were given
@@ -2705,48 +3095,48 @@ bool save_workspace(ApplicationState* app_state, str_t filename) {
         const md_bond_flags_t flags = bonds.flags[i];
         if (md_bond_origin(flags) == MD_BOND_ORIGIN_USER) {
             if (!has_user_bonds) {
-                viamd::write_section_header(state, STR_LIT("UserBonds"));
+                viamd::write_section_header(state, MD_STR_LIT("UserBonds"));
                 has_user_bonds = true;
             }
-            viamd::write_int_vec(state, STR_LIT("atoms"), bonds.pairs[i].idx, 2);
+            viamd::write_int_vec(state, MD_STR_LIT("atoms"), bonds.pairs[i].idx, 2);
             if (flags & MD_BOND_FLAG_KIND_GIVEN) {
-                viamd::write_str(state, STR_LIT("kind"), str_from_cstr(bond_kind_str(flags)));
+                viamd::write_str(state, MD_STR_LIT("kind"), md_str_from_cstr(bond_kind_str(flags)));
             }
         }
     }
 
-    viamd::write_section_header(state, STR_LIT("Windows"));
+    viamd::write_section_header(state, MD_STR_LIT("Windows"));
     for (size_t i = 0; i < num_workspace_windows; ++i) {
-        viamd::write_bool(state, str_from_cstr(workspace_windows[i].name), *workspace_windows[i].show);
+        viamd::write_bool(state, md_str_from_cstr(workspace_windows[i].name), *workspace_windows[i].show);
     }
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdSerialize, viamd::EventPayloadType_SerializationState, &state);
 
     // Only now, with all of it in hand, is the file touched
-    const str_t text = md_str_writer_to_str(&state.sw);
+    const md_str_t text = md_str_writer_to_str(&state.sw);
     md_file_t file = {0};
     if (!md_file_open(&file, filename, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
-        VIAMD_LOG_ERROR("Could not open workspace file for writing: '" STR_FMT "'", STR_ARG(filename));
+        VIAMD_LOG_ERROR("Could not open workspace file for writing: '" MD_STR_FMT "'", MD_STR_ARG(filename));
         return false;
     }
-    const size_t written = md_file_write(file, str_ptr(text), str_len(text));
+    const size_t written = md_file_write(file, md_str_ptr(text), md_str_len(text));
     md_file_close(&file);
-    if (written != str_len(text)) {
-        VIAMD_LOG_ERROR("Could not write all of the workspace file: '" STR_FMT "'", STR_ARG(filename));
+    if (written != md_str_len(text)) {
+        VIAMD_LOG_ERROR("Could not write all of the workspace file: '" MD_STR_FMT "'", MD_STR_ARG(filename));
         return false;
     }
 
     // Saved there, it is the workspace from here on: the next plain save goes to the same file
-    str_copy_to_char_buf(app_state->files.workspace, sizeof(app_state->files.workspace), filename);
-    VIAMD_LOG_SUCCESS("Saved workspace '" STR_FMT "'", STR_ARG(filename));
+    md_str_copy_to_char_buf(app_state->files.workspace, sizeof(app_state->files.workspace), filename);
+    VIAMD_LOG_SUCCESS("Saved workspace '" MD_STR_FMT "'", MD_STR_ARG(filename));
     return true;
 }
 
 // --- SELECTION ---
-Selection* create_selection(ApplicationState* state, str_t name, md_bitset_t atom_mask) {
-    ASSERT(state);
+Selection* create_selection(ApplicationState* state, md_str_t name, md_bitset_t atom_mask) {
+    MD_ASSERT(state);
     Selection sel;
-    str_copy_to_char_buf(sel.name, sizeof(sel.name), name);
+    md_str_copy_to_char_buf(sel.name, sizeof(sel.name), name);
     sel.atom_mask = md_bitset_copy(atom_mask, state->allocator.persistent);
     md_array_push(state->selection.stored_selections, sel, state->allocator.persistent);
     return md_array_last(state->selection.stored_selections);
@@ -2760,7 +3150,7 @@ void remove_all_selections(ApplicationState* state) {
 }
 
 void remove_selection(ApplicationState* state, size_t idx) {
-    ASSERT(state);
+    MD_ASSERT(state);
     if (md_array_size(state->selection.stored_selections) <= idx) {
         VIAMD_LOG_ERROR("Index [%zu] out of range when trying to remove selection", idx);
     }
@@ -2774,9 +3164,9 @@ void remove_selection(ApplicationState* state, size_t idx) {
 // "ground_state" reads as "Ground State" in a menu. The path segment is the identity; this is
 // presentation only, which is why it lives here and not in mdlib. Writes into a caller buffer so
 // gathering stays allocation free.
-int dipole_label_pretty(char* buf, size_t cap, str_t group) {
+int dipole_label_pretty(char* buf, size_t cap, md_str_t group) {
     if (!buf || cap == 0) return 0;
-    size_t n = MIN(group.len, cap - 1);
+    size_t n = MD_MIN(group.len, cap - 1);
     bool boundary = true;
     for (size_t i = 0; i < n; ++i) {
         char c = group.ptr[i];
@@ -2805,10 +3195,10 @@ int dipole_entry_label(char* buf, size_t cap, const DipoleGroup& group, uint32_t
 // The origin lives beside the vector: same group, last path segment swapped. Derived rather than
 // carried around, so a key is the only thing anyone has to hold on to.
 static const md_attribute_t* dipole_origin_of(const md_system_t& sys, const md_attribute_t* vec) {
-    return md_attributes_sibling(&sys.attributes, vec, STR_LIT("origin"));
+    return md_attributes_sibling(&sys.attributes, vec, MD_STR_LIT("origin"));
 }
 
-// A vector and an origin form a group only if both are there, both are 3 component, and the origin
+// A vector and an origin form a group only if both are there, both are 3 residue, and the origin
 // is addressed by the vector's index space - either one per element, or a single anchor shared over
 // all of them, which is how one centre of charge serves every excited state.
 static bool dipole_group_qualifies(const md_attribute_t* vec, const md_attribute_t* org) {
@@ -2822,8 +3212,8 @@ static bool dipole_group_qualifies(const md_attribute_t* vec, const md_attribute
 
 size_t dipole_groups_gather(DipoleGroup out[], size_t cap, const md_system_t& sys) {
     size_t count = 0;
-    for (md_attribute_iter_t it = md_attributes_iter_children(&sys.attributes, STR_LIT("dipole")); md_attributes_next(&it);) {
-        const md_attribute_t* vec = md_attributes_find_in(&sys.attributes, it.child_path, STR_LIT("vector"));
+    for (md_attribute_iter_t it = md_attributes_iter_children(&sys.attributes, MD_STR_LIT("dipole")); md_attributes_next(&it);) {
+        const md_attribute_t* vec = md_attributes_find_in(&sys.attributes, it.child_path, MD_STR_LIT("vector"));
         if (!vec || !dipole_group_qualifies(vec, dipole_origin_of(sys, vec))) continue;
 
         if (out && count < cap) {
@@ -2847,10 +3237,10 @@ bool dipole_group_from_key(DipoleGroup* out, const md_system_t& sys, md_attribut
     if (out) {
         // The group name is the path segment before the leaf, which is the same string the gather
         // above hands back - so a label built from either route reads identically.
-        str_t label = vec->path;
+        md_str_t label = vec->path;
         size_t sep = 0;
-        if (str_rfind_char(&sep, label, '/')) label = str_substr(label, 0, sep);
-        if (str_rfind_char(&sep, label, '/')) label = str_substr(label, sep + 1, SIZE_MAX);
+        if (md_str_rfind_char(&sep, label, '/')) label = md_str_substr(label, 0, sep);
+        if (md_str_rfind_char(&sep, label, '/')) label = md_str_substr(label, sep + 1, SIZE_MAX);
 
         *out = {
             .key   = key,
@@ -2879,8 +3269,8 @@ bool dipole_moment_read(vec3_t* out_vec, vec3_t* out_origin, const md_system_t& 
     // system space, and extraction refuses if it is not.
     float v[3] = {0, 0, 0};
     float o[3] = {0, 0, 0};
-    md_attribute_extract_f32(v, ARRAY_SIZE(v), vec, vec_slice, md_unit_none());
-    md_attribute_extract_f32(o, ARRAY_SIZE(o), org, org_slice, md_unit_angstrom());
+    md_attribute_extract_f32(v, MD_COUNTOF(v), vec, vec_slice, md_unit_none());
+    md_attribute_extract_f32(o, MD_COUNTOF(o), org, org_slice, md_unit_angstrom());
 
     if (out_vec)    *out_vec    = vec3_set(v[0], v[1], v[2]);
     if (out_origin) *out_origin = vec3_set(o[0], o[1], o[2]);
@@ -2888,7 +3278,7 @@ bool dipole_moment_read(vec3_t* out_vec, vec3_t* out_origin, const md_system_t& 
 }
 
 
-// A per atom scalar field: values one component wide, the atom axis LAST, and at most one axis of
+// A per atom scalar field: values one residue wide, the atom axis LAST, and at most one axis of
 // variants ahead of it. mdlib deliberately does not know that an "atom/..." path is over this
 // system's atoms - categories are not predeclared - so this is where that convention is checked.
 static bool atom_attribute_qualifies(const md_attribute_t* attr, const md_system_t& sys) {
@@ -2900,7 +3290,7 @@ static bool atom_attribute_qualifies(const md_attribute_t* attr, const md_system
 
 size_t atom_attribute_query(md_attribute_id_t out_ids[], size_t cap, const md_system_t& sys) {
     size_t count = 0;
-    for (md_attribute_iter_t it = md_attributes_iter(&sys.attributes, STR_LIT("atom")); md_attributes_next(&it);) {
+    for (md_attribute_iter_t it = md_attributes_iter(&sys.attributes, MD_STR_LIT("atom")); md_attributes_next(&it);) {
         if (!atom_attribute_qualifies(it.attr, sys)) continue;
 
         if (out_ids && count < cap) {
@@ -2912,10 +3302,10 @@ size_t atom_attribute_query(md_attribute_id_t out_ids[], size_t cap, const md_sy
     return count;
 }
 
-str_t atom_attribute_label(const md_attribute_t* attr) {
-    if (!attr) return str_t{};
+md_str_t atom_attribute_label(const md_attribute_t* attr) {
+    if (!attr) return md_str_t{};
     // An empty label is a valid state, and the leaf is what the path spells for itself.
-    return str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label;
+    return md_str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label;
 }
 
 int atom_attribute_variant_count(const md_attribute_t* attr) {
@@ -2943,8 +3333,8 @@ ColorScaleSpan atom_attribute_span(const md_attribute_t* attr, const md_bitset_t
         for (size_t i = 0; i < num_values; ++i) {
             if (mask && !md_bitset_test(*mask, (uint32_t)(i % num_atoms))) continue;
             if (atom_attribute_value_absent(values[i])) continue;
-            value_min = MIN(value_min, values[i]);
-            value_max = MAX(value_max, values[i]);
+            value_min = MD_MIN(value_min, values[i]);
+            value_max = MD_MAX(value_max, values[i]);
             num_present += 1;
         }
         if (num_present > 0) {
@@ -2957,18 +3347,18 @@ ColorScaleSpan atom_attribute_span(const md_attribute_t* attr, const md_bitset_t
 }
 
 void atom_attribute_legend_label(char* buf, size_t cap, const md_attribute_t* attr, int variant_idx) {
-    ASSERT(buf && cap > 0);
-    const str_t label = atom_attribute_label(attr);
+    MD_ASSERT(buf && cap > 0);
+    const md_str_t label = atom_attribute_label(attr);
     const int num_variants = atom_attribute_variant_count(attr);
     if (num_variants > 1) {
-        snprintf(buf, cap, "%.*s [%d/%d]", (int)label.len, label.ptr, CLAMP(variant_idx, 0, num_variants - 1) + 1, num_variants);
+        snprintf(buf, cap, "%.*s [%d/%d]", (int)label.len, label.ptr, MD_CLAMP(variant_idx, 0, num_variants - 1) + 1, num_variants);
     } else {
         snprintf(buf, cap, "%.*s", (int)label.len, label.ptr);
     }
 }
 
 void atom_attribute_select(AtomAttributeColoring* coloring, md_attribute_id_t key, const md_system_t& sys) {
-    ASSERT(coloring);
+    MD_ASSERT(coloring);
 
     coloring->key = key;
     coloring->variant_idx = 0;
@@ -2993,7 +3383,7 @@ void atom_attribute_select(AtomAttributeColoring* coloring, md_attribute_id_t ke
 // ---------------------------------------------------------------------------
 // Per dataset GPU data
 // ---------------------------------------------------------------------------
-// Built from the system's own basis/ attributes, so it needs no loader and no component - which is
+// Built from the system's own basis/ attributes, so it needs no loader and no residue - which is
 // the point of publishing the basis in the first place. Lives beside gl_mol because it is the same
 // kind of thing: derived FROM the system so that something can draw or evaluate it, and never read
 // back by mdlib.
@@ -3001,8 +3391,20 @@ void atom_attribute_select(AtomAttributeColoring* coloring, md_attribute_id_t ke
 // The device scratch is grown here rather than allocated per dataset. A wider basis loaded later
 // grows it; a narrower one leaves it alone, because it is scratch and only the maximum matters.
 
+#if MD_ENABLE_GPU
+static bool dmat_build_take(ApplicationState* state, bool wait);
+static void localization_gpu_free(ApplicationState* state);
+static bool dpack_build_take(ApplicationState* state, bool wait);
+static bool gpu_density_jobs_cancel(ApplicationState* state, uint32_t vol_tex);
+#endif
+
 void system_gpu_data_free(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
+#if MD_ENABLE_GPU
+    // the evaluations not yet all issued are of what goes: dropped, so that the drain waits for what is in flight only
+    if (state->gpu_stream) gpu_density_jobs_cancel(state, 0);
+#endif
+    gpu_volume_jobs_drain(state);   // what the evaluations under way read goes below
 #if MD_ENABLE_GPU
     if (state->mold.gpu_basis) {
         md_gto_gpu_basis_destroy(state->gpu_stream, state->mold.gpu_basis);
@@ -3013,13 +3415,28 @@ void system_gpu_data_free(ApplicationState* state) {
         state->mold.gpu_atoms = 0;
     }
     state->mold.gpu_atoms_hash = 0;
+    dmat_build_take(state, true);   // what a worker has under way: taken, then freed below
+    if (state->mold.gpu_dmat) {
+        md_gto_gpu_dmat_destroy(state->gpu_stream, state->mold.gpu_dmat);
+        state->mold.gpu_dmat = nullptr;
+    }
+    state->mold.gpu_dmat_key = 0;
+    state->mold.gpu_dmat_failed_key = 0;
+    localization_gpu_free(state);
+    dpack_build_take(state, true);
+    if (state->mold.gpu_dpack) {
+        md_gpu_free(state->gpu_stream, state->mold.gpu_dpack);
+        state->mold.gpu_dpack = 0;
+    }
+    state->mold.gpu_dpack_key = 0;
+    state->mold.gpu_dpack_failed_key = 0;
 #else
     (void)state;
 #endif
 }
 
 bool system_gpu_data_update(ApplicationState* state, double cutoff) {
-    ASSERT(state);
+    MD_ASSERT(state);
 #if MD_ENABLE_GPU
     system_gpu_data_free(state);
 
@@ -3028,7 +3445,7 @@ bool system_gpu_data_update(ApplicationState* state, double cutoff) {
     }
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     md_gto_basis_t basis = {};
     if (!md_gto_basis_extract_attributes(&basis, &state->mold.sys.attributes, md_temp_allocator(temp))) {
@@ -3073,16 +3490,16 @@ bool system_gpu_data_update(ApplicationState* state, double cutoff) {
 // Nothing here holds a reader. The basis and the AO coefficients are attributes on the system, the
 // atom positions are the system's own state, and the grid, the destination texture and the
 // evaluation parameters belong to the caller. There is no vlx pointer in scope, no event, and no
-// component to ask - which is the whole point of publishing the coefficients.
+// residue to ask - which is the whole point of publishing the coefficients.
 //
 // The basis is rebuilt per call for now. That is one interleave over a few hundred shells, but it
 // is the obvious thing for a representation to cache, keyed on the ids of the basis/ attributes it
 // was built from.
-double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, const md_system_t& sys, str_t coefficient_path, const md_attribute_slice_t* slice_ptr) {
+double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, const md_system_t& sys, md_str_t coefficient_path, const md_attribute_slice_t* slice_ptr) {
     const md_attribute_slice_t slice = slice_ptr ? *slice_ptr : md_attribute_slice_all();
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, coefficient_path);
     if (!attr) {
-        MD_LOG_DEBUG("No orbital coefficients published at '" STR_FMT "'", STR_ARG(coefficient_path));
+        MD_LOG_DEBUG("No orbital coefficients published at '" MD_STR_FMT "'", MD_STR_ARG(coefficient_path));
         return nullptr;
     }
 
@@ -3091,11 +3508,11 @@ double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, c
     // format rather than the attribute is what makes those the same call.
     md_attribute_format_t format = {};
     if (!md_attribute_slice_format(&format, attr, slice)) {
-        MD_LOG_ERROR("The slice does not address '" STR_FMT "'", STR_ARG(coefficient_path));
+        MD_LOG_ERROR("The slice does not address '" MD_STR_FMT "'", MD_STR_ARG(coefficient_path));
         return nullptr;
     }
     if (format.rank != 1 || format.components != 1) {
-        MD_LOG_ERROR("'" STR_FMT "' does not slice down to one row of orbital coefficients", STR_ARG(coefficient_path));
+        MD_LOG_ERROR("'" MD_STR_FMT "' does not slice down to one row of orbital coefficients", MD_STR_ARG(coefficient_path));
         return nullptr;
     }
 
@@ -3137,7 +3554,7 @@ double* orbital_coefficients_extract(size_t* out_num_ao, md_temp_scope_t temp, c
 // h5 carries a local-to-global map whether it is opened on its own - where the map must NOT be
 // applied, since the system IS the QM atoms - or against a larger system, where it must. Only the
 // side holding both knows which, and that is here.
-static const str_t QM_ATOM_MAP_PATH = STR_INIT("qm/atom/system_index");
+static const md_str_t QM_ATOM_MAP_PATH = MD_STR_INIT("qm/atom/system_index");
 
 // The map itself is written by the READER, on the load path: only the entry point that was called
 // knows whether this file stands alone or supplements a larger system, and that is the whole of
@@ -3153,8 +3570,8 @@ bool es_orbital_extent(const md_system_t& sys, size_t* out_num_mo, size_t* out_n
     return true;
 }
 
-bool es_orbital_frontier(OrbitalFrontier* out, const md_system_t& sys, str_t occupation_path) {
-    ASSERT(out);
+bool es_orbital_frontier(OrbitalFrontier* out, const md_system_t& sys, md_str_t occupation_path) {
+    MD_ASSERT(out);
     *out = {};
 
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, occupation_path);
@@ -3181,7 +3598,7 @@ bool es_orbital_frontier(OrbitalFrontier* out, const md_system_t& sys, str_t occ
     return true;
 }
 
-const double* es_orbital_energies(size_t* out_count, const md_system_t& sys, str_t energy_path) {
+const double* es_orbital_energies(size_t* out_count, const md_system_t& sys, md_str_t energy_path) {
     if (out_count) *out_count = 0;
 
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, energy_path);
@@ -3197,7 +3614,7 @@ static const uint32_t* qm_atom_map_find(size_t* out_count, const md_system_t& sy
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, QM_ATOM_MAP_PATH);
     const uint32_t* map = (const uint32_t*)md_attribute_view(attr, MD_ATTRIBUTE_TYPE_U32, 1, 1);
     if (attr && !map) {
-        MD_LOG_ERROR("'" STR_FMT "' is not a plain column of atom indices", STR_ARG(QM_ATOM_MAP_PATH));
+        MD_LOG_ERROR("'" MD_STR_FMT "' is not a plain column of atom indices", MD_STR_ARG(QM_ATOM_MAP_PATH));
     }
     if (map && out_count) *out_count = attr->format.shape[0];
     return map;
@@ -3214,7 +3631,7 @@ bool es_has_distinct_beta_orbitals(const md_system_t& sys) {
     return !md_attribute_same_data(a, b);
 }
 
-double es_electron_count(const md_system_t& sys, str_t occupation_path) {
+double es_electron_count(const md_system_t& sys, md_str_t occupation_path) {
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, occupation_path);
     const double* occ = (const double*)md_attribute_view(attr, MD_ATTRIBUTE_TYPE_F64, 1, 1);
     if (!occ) {
@@ -3244,6 +3661,82 @@ size_t es_excited_state_count(const md_system_t& sys) {
     return attr->format.shape[0];
 }
 
+// The states' NTOs read once on a worker thread: what es_nto_ready keeps. A state's status is written by its task
+// and read by the frame. A task reads the system, so it ends before the system goes: free_system_data waits for
+// every pool task (interrupt_async_tasks) before this is freed. The task is detached, so nothing cancels it before
+// it has run (which would leave its state under way for good), and es_nto_warming is what the panel shows.
+struct NtoWarm {
+    enum : uint8_t { NotBegun = 0, UnderWay = 1, Done = 2 };
+    size_t count = 0;
+    std::atomic<uint8_t>* status = nullptr;
+    std::atomic<int64_t>  under_way = 0;
+    md_tick_t t0 = 0;   // when the oldest still under way began, read only while under_way > 0
+};
+
+bool es_nto_ready(ApplicationState* state, size_t state_idx) {
+    MD_ASSERT(state);
+    const md_system_t& sys = state->mold.sys;
+    const md_attribute_t* attr = md_attributes_find(&sys.attributes, es_path::nto_lambda);
+    const size_t count = es_excited_state_count(sys);
+    if (!attr || attr->data || state_idx >= count) {
+        return true;
+    }
+    NtoWarm* w = (NtoWarm*)state->mold.nto_warm;
+    if (!w) {
+        w = new NtoWarm();
+        w->count = count;
+        w->status = new std::atomic<uint8_t>[count];
+        for (size_t i = 0; i < count; ++i) w->status[i].store(NtoWarm::NotBegun);
+        state->mold.nto_warm = w;
+    }
+    if (state_idx >= w->count) {
+        return true;
+    }
+    const uint8_t status = w->status[state_idx].load(std::memory_order_acquire);
+    if (status == NtoWarm::Done) {
+        return true;
+    }
+    if (status == NtoWarm::NotBegun) {
+        w->status[state_idx].store(NtoWarm::UnderWay, std::memory_order_relaxed);
+        if (w->under_way.fetch_add(1) == 0) w->t0 = md_tick_now();
+        const md_system_t* sys_ptr = &state->mold.sys;
+        const uint32_t idx = (uint32_t)state_idx;
+        task_system::detach({}, [w, sys_ptr, idx]() {
+            // the weights: the reader computes the state's orbitals with them, and keeps all three
+            const md_attribute_t* a = md_attributes_find(&sys_ptr->attributes, es_path::nto_lambda);
+            if (a) {
+                const md_attribute_slice_t slice = md_attribute_slice_1(idx);
+                const size_t n = md_attribute_slice_count(a, slice);
+                md_temp_scope_t temp = md_temp_begin();
+                double* values = (double*)md_temp_alloc(temp, sizeof(double) * (n ? n : 1));
+                if (values) md_attribute_extract_f64(values, n, a, slice, md_unit_none());
+                md_temp_end(temp);
+            }
+            // done whether or not it could be read: where it is read next, it fails as loudly as it would have
+            w->status[idx].store(NtoWarm::Done, std::memory_order_release);
+            w->under_way.fetch_sub(1);
+            md_temp_trim();
+        });
+    }
+    return false;
+}
+
+bool es_nto_warming(const ApplicationState* state, double* seconds) {
+    const NtoWarm* w = state ? (const NtoWarm*)state->mold.nto_warm : nullptr;
+    const bool warming = w && w->under_way.load() > 0;
+    if (seconds) *seconds = warming ? md_tick_to_seconds(md_tick_now() - w->t0) : 0.0;
+    return warming;
+}
+
+void es_nto_warm_free(ApplicationState* state) {
+    MD_ASSERT(state);
+    NtoWarm* w = (NtoWarm*)state->mold.nto_warm;
+    if (!w) return;
+    delete[] w->status;
+    delete w;
+    state->mold.nto_warm = nullptr;
+}
+
 size_t es_nto_lambdas(double* out_values, size_t cap, const md_system_t& sys, size_t state_idx, double cutoff) {
     if (!out_values || cap == 0) {
         return 0;
@@ -3260,7 +3753,7 @@ size_t es_nto_lambdas(double* out_values, size_t cap, const md_system_t& sys, si
     }
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     double* values = (double*)md_temp_alloc(temp, sizeof(double) * row);
     if (!values || md_attribute_extract_f64(values, row, attr, slice, md_unit_none()) != row) {
         return 0;
@@ -3275,12 +3768,12 @@ size_t es_nto_lambdas(double* out_values, size_t cap, const md_system_t& sys, si
 }
 
 bool es_qm_atoms(QmAtoms* out, const md_system_t& sys) {
-    ASSERT(out);
+    MD_ASSERT(out);
     *out = {};
 
     // The element column defines the domain: it is published for every QM system, and its length
     // is the atom count. Without it there is no QM atom space to speak of.
-    const md_attribute_t* z = md_attributes_find(&sys.attributes, STR_LIT("qm/atom/atomic_number"));
+    const md_attribute_t* z = md_attributes_find(&sys.attributes, MD_STR_LIT("qm/atom/atomic_number"));
     if (!z || !z->data || z->format.type != MD_ATTRIBUTE_TYPE_U8 ||
         z->format.rank != 1 || z->format.components != 1) {
         return false;
@@ -3288,7 +3781,7 @@ bool es_qm_atoms(QmAtoms* out, const md_system_t& sys) {
     out->count         = z->format.shape[0];
     out->atomic_number = (const uint8_t*)z->data;
 
-    if (const md_attribute_t* c = md_attributes_find(&sys.attributes, STR_LIT("qm/atom/coordinate"))) {
+    if (const md_attribute_t* c = md_attributes_find(&sys.attributes, MD_STR_LIT("qm/atom/coordinate"))) {
         if (c->data && c->format.type == MD_ATTRIBUTE_TYPE_F64 && c->format.rank == 1 &&
             c->format.components == 3 && c->format.shape[0] == out->count) {
             // dvec3_t is three doubles with no padding, and the {N,3} layout is exactly an
@@ -3331,7 +3824,7 @@ static size_t basis_atom_positions_gather(vec3_t* dst, size_t cap, const md_syst
     size_t map_count = 0;
     const uint32_t* map = qm_atom_map_find(&map_count, sys);
     if (map && map_count < num_basis_atoms) {
-        MD_LOG_ERROR("The basis spans %zu atoms and '" STR_FMT "' maps %zu", num_basis_atoms, STR_ARG(QM_ATOM_MAP_PATH), map_count);
+        MD_LOG_ERROR("The basis spans %zu atoms and '" MD_STR_FMT "' maps %zu", num_basis_atoms, MD_STR_ARG(QM_ATOM_MAP_PATH), map_count);
         return 0;
     }
 
@@ -3364,10 +3857,15 @@ static void gpu_volume_upload_to_gl(uint32_t vol_tex, const void* src, size_t si
     // The isosurface renderer's empty space grid follows the texels
     volume::notify_data_changed(vol_tex);
     if (void* dst = gl::pbo_upload_begin(size)) {
-        MEMCPY(dst, src, size);
+        md_memcpy(dst, src, size);
         if (gl::pbo_upload_end_texture_3D(vol_tex, 0, GL_R32F)) return;
     }
     gl::set_texture_3D_data(vol_tex, 0, src, GL_R32F);
+}
+
+// The scratch the evaluations write now (ApplicationState::gpu_eval_target)
+static inline md_gpu_texture_t gpu_eval_target(const ApplicationState* state) {
+    return state->gpu_eval_target ? state->gpu_eval_target : state->gpu_volume;
 }
 
 static ApplicationState::GpuVolumeJob* gpu_volume_job_acquire(ApplicationState* state) {
@@ -3404,6 +3902,12 @@ static void gpu_volume_job_complete(void* user) {
         gpu_volume_upload_to_gl(job->tex_id, job->rb.cpu, job->size);
     }
     if (self && job->rb.gpu) md_gpu_free(self->gpu_stream, job->rb.gpu);
+    if (job->issued_job) {
+        MD_LOG_DEBUG("Density volume %dx%dx%d: %.1f ms from the request to the texture, on the GPU in pieces over the frames (" MD_GTO_GPU_GEMM_PIECES_REVISION ")",
+                     (int)job->grid.dim[0], (int)job->grid.dim[1], (int)job->grid.dim[2], md_tick_to_milliseconds(md_tick_now() - (md_tick_t)job->t0));
+        md_gto_gpu_job_end((md_gto_gpu_job_t*)job->issued_job);
+        job->issued_job = nullptr;
+    }
     job->rb        = {};
     job->in_flight = false;
 }
@@ -3416,11 +3920,66 @@ static bool gpu_volume_readback_blocking(ApplicationState* state, uint32_t vol_t
         .offset = {0, 0, 0},
         .extent = { (uint32_t)grid.dim[0], (uint32_t)grid.dim[1], (uint32_t)grid.dim[2] },
     };
-    bool ok = md_gpu_copy_from_texture(state->gpu_stream, rb.gpu, state->gpu_volume, &region);
+    bool ok = md_gpu_copy_from_texture(state->gpu_stream, rb.gpu, gpu_eval_target(state), &region);
     md_gpu_stream_sync(state->gpu_stream);
     if (ok) gpu_volume_upload_to_gl(vol_tex, rb.cpu, size);
     md_gpu_free(state->gpu_stream, rb.gpu);
     return ok;
+}
+
+static bool gpu_volume_readback_issue(ApplicationState* state, ApplicationState::GpuVolumeJob* job, uint32_t vol_tex, const md_grid_t& grid);
+
+// The density jobs not yet all issued: each, once its counts are there (wait: waited for), issued and its
+// readback queued. True when none is left.
+static bool gpu_density_jobs_issue(ApplicationState* state, bool wait) {
+    bool none = true;
+    for (int i = 0; i < ApplicationState::GPU_VOLUME_JOB_SLOTS; ++i) {
+        ApplicationState::GpuVolumeJob& j = state->gpu_volume_jobs[i];
+        if (!j.in_flight || !j.density_job) continue;
+        md_gto_gpu_job_t* dj = (md_gto_gpu_job_t*)j.density_job;
+        if (!md_gto_gpu_job_poll(dj, wait)) {
+            none = false;
+            continue;
+        }
+        j.density_job = nullptr;
+        j.issued_job = dj;      // kept for its progress until the readback lands (gpu_volume_job_complete)
+        gpu_volume_readback_issue(state, &j, j.tex_id, j.grid);
+        if (!j.in_flight && j.issued_job) {     // failed, or read back on the spot
+            md_gto_gpu_job_end(dj);
+            j.issued_job = nullptr;
+        }
+    }
+    return none;
+}
+
+static bool gpu_density_job_pending(const ApplicationState* state) {
+    for (int i = 0; i < ApplicationState::GPU_VOLUME_JOB_SLOTS; ++i) {
+        if (state->gpu_volume_jobs[i].in_flight && state->gpu_volume_jobs[i].density_job) return true;
+    }
+    return false;
+}
+
+// What the GPU evaluations share - the atom positions, the coefficients, the dmat, the scratch volume - is
+// only changed once every density job is issued: one not yet issued reads them when it is. Waits for those.
+static void gpu_density_jobs_settle(ApplicationState* state) {
+    if (gpu_density_job_pending(state)) gpu_density_jobs_issue(state, true);
+}
+
+// The density jobs not yet all issued, of vol_tex (0: every one), dropped: what they have in flight completes,
+// nothing more is issued, and no readback is queued (the texture keeps what it held). True when any was.
+static bool gpu_density_jobs_cancel(ApplicationState* state, uint32_t vol_tex) {
+    bool any = false;
+    for (int i = 0; i < ApplicationState::GPU_VOLUME_JOB_SLOTS; ++i) {
+        ApplicationState::GpuVolumeJob& j = state->gpu_volume_jobs[i];
+        if (!j.in_flight || !j.density_job || (vol_tex && j.tex_id != vol_tex)) continue;
+        md_gto_gpu_job_t* dj = (md_gto_gpu_job_t*)j.density_job;
+        MD_LOG_DEBUG("Density volume: the evaluation under way no longer wanted, dropped at %.0f%% after %.1f ms", md_gto_gpu_job_progress(dj) * 100.0f,
+                     md_tick_to_milliseconds(md_tick_now() - (md_tick_t)j.t0));
+        md_gto_gpu_job_end(dj);
+        j = ApplicationState::GpuVolumeJob{};
+        any = true;
+    }
+    return any;
 }
 
 // Queues a readback of the evaluated region of gpu_volume. Returns once the copy is recorded; the
@@ -3429,7 +3988,7 @@ static bool gpu_volume_readback_blocking(ApplicationState* state, uint32_t vol_t
 //
 // Returns true when the work was QUEUED -- not that the texture holds data.
 static bool gpu_volume_readback(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid) {
-    if (!state->gpu_stream || !state->gpu_volume) {
+    if (!state->gpu_stream || !gpu_eval_target(state)) {
         return false;
     }
     const size_t size = sizeof(float) * (size_t)grid.dim[0] * (size_t)grid.dim[1] * (size_t)grid.dim[2];
@@ -3456,7 +4015,13 @@ static bool gpu_volume_readback(ApplicationState* state, uint32_t vol_tex, const
     if (!job) {
         return gpu_volume_readback_blocking(state, vol_tex, grid, size);
     }
+    job->src = gpu_eval_target(state);
+    return gpu_volume_readback_issue(state, job, vol_tex, grid);
+}
 
+// The copy of gpu_volume into job's staging and its completion, queued; job is acquired
+static bool gpu_volume_readback_issue(ApplicationState* state, ApplicationState::GpuVolumeJob* job, uint32_t vol_tex, const md_grid_t& grid) {
+    const size_t size = sizeof(float) * (size_t)grid.dim[0] * (size_t)grid.dim[1] * (size_t)grid.dim[2];
     md_gpu_mem_t rb = md_gpu_malloc(state->gpu_stream, MD_GPU_MEM_HOST_READ, size);
     if (!rb.cpu) {
         MD_LOG_ERROR("Failed to allocate volume readback staging (%zu bytes)", size);
@@ -3468,7 +4033,7 @@ static bool gpu_volume_readback(ApplicationState* state, uint32_t vol_tex, const
         .offset = {0, 0, 0},
         .extent = { (uint32_t)grid.dim[0], (uint32_t)grid.dim[1], (uint32_t)grid.dim[2] },
     };
-    if (!md_gpu_copy_from_texture(state->gpu_stream, rb.gpu, state->gpu_volume, &region)) {
+    if (!md_gpu_copy_from_texture(state->gpu_stream, rb.gpu, job->src ? job->src : state->gpu_volume, &region)) {
         MD_LOG_ERROR("Failed to record the volume readback");
         md_gpu_free(state->gpu_stream, rb.gpu);
         job->in_flight = false;
@@ -3492,6 +4057,34 @@ static bool gpu_volume_readback(ApplicationState* state, uint32_t vol_tex, const
     return true;
 }
 
+// The readback of a density job's evaluation: its slot now, the copy once the job is all issued
+// (gpu_volume_jobs_poll). Takes the job.
+static bool gpu_volume_readback_after(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, md_gto_gpu_job_t* dj) {
+    if (md_gto_gpu_job_poll(dj, false)) {
+        md_gto_gpu_job_end(dj);
+        return gpu_volume_readback(state, vol_tex, grid);
+    }
+    if (gpu_volume_job_in_flight_for(state, vol_tex)) {
+        // not to be: the representations wait for the last one (gpu_volume_job_in_flight_for). Ordered as the
+        // plain readback is
+        md_gto_gpu_job_poll(dj, true);
+        md_gto_gpu_job_end(dj);
+        return gpu_volume_readback(state, vol_tex, grid);
+    }
+    ApplicationState::GpuVolumeJob* job = gpu_volume_job_acquire(state);
+    if (!job) {
+        md_gto_gpu_job_poll(dj, true);
+        md_gto_gpu_job_end(dj);
+        return gpu_volume_readback(state, vol_tex, grid);
+    }
+    job->tex_id = vol_tex;
+    job->src = gpu_eval_target(state);
+    job->grid = grid;
+    job->density_job = dj;
+    job->t0 = md_tick_now();
+    return true;
+}
+
 // Queues the atom upload on gpu_stream if it is dirty. Any evaluation launched afterwards on the
 // same stream observes it. md_gpu_upload_begin writes straight into the destination when that is
 // safe and stages through a transient arena otherwise, so there is one path regardless of whether
@@ -3504,11 +4097,11 @@ static bool gpu_atoms_ensure_uploaded(ApplicationState* state, const md_system_t
     const size_t sz = md_gto_gpu_atom_buffer_size(num_atoms);
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     // Same gather as the GL path, through the same map, so the two backends cannot disagree about
     // which atom a basis index means. Packed to vec4 because that is what the device wants.
-    vec3_t* xyz = (vec3_t*)md_temp_alloc(temp, sizeof(vec3_t) * MAX(num_atoms, (size_t)1));
+    vec3_t* xyz = (vec3_t*)md_temp_alloc(temp, sizeof(vec3_t) * MD_MAX(num_atoms, (size_t)1));
     if (!xyz || basis_atom_positions_gather(xyz, num_atoms, sys, sys_state, num_atoms) != num_atoms) {
         return false;
     }
@@ -3520,7 +4113,7 @@ static bool gpu_atoms_ensure_uploaded(ApplicationState* state, const md_system_t
         return true;
     }
 
-    vec4_t* xyzw = (vec4_t*)md_temp_alloc(temp, sizeof(vec4_t) * MAX(num_atoms, (size_t)1));
+    vec4_t* xyzw = (vec4_t*)md_temp_alloc(temp, sizeof(vec4_t) * MD_MAX(num_atoms, (size_t)1));
     if (!xyzw) {
         return false;
     }
@@ -3544,10 +4137,58 @@ static bool gpu_atoms_ensure_uploaded(ApplicationState* state, const md_system_t
 
 #endif // MD_ENABLE_GPU
 
+#if !MD_ENABLE_GPU
+bool density_dmat_preparing(const ApplicationState*, double* seconds) {
+    if (seconds) *seconds = 0.0;
+    return false;
+}
+#endif
+
+void gpu_volume_jobs_poll(ApplicationState* state) {
+    MD_ASSERT(state);
+#if MD_ENABLE_GPU
+    if (state->gpu_stream) gpu_density_jobs_issue(state, false);
+#else
+    (void)state;
+#endif
+}
+
+size_t gpu_volume_jobs_progress(const ApplicationState* state, float* fraction, size_t cap) {
+    MD_ASSERT(state);
+    size_t n = 0;
+#if MD_ENABLE_GPU
+    const md_tick_t now = md_tick_now();
+    for (int i = 0; i < ApplicationState::GPU_VOLUME_JOB_SLOTS && n < cap; ++i) {
+        const ApplicationState::GpuVolumeJob& j = state->gpu_volume_jobs[i];
+        void* dj = j.density_job ? j.density_job : j.issued_job;
+        if (!j.in_flight || !dj) continue;
+        // one done within a few frames shows nothing
+        if (md_tick_to_seconds(now - (md_tick_t)j.t0) < 0.25) continue;
+        fraction[n++] = md_gto_gpu_job_progress((md_gto_gpu_job_t*)dj);
+    }
+#else
+    (void)state;
+    (void)fraction;
+    (void)cap;
+#endif
+    return n;
+}
+
+bool gpu_volume_job_cancel(ApplicationState* state, uint32_t vol_tex) {
+    MD_ASSERT(state);
+#if MD_ENABLE_GPU
+    return vol_tex != 0 && state->gpu_stream && gpu_density_jobs_cancel(state, vol_tex);
+#else
+    (void)vol_tex;
+    return false;
+#endif
+}
+
 void gpu_volume_jobs_drain(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 #if MD_ENABLE_GPU
     if (!state->gpu_stream || !gpu_volume_job_any_in_flight(state)) return;
+    gpu_density_jobs_issue(state, true);
     md_gpu_stream_sync(state->gpu_stream);
     md_gpu_device_poll(state->gpu_device);   // this is what actually runs the callbacks
 
@@ -3556,6 +4197,10 @@ void gpu_volume_jobs_drain(ApplicationState* state) {
     for (int i = 0; i < ApplicationState::GPU_VOLUME_JOB_SLOTS; ++i) {
         ApplicationState::GpuVolumeJob& j = state->gpu_volume_jobs[i];
         if (j.in_flight) {
+            if (j.density_job) md_gto_gpu_job_end((md_gto_gpu_job_t*)j.density_job);
+            if (j.issued_job) md_gto_gpu_job_end((md_gto_gpu_job_t*)j.issued_job);
+            j.density_job = nullptr;
+            j.issued_job = nullptr;
             if (j.rb.gpu) md_gpu_free(state->gpu_stream, j.rb.gpu);
             j.rb = {};
             j.in_flight = false;
@@ -3575,7 +4220,7 @@ vec3_t* basis_atom_positions_extract(size_t* out_count, md_temp_scope_t temp, co
     }
 
     const size_t num_basis_atoms = md_gto_basis_num_atoms(&basis);
-    vec3_t* atom_xyz = (vec3_t*)md_temp_alloc(temp, sizeof(vec3_t) * MAX(num_basis_atoms, (size_t)1));
+    vec3_t* atom_xyz = (vec3_t*)md_temp_alloc(temp, sizeof(vec3_t) * MD_MAX(num_basis_atoms, (size_t)1));
     if (!atom_xyz || basis_atom_positions_gather(atom_xyz, num_basis_atoms, sys, state, num_basis_atoms) != num_basis_atoms) {
         return nullptr;
     }
@@ -3588,8 +4233,8 @@ vec3_t* basis_atom_positions_extract(size_t* out_count, md_temp_scope_t temp, co
 // NOT part of it: they come in as a parameter, because which geometry an orbital is drawn at is the
 // caller's decision and nothing down here is in a position to make it.
 static bool gto_basis_context(md_gto_basis_t* out_basis, md_temp_scope_t temp, const md_system_t& sys) {
-    ASSERT(out_basis);
-    MEMSET(out_basis, 0, sizeof(*out_basis));
+    MD_ASSERT(out_basis);
+    md_memset(out_basis, 0, sizeof(*out_basis));
     return md_gto_basis_extract_attributes(out_basis, &sys.attributes, md_temp_allocator(temp));
 }
 
@@ -3606,25 +4251,34 @@ static bool gto_positions_match_basis(const md_gto_basis_t* basis, const vec3_t*
 
 bool orbital_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_system_t& sys,
                          const vec3_t* atom_pos, size_t num_atom_pos,
-                         str_t coefficient_path, const md_attribute_slice_t* slice, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff) {
+                         md_str_t coefficient_path, const md_attribute_slice_t* slice, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff) {
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     size_t  num_ao    = 0;
     double* ao_coeffs = orbital_coefficients_extract(&num_ao, temp, sys, coefficient_path, slice);
     if (!ao_coeffs) {
         return false;
     }
+    return orbital_coefficients_evaluate_gl(vol_tex, grid, sys, atom_pos, num_atom_pos, ao_coeffs, num_ao, mode, op, cutoff);
+}
+
+bool orbital_coefficients_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_system_t& sys,
+                                      const vec3_t* atom_pos, size_t num_atom_pos,
+                                      const double* ao_coeffs, size_t num_ao, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff) {
+    if (!ao_coeffs || num_ao == 0) return false;
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
 
     md_gto_basis_t basis = {};
     if (!gto_basis_context(&basis, temp, sys) || !gto_positions_match_basis(&basis, atom_pos, num_atom_pos)) {
         return false;
     }
 
-    // The coefficients and the basis are separate attributes, so nothing guarantees they agree
+    // The coefficients and the basis come from different places, so nothing guarantees they agree
     // until it is checked here.
     if (md_gto_basis_num_ao(&basis) != num_ao) {
-        MD_LOG_ERROR("The basis spans %zu atomic orbitals and '" STR_FMT "' %zu", md_gto_basis_num_ao(&basis), STR_ARG(coefficient_path), num_ao);
+        MD_LOG_ERROR("The basis spans %zu atomic orbitals and the orbital %zu", md_gto_basis_num_ao(&basis), num_ao);
         return false;
     }
 
@@ -3642,22 +4296,34 @@ bool orbital_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_syste
 // which narrows to one matrix. The caller names what it wants and this cares neither which of the
 // two shapes it came from, nor whether the values were stored or worked out on demand, because
 // md_attribute_slice_format answers the first and the extract answers the second.
-double* density_matrix_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, str_t density_path, const md_attribute_slice_t* slice_ptr) {
+// The context a density is extracted through: a density built from its orbitals on demand (md_qm's providers)
+// spreads its tiles over the pool, at the priority of whoever asks. One per extraction, since a context is not
+// to be used by two threads at once.
+struct DensityIo {
+    md_attribute_io_t* io = md_attribute_io_create(task_system::executor(), md_get_heap_allocator());
+    DensityIo() = default;
+    DensityIo(const DensityIo&) = delete;
+    DensityIo& operator=(const DensityIo&) = delete;
+    ~DensityIo() { md_attribute_io_destroy(io); }
+};
+
+double* density_matrix_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, md_str_t density_path, const md_attribute_slice_t* slice_ptr) {
     const md_attribute_slice_t slice = slice_ptr ? *slice_ptr : md_attribute_slice_all();
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, density_path);
     if (!attr) {
-        MD_LOG_DEBUG("No density published at '" STR_FMT "'", STR_ARG(density_path));
+        MD_LOG_DEBUG("No density published at '" MD_STR_FMT "'", MD_STR_ARG(density_path));
         return nullptr;
     }
 
     // Square or packed, stored or computed on demand: md_qm reads either, and says why when the
     // slice does not narrow it to one symmetric matrix
-    const size_t dim = md_qm_extract_symmetric_f64(nullptr, 0, attr, slice);
+    const size_t dim = md_qm_extract_symmetric_f64(nullptr, 0, attr, slice, nullptr);
     if (dim == 0) {
         return nullptr;
     }
     double* dst = (double*)md_temp_alloc(temp, sizeof(double) * dim * dim);
-    if (!dst || md_qm_extract_symmetric_f64(dst, dim * dim, attr, slice) != dim) {
+    DensityIo io;
+    if (!dst || md_qm_extract_symmetric_f64(dst, dim * dim, attr, slice, io.io) != dim) {
         return nullptr;
     }
 
@@ -3668,21 +4334,22 @@ double* density_matrix_extract(size_t* out_dim, md_temp_scope_t temp, const md_s
 // The same matrix as its packed upper triangle in float - what both density paths hand the shader.
 // A packed attribute is extracted as it is and nothing larger is ever made; a square one is
 // extracted whole into scratch first.
-float* density_packed_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, str_t density_path, const md_attribute_slice_t* slice_ptr) {
+float* density_packed_extract(size_t* out_dim, md_temp_scope_t temp, const md_system_t& sys, md_str_t density_path, const md_attribute_slice_t* slice_ptr) {
     const md_attribute_slice_t slice = slice_ptr ? *slice_ptr : md_attribute_slice_all();
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, density_path);
     if (!attr) {
-        MD_LOG_DEBUG("No density published at '" STR_FMT "'", STR_ARG(density_path));
+        MD_LOG_DEBUG("No density published at '" MD_STR_FMT "'", MD_STR_ARG(density_path));
         return nullptr;
     }
 
-    const size_t dim = md_qm_extract_packed_symmetric_f32(nullptr, 0, attr, slice);
+    const size_t dim = md_qm_extract_packed_symmetric_f32(nullptr, 0, attr, slice, nullptr);
     if (dim == 0) {
         return nullptr;
     }
     const size_t len = dim * (dim + 1) / 2;
     float* dst = (float*)md_temp_alloc(temp, sizeof(float) * len);
-    if (!dst || md_qm_extract_packed_symmetric_f32(dst, len, attr, slice) != dim) {
+    DensityIo io;
+    if (!dst || md_qm_extract_packed_symmetric_f32(dst, len, attr, slice, io.io) != dim) {
         return nullptr;
     }
 
@@ -3698,7 +4365,7 @@ static bool density_packed_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, 
     }
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     md_gto_basis_t basis = {};
     if (!gto_basis_context(&basis, temp, sys) || !gto_positions_match_basis(&basis, atom_pos, num_atom_pos)) {
@@ -3727,7 +4394,7 @@ bool density_matrix_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const m
     }
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     md_gto_basis_t basis = {};
     if (!gto_basis_context(&basis, temp, sys) || !gto_positions_match_basis(&basis, atom_pos, num_atom_pos)) {
@@ -3746,9 +4413,9 @@ bool density_matrix_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const m
 
 bool density_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_system_t& sys,
                          const vec3_t* atom_pos, size_t num_atom_pos,
-                         str_t density_path, const md_attribute_slice_t* slice, md_gto_op_t op) {
+                         md_str_t density_path, const md_attribute_slice_t* slice, md_gto_op_t op) {
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     // Packed from the start: the shader reads the upper triangle as float, so that is all that is made
     size_t dim = 0;
@@ -3760,41 +4427,17 @@ bool density_evaluate_gl(uint32_t vol_tex, const md_grid_t& grid, const md_syste
     return density_packed_evaluate_gl(vol_tex, grid, sys, atom_pos, num_atom_pos, packed, dim, op);
 }
 
-static bool es_attribute_exists(const md_system_t& sys, str_t path) {
+static bool es_attribute_exists(const md_system_t& sys, md_str_t path) {
     return md_attributes_find(&sys.attributes, path) != nullptr;
 }
 
-// Evaluates whatever the representation is currently pointed at into its own volume texture.
-// Everything it needs is an attribute on the system or a field of the representation; there is no
-// reader, no component and no event in the path, which is the whole point of the port.
-static bool electronic_structure_evaluate(ApplicationState* state, Representation* rep) {
-    const ElectronicStructureRepresentation& es = rep->electronic_structure;
-
-    const double samples_per_angstrom = volume_resolution_samples_per_angstrom[(int)es.resolution];
-
-    md_grid_t grid = {};
-    if (!electronic_structure_grid_init(&grid, state->mold.sys, state->mold.state, samples_per_angstrom * BOHR_TO_ANGSTROM)) {
-        return false;
-    }
-    init_volume(&rep->electronic_structure.density_vol, grid, GL_R32F);
-    rep->electronic_structure.grid = grid;
-    const uint32_t tex_id = rep->electronic_structure.density_vol.tex_id;
-
+// The density a representation's volume is evaluated from, for the sources that are one: its path and slice
+// (all of it: num_idx 0). False for the orbitals, and for a density property the system no longer has.
+static bool es_volume_density(md_str_t* out_path, md_attribute_slice_t* out_slice, const ElectronicStructureRepresentation& es, const md_system_t& sys) {
+    *out_slice = md_attribute_slice_all();
     switch (es.source) {
-    case ElectronicStructureSource::MolecularOrbital: {
-        const str_t path = (es.spin == ElectronicStructureSpin::Beta) ? es_path::beta_coefficient : es_path::alpha_coefficient;
-        const md_attribute_slice_t slice = md_attribute_slice_1((uint32_t)es.orbital_idx);
-        return orbital_evaluate(state, tex_id, grid, path, &slice, MD_GTO_EVAL_MODE_PSI, es_gto_op(es.use_magnitude), DEFAULT_GTO_CUTOFF_VALUE);
-    }
-    case ElectronicStructureSource::NaturalTransitionOrbital: {
-        const str_t path = (es.nto_component == ElectronicStructureNtoComponent::Particle) ? es_path::nto_particle : es_path::nto_hole;
-        // {S,L,A}: the excited state and then the lambda pair within it. Two indices instead of the
-        // one an ordinary orbital takes, which is exactly what a slice is for.
-        const md_attribute_slice_t slice = md_attribute_slice_2((uint32_t)es.excited_state_idx, (uint32_t)es.nto_lambda_idx);
-        return orbital_evaluate(state, tex_id, grid, path, &slice, MD_GTO_EVAL_MODE_PSI, es_gto_op(es.use_magnitude), DEFAULT_GTO_CUTOFF_VALUE);
-    }
     case ElectronicStructureSource::TransitionDensity: {
-        str_t path = es_path::attachment_density;
+        md_str_t path = es_path::attachment_density;
         switch (es.transition_density_component) {
         case ElectronicStructureTransitionDensityComponent::Detachment: path = es_path::detachment_density; break;
         case ElectronicStructureTransitionDensityComponent::Difference: path = es_path::transition_diff;    break;
@@ -3803,21 +4446,482 @@ static bool electronic_structure_evaluate(ApplicationState* state, Representatio
         }
         // These are VIRTUAL: the slice is what tells the provider to reconstruct one state rather
         // than all of them, and it is the only reason asking for one is affordable.
-        const md_attribute_slice_t slice = md_attribute_slice_1((uint32_t)es.excited_state_idx);
-        return density_evaluate(state, tex_id, grid, path, &slice, MD_GTO_OP_SET);
+        *out_path  = path;
+        *out_slice = md_attribute_slice_1((uint32_t)es.excited_state_idx);
+        return true;
     }
-    case ElectronicStructureSource::ElectronDensity: {
-        // A spin difference is signed, so it is the one density the magnitude toggle applies to.
-        const bool magnitude = (es.spin == ElectronicStructureSpin::Difference) && es.use_magnitude;
-        return density_evaluate(state, tex_id, grid, es_electron_density_path(es.spin), nullptr, es_gto_op(magnitude));
-    }
+    case ElectronicStructureSource::ElectronDensity:
+        *out_path = es_electron_density_path(es.spin);
+        return true;
     case ElectronicStructureSource::DensityProperty: {
-        const md_attribute_t* attr = md_attributes_get(&state->mold.sys.attributes, es.density_property_key);
-        if (!attr) {
+        const md_attribute_t* attr = md_attributes_get(&sys.attributes, es.density_property_key);
+        if (!attr) return false;
+        *out_path = attr->path;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// Evaluates whatever the representation is currently pointed at into its own volume texture.
+// Everything it needs is an attribute on the system or a field of the representation; there is no
+// reader, no component and no event in the path, which is the whole point of the port.
+// ---------------------------------------------------------------------------
+// ELF and LOL over a grid
+// ---------------------------------------------------------------------------
+// On the GPU by their own grid kernel (md_gto_gpu_localization_launch): the spins' density matrices in tiles,
+// built on the device from the orbitals over a GPU basis at the AO cutoff 1e-8 (ELF is made of small differences
+// in the tails), made by a pool task (localization_gpu_prepare) and kept until the orbitals change or the atoms
+// move out of the tiles' margin; the kernel issued into the GPU stream as the density's is, and its volume read
+// back as the density's (gpu_volume_readback): nothing waits. Without a GPU, by a pool task on the CPU, in double
+// (localization_poll): of each spin rho_s with its gradient and tau_s over the derivative basis
+// (md_qm_kinetic_orbitals), then md_qm_elf or md_qm_lol per point; slow.
+//
+// No floor of rho. ELF is a ratio of two vanishing quantities far from the atoms (with a gaussian basis it goes to 1,
+// or in float to noise, there: nothing of the molecule); it is taken as Multiwfn has it, D + MD_QM_ELF_D_MIN (1e-5),
+// which follows the exact one to the 1e-3 isodensity and goes to 0 smoothly by rho 1e-4 (md_qm_elf). LOL is a plain
+// ratio and goes to 0 there itself. The CPU path, in double from the same float data, alike.
+#define ES_LOCALIZATION_RHO_MIN 0.0
+#define ES_LOCALIZATION_CUTOFF 1.0e-8
+#define ES_LOCALIZATION_CHUNK (1u << 18)
+// How far the atoms may move before the matrices' pattern is made again (bohr), as the density's (GPU_DMAT_MARGIN)
+#define ES_LOCALIZATION_MARGIN 1.0
+
+#if MD_ENABLE_GPU
+static bool gpu_evaluation_ready(const ApplicationState* state);
+static uint64_t density_dmat_key(const md_system_t& sys, md_str_t density_path);
+#endif
+
+// The densities and kinetic energy densities of the spins (one, the total, for a closed shell), as product fields
+struct LocalizationFields {
+    md_gto_basis_t      basis = {};
+    md_gto_basis_t      dbasis = {};    // the derivative basis
+    md_gto_iso_field_t* rho[2] = {};
+    md_gto_iso_field_t* tau[2] = {};
+    int                 num_spins = 0;  // 1: closed shell (the total density), 2: alpha and beta
+};
+
+static void localization_fields_free(LocalizationFields* f) {
+    md_allocator_i* heap = md_get_heap_allocator();
+    for (int i = 0; i < 2; ++i) {
+        if (f->rho[i]) md_gto_iso_field_destroy(f->rho[i]);
+        if (f->tau[i]) md_gto_iso_field_destroy(f->tau[i]);
+    }
+    md_gto_basis_free(&f->basis, heap);
+    md_gto_basis_free(&f->dbasis, heap);
+    *f = LocalizationFields{};
+}
+
+static bool localization_fields_init(LocalizationFields* f, const md_system_t& sys, const float* atom_xyz) {
+    md_allocator_i* heap = md_get_heap_allocator();
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+    md_allocator_i* alloc = md_temp_allocator(temp);
+    if (!md_gto_basis_extract_attributes(&f->basis, &sys.attributes, heap)) return false;
+
+    // a closed shell: the same orbitals and occupations in both spins, which are then one density
+    double *ar = nullptr, *aw = nullptr, *br = nullptr, *bw = nullptr;
+    size_t ana = 0, bna = 0;
+    const size_t an = md_qm_density_orbitals(&ar, &aw, &ana, &sys, MD_STR_LIT("orbital/alpha/density"), alloc);
+    const size_t bn = md_qm_density_orbitals(&br, &bw, &bna, &sys, MD_STR_LIT("orbital/beta/density"), alloc);
+    if (an == 0 && bn == 0) return false;
+    const bool closed = an == bn && ana == bna && memcmp(ar, br, sizeof(double) * an * ana) == 0 && memcmp(aw, bw, sizeof(double) * an) == 0;
+    // A spin without occupied orbitals has no density: it is left out, as md_qm_elf takes a spin of none
+    md_str_t paths[2];
+    int num = 0;
+    if (closed) {
+        paths[num++] = MD_STR_LIT("orbital/total/density");
+    } else {
+        if (an) paths[num++] = MD_STR_LIT("orbital/alpha/density");
+        if (bn) paths[num++] = MD_STR_LIT("orbital/beta/density");
+    }
+    for (int i = 0; i < num; ++i) {
+        double *rr = nullptr, *rw = nullptr, *kr = nullptr, *kw = nullptr;
+        size_t rna = 0, kna = 0;
+        md_gto_basis_t dbasis = {};
+        const size_t rn = md_qm_density_orbitals(&rr, &rw, &rna, &sys, paths[i], alloc);
+        const size_t kn = rn ? md_qm_kinetic_orbitals(&kr, &kw, &kna, &dbasis, &sys, paths[i], heap) : 0;
+        if (!rn || !kn) return false;
+        if (i == 0) f->dbasis = dbasis; else md_gto_basis_free(&dbasis, heap);
+        f->rho[i] = md_gto_iso_field_create_products(&f->basis,  atom_xyz, 0, rr, nullptr, rw, rn, heap);
+        f->tau[i] = md_gto_iso_field_create_products(&f->dbasis, atom_xyz, 0, kr, nullptr, kw, kn, heap);
+        md_free(heap, kr, sizeof(double) * kn * kna);
+        md_free(heap, kw, sizeof(double) * kn);
+        if (!f->rho[i] || !f->tau[i]) return false;
+    }
+    // Not the spin form with one spin's terms twice: closed is what says num_spins = 1 means the total
+    f->num_spins = closed ? 1 : num;
+    return true;
+}
+
+static inline float localization_value(bool lol, int num_spins, const double rho[2], const double g2[2], const double tau[2]) {
+    if (num_spins == 1) {   // a closed shell: two equal halves
+        const double r[2] = {0.5 * rho[0], 0.5 * rho[0]}, g[2] = {0.25 * g2[0], 0.25 * g2[0]}, t[2] = {0.5 * tau[0], 0.5 * tau[0]};
+        return localization_value(lol, 2, r, g, t);
+    }
+    if (lol) return (float)md_qm_lol(rho[0], tau[0], rho[1], tau[1], ES_LOCALIZATION_RHO_MIN);
+    return (float)md_qm_elf(rho[0], g2[0], tau[0], rho[1], g2[1], tau[1], ES_LOCALIZATION_RHO_MIN, MD_QM_ELF_D_MIN);
+}
+
+// The evaluation of a representation's ELF or LOL, by a pool task: the fields made, the points evaluated, ELF or LOL
+// taken, while the frame goes on and the volume shown stays what it was. Polled each frame by the representation's
+// update (localization_poll), which puts the values in its volume once they are there. What the task reads outlives
+// it: the system's attributes (a load waits for the pool), the rest its own copies. A job no longer wanted (another
+// field asked for, the representation gone) is cancelled and let go of once it has stopped (es_jobs_collect):
+// nothing here waits for one but the shutdown.
+struct LocalizationJob {
+    task_system::Job   task;
+    uint32_t           rep_id = 0;
+    uint64_t           key = 0;           // the volume hash it was started for
+    bool               lol = false;
+    bool               orphan = false;    // nobody wants what it makes
+    const md_system_t* sys = nullptr;
+    md_grid_t          grid = {};
+    float*             atom_xyz = nullptr;  // bohr, packed, one per basis atom: its own copy
+    size_t             num_atoms = 0;
+    float*             out = nullptr;       // the values, in the texture's order
+    bool               ok = false;
+    double             seconds = 0.0;
+};
+
+static LocalizationJob* g_localization_jobs[64];
+static uint32_t g_num_localization_jobs = 0;
+
+// In double on the CPU: slow, for when there is no GPU (localization_gpu_prepare)
+static bool localization_evaluate_cpu(LocalizationJob* job, const LocalizationFields& f, const float* xyz, size_t count) {
+    const size_t chunk = MD_MIN(count, (size_t)4096);
+    const int ns = f.num_spins;
+    double* buf = (double*)malloc(sizeof(double) * chunk * ns * 5);
+    if (!buf) return false;
+    for (size_t beg = 0; beg < count; beg += chunk) {
+        if (task_system::cancelled()) { free(buf); return false; }
+        const size_t n = MD_MIN(chunk, count - beg);
+        double* rho = buf;
+        double* grad = buf + ns * n;
+        double* tau = buf + 4 * ns * n;
+        for (int s = 0; s < ns; ++s) {
+            md_gto_iso_field_evaluate(f.rho[s], xyz + 3 * beg, n, 0, rho + s * n, grad + 3 * s * n);
+            md_gto_iso_field_evaluate(f.tau[s], xyz + 3 * beg, n, 0, tau + s * n, nullptr);
+        }
+        for (size_t i = 0; i < n; ++i) {
+            double r[2] = {}, g2[2] = {}, t[2] = {};
+            for (int s = 0; s < ns; ++s) {
+                const double* g = grad + 3 * (s * n + i);
+                r[s]  = rho[s * n + i];
+                g2[s] = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+                t[s]  = tau[s * n + i];
+            }
+            job->out[beg + i] = localization_value(job->lol, ns, r, g2, t);
+        }
+        task_system::set_progress((float)(beg + n) / (float)count);
+    }
+    free(buf);
+    return true;
+}
+
+// On a worker thread
+static void localization_job_run(LocalizationJob* job) {
+    const md_tick_t t0 = md_tick_now();
+    const size_t count = md_grid_num_points(&job->grid);
+    float* xyz = (float*)malloc(sizeof(float) * 3 * count);
+    job->out = (float*)malloc(sizeof(float) * count);
+    LocalizationFields f;
+    bool ok = xyz && job->out && localization_fields_init(&f, *job->sys, job->atom_xyz);
+    if (ok) md_grid_extract_points(xyz, &job->grid);   // bohr, in the order of the texture's texels
+    bool done = false;
+    if (ok && !done && !task_system::cancelled()) {
+        done = localization_evaluate_cpu(job, f, xyz, count);
+    }
+    localization_fields_free(&f);
+    free(xyz);
+    job->ok = done;
+    job->seconds = md_tick_to_seconds(md_tick_now() - t0);
+}
+
+static void localization_job_destroy(LocalizationJob* job) {
+    job->task.cancel_and_wait();
+    free(job->atom_xyz);
+    free(job->out);
+    delete job;
+}
+
+// Lets go of the jobs which have stopped and nobody wants: superseded, or of a representation which is gone or no
+// longer of ELF or LOL
+void es_jobs_collect(ApplicationState* state) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g_num_localization_jobs; ++i) {
+        LocalizationJob* job = g_localization_jobs[i];
+        if (!job->orphan && !job->task.running()) {
+            const Representation* rep = nullptr;
+            for (size_t r = 0; r < md_array_size(state->representation.reps); ++r) {
+                if (state->representation.reps[r].node.id == job->rep_id) rep = &state->representation.reps[r];
+            }
+            job->orphan = !rep || rep->type != RepresentationType::ElectronicStructure || !electronic_structure_is_localization(rep->electronic_structure);
+        }
+        if (job->orphan && !job->task.running()) {
+            localization_job_destroy(job);
+        } else {
+            g_localization_jobs[n++] = job;
+        }
+    }
+    g_num_localization_jobs = n;
+}
+
+void es_jobs_shutdown(ApplicationState*) {
+    for (uint32_t i = 0; i < g_num_localization_jobs; ++i) localization_job_destroy(g_localization_jobs[i]);
+    g_num_localization_jobs = 0;
+}
+
+// The representation's ELF or LOL for the volume hash 'key': 1 when it is in the volume (put there now), 0 while it
+// is under way (started here if it was not), -1 when it could not be made
+static int localization_poll(ApplicationState* state, Representation* rep, uint64_t key) {
+    ElectronicStructureRepresentation& es = rep->electronic_structure;
+    const bool lol = es.source == ElectronicStructureSource::LocalizedOrbitalLocator;
+    LocalizationJob* job = nullptr;
+    for (uint32_t i = 0; i < g_num_localization_jobs; ++i) {
+        LocalizationJob* j = g_localization_jobs[i];
+        if (j->orphan || j->rep_id != rep->node.id) continue;
+        if (j->key == key) { job = j; continue; }
+        // of another field: it goes once it has stopped
+        j->task.cancel();
+        j->orphan = true;
+    }
+    if (!job) {
+        if (g_num_localization_jobs == MD_COUNTOF(g_localization_jobs)) return 0;   // asked again next frame
+        md_grid_t grid = {};
+        const double samples_per_angstrom = volume_resolution_samples_per_angstrom[(int)electronic_structure_volume_resolution(es)];
+        if (!electronic_structure_grid_init(&grid, state->mold.sys, state->mold.state, samples_per_angstrom * BOHR_TO_ANGSTROM)) return -1;
+        md_temp_scope_t temp = md_temp_begin();
+        size_t num_atoms = 0;
+        const vec3_t* atom_pos = basis_atom_positions_extract(&num_atoms, temp, state->mold.sys, state->mold.state);
+        job = new LocalizationJob();
+        job->rep_id = rep->node.id;
+        job->key = key;
+        job->lol = lol;
+        job->sys = &state->mold.sys;
+        job->grid = grid;
+        job->atom_xyz = atom_pos ? (float*)malloc(sizeof(vec3_t) * num_atoms) : nullptr;
+        if (job->atom_xyz) {
+            md_memcpy(job->atom_xyz, atom_pos, sizeof(vec3_t) * num_atoms);
+            job->num_atoms = num_atoms;
+        }
+        md_temp_end(temp);
+        if (!job->atom_xyz) {
+            delete job;
+            return -1;
+        }
+        g_localization_jobs[g_num_localization_jobs++] = job;
+        job->task.start(lol ? MD_STR_LIT("Localized orbital locator") : MD_STR_LIT("Electron localization function"),
+                        [job]() { localization_job_run(job); md_temp_trim(); });
+        return 0;
+    }
+    if (job->task.running()) return 0;
+    const bool made = job->task.status() == task_system::Status::Completed && job->ok;
+    if (made) {
+        init_volume(&es.density_vol, job->grid, GL_R32F);
+        es.grid = job->grid;
+        gl::set_texture_3D_data(es.density_vol.tex_id, 0, job->out, GL_R32F);
+        volume::notify_data_changed(es.density_vol.tex_id);
+        MD_LOG_INFO("%s: %zu points in %.2f s (CPU)", lol ? "LOL" : "ELF", md_grid_num_points(&job->grid), job->seconds);
+    } else if (job->task.status() == task_system::Status::Completed) {
+        MD_LOG_ERROR("%s could not be evaluated (are the orbitals and their occupations there?)", lol ? "LOL" : "ELF");
+    }
+    job->orphan = true;   // what it made is taken: it goes with the next collect
+    return made ? 1 : -1;
+}
+
+#if MD_ENABLE_GPU
+// What the kernel reads, made by a pool task on a stream of its own (destroyed by the task once its work is done:
+// what it made is then ready for any stream), kept in state->mold.gpu_localization
+struct LocalizationGpu {
+    task_system::Job   task;            // a cancelled one (a load) made nothing to be taken
+    uint64_t           key = 0;         // the orbitals and occupations it is made of (density_dmat_key)
+    const md_system_t* sys = nullptr;
+    vec3_t*            xyz = nullptr;   // bohr, its copy: the positions the tiles' pattern is made for
+    size_t             num_atoms = 0;
+    md_gpu_stream_t    stream = nullptr;
+    md_gto_basis_t     basis = {};      // heap
+    md_gto_gpu_basis_t gpu_basis = nullptr;
+    md_gto_gpu_dmat_t  dmat[2] = {};
+    uint32_t           num_spins = 0;   // 1: dmat[0] the total density of a closed shell; 2: alpha and beta
+    bool               ok = false;
+    md_tick_t          t0 = 0;
+};
+
+// On a worker thread
+static void localization_gpu_build(LocalizationGpu* L) {
+    md_allocator_i* heap = md_get_heap_allocator();
+    md_temp_scope_t temp = md_temp_begin();
+    md_allocator_i* alloc = md_temp_allocator(temp);
+    bool ok = md_gto_basis_extract_attributes(&L->basis, &L->sys->attributes, heap);
+    const md_gto_gpu_basis_desc_t bd = { .basis = &L->basis, .cutoff = ES_LOCALIZATION_CUTOFF };
+    L->gpu_basis = ok ? md_gto_gpu_basis_create(L->stream, &bd) : nullptr;
+    ok = ok && L->gpu_basis;
+    // a closed shell: the same orbitals and occupations in both spins, which are then one density, the total
+    double *ar = nullptr, *aw = nullptr, *br = nullptr, *bw = nullptr;
+    size_t ana = 0, bna = 0;
+    const size_t an = ok ? md_qm_density_orbitals(&ar, &aw, &ana, L->sys, es_path::alpha_density, alloc) : 0;
+    const size_t bn = ok ? md_qm_density_orbitals(&br, &bw, &bna, L->sys, es_path::beta_density, alloc) : 0;
+    const bool closed = an == bn && ana == bna && memcmp(ar, br, sizeof(double) * an * ana) == 0 && memcmp(aw, bw, sizeof(double) * an) == 0;
+    ok = ok && an > 0 && bn > 0;
+    L->num_spins = closed ? 1 : 2;
+    for (uint32_t k = 0; ok && k < L->num_spins; ++k) {
+        const md_gto_gpu_dmat_desc_t dd = {
+            .basis = &L->basis, .atom_xyz = (const float*)L->xyz, .atom_xyz_stride = sizeof(vec3_t), .cutoff = ES_LOCALIZATION_CUTOFF, .margin = ES_LOCALIZATION_MARGIN };
+        L->dmat[k] = md_gto_gpu_dmat_create(L->stream, &dd);
+        double* rows = k == 0 ? ar : br;
+        double* w = k == 0 ? aw : bw;
+        const size_t n = k == 0 ? an : bn;
+        if (closed) for (size_t i = 0; i < n; ++i) w[i] *= 2.0;     // the total
+        ok = L->dmat[k] && md_gto_gpu_dmat_build(L->stream, L->dmat[k], rows, w, n);
+    }
+    L->ok = ok;
+    md_temp_end(temp);
+    md_gpu_stream_destroy(L->stream);   // once its work is done
+    L->stream = nullptr;
+    md_temp_trim();
+}
+
+static void localization_gpu_destroy(LocalizationGpu* L, md_gpu_stream_t gl_stream) {
+    // only once its task has ended
+    L->task.cancel_and_wait();
+    for (int k = 0; k < 2; ++k) if (L->dmat[k]) md_gto_gpu_dmat_destroy(gl_stream, L->dmat[k]);
+    if (L->gpu_basis) md_gto_gpu_basis_destroy(gl_stream, L->gpu_basis);
+    if (L->stream) md_gpu_stream_destroy(L->stream);    // of a task cancelled before it ran
+    md_gto_basis_free(&L->basis, md_get_heap_allocator());
+    free(L->xyz);
+    delete L;
+}
+
+static void localization_gpu_free(ApplicationState* state) {
+    if (state->mold.gpu_localization) {
+        localization_gpu_destroy((LocalizationGpu*)state->mold.gpu_localization, state->gpu_stream);
+        state->mold.gpu_localization = nullptr;
+    }
+    state->mold.gpu_localization_failed_key = 0;
+}
+
+// Whether ELF and LOL can be evaluated on the GPU now: 1 when what the kernel reads is there for the orbitals and
+// the atoms as they are, 0 while it is being made (begun here when it is not), -1 when there is no GPU or it
+// could not be made (then on the CPU)
+static int localization_gpu_prepare(ApplicationState* state) {
+    if (!gpu_evaluation_ready(state) || !state->gpu_device) return -1;
+    const md_system_t& sys = state->mold.sys;
+    const uint64_t key = density_dmat_key(sys, MD_STR_LIT("localization"));
+    if (key == state->mold.gpu_localization_failed_key) return -1;
+    LocalizationGpu* L = (LocalizationGpu*)state->mold.gpu_localization;
+    if (L && L->task.running()) return 0;
+
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+    size_t num_atoms = 0;
+    const vec3_t* xyz = basis_atom_positions_extract(&num_atoms, temp, sys, state->mold.state);
+    if (!xyz) return -1;
+    if (L && L->key == key) {
+        if (L->task.status() != task_system::Status::Completed || !L->ok) {
+            MD_LOG_ERROR("ELF and LOL: what their GPU kernel reads could not be made; evaluating them on the CPU");
+            localization_gpu_free(state);
+            state->mold.gpu_localization_failed_key = key;
+            return -1;
+        }
+        bool valid = num_atoms == L->num_atoms;
+        for (uint32_t k = 0; valid && k < L->num_spins; ++k) valid = md_gto_gpu_dmat_pattern_valid(L->dmat[k], (const float*)xyz, sizeof(vec3_t));
+        if (valid) return 1;
+    }
+    // made (again): for other orbitals, or atoms beyond the margin
+    if (L) localization_gpu_free(state);
+    L = new LocalizationGpu();
+    L->key = key;
+    L->sys = &state->mold.sys;
+    L->t0 = md_tick_now();
+    L->xyz = (vec3_t*)malloc(sizeof(vec3_t) * num_atoms);
+    L->num_atoms = num_atoms;
+    L->stream = L->xyz ? md_gpu_stream_create(state->gpu_device, MD_GPU_STREAM_COMPUTE, "ELF/LOL matrices") : nullptr;
+    if (!L->stream) {
+        free(L->xyz);
+        delete L;
+        return -1;
+    }
+    md_memcpy(L->xyz, xyz, sizeof(vec3_t) * num_atoms);
+    state->mold.gpu_localization = L;
+    L->task.start(MD_STR_LIT("ELF/LOL density matrices"), [L]() { localization_gpu_build(L); });
+    return 0;
+}
+
+// ELF or LOL into vol_tex by the kernel, read back as the density is; what it reads is there (localization_gpu_prepare)
+static bool localization_gpu_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, bool lol) {
+    LocalizationGpu* L = (LocalizationGpu*)state->mold.gpu_localization;
+    if (!L || !L->ok || L->task.running()) return false;
+    gpu_density_jobs_settle(state);     // the scratch volume is written below
+    if (!gpu_atoms_ensure_uploaded(state, state->mold.sys, state->mold.state)) return false;
+    md_gto_gpu_localization_desc_t desc = {
+        .basis = L->gpu_basis, .atom_xyz = state->mold.gpu_atoms, .num_spins = L->num_spins,
+        .dmat = { L->dmat[0], L->num_spins > 1 ? L->dmat[1] : nullptr },
+        .kind = lol ? MD_GTO_GPU_LOL : MD_GTO_GPU_ELF, .rho_min = ES_LOCALIZATION_RHO_MIN,
+        .d_min = MD_QM_ELF_D_MIN,
+        .out_tex = gpu_eval_target(state), .grid = &grid, .sample_offset = {0.5f, 0.5f, 0.5f},
+    };
+    if (!md_gto_gpu_localization_launch(state->gpu_stream, &desc)) return false;
+    return gpu_volume_readback(state, vol_tex, grid);
+}
+#endif
+
+static bool es_evaluate_into(ApplicationState* state, const ElectronicStructureRepresentation& es, uint32_t tex_id, const md_grid_t& grid);
+
+static bool electronic_structure_evaluate(ApplicationState* state, Representation* rep) {
+    const ElectronicStructureRepresentation& es = rep->electronic_structure;
+
+    const double samples_per_angstrom = volume_resolution_samples_per_angstrom[(int)electronic_structure_volume_resolution(es)];
+
+    md_grid_t grid = {};
+    if (!electronic_structure_grid_init(&grid, state->mold.sys, state->mold.state, samples_per_angstrom * BOHR_TO_ANGSTROM)) {
+        return false;
+    }
+    init_volume(&rep->electronic_structure.density_vol, grid, GL_R32F);
+    rep->electronic_structure.grid = grid;
+    rep->electronic_structure.box_to_world = rep->electronic_structure.density_vol.texture_to_world;
+    rep->electronic_structure.has_box = true;
+    return es_evaluate_into(state, es, rep->electronic_structure.density_vol.tex_id, grid);
+}
+
+// What the representation's source is, evaluated over grid into tex_id (a GL 3D texture of the grid's dims): the
+// volume, or the image of a plane (one layer). On the GPU, written to the scratch gpu_eval_target and read back.
+static bool es_evaluate_into(ApplicationState* state, const ElectronicStructureRepresentation& es, uint32_t tex_id, const md_grid_t& grid) {
+    switch (es.source) {
+    case ElectronicStructureSource::MolecularOrbital: {
+        const md_str_t path = (es.spin == ElectronicStructureSpin::Beta) ? es_path::beta_coefficient : es_path::alpha_coefficient;
+        const md_attribute_slice_t slice = md_attribute_slice_1((uint32_t)es.orbital_idx);
+        return orbital_evaluate(state, tex_id, grid, path, &slice, MD_GTO_EVAL_MODE_PSI, es_gto_op(es.use_magnitude), DEFAULT_GTO_CUTOFF_VALUE);
+    }
+    case ElectronicStructureSource::NaturalTransitionOrbital: {
+        const md_str_t path = (es.nto_component == ElectronicStructureNtoComponent::Particle) ? es_path::nto_particle : es_path::nto_hole;
+        // {S,L,A}: the excited state and then the lambda pair within it. Two indices instead of the
+        // one an ordinary orbital takes, which is exactly what a slice is for.
+        const md_attribute_slice_t slice = md_attribute_slice_2((uint32_t)es.excited_state_idx, (uint32_t)es.nto_lambda_idx);
+        return orbital_evaluate(state, tex_id, grid, path, &slice, MD_GTO_EVAL_MODE_PSI, es_gto_op(es.use_magnitude), DEFAULT_GTO_CUTOFF_VALUE);
+    }
+    case ElectronicStructureSource::TransitionDensity:
+    case ElectronicStructureSource::ElectronDensity:
+    case ElectronicStructureSource::DensityProperty: {
+        md_str_t path = {};
+        md_attribute_slice_t slice = {};
+        if (!es_volume_density(&path, &slice, es, state->mold.sys)) {
             return false;
         }
-        return density_evaluate(state, tex_id, grid, attr->path, nullptr, MD_GTO_OP_SET);
+        // A spin difference is signed, so it is the one density the magnitude toggle applies to.
+        const bool magnitude = es.source == ElectronicStructureSource::ElectronDensity && es.spin == ElectronicStructureSpin::Difference && es.use_magnitude;
+        return density_evaluate(state, tex_id, grid, path, slice.num_idx > 0 ? &slice : nullptr, es_gto_op(magnitude), true);
     }
+    case ElectronicStructureSource::ElectronLocalization:
+    case ElectronicStructureSource::LocalizedOrbitalLocator:
+#if MD_ENABLE_GPU
+        // by their kernel when what it reads is there (the update waits for it); else by a pool task on the CPU,
+        // which the update polls (localization_poll), and which fills the volume itself
+        return localization_gpu_evaluate(state, tex_id, grid, es.source == ElectronicStructureSource::LocalizedOrbitalLocator);
+#else
+        return false;
+#endif
     default:
         MD_LOG_ERROR("Unknown electronic structure source");
         return false;
@@ -3832,7 +4936,7 @@ static void electronic_structure_color_volume_update(ApplicationState* state, Re
     }
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     const md_system_t&       sys       = state->mold.sys;
     const md_system_state_t& sys_state = state->mold.state;
@@ -3850,11 +4954,11 @@ static void electronic_structure_color_volume_update(ApplicationState* state, Re
     // RGBA8 texture is as large as the density itself (512 MB at the 512^3 limit)
     const int downsample_factor = 2;
     int dim[3] = {
-        MAX(1, DIV_UP((int)rep->electronic_structure.density_vol.dim[0], downsample_factor)),
-        MAX(1, DIV_UP((int)rep->electronic_structure.density_vol.dim[1], downsample_factor)),
-        MAX(1, DIV_UP((int)rep->electronic_structure.density_vol.dim[2], downsample_factor)),
+        MD_MAX(1, MD_DIV_UP((int)rep->electronic_structure.density_vol.dim[0], downsample_factor)),
+        MD_MAX(1, MD_DIV_UP((int)rep->electronic_structure.density_vol.dim[1], downsample_factor)),
+        MD_MAX(1, MD_DIV_UP((int)rep->electronic_structure.density_vol.dim[2], downsample_factor)),
     };
-    MEMCPY(rep->electronic_structure.color_vol.dim, dim, sizeof(dim));
+    md_memcpy(rep->electronic_structure.color_vol.dim, dim, sizeof(dim));
     rep->electronic_structure.color_vol.world_to_model   = rep->electronic_structure.density_vol.world_to_model;
     rep->electronic_structure.color_vol.texture_to_world = rep->electronic_structure.density_vol.texture_to_world;
     rep->electronic_structure.color_vol.voxel_size       = vec3_set(
@@ -3903,10 +5007,16 @@ static void electronic_structure_color_volume_update(ApplicationState* state, Re
 }
 
 // The values of a volume texture, read back. A volume the md_gpu path is still filling is waited
-// for first, and image stores of the GL compute path are made visible before the read.
+// for first (the caller waits for it without blocking: gpu_volume_job_in_flight_for), and image stores
+// of the GL compute path are made visible before the read.
 static bool volume_read_values(float* dst, ApplicationState* state, const Volume& vol) {
     if (!vol.tex_id) return false;
-    gpu_volume_jobs_drain(state);
+#if MD_ENABLE_GPU
+    // its own readback only: draining every one would wait for whatever else the stream holds
+    if (gpu_volume_job_in_flight_for(state, vol.tex_id)) gpu_volume_jobs_drain(state);
+#else
+    (void)state;
+#endif
     if (glMemoryBarrier) {
         glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT);
     }
@@ -3923,12 +5033,13 @@ static bool volume_read_values(float* dst, ApplicationState* state, const Volume
 // frame - and on nothing else the representation chooses, so they are kept while the surfaces
 // change: a new isovalue, orbital, density or resolution evaluates only what its band adds, and on
 // the GPU, which evaluates the whole field once, nothing at all.
-static void electronic_structure_field_update(ApplicationState* state, Representation* rep) {
+// False while the density it reads is still being evaluated (to be called again)
+static bool electronic_structure_field_update(ApplicationState* state, Representation* rep) {
     ElectronicStructureRepresentation& es = rep->electronic_structure;
     const md_system_t& sys = state->mold.sys;
     if (!surface_field_available(es.field_kind, sys)) {
         surface_field_free(&es.field_vol);
-        return;
+        return true;
     }
 
     IsoDesc iso;
@@ -3940,18 +5051,22 @@ static void electronic_structure_field_update(ApplicationState* state, Represent
     source_hash = md_hash64(&state->animation.frame, sizeof(state->animation.frame), source_hash);
     uint64_t band_hash = md_hash64(iso.values, sizeof(float) * iso.count, (uint64_t)iso.count + 1);
     band_hash = md_hash64_combine(band_hash, es.vol_hash);
-    if (es.field_vol.tex_id && source_hash == es.field_vol.source_hash && band_hash == es.field_vol.band_hash) {
-        return;
+    if (source_hash == es.field_vol.source_hash && band_hash == es.field_vol.band_hash) {
+        return true;    // what is under way is taken by electronic_structure_field_poll
     }
 
     const size_t num_voxels = md_grid_num_points(&es.grid);
-    if (num_voxels == 0) return;
+    if (num_voxels == 0) return true;
+#if MD_ENABLE_GPU
+    // The density still being evaluated on the GPU: read once it is there, a later frame, rather than waited for
+    if (es.density_vol.tex_id && gpu_volume_job_in_flight_for(state, es.density_vol.tex_id)) return false;
+#endif
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     float* density = (float*)md_temp_alloc(temp, sizeof(float) * num_voxels);
     if (!density || !volume_read_values(density, state, es.density_vol)) {
-        return;
+        return true;
     }
 
     SurfaceFieldDesc desc = {};
@@ -3964,25 +5079,35 @@ static void electronic_structure_field_update(ApplicationState* state, Represent
     desc.num_iso     = iso.count;
     desc.source_hash = source_hash;
     desc.band_hash   = band_hash;
-    if (es.field_kind == SurfaceFieldKind::ElectrostaticPotential) {
+    if (surface_field_uses_basis(es.field_kind)) {
         // The QM nuclei and basis where the density was drawn: the current frame, as for the density
         desc.basis_atom_xyz = basis_atom_positions_extract(&desc.num_basis_atoms, temp, sys, state->mold.state);
     }
 #if MD_ENABLE_GPU
-    if (state->gpu_stream && state->gpu_volume) {
-        desc.gpu_stream  = state->gpu_stream;
-        desc.gpu_scratch = state->gpu_volume;
-        desc.gpu_scratch_dim[0] = desc.gpu_scratch_dim[1] = desc.gpu_scratch_dim[2] = GPU_VOLUME_DIM;
-    }
+    desc.gpu_stream = state->gpu_stream;
 #endif
 
     const md_tick_t t0 = md_tick_now();
     if (surface_field_update(&es.field_vol, desc)) {
         color_scale_update_range(&es.field_map, surface_field_span(es.field_vol));
         const SurfaceFieldVolume& fv = es.field_vol;
-        MD_LOG_DEBUG("Surface field: %zu of %zu voxels (%dx%dx%d) evaluated%s, %.1f ms; on %zu surface samples min %g, 1%% %g, 99%% %g, max %g",
+        MD_LOG_DEBUG("Surface field: %zu of %zu voxels (%dx%dx%d) evaluated%s%s, the update %.1f ms", fv.num_evaluated, fv.num_voxels,
+                     fv.grid.dim[0], fv.grid.dim[1], fv.grid.dim[2], fv.on_gpu ? " on the GPU" : "", surface_field_busy(fv) ? ", more under way" : "",
+                     md_tick_to_milliseconds(md_tick_now() - t0));
+    }
+    return true;
+}
+
+void electronic_structure_field_poll(Representation* rep) {
+    MD_ASSERT(rep);
+    ElectronicStructureRepresentation& es = rep->electronic_structure;
+    if (!surface_field_busy(es.field_vol)) return;
+    if (surface_field_poll(&es.field_vol)) {
+        color_scale_update_range(&es.field_map, surface_field_span(es.field_vol));
+        const SurfaceFieldVolume& fv = es.field_vol;
+        MD_LOG_DEBUG("Surface field: %zu of %zu voxels (%dx%dx%d) evaluated%s; on %zu surface samples min %g, 1%% %g, 99%% %g, max %g",
                      fv.num_evaluated, fv.num_voxels, fv.grid.dim[0], fv.grid.dim[1], fv.grid.dim[2], fv.on_gpu ? " on the GPU" : "",
-                     md_tick_to_milliseconds(md_tick_now() - t0), fv.num_surface_samples, fv.surface_min, fv.surface_lo, fv.surface_hi, fv.surface_max);
+                     fv.num_surface_samples, fv.surface_min, fv.surface_lo, fv.surface_hi, fv.surface_max);
     }
 }
 
@@ -3995,10 +5120,10 @@ static void electronic_structure_field_update(ApplicationState* state, Represent
 // precedes, and computing it here is what makes the box follow the geometry instead of pinning it
 // to whatever the coordinates were when the file was opened.
 bool electronic_structure_grid_init(md_grid_t* grid, const md_system_t& sys, const md_system_state_t& state, double samples_per_unit_length) {
-    ASSERT(grid);
+    MD_ASSERT(grid);
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     md_gto_basis_t basis = {};
     if (!md_gto_basis_extract_attributes(&basis, &sys.attributes, md_temp_allocator(temp))) {
@@ -4053,29 +5178,36 @@ static bool gpu_evaluation_ready(const ApplicationState* state) {
 }
 #endif
 
-bool orbital_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, str_t coefficient_path,
+bool orbital_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, md_str_t coefficient_path,
                       const md_attribute_slice_t* slice, md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff) {
-    ASSERT(state);
+    MD_ASSERT(state);
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+
+    size_t num_ao = 0;
+    const double* ao_coeffs = orbital_coefficients_extract(&num_ao, temp, state->mold.sys, coefficient_path, slice);
+    if (!ao_coeffs) {
+        return false;
+    }
+    return orbital_coefficients_evaluate(state, vol_tex, grid, ao_coeffs, num_ao, mode, op, cutoff);
+}
+
+bool orbital_coefficients_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, const double* ao_coeffs, size_t num_ao,
+                                   md_gto_eval_mode_t mode, md_gto_op_t op, double cutoff) {
+    MD_ASSERT(state);
+    if (!ao_coeffs || num_ao == 0) return false;
 
 #if MD_ENABLE_GPU
     if (gpu_evaluation_ready(state)) {
         const md_system_t&       sys       = state->mold.sys;
         const md_system_state_t& sys_state = state->mold.state;
 
-        md_temp_scope_t temp = md_temp_begin();
-        defer { md_temp_end(temp); };
-
-        size_t  num_ao    = 0;
-        const double* ao_coeffs = orbital_coefficients_extract(&num_ao, temp, sys, coefficient_path, slice);
-        if (!ao_coeffs) {
-            return false;
-        }
-
         const size_t num_cgtos = md_gto_gpu_basis_num_cgtos(state->mold.gpu_basis);
         if (num_cgtos != num_ao) {
-            MD_LOG_ERROR("The uploaded basis spans %zu atomic orbitals and '" STR_FMT "' %zu", num_cgtos, STR_ARG(coefficient_path), num_ao);
+            MD_LOG_ERROR("The uploaded basis spans %zu atomic orbitals and the orbital %zu", num_cgtos, num_ao);
             return false;
         }
+        gpu_density_jobs_settle(state);     // the inputs are changed below
         if (!gpu_atoms_ensure_uploaded(state, sys, sys_state)) {
             return false;
         }
@@ -4092,7 +5224,7 @@ bool orbital_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t
             .basis        = state->mold.gpu_basis,
             .atom_xyz     = state->mold.gpu_atoms,
             .coeff        = state->gpu_coeff,
-            .out_tex      = state->gpu_volume,
+            .out_tex      = gpu_eval_target(state),
             .grid         = &grid,
             .sample_offset = {0.5f, 0.5f, 0.5f},
             .num_orbitals = 1,
@@ -4107,19 +5239,20 @@ bool orbital_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t
     // The call site's choice of geometry, made explicit: this wrapper draws at the system's CURRENT
     // state. A caller wanting another one gathers its own positions and calls the _gl form.
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     size_t num_atom_pos = 0;
     const vec3_t* atom_pos = basis_atom_positions_extract(&num_atom_pos, temp, state->mold.sys, state->mold.state);
-    return orbital_evaluate_gl(vol_tex, grid, state->mold.sys, atom_pos, num_atom_pos, coefficient_path, slice, mode, op, cutoff);
+    return orbital_coefficients_evaluate_gl(vol_tex, grid, state->mold.sys, atom_pos, num_atom_pos, ao_coeffs, num_ao, mode, op, cutoff);
 }
 
 #if MD_ENABLE_GPU
-static void density_gpu_launch(ApplicationState* state, const md_grid_t& grid, md_gto_op_t op);
+static void density_gpu_launch(ApplicationState* state, const md_grid_t& grid, md_gto_op_t op, md_gto_gpu_dmat_t dmat = nullptr, md_gto_gpu_job_t** out_job = nullptr,
+                               md_gpu_addr_t coeff = 0);
 
 bool density_matrix_evaluate_to_gpu_volume(ApplicationState* state, const md_grid_t& grid,
                                            const double* density_matrix, size_t dim, md_gto_op_t op) {
-    ASSERT(state);
+    MD_ASSERT(state);
     if (!density_matrix || dim == 0 || !gpu_evaluation_ready(state)) {
         return false;
     }
@@ -4132,6 +5265,7 @@ bool density_matrix_evaluate_to_gpu_volume(ApplicationState* state, const md_gri
         MD_LOG_ERROR("The uploaded basis spans %zu atomic orbitals and the density matrix %zu", num_cgtos, dim);
         return false;
     }
+    gpu_density_jobs_settle(state);     // the inputs are changed below
     if (!gpu_atoms_ensure_uploaded(state, sys, sys_state)) {
         return false;
     }
@@ -4147,38 +5281,370 @@ bool density_matrix_evaluate_to_gpu_volume(ApplicationState* state, const md_gri
     return true;
 }
 
-// The density kernel over whatever was last uploaded to the coefficient buffer
-static void density_gpu_launch(ApplicationState* state, const md_grid_t& grid, md_gto_op_t op) {
+// The density kernel over whatever was last uploaded to the coefficient buffer, or over a dmat, or over coeff (a
+// packed triangle of its own). out_job: as a job (md_gto_gpu_density_job_begin), which the caller completes, instead
+// of a launch that waits for its counts
+static void density_gpu_launch(ApplicationState* state, const md_grid_t& grid, md_gto_op_t op, md_gto_gpu_dmat_t dmat, md_gto_gpu_job_t** out_job,
+                               md_gpu_addr_t coeff) {
     md_gto_gpu_density_desc_t desc = {
         .basis         = state->mold.gpu_basis,
         .atom_xyz      = state->mold.gpu_atoms,
-        .coeff         = state->gpu_coeff,
-        .out_tex       = state->gpu_volume,
+        .coeff         = dmat ? 0 : (coeff ? coeff : state->gpu_coeff),
+        .dmat          = dmat,
+        .out_tex       = gpu_eval_target(state),
         .grid          = &grid,
         .sample_offset = {0.5f, 0.5f, 0.5f},
         .op            = op,
     };
-    md_gto_gpu_density_launch(state->gpu_stream, &desc);
+    if (out_job) {
+        *out_job = md_gto_gpu_density_job_begin(state->gpu_stream, &desc);
+    } else {
+        md_gto_gpu_density_launch(state->gpu_stream, &desc);
+    }
 }
 
-bool density_evaluate_to_gpu_volume(ApplicationState* state, const md_grid_t& grid, str_t density_path,
+// How far the atoms may move before the dmat's pattern is made again (bohr): the pattern keeps the AO pairs
+// up to this much further apart, about 13% more tiles for a protein, and holds while no atom has moved
+// more than half of it.
+static constexpr double GPU_DMAT_MARGIN = 1.0;
+
+static bool density_is_scf(md_str_t density_path) {
+    return md_str_eq(density_path, es_path::alpha_density) || md_str_eq(density_path, es_path::beta_density) ||
+           md_str_eq(density_path, es_path::total_density) || md_str_eq(density_path, es_path::difference_density);
+}
+
+// What a dmat holds: the density, and the versions of the orbitals and occupations it is made of
+static uint64_t density_dmat_key(const md_system_t& sys, md_str_t density_path) {
+    uint64_t key = md_hash64(density_path.ptr, density_path.len, 0x5cf0d3a7);
+    const md_str_t sources[4] = {es_path::alpha_coefficient, es_path::alpha_occupation, es_path::beta_coefficient, es_path::beta_occupation};
+    for (const md_str_t& p : sources) {
+        const md_attribute_t* a = md_attributes_find(&sys.attributes, p);
+        const uint64_t v = a ? md_attributes_version(&sys.attributes, a->id) : 0;
+        key = md_hash64(&v, sizeof(v), key);
+    }
+    return key ? key : 1;
+}
+
+// The density at density_path into dm, from its orbitals (md_qm_density_orbitals), on stream s
+static bool density_dmat_fill(md_gpu_stream_t s, md_gto_gpu_dmat_t dm, const md_system_t& sys, md_str_t density_path, size_t num_cgtos) {
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+    double* rows = nullptr;
+    double* weights = nullptr;
+    size_t num_ao = 0;
+    const size_t count = md_qm_density_orbitals(&rows, &weights, &num_ao, &sys, density_path, md_temp_allocator(temp));
+    if (count == 0 || num_ao != num_cgtos) {
+        return false;
+    }
+    return md_gto_gpu_dmat_build(s, dm, rows, weights, count);
+}
+
+// A dmat whose pattern is made where the atoms are (xyz, bohr), on stream s
+static md_gto_gpu_dmat_t density_dmat_pattern(md_gpu_stream_t s, const md_system_t& sys, const vec3_t* xyz) {
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+    md_gto_basis_t basis = {};
+    if (!md_gto_basis_extract_attributes(&basis, &sys.attributes, md_temp_allocator(temp))) {
+        return nullptr;
+    }
+    // The cutoff of gpu_basis (system_gpu_data_update), whose radii the pattern is made with
+    const md_gto_gpu_dmat_desc_t desc = {
+        .basis = &basis, .atom_xyz = (const float*)xyz, .atom_xyz_stride = sizeof(vec3_t),
+        .cutoff = DEFAULT_GTO_CUTOFF_VALUE, .margin = GPU_DMAT_MARGIN,
+    };
+    return md_gto_gpu_dmat_create(s, &desc);
+}
+
+// A dmat made on a worker thread, on a GPU stream of its own: the pattern, the orbitals and the build are for a
+// protein's total density a third of a second of the CPU, more than a second the first time the orbitals are
+// read, which the representations' frames do not wait for (density_dmat_prepare). Made anew rather than
+// refilled, because the one in use may be read by an evaluation still on the GPU.
+struct DmatBuild {
+    task_system::Job task;              // a cancelled one (a load) made nothing to be taken
+    uint64_t key = 0;
+    md_str_t path = {};                    // an es_path constant
+    const md_system_t* sys = nullptr;
+    vec3_t* xyz = nullptr;              // bohr, its copy
+    size_t num_cgtos = 0;
+    md_gpu_stream_t stream = nullptr;   // the task's, destroyed by it once its work is done (its staging given back)
+    md_gto_gpu_dmat_t dmat = nullptr;
+    md_tick_t t0 = 0;
+};
+
+static void dmat_build_destroy(DmatBuild* b, md_gpu_stream_t gl_stream) {
+    // only once its task has ended (dmat_build_take)
+    if (b->dmat) md_gto_gpu_dmat_destroy(gl_stream, b->dmat);
+    if (b->stream) md_gpu_stream_destroy(b->stream);    // of a task cancelled before it ran: nothing on it
+    free(b->xyz);
+    delete b;
+}
+
+// The build under way, taken once it is done: its dmat becomes the one in use. wait: waited for if it is not
+// done. Returns false while it is under way.
+static bool dmat_build_take(ApplicationState* state, bool wait) {
+    DmatBuild* b = (DmatBuild*)state->mold.gpu_dmat_build;
+    if (!b) return true;
+    if (wait) b->task.wait();
+    if (b->task.running()) return false;
+    state->mold.gpu_dmat_build = nullptr;
+    const bool made = b->task.status() == task_system::Status::Completed;
+    if (made && b->dmat) {
+        gpu_density_jobs_settle(state);     // one not yet issued reads the dmat in use
+        // its build is done on the GPU: the task waited for it before it ended (destroying its stream)
+        if (state->mold.gpu_dmat) md_gto_gpu_dmat_destroy(state->gpu_stream, state->mold.gpu_dmat);
+        state->mold.gpu_dmat = b->dmat;
+        state->mold.gpu_dmat_key = b->key;
+        b->dmat = nullptr;
+        MD_LOG_DEBUG("The density matrix of '" MD_STR_FMT "' made in %.1f ms (on a worker thread)", MD_STR_ARG(b->path), md_tick_to_milliseconds(md_tick_now() - b->t0));
+    } else if (made) {
+        state->mold.gpu_dmat_failed_key = b->key;     // made where it is asked for (density_dmat_ensure), which may fail as loudly
+    }
+    dmat_build_destroy(b, state->gpu_stream);
+    return true;
+}
+
+// Any other density a representation evaluates, as the packed float triangle the kernel reads: a transition density
+// is made by its provider on every read (seconds for a protein: md_attributes.h, VIRTUAL ATTRIBUTES), a density
+// property read from its file, either on the GL thread a stall of the frame as long. Extracted on a worker thread
+// straight into a device buffer of its own (the upload's staging), on a GPU stream of its own, and kept for the
+// evaluations that follow (state->mold.gpu_dpack): a new resolution or frame of the same density reads it again
+// from the device.
+struct DensityPackBuild {
+    task_system::Job task;              // a cancelled one (a load) made nothing to be taken
+    uint64_t key = 0;
+    md_str_t path = {};                    // an es_path constant, or a path owned by the system's attribute table
+    md_attribute_slice_t slice = {};
+    const md_system_t* sys = nullptr;
+    size_t num_cgtos = 0;
+    md_gpu_stream_t stream = nullptr;   // the task's, destroyed by it once its uploads are done
+    md_gpu_addr_t buf = 0;
+    bool ok = false;
+    md_tick_t t0 = 0;
+};
+
+// What a packed density holds: the attribute, the slice of it and its version
+static uint64_t density_pack_key(const md_system_t& sys, const md_attribute_t& attr, const md_attribute_slice_t& slice) {
+    uint64_t key = md_hash64(attr.path.ptr, attr.path.len, 0x3a9d07c1);
+    key = md_hash64(&slice.num_idx, sizeof(slice.num_idx), key);
+    if (slice.num_idx > 0) key = md_hash64(slice.idx, sizeof(uint32_t) * slice.num_idx, key);
+    const uint64_t v = md_attributes_version(&sys.attributes, attr.id);
+    key = md_hash64(&v, sizeof(v), key);
+    return key ? key : 1;
+}
+
+// The build under way, taken once it is done: its buffer becomes the one in use. wait: waited for if it is not
+// done. Returns false while it is under way.
+static bool dpack_build_take(ApplicationState* state, bool wait) {
+    DensityPackBuild* b = (DensityPackBuild*)state->mold.gpu_dpack_build;
+    if (!b) return true;
+    if (wait) b->task.wait();
+    if (b->task.running()) return false;
+    state->mold.gpu_dpack_build = nullptr;
+    const bool made = b->task.status() == task_system::Status::Completed;
+    if (made && b->ok) {
+        gpu_density_jobs_settle(state);     // one not yet all issued reads the buffer in use
+        if (state->mold.gpu_dpack) md_gpu_free(state->gpu_stream, state->mold.gpu_dpack);
+        state->mold.gpu_dpack = b->buf;
+        state->mold.gpu_dpack_key = b->key;
+        b->buf = 0;
+        MD_LOG_DEBUG("The density '" MD_STR_FMT "' extracted to the device in %.1f ms (on a worker thread)", MD_STR_ARG(b->path), md_tick_to_milliseconds(md_tick_now() - b->t0));
+    } else if (made) {
+        state->mold.gpu_dpack_failed_key = b->key;   // extracted where it is asked for, which fails as loudly
+    }
+    if (b->buf) md_gpu_free(state->gpu_stream, b->buf);
+    if (b->stream) md_gpu_stream_destroy(b->stream);    // of a task cancelled before it ran: nothing on it
+    delete b;
+    return true;
+}
+
+bool density_dmat_preparing(const ApplicationState* state, double* seconds) {
+    const DmatBuild* b = state ? (const DmatBuild*)state->mold.gpu_dmat_build : nullptr;
+    const DensityPackBuild* p = state ? (const DensityPackBuild*)state->mold.gpu_dpack_build : nullptr;
+    const md_tick_t now = md_tick_now();
+    double t = 0.0;
+    if (b) t = MD_MAX(t, md_tick_to_seconds(now - b->t0));
+    if (p) t = MD_MAX(t, md_tick_to_seconds(now - p->t0));
+    if (seconds) *seconds = t;
+    return b != nullptr || p != nullptr;
+}
+
+// For the representations' evaluations, which wait for it without waiting on it: true when the dmat holds the
+// SCF density at density_path for the atoms where they are (the evaluation can be issued), or when the density
+// does not go through one; false while it is being made on a worker thread, which this begins when it is not.
+static bool density_dmat_prepare(ApplicationState* state, md_str_t density_path) {
+    if (!density_is_scf(density_path) || !gpu_evaluation_ready(state) || !state->gpu_device) {
+        return true;
+    }
+    if (!dmat_build_take(state, false)) return false;
+    const md_system_t& sys = state->mold.sys;
+    const uint64_t key = density_dmat_key(sys, density_path);
+    if (key == state->mold.gpu_dmat_failed_key) return true;
+
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+    size_t num_atoms = 0;
+    const vec3_t* xyz = basis_atom_positions_extract(&num_atoms, temp, sys, state->mold.state);
+    if (!xyz || num_atoms != md_gto_gpu_basis_num_atoms(state->mold.gpu_basis)) {
+        return true;    // the evaluation fails as it would have
+    }
+    if (state->mold.gpu_dmat && state->mold.gpu_dmat_key == key && md_gto_gpu_dmat_pattern_valid(state->mold.gpu_dmat, (const float*)xyz, sizeof(vec3_t))) {
+        return true;
+    }
+
+    DmatBuild* b = new DmatBuild();
+    b->key = key;
+    b->path = density_path;
+    b->sys = &state->mold.sys;
+    b->num_cgtos = md_gto_gpu_basis_num_cgtos(state->mold.gpu_basis);
+    b->t0 = md_tick_now();
+    b->xyz = (vec3_t*)malloc(sizeof(vec3_t) * num_atoms);
+    b->stream = b->xyz ? md_gpu_stream_create(state->gpu_device, MD_GPU_STREAM_COMPUTE, "density matrix") : nullptr;
+    if (!b->stream) {
+        free(b->xyz);
+        delete b;
+        return true;    // made where it is asked for
+    }
+    md_memcpy(b->xyz, xyz, sizeof(vec3_t) * num_atoms);
+    b->task.start({}, [b]() {
+        b->dmat = density_dmat_pattern(b->stream, *b->sys, b->xyz);
+        if (b->dmat && !density_dmat_fill(b->stream, b->dmat, *b->sys, b->path, b->num_cgtos)) {
+            md_gto_gpu_dmat_destroy(b->stream, b->dmat);
+            b->dmat = nullptr;
+        }
+        md_gpu_stream_destroy(b->stream);   // once its work is done: the dmat is then ready for any stream
+        b->stream = nullptr;
+        md_temp_trim();     // the orbitals were read into this worker's temp arenas
+    });
+    state->mold.gpu_dmat_build = b;
+    return false;
+}
+
+// For the representations' evaluations, as density_dmat_prepare and for any density: true when the density at
+// density_path (sliced) can be issued now - an SCF density's dmat made, any other's packed triangle on the device
+// (state->mold.gpu_dpack) - or when it is not to be had this way (evaluated as it would have been); false while it
+// is being made on a worker thread, which this begins when it is not.
+static bool density_pack_prepare(ApplicationState* state, md_str_t density_path, const md_attribute_slice_t* slice_ptr) {
+    const md_attribute_slice_t s = slice_ptr ? *slice_ptr : md_attribute_slice_all();
+    if (s.num_idx == 0 && density_is_scf(density_path)) {
+        if (!density_dmat_prepare(state, density_path)) return false;
+        // through the dmat, unless it could not be made of the orbitals (not published): through the packed triangle
+        if (state->mold.gpu_dmat_failed_key != density_dmat_key(state->mold.sys, density_path)) return true;
+    }
+    if (!gpu_evaluation_ready(state) || !state->gpu_device) {
+        return true;
+    }
+    if (!dpack_build_take(state, false)) return false;
+    const md_system_t& sys = state->mold.sys;
+    const md_attribute_t* attr = md_attributes_find(&sys.attributes, density_path);
+    if (!attr) return true;
+    const uint64_t key = density_pack_key(sys, *attr, s);
+    if ((state->mold.gpu_dpack && key == state->mold.gpu_dpack_key) || key == state->mold.gpu_dpack_failed_key) return true;
+    const size_t num_cgtos = md_gto_gpu_basis_num_cgtos(state->mold.gpu_basis);
+    if (md_qm_extract_packed_symmetric_f32(nullptr, 0, attr, s, nullptr) != num_cgtos) {
+        return true;    // the evaluation fails as it would have, and says why
+    }
+
+    DensityPackBuild* b = new DensityPackBuild();
+    b->key = key;
+    b->path = attr->path;
+    b->slice = s;
+    b->sys = &state->mold.sys;
+    b->num_cgtos = num_cgtos;
+    b->t0 = md_tick_now();
+    b->stream = md_gpu_stream_create(state->gpu_device, MD_GPU_STREAM_COMPUTE, "packed density");
+    if (!b->stream) {
+        delete b;
+        return true;    // extracted where it is asked for
+    }
+    b->task.start({}, [b]() {
+        const md_attribute_t* a = md_attributes_find(&b->sys->attributes, b->path);
+        const size_t len = b->num_cgtos * (b->num_cgtos + 1) / 2;
+        if (a) {
+            b->buf = md_gpu_malloc(b->stream, MD_GPU_MEM_DEVICE, sizeof(float) * len).gpu;
+            float* dst = b->buf ? (float*)md_gpu_upload_begin(b->stream, b->buf, sizeof(float) * len) : nullptr;
+            if (dst) {
+                DensityIo io;
+                const bool extracted = md_qm_extract_packed_symmetric_f32(dst, len, a, b->slice, io.io) == b->num_cgtos;
+                b->ok = md_gpu_upload_end(b->stream) && extracted;
+            }
+        }
+        md_gpu_stream_destroy(b->stream);   // once its uploads are done: the buffer is then ready for any stream
+        b->stream = nullptr;
+        md_temp_trim();     // what the provider made in this worker's temp arenas
+    });
+    state->mold.gpu_dpack_build = b;
+    return false;
+}
+
+// The SCF density at density_path (orbital/{alpha,beta,total,difference}/density) in state->mold.gpu_dmat,
+// built on the device from its orbitals (md_qm_density_orbitals): on this thread unless a worker has made it
+// (density_dmat_prepare), and one under way is waited for. False for any other density, or one whose orbitals
+// are not published or that is zero: those go through the packed matrix.
+static bool density_dmat_ensure(ApplicationState* state, md_str_t density_path) {
+    if (!density_is_scf(density_path) || !state->gpu_stream || !state->mold.gpu_basis) {
+        return false;
+    }
+    dmat_build_take(state, true);
+    const md_system_t& sys = state->mold.sys;
+    const uint64_t key = density_dmat_key(sys, density_path);
+
+    md_temp_scope_t temp = md_temp_begin();
+    MD_DEFER { md_temp_end(temp); };
+    size_t num_atoms = 0;
+    const vec3_t* xyz = basis_atom_positions_extract(&num_atoms, temp, sys, state->mold.state);
+    if (!xyz || num_atoms != md_gto_gpu_basis_num_atoms(state->mold.gpu_basis)) {
+        return false;
+    }
+    // A pattern made where the atoms were: kept while they stay within the margin, else made again
+    if (state->mold.gpu_dmat && !md_gto_gpu_dmat_pattern_valid(state->mold.gpu_dmat, (const float*)xyz, sizeof(vec3_t))) {
+        md_gto_gpu_dmat_destroy(state->gpu_stream, state->mold.gpu_dmat);
+        state->mold.gpu_dmat = nullptr;
+    }
+    if (!state->mold.gpu_dmat) {
+        state->mold.gpu_dmat = density_dmat_pattern(state->gpu_stream, sys, xyz);
+        state->mold.gpu_dmat_key = 0;
+        if (!state->mold.gpu_dmat) {
+            return false;
+        }
+    }
+    if (key != state->mold.gpu_dmat_key) {
+        if (!density_dmat_fill(state->gpu_stream, state->mold.gpu_dmat, sys, density_path, md_gto_gpu_basis_num_cgtos(state->mold.gpu_basis))) {
+            return false;
+        }
+        state->mold.gpu_dmat_key = key;
+    }
+    return true;
+}
+
+static bool density_to_gpu_volume(ApplicationState* state, const md_grid_t& grid, md_str_t density_path,
+                                  const md_attribute_slice_t* slice, md_gto_op_t op, md_gto_gpu_job_t** out_job);
+
+bool density_evaluate_to_gpu_volume(ApplicationState* state, const md_grid_t& grid, md_str_t density_path,
                                     const md_attribute_slice_t* slice, md_gto_op_t op) {
-    ASSERT(state);
+    return density_to_gpu_volume(state, grid, density_path, slice, op, nullptr);
+}
+
+// out_job: the evaluation as a job (density_gpu_launch), when it is one; nullptr: launched
+static bool density_to_gpu_volume(ApplicationState* state, const md_grid_t& grid, md_str_t density_path,
+                                  const md_attribute_slice_t* slice, md_gto_op_t op, md_gto_gpu_job_t** out_job) {
+    MD_ASSERT(state);
+    if (out_job) *out_job = nullptr;
     if (!gpu_evaluation_ready(state)) {
         return false;
     }
+    gpu_density_jobs_settle(state);     // the inputs are changed below
 
     const md_system_t&       sys       = state->mold.sys;
     const md_system_state_t& sys_state = state->mold.state;
     const md_attribute_slice_t s = slice ? *slice : md_attribute_slice_all();
     const md_attribute_t* attr = md_attributes_find(&sys.attributes, density_path);
     if (!attr) {
-        MD_LOG_DEBUG("No density published at '" STR_FMT "'", STR_ARG(density_path));
+        MD_LOG_DEBUG("No density published at '" MD_STR_FMT "'", MD_STR_ARG(density_path));
         return false;
     }
 
     const size_t num_cgtos = md_gto_gpu_basis_num_cgtos(state->mold.gpu_basis);
-    const size_t dim = md_qm_extract_packed_symmetric_f32(nullptr, 0, attr, s);
+    const size_t dim = md_qm_extract_packed_symmetric_f32(nullptr, 0, attr, s, nullptr);
     if (dim == 0) {
         return false;
     }
@@ -4190,29 +5656,53 @@ bool density_evaluate_to_gpu_volume(ApplicationState* state, const md_grid_t& gr
         return false;
     }
 
+    // An SCF density through the dmat, built on the device from its orbitals: no matrix on the host, and
+    // only the AO pairs the evaluation reads
+    if (s.num_idx == 0 && density_dmat_ensure(state, density_path)) {
+        density_gpu_launch(state, grid, op, state->mold.gpu_dmat, out_job);
+        return true;
+    }
+
+    // Extracted on a worker thread for a representation (density_pack_prepare): on the device already
+    dpack_build_take(state, false);
+    if (state->mold.gpu_dpack && state->mold.gpu_dpack_key == density_pack_key(sys, *attr, s)) {
+        density_gpu_launch(state, grid, op, nullptr, out_job, state->mold.gpu_dpack);
+        return true;
+    }
+
     // Straight into the upload buffer: the packed float triangle is exactly what the kernel reads, so
     // a packed attribute - a density property read from its file - never exists in any other form
     float* dst = (float*)md_gpu_upload_begin(state->gpu_stream, state->gpu_coeff, md_gto_gpu_coeff_size_density(num_cgtos));
     if (!dst) {
         return false;
     }
-    const bool extracted = md_qm_extract_packed_symmetric_f32(dst, dim * (dim + 1) / 2, attr, s) == dim;
+    DensityIo io;
+    const bool extracted = md_qm_extract_packed_symmetric_f32(dst, dim * (dim + 1) / 2, attr, s, io.io) == dim;
     md_gpu_upload_end(state->gpu_stream);
     if (!extracted) {
         return false;
     }
 
-    density_gpu_launch(state, grid, op);
+    density_gpu_launch(state, grid, op, nullptr, out_job);
     return true;
 }
 #endif
 
 // The backend choice, over a density matrix the caller already holds. density_evaluate below is
-// this plus the extract, and a caller which has cached the matrix - the QM component does, because
+// this plus the extract, and a caller which has cached the matrix - the QM residue does, because
 // the transition densities are rebuilt on every read - calls this one and skips the rebuild.
+bool gpu_volume_evaluation_available(const ApplicationState* state) {
+#if MD_ENABLE_GPU
+    return state && gpu_evaluation_ready(state);
+#else
+    (void)state;
+    return false;
+#endif
+}
+
 bool density_matrix_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid,
                              const double* density_matrix, size_t dim, md_gto_op_t op) {
-    ASSERT(state);
+    MD_ASSERT(state);
     if (!density_matrix || dim == 0) {
         return false;
     }
@@ -4227,22 +5717,23 @@ bool density_matrix_evaluate(ApplicationState* state, uint32_t vol_tex, const md
 #endif
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     size_t num_atom_pos = 0;
     const vec3_t* atom_pos = basis_atom_positions_extract(&num_atom_pos, temp, state->mold.sys, state->mold.state);
     return density_matrix_evaluate_gl(vol_tex, grid, state->mold.sys, atom_pos, num_atom_pos, density_matrix, dim, op);
 }
 
-bool density_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, str_t density_path,
-                      const md_attribute_slice_t* slice, md_gto_op_t op) {
-    ASSERT(state);
+bool density_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t& grid, md_str_t density_path,
+                      const md_attribute_slice_t* slice, md_gto_op_t op, bool async) {
+    MD_ASSERT(state);
 
 #if MD_ENABLE_GPU
     // Evaluate, then read back. The split exists because a consumer that runs another kernel over
     // the result - the critical point extraction does - wants the first half and not the second.
-    if (density_evaluate_to_gpu_volume(state, grid, density_path, slice, op)) {
-        return gpu_volume_readback(state, vol_tex, grid);
+    md_gto_gpu_job_t* job = nullptr;
+    if (density_to_gpu_volume(state, grid, density_path, slice, op, async ? &job : nullptr)) {
+        return job ? gpu_volume_readback_after(state, vol_tex, grid, job) : gpu_volume_readback(state, vol_tex, grid);
     }
     if (gpu_evaluation_ready(state)) {
         return false;   // the GPU path was available and failed; the GL one would fail the same way
@@ -4251,55 +5742,282 @@ bool density_evaluate(ApplicationState* state, uint32_t vol_tex, const md_grid_t
 
     // As above: the current state, chosen here rather than assumed further down.
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     size_t num_atom_pos = 0;
     const vec3_t* atom_pos = basis_atom_positions_extract(&num_atom_pos, temp, state->mold.sys, state->mold.state);
     return density_evaluate_gl(vol_tex, grid, state->mold.sys, atom_pos, num_atom_pos, density_path, slice, op);
 }
 
+// The transfer function of a volume rendering, set up for the field when it is first drawn (or when the kind of its
+// values changes), on a range set by hand: one to the largest values would put most of the field at the bottom of
+// the curve. A signed field (an orbital, a difference) from -3 to 3 times the isovalue, the value it is significant
+// at, through a diverging map, the curve on the magnitude from a tenth of the range; a density from 0 to 10 times it
+// (its largest values are at the nuclei) through a sequential one; ELF and LOL over [0, 1], what they span, the curve
+// from 1/2, the electron gas's value, so what shows is where the electrons are more localized.
+static void es_volume_map_update(ElectronicStructureRepresentation& es) {
+    const ElectronicStructureValueKind kind = electronic_structure_value_kind(es);
+    if (es.volume.map_init && es.volume.map_kind == (int)kind) return;
+    TransferFunction& tf = es.volume.tf;
+    const float iso = (float)fabs(es.iso_value);
+    switch (kind) {
+    case ElectronicStructureValueKind::Signed:
+        tf.symmetric = true;
+        tf.colormap = COLOR_SCALE_COLORMAP_RDBU;
+        tf.range_beg = -3.0f * iso;
+        tf.range_end =  3.0f * iso;
+        transfer_function_ramp_magnitude(&tf, 0.1f);
+        break;
+    case ElectronicStructureValueKind::Localization:
+        tf.symmetric = false;
+        tf.colormap = COLOR_SCALE_COLORMAP_VIRIDIS;
+        tf.range_beg = 0.0f;
+        tf.range_end = 1.0f;
+        transfer_function_ramp(&tf, 0.5f);
+        break;
+    case ElectronicStructureValueKind::Density:
+    default:
+        tf.symmetric = false;
+        tf.colormap = COLOR_SCALE_COLORMAP_VIRIDIS;
+        tf.range_beg = 0.0f;
+        tf.range_end = 10.0f * iso;
+        transfer_function_ramp(&tf, 0.0f);
+        break;
+    }
+    es.volume.view.fit = 1;
+    es.volume.map_init = true;
+    es.volume.map_kind = (int)kind;
+}
+
+// What the representation's source is, of the frame: what an evaluation of it, on any grid, depends on
+static uint64_t es_source_hash(const ApplicationState* state, const ElectronicStructureRepresentation& es) {
+    uint64_t h = md_hash64(&state->animation.frame, sizeof(state->animation.frame), 0);
+    h = md_hash64(&es.source,                       sizeof(es.source), h);
+    h = md_hash64(&es.use_magnitude,                sizeof(es.use_magnitude), h);
+    h = md_hash64(&es.spin,                         sizeof(es.spin), h);
+    h = md_hash64(&es.nto_component,                sizeof(es.nto_component), h);
+    h = md_hash64(&es.transition_density_component, sizeof(es.transition_density_component), h);
+    h = md_hash64(&es.orbital_idx,                  sizeof(es.orbital_idx), h);
+    h = md_hash64(&es.excited_state_idx,            sizeof(es.excited_state_idx), h);
+    h = md_hash64(&es.nto_lambda_idx,               sizeof(es.nto_lambda_idx), h);
+    h = md_hash64(&es.density_property_key,         sizeof(es.density_property_key), h);
+    return h;
+}
+
+// Whether what an evaluation of the source reads is there: 1 yes, 0 not yet (being made: ask again), -1 not on the
+// GPU (ELF and LOL on the CPU, which fills the volume itself)
+static int es_source_ready(ApplicationState* state, const ElectronicStructureRepresentation& es) {
+#if MD_ENABLE_GPU
+    // a density job under way, of any representation: an evaluation now would wait for its counts
+    if (gpu_density_job_pending(state)) return 0;
+    // a density's matrix, made on a worker thread (an SCF density's dmat, another's packed triangle)
+    md_str_t path = {};
+    md_attribute_slice_t slice = {};
+    if (es_volume_density(&path, &slice, es, state->mold.sys) && !density_pack_prepare(state, path, &slice)) return 0;
+#endif
+    if (es.source == ElectronicStructureSource::NaturalTransitionOrbital && !es_nto_ready(state, (size_t)es.excited_state_idx)) return 0;
+    if (electronic_structure_is_localization(es)) {
+#if MD_ENABLE_GPU
+        const int g = localization_gpu_prepare(state);
+        return g == 0 ? 0 : (g < 0 ? -1 : 1);
+#else
+        return -1;
+#endif
+    }
+    return 1;
+}
+
+bool es_plane_images_supported(ApplicationState* state, const ElectronicStructureRepresentation& es) {
+#if MD_ENABLE_GPU
+    if (es.display != ElectronicStructureDisplay::Planes) return false;
+    if (!gpu_evaluation_ready(state) || !state->gpu_plane) return false;
+    // ELF and LOL without their kernel: on the CPU, into the volume
+    return !electronic_structure_is_localization(es) || localization_gpu_prepare(state) >= 0;
+#else
+    (void)state; (void)es;
+    return false;
+#endif
+}
+
+// The box of the volume without the volume: its grid, at the resolution, and its unit cube in the world
+static void es_box_update(ApplicationState* state, Representation* rep) {
+    ElectronicStructureRepresentation& es = rep->electronic_structure;
+    const double samples_per_angstrom = volume_resolution_samples_per_angstrom[(int)electronic_structure_volume_resolution(es)];
+    md_grid_t grid = {};
+    if (!electronic_structure_grid_init(&grid, state->mold.sys, state->mold.state, samples_per_angstrom * BOHR_TO_ANGSTROM)) {
+        es.has_box = false;
+        return;
+    }
+    const float scl = (float)BOHR_TO_ANGSTROM;
+    es.box_to_world = compute_texture_to_world_mat(grid.orientation, grid.origin * scl, md_grid_extent(&grid) * scl);
+    es.has_box = true;
+}
+
+bool electronic_structure_plane_images_update(ApplicationState* state, Representation* rep) {
+#if MD_ENABLE_GPU
+    ElectronicStructureRepresentation& es = rep->electronic_structure;
+    es_slices_conform(&es);
+    if (!es.has_box || !es_plane_images_supported(state, es)) return true;
+    const uint64_t src = es_source_hash(state, es);
+    const float detail_spacing = plane_detail_spacing_angstrom[MD_CLAMP((int)es.plane_detail, 0, (int)PlaneDetail::Count - 1)];
+    const double now = ImGui::GetTime();
+    bool done = true;
+    int ready = -2;     // asked when first needed, and again after each evaluation issued
+    for (int i = 0; i < es.slices.count && i < ES_MAX_PLANES; ++i) {
+        ElectronicStructurePlaneImage& im = es.plane_images[i];
+        // the one being evaluated, there: drawn from now on
+        if (im.pending) {
+            if (gpu_volume_job_in_flight_for(state, im.img[1 - im.front].tex_id)) {
+                done = false;
+                continue;
+            }
+            im.front = 1 - im.front;
+            im.pending = false;
+            im.serial += 1;
+            im.ms = (float)((now - im.issued) * 1000.0);
+        }
+        im.current = false;
+        const ElectronicStructurePlane& p = es.slices.items[i];
+        if (!p.enabled) continue;
+        EsSliceFrame frame;
+        if (!es_slice_frame(&frame, p)) continue;
+        // what an image is of: the source and the rectangle (not the box: the volume's values past it are no part of
+        // an image, evaluated wherever it is)
+        uint64_t key = md_hash64(&frame, sizeof(frame), src);
+        key = key ? key : 1;
+        const int f = im.front;
+        // all of the rectangle at the detail's spacing, at most GPU_PLANE_DIM a side
+        const float ext = 2.0f * MD_MAX(frame.hu, frame.hv);
+        const float spacing = MD_MAX(detail_spacing, ext / (float)GPU_PLANE_DIM);
+        im.current = key == im.key[f];
+        // while dragged: drawn from the volume, evaluated once let go
+        if (es_planes_dragging(rep->node.id, i)) continue;
+        if (im.current && fabsf(im.spacing[f] - spacing) <= 1.0e-3f * spacing) continue;
+        if (ready == -2) ready = es_source_ready(state, es);
+        if (ready <= 0) {
+            done &= ready < 0;
+            continue;
+        }
+        md_grid_t grid = {};
+        es_slice_image_grid(&grid, frame, spacing);
+        const int b = 1 - f;
+        Volume& v = im.img[b];
+        init_volume(&v, grid, GL_R32F);
+        state->gpu_eval_target = state->gpu_plane;
+        const bool ok = es_evaluate_into(state, es, v.tex_id, grid);
+        state->gpu_eval_target = nullptr;
+        if (!ok) continue;
+        im.key[b] = key;
+        im.spacing[b] = spacing;
+        im.pending = true;
+        im.issued = now;
+        done = false;
+        ready = -2;
+    }
+    return done;
+#else
+    (void)state; (void)rep;
+    return true;
+#endif
+}
+
 // Re-evaluating is expensive and everything it depends on is right here, so it is gated on a hash of
 // exactly those inputs - the frame included, since the geometry moves the grid.
-void electronic_structure_representation_update(ApplicationState* state, Representation* rep, const uint32_t* atom_colors) {
-    ASSERT(state);
-    ASSERT(rep);
+bool electronic_structure_representation_update(ApplicationState* state, Representation* rep, const uint32_t* atom_colors) {
+    MD_ASSERT(state);
+    MD_ASSERT(rep);
     ElectronicStructureRepresentation& es = rep->electronic_structure;
 
-    uint64_t vol_hash = md_hash64(&state->animation.frame, sizeof(state->animation.frame), 0);
-    vol_hash = md_hash64(&es.source,                       sizeof(es.source), vol_hash);
-    vol_hash = md_hash64(&es.use_magnitude,                sizeof(es.use_magnitude), vol_hash);
-    vol_hash = md_hash64(&es.spin,                         sizeof(es.spin), vol_hash);
-    vol_hash = md_hash64(&es.nto_component,                sizeof(es.nto_component), vol_hash);
-    vol_hash = md_hash64(&es.transition_density_component, sizeof(es.transition_density_component), vol_hash);
-    vol_hash = md_hash64(&es.resolution,                   sizeof(es.resolution), vol_hash);
-    vol_hash = md_hash64(&es.orbital_idx,                  sizeof(es.orbital_idx), vol_hash);
-    vol_hash = md_hash64(&es.excited_state_idx,            sizeof(es.excited_state_idx), vol_hash);
-    vol_hash = md_hash64(&es.nto_lambda_idx,               sizeof(es.nto_lambda_idx), vol_hash);
-    vol_hash = md_hash64(&es.density_property_key,         sizeof(es.density_property_key), vol_hash);
+    uint64_t vol_hash = es_source_hash(state, es);
+    const VolumeResolution resolution = electronic_structure_volume_resolution(es);
+    vol_hash = md_hash64(&resolution, sizeof(resolution), vol_hash);
 
     // The mesh rendering mode draws the surfaces from the field itself (iso_meshes.h), and evaluates a surface
     // field at their vertices: the volume is only evaluated for what still reads it, the colours by atom
     const bool mesh_mode = state->settings.isosurface_rendering == IsosurfaceRendering_Mesh;
-    const bool needs_volume = !mesh_mode || es.coloring == SurfaceColoring::AtomColors;
+    // ELF and LOL are not drawn as isosurfaces (a workspace may say otherwise)
+    if (electronic_structure_is_localization(es) && es.display == ElectronicStructureDisplay::Isosurface) {
+        es.display = ElectronicStructureDisplay::Volume;
+    }
+    const bool iso_display = es.display == ElectronicStructureDisplay::Isosurface;
+    // a volume rendering and a plane draw from (or over the box of) the volume, whatever renders the isosurfaces
+    // (the planes display evaluated on the planes too: the volume is drawn where an image is not there, or not of the
+    // plane as it is, as while it is dragged)
+    const bool needs_volume = !mesh_mode || !iso_display || es.coloring == SurfaceColoring::AtomColors;
     vol_hash = md_hash64(&needs_volume, sizeof(needs_volume), vol_hash);
 
+    bool done = true;
     if (vol_hash != es.vol_hash) {
-        es.vol_hash = vol_hash;
+        bool ready = true;
+#if MD_ENABLE_GPU
+        // The volume's evaluation under way, of what is no longer wanted: dropped where it is not yet all issued
+        // (its pieces in flight complete), rather than waited for - for a large system seconds. Not while
+        // playing, where each frame would drop the one before and none would be shown. The volume then holds
+        // what it held before that one: of no hash (asked for again, it is evaluated again).
+        if (es.density_vol.tex_id && state->animation.mode != PlaybackMode::Playing && gpu_volume_job_cancel(state, es.density_vol.tex_id)) {
+            es.vol_hash = 0;
+        }
+        // What the evaluation needs, which the frame does not wait for: the volume's last evaluation off the GPU
+        // (its readback in flight: a new one now would wait for it, and the volume's texture be remade under
+        // it), and a density's matrix, made on a worker thread (an SCF density's dmat, another's packed
+        // triangle). Until then the volume shown stays, and this is asked again next frame.
         if (needs_volume) {
-            electronic_structure_evaluate(state, rep);
+            // (a density job under way of any representation, not yet all issued: an evaluation now would issue
+            // all it has left at once)
+            md_str_t path = {};
+            md_attribute_slice_t slice = {};
+            if ((es.density_vol.tex_id && gpu_volume_job_in_flight_for(state, es.density_vol.tex_id)) || gpu_density_job_pending(state)) {
+                ready = false;
+            } else if (es_volume_density(&path, &slice, es, state->mold.sys)) {
+                ready = density_pack_prepare(state, path, &slice);
+            }
+        }
+#endif
+        // a natural transition orbital whose state is being read on a worker thread
+        if (ready && needs_volume && es.source == ElectronicStructureSource::NaturalTransitionOrbital) {
+            ready = es_nto_ready(state, (size_t)es.excited_state_idx);
+        }
+        // ELF and LOL: on the GPU once what their kernel reads is made (by a pool task), else by a pool task on the
+        // CPU which puts them in the volume once they are there. Until then the volume shown stays (a failure is
+        // taken as done, not tried again every frame)
+        bool localization_cpu = false;
+        if (ready && needs_volume && electronic_structure_is_localization(es)) {
+#if MD_ENABLE_GPU
+            const int g = localization_gpu_prepare(state);
+            if (g == 0) ready = false;
+            localization_cpu = g < 0;
+#else
+            localization_cpu = true;
+#endif
+            if (localization_cpu) ready = localization_poll(state, rep, vol_hash) != 0;
+        }
+        if (ready) {
+            es.vol_hash = vol_hash;
+            if (needs_volume && !localization_cpu) {
+                electronic_structure_evaluate(state, rep);
+            } else if (!needs_volume) {
+                es_box_update(state, rep);
+            }
+        } else {
+            done = false;
         }
     }
 
-    if (es.coloring == SurfaceColoring::AtomColors) {
+    if (es.display != ElectronicStructureDisplay::Isosurface) {
+        es_volume_map_update(es);
+    }
+
+    if (iso_display && es.coloring == SurfaceColoring::AtomColors) {
         uint64_t col_hash = md_hash64(&es.gaussian_splatting_power, sizeof(es.gaussian_splatting_power), (int)rep->color_mapping);
         col_hash = md_hash64_combine(col_hash, es.vol_hash);
         if (col_hash != es.col_hash) {
             es.col_hash = col_hash;
             electronic_structure_color_volume_update(state, rep, atom_colors);
         }
-    } else if (es.coloring == SurfaceColoring::Field && !mesh_mode) {
-        electronic_structure_field_update(state, rep);
+    } else if (iso_display && es.coloring == SurfaceColoring::Field && !mesh_mode) {
+        done &= electronic_structure_field_update(state, rep);
     }
+    return done;
 }
 
 // Every leaf under the density property group is one property, in the table's own path order. The
@@ -4313,7 +6031,7 @@ size_t density_properties_gather(DensityProperty out[], size_t cap, const md_sys
     for (md_attribute_iter_t it = md_attributes_iter(&sys.attributes, es_path::density_property); md_attributes_next(&it);) {
         const md_attribute_t* attr = it.attr;
         if (out && count < cap) {
-            const str_t label = str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label;
+            const md_str_t label = md_str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label;
             out[count] = { .key = attr->id, .label = label };
         }
         count += 1;
@@ -4329,12 +6047,17 @@ ElectronicStructureSourceFlags es_source_mask(const md_system_t& sys) {
     if (es_attribute_exists(sys, es_path::nto_particle))       mask |= ElectronicStructureSourceFlag_NaturalTransitionOrbital;
     if (es_attribute_exists(sys, es_path::attachment_density)) mask |= ElectronicStructureSourceFlag_TransitionDensity;
     if (density_properties_gather(nullptr, 0, sys) > 0)        mask |= ElectronicStructureSourceFlag_DensityProperty;
+    // ELF and LOL take the occupied orbitals' gradients: the orbitals with their occupations, and a basis whose
+    // derivatives are within what is evaluated (no g functions)
+    if (es_attribute_exists(sys, es_path::alpha_coefficient) && md_qm_kinetic_available(&sys)) {
+        mask |= ElectronicStructureSourceFlag_ElectronLocalization | ElectronicStructureSourceFlag_LocalizedOrbitalLocator;
+    }
 
     return mask;
 }
 
 bool electronic_structure_select_available_source(ElectronicStructureRepresentation* es, const md_system_t& sys) {
-    ASSERT(es);
+    MD_ASSERT(es);
     const ElectronicStructureSourceFlags mask = es_source_mask(sys);
     if (mask == 0) {
         return false;
@@ -4354,8 +6077,8 @@ bool electronic_structure_select_available_source(ElectronicStructureRepresentat
     // The same rule the representation window applies when it draws: a key naming none of the
     // properties this system has is replaced by the first one.
     if (es->source == ElectronicStructureSource::DensityProperty) {
-        DensityProperty props[64];
-        const size_t num_props = MIN(density_properties_gather(props, ARRAY_SIZE(props), sys), ARRAY_SIZE(props));
+        DensityProperty props[DensityProperty::MaxCount];
+        const size_t num_props = MD_MIN(density_properties_gather(props, MD_COUNTOF(props), sys), MD_COUNTOF(props));
         bool found = false;
         for (size_t i = 0; i < num_props; ++i) {
             if (props[i].key == es->density_property_key) {
@@ -4377,12 +6100,12 @@ bool electronic_structure_select_available_source(ElectronicStructureRepresentat
 // through atom_attribute_query.
 
 int playback_stride(const ApplicationState* app) {
-    ASSERT(app);
-    return (app->animation.mode == PlaybackMode::Playing) ? MAX(1, app->animation.stride) : 1;
+    MD_ASSERT(app);
+    return (app->animation.mode == PlaybackMode::Playing) ? MD_MAX(1, app->animation.stride) : 1;
 }
 
 void interpolate_system_state(ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
 
     // Recorded before anything can return early, so that a change of stride is acted on once (see main)
     const int64_t stride = playback_stride(app);
@@ -4394,9 +6117,9 @@ void interpolate_system_state(ApplicationState* app) {
     const size_t num_frames = run_num_frames(app);
     if (num_atoms == 0 || num_frames == 0) return;
 
-    const int64_t last_frame = MAX(0LL, (int64_t)num_frames - 1);
+    const int64_t last_frame = MD_MAX(0LL, (int64_t)num_frames - 1);
     // This is not actually time, but the fractional frame representation
-    const double time = CLAMP(app->animation.frame, 0.0, double(last_frame));
+    const double time = MD_CLAMP(app->animation.frame, 0.0, double(last_frame));
 
     // The frames interpolated between, the keys: every stride:th frame counted from the first, and the last, which
     // closes a shorter final interval when the stride does not divide the trajectory. With a stride of 1 every frame
@@ -4404,9 +6127,9 @@ void interpolate_system_state(ApplicationState* app) {
     // it is played.
     const int64_t last_key = (last_frame + stride - 1) / stride;
     auto key_frame = [stride, last_key, last_frame](int64_t k) {
-        return MIN(CLAMP(k, (int64_t)0, last_key) * stride, last_frame);
+        return MD_MIN(MD_CLAMP(k, (int64_t)0, last_key) * stride, last_frame);
     };
-    const int64_t key = MIN((int64_t)(time / (double)stride), last_key);
+    const int64_t key = MD_MIN((int64_t)(time / (double)stride), last_key);
 
     // This represents the frames that we would like to load into memory for interpolation (worst case).
     const int64_t frames[4] = {
@@ -4445,7 +6168,7 @@ void interpolate_system_state(ApplicationState* app) {
 
     md_allocator_i* temp_arena = app->allocator.frame;
     md_temp_scope_t temp = md_temp_begin_in(temp_arena);
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     struct Payload {
         ApplicationState* app;
@@ -4483,7 +6206,7 @@ void interpolate_system_state(ApplicationState* app) {
     if (mode == InterpolationMode::CubicSpline) {
         // Tangent scale of the cardinal spline: (p2 - p0) * s. Tension 0 gives s = 0.5, i.e. Catmull-Rom, which plays
         // uniform motion back uniformly; tension 1 eases in and out of every frame.
-        const float s = 0.5f * (1.0f - CLAMP(app->animation.tension, 0.0f, 1.0f));
+        const float s = 0.5f * (1.0f - MD_CLAMP(app->animation.tension, 0.0f, 1.0f));
         md_util_cubic_spline_weights(payload.w, payload.t, s);
     } else if (mode == InterpolationMode::BSpline) {
         md_util_cubic_bspline_weights(payload.w, payload.t);
@@ -4535,7 +6258,7 @@ void interpolate_system_state(ApplicationState* app) {
             requested_frames[num_requested_frames++] = (int)frames[3];
             break;
         default:
-            ASSERT(false);
+            MD_ASSERT(false);
             break;
     }
 
@@ -4562,22 +6285,23 @@ void interpolate_system_state(ApplicationState* app) {
         payload.src_states[i] = &app->mold.frame_cache.states[slot_idx];
     }
 
-    // This holds the chain of tasks we are about to submit
-    task_system::ID tasks[16] = {0};
-    int num_tasks = 0;
+    // The steps in order, each spread over the pool where it is a range; the frame waits for them all (frame priority:
+    // the main thread never takes up background work while it does)
+    Payload* data = &payload;
 
-    task_system::ID load_task = task_system::create_pool_task(STR_LIT("## Load Frames"), num_frames_to_load,
-        [data = &payload, frame_cache_load_slot](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
+    task_system::parallel_for(num_frames_to_load, 1,
+        [data = &payload, frame_cache_load_slot](uint32_t range_beg, uint32_t range_end) {
+            const uint32_t thread_num = task_system::thread_index();
             for (uint32_t i = range_beg; i < range_end; ++i) {
                 int slot_idx = frame_cache_load_slot[i];
                 int frame_idx = data->app->mold.frame_cache.frame_idx[slot_idx];
                 md_system_state_t* state = &data->app->mold.frame_cache.states[slot_idx];
                 // This thread's own context, kept for as long as the trajectory, so playback opens
                 // the run's files once rather than once per frame.
-                md_system_extract_t** ex = (thread_num < ARRAY_SIZE(data->app->mold.frame_extract)) ? &data->app->mold.frame_extract[thread_num] : nullptr;
+                md_system_extract_t** ex = (thread_num < MD_COUNTOF(data->app->mold.frame_extract)) ? &data->app->mold.frame_extract[thread_num] : nullptr;
                 if (ex && !*ex) {
-                    *ex = md_system_extract_begin(&data->app->mold.sys, str_from_cstr(data->app->mold.run),
-                        frame_extract_paths, ARRAY_SIZE(frame_extract_paths), md_get_heap_allocator());
+                    *ex = md_system_extract_begin(&data->app->mold.sys, md_str_from_cstr(data->app->mold.run),
+                        frame_extract_paths, MD_COUNTOF(frame_extract_paths), md_get_heap_allocator());
                 }
                 if (ex && *ex) {
                     md_system_extract_frame(*ex, frame_idx, state);
@@ -4588,19 +6312,17 @@ void interpolate_system_state(ApplicationState* app) {
         }
     );
 
-    tasks[num_tasks++] = load_task;
 
     switch (mode) {
         case InterpolationMode::Nearest: {
-            task_system::ID interp_task = task_system::create_pool_task(STR_LIT("## Interpolate"), [data = &payload]() {
+            {
                 data->dst_state->unitcell = data->src_states[0]->unitcell;
-                MEMCPY(data->dst_state->xyz, data->src_states[0]->xyz, sizeof(vec3_t) * data->dst_state->num_atoms);
-            });
-            tasks[num_tasks++] = interp_task;
+                md_memcpy(data->dst_state->xyz, data->src_states[0]->xyz, sizeof(vec3_t) * data->dst_state->num_atoms);
+            }
             break;
         }
         case InterpolationMode::Linear: {
-            task_system::ID iterp_cell_task = task_system::create_pool_task(STR_LIT("## Interp Unitcell"), [data = &payload]() {
+            {
                 double x  = lerp(data->src_states[0]->unitcell.x,  data->src_states[1]->unitcell.x,  data->t);
                 double y  = lerp(data->src_states[0]->unitcell.y,  data->src_states[1]->unitcell.y,  data->t);
                 double z  = lerp(data->src_states[0]->unitcell.z,  data->src_states[1]->unitcell.z,  data->t);
@@ -4608,25 +6330,22 @@ void interpolate_system_state(ApplicationState* app) {
                 double xz = lerp(data->src_states[0]->unitcell.xz, data->src_states[1]->unitcell.xz, data->t);
                 double yz = lerp(data->src_states[0]->unitcell.yz, data->src_states[1]->unitcell.yz, data->t);
                 data->dst_state->unitcell = md_unitcell_from_basis_parameters(x, y, z, xy, xz, yz);
-			});
+			}
 
-            task_system::ID interp_coord_task = task_system::create_pool_task(STR_LIT("## Interp Coord Data"), (uint32_t)num_atoms, [data = &payload](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                (void)thread_num;
+            task_system::parallel_for((uint32_t)num_atoms, grain_size, [data = &payload](uint32_t range_beg, uint32_t range_end) {
                 size_t count = range_end - range_beg;
                 vec3_t* dst = data->dst_state->xyz + range_beg;
                 const vec3_t* src[2] = { data->src_states[0]->xyz + range_beg, data->src_states[1]->xyz + range_beg };
 
                 md_util_interpolate_linear(dst, src, count, &data->dst_state->unitcell, data->t);
-            }, grain_size);
+            });
 
-			tasks[num_tasks++] = iterp_cell_task;
-            tasks[num_tasks++] = interp_coord_task;
 
             break;
         }
         case InterpolationMode::CubicSpline:
         case InterpolationMode::BSpline: {
-            task_system::ID iterp_cell_task = task_system::create_pool_task(STR_LIT("## Interp Unitcell"), [data = &payload]() {
+            {
                 const md_unitcell_t* c[4] = { &data->src_states[0]->unitcell, &data->src_states[1]->unitcell, &data->src_states[2]->unitcell, &data->src_states[3]->unitcell };
                 const float* w = data->w;
                 double x  = w[0] * c[0]->x  + w[1] * c[1]->x  + w[2] * c[2]->x  + w[3] * c[3]->x;
@@ -4636,45 +6355,40 @@ void interpolate_system_state(ApplicationState* app) {
                 double xz = w[0] * c[0]->xz + w[1] * c[1]->xz + w[2] * c[2]->xz + w[3] * c[3]->xz;
                 double yz = w[0] * c[0]->yz + w[1] * c[1]->yz + w[2] * c[2]->yz + w[3] * c[3]->yz;
                 data->dst_state->unitcell = md_unitcell_from_basis_parameters(x, y, z, xy, xz, yz);
-            });
+            }
 
-            task_system::ID interp_coord_task = task_system::create_pool_task(STR_LIT("## Interp Coord Data"), (uint32_t)num_atoms, [data = &payload](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                (void)thread_num;
+            task_system::parallel_for((uint32_t)num_atoms, grain_size, [data = &payload](uint32_t range_beg, uint32_t range_end) {
                 size_t count = range_end - range_beg;
                 vec3_t* dst = data->dst_state->xyz + range_beg;
                 const vec3_t* src[4] = { data->src_states[0]->xyz + range_beg, data->src_states[1]->xyz + range_beg, data->src_states[2]->xyz + range_beg, data->src_states[3]->xyz + range_beg };
 
                 md_util_interpolate_cubic_weighted(dst, src, count, &data->dst_state->unitcell, data->w);
-            }, grain_size);
+            });
 
-            tasks[num_tasks++] = iterp_cell_task;
-            tasks[num_tasks++] = interp_coord_task;
             
             break;
         }
         default:
-            ASSERT(false);
+            MD_ASSERT(false);
             break;
     }
 
     if (payload.dst_angle) {
         switch (mode) {
             case InterpolationMode::Nearest: {
-                task_system::ID angle_task = task_system::create_pool_task(STR_LIT("## Compute Backbone Angles"), [data = &payload]() {
+                {
                     const md_backbone_angles_t* src_angles[2] = {
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[1],
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[2],
                     };
                     const md_backbone_angles_t* src_angle = data->t < 0.5f ? src_angles[0] : src_angles[1];
-                    MEMCPY(data->dst_angle, src_angle, data->app->mold.sys.protein_backbone.segment.count * sizeof(md_backbone_angles_t));
-                });
+                    md_memcpy(data->dst_angle, src_angle, data->app->mold.sys.protein_backbone.segment.count * sizeof(md_backbone_angles_t));
+                }
 
-                tasks[num_tasks++] = angle_task;
                 break;
             }
             case InterpolationMode::Linear: {
-                task_system::ID angle_task = task_system::create_pool_task(STR_LIT("## Compute Backbone Angles"), (uint32_t)sys.protein_backbone.segment.count, [data = &payload](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                    (void)thread_num;
+                task_system::parallel_for((uint32_t)sys.protein_backbone.segment.count, 1, [data = &payload](uint32_t range_beg, uint32_t range_end) {
                     const md_backbone_angles_t* src_angles[2] = {
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[1],
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[2],
@@ -4683,22 +6397,20 @@ void interpolate_system_state(ApplicationState* app) {
                         float phi[2] = {src_angles[0][i].phi, src_angles[1][i].phi};
                         float psi[2] = {src_angles[0][i].psi, src_angles[1][i].psi};
 
-                        phi[1] = deperiodize_orthof(phi[1], phi[0], (float)TWO_PI);
-                        psi[1] = deperiodize_orthof(psi[1], psi[0], (float)TWO_PI);
+                        phi[1] = deperiodize_orthof(phi[1], phi[0], (float)MD_TWO_PI);
+                        psi[1] = deperiodize_orthof(psi[1], psi[0], (float)MD_TWO_PI);
 
                         float final_phi = lerp(phi[0], phi[1], data->t);
                         float final_psi = lerp(psi[0], psi[1], data->t);
-                        data->dst_angle[i] = {deperiodize_orthof(final_phi, 0, (float)TWO_PI), deperiodize_orthof(final_psi, 0, (float)TWO_PI)};
+                        data->dst_angle[i] = {deperiodize_orthof(final_phi, 0, (float)MD_TWO_PI), deperiodize_orthof(final_psi, 0, (float)MD_TWO_PI)};
                     }
                 });
 
-                tasks[num_tasks++] = angle_task;
                 break;
             }
             case InterpolationMode::CubicSpline:
             case InterpolationMode::BSpline: {
-                task_system::ID angle_task = task_system::create_pool_task(STR_LIT("## Interpolate Backbone Angles"), (uint32_t)sys.protein_backbone.segment.count, [data = &payload](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                    (void)thread_num;
+                task_system::parallel_for((uint32_t)sys.protein_backbone.segment.count, 1, [data = &payload](uint32_t range_beg, uint32_t range_end) {
                     const md_backbone_angles_t* src_angles[4] = {
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[0],
                         data->app->trajectory_data.backbone_angles.data + data->app->trajectory_data.backbone_angles.stride * data->frames[1],
@@ -4709,33 +6421,31 @@ void interpolate_system_state(ApplicationState* app) {
                         float phi[4] = {src_angles[0][i].phi, src_angles[1][i].phi, src_angles[2][i].phi, src_angles[3][i].phi};
                         float psi[4] = {src_angles[0][i].psi, src_angles[1][i].psi, src_angles[2][i].psi, src_angles[3][i].psi};
 
-                        phi[0] = deperiodize_orthof(phi[0], phi[1], (float)TWO_PI);
-                        phi[2] = deperiodize_orthof(phi[2], phi[1], (float)TWO_PI);
-                        phi[3] = deperiodize_orthof(phi[3], phi[2], (float)TWO_PI);
+                        phi[0] = deperiodize_orthof(phi[0], phi[1], (float)MD_TWO_PI);
+                        phi[2] = deperiodize_orthof(phi[2], phi[1], (float)MD_TWO_PI);
+                        phi[3] = deperiodize_orthof(phi[3], phi[2], (float)MD_TWO_PI);
 
-                        psi[0] = deperiodize_orthof(psi[0], psi[1], (float)TWO_PI);
-                        psi[2] = deperiodize_orthof(psi[2], psi[1], (float)TWO_PI);
-                        psi[3] = deperiodize_orthof(psi[3], psi[2], (float)TWO_PI);
+                        psi[0] = deperiodize_orthof(psi[0], psi[1], (float)MD_TWO_PI);
+                        psi[2] = deperiodize_orthof(psi[2], psi[1], (float)MD_TWO_PI);
+                        psi[3] = deperiodize_orthof(psi[3], psi[2], (float)MD_TWO_PI);
 
                         const float* w = data->w;
                         float final_phi = w[0] * phi[0] + w[1] * phi[1] + w[2] * phi[2] + w[3] * phi[3];
                         float final_psi = w[0] * psi[0] + w[1] * psi[1] + w[2] * psi[2] + w[3] * psi[3];
-                        data->dst_angle[i] = {deperiodize_orthof(final_phi, 0, (float)TWO_PI), deperiodize_orthof(final_psi, 0, (float)TWO_PI)};
+                        data->dst_angle[i] = {deperiodize_orthof(final_phi, 0, (float)MD_TWO_PI), deperiodize_orthof(final_psi, 0, (float)MD_TWO_PI)};
                     }
                 });
 
-                tasks[num_tasks++] = angle_task;
                 break;
             }
             default:
-                ASSERT(false);
+                MD_ASSERT(false);
                 break;
         }
     }
 
     if (payload.dst_ss) {
-        task_system::ID ss_task = task_system::create_pool_task(STR_LIT("## Interpolate Secondary Structures"), (uint32_t)num_segments, [data = &payload, mode](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-            (void)thread_num;
+        task_system::parallel_for((uint32_t)num_segments, 1, [data = &payload, mode](uint32_t range_beg, uint32_t range_end) {
             // The state carries the secondary structure of the nearest frame as it was assigned. The cartoon blends the
             // denoised copy (a presentation smoothing, see secondary_structure_render) where it exists.
             const md_secondary_structure_t* label_nearest = data->app->trajectory_data.secondary_structure.data +
@@ -4754,8 +6464,8 @@ void interpolate_system_state(ApplicationState* app) {
             };
             const md_secondary_structure_t* src_ss_nearest = data->t < 0.5f ? src_ss[1] : src_ss[2];
             auto normalize_ss = [](md_gl_secondary_structure_t ss) {
-                ss.helix = CLAMP(ss.helix, 0.0f, 1.0f);
-                ss.sheet = CLAMP(ss.sheet, 0.0f, 1.0f);
+                ss.helix = MD_CLAMP(ss.helix, 0.0f, 1.0f);
+                ss.sheet = MD_CLAMP(ss.sheet, 0.0f, 1.0f);
                 float sum = ss.helix + ss.sheet;
                 if (sum > 1.0f) {
                     ss.helix /= sum;
@@ -4771,7 +6481,7 @@ void interpolate_system_state(ApplicationState* app) {
                 return normalize_ss(ss);
             };
             auto smoothstep5 = [](float t) {
-                t = CLAMP(t, 0.0f, 1.0f);
+                t = MD_CLAMP(t, 0.0f, 1.0f);
                 return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
             };
             auto is_eq = [](md_gl_secondary_structure_t a, md_gl_secondary_structure_t b) {
@@ -4825,22 +6535,12 @@ void interpolate_system_state(ApplicationState* app) {
             }
             }
         });
-        tasks[num_tasks++] = ss_task;
 
         // Isolated coils between matching structured segments are filled in, to reduce the noise during transitions.
         // A non temporal filtering step, after the blend above.
-        task_system::ID ss_cleanup_task = task_system::create_pool_task(STR_LIT("## Cleanup Secondary Structures"), [data = &payload]() {
+        {
             secondary_structure_weights_fill_isolated_coils(data->ss_weights, &data->app->mold.sys.protein_backbone);
-        });
-        tasks[num_tasks++] = ss_cleanup_task;
-    }
-
-    if (num_tasks > 0) {
-        for (int i = 1; i < num_tasks; ++i) {
-            task_system::set_task_dependency(tasks[i], tasks[i-1]);
         }
-        task_system::enqueue_task(tasks[0]);
-        task_system::task_wait_for(tasks[num_tasks - 1]);
     }
 
     // The weights are the renderer's input and nothing else's: straight to the GPU, from the temporary memory above
@@ -4876,7 +6576,7 @@ static bool is_identity(const mat4_t& M) {
 }
 
 void recenter_mark_query_dirty(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     state->operations.recenter_query.version += 1;
     if (state->operations.recenter_query.version == 0) {
         state->operations.recenter_query.version = 1;
@@ -4884,12 +6584,12 @@ void recenter_mark_query_dirty(ApplicationState* state) {
 }
 
 const md_bitset_t& recenter_get_active_target_mask(const ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     return state->operations.recenter_query.enabled ? state->operations.recenter_query.mask : state->operations.selection_mask;
 }
 
 bool recenter_update_query_mask(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 
     auto& query = state->operations.recenter_query;
     const uint64_t ir_fingerprint = state->script.ir ? state->script.ir_fingerprint : 0;
@@ -4910,13 +6610,13 @@ bool recenter_update_query_mask(ApplicationState* state) {
         return false;
     }
 
-    filter_evaluate(&query.filter, &query.mask, filter_context(state), state->allocator.persistent);
+    filter_evaluate(&query.filter, &query.mask, state->script.language, filter_context(state), state->allocator.persistent);
     query.evaluated_version = query.version;
     return true;
 }
 
 void recenter_update(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     recenter_update_query_mask(state);
     recenter_update_target_data(state);
 }
@@ -4950,7 +6650,7 @@ void recenter_update_target_data(ApplicationState* state) {
         if (state->operations.initial_frame.rel_xyzw && count > 0) {
             // Fetch initial frame data required for orienting the structure
             size_t num_atoms = state->mold.sys.atom.count;
-            vec3_t* temp_xyz = (vec3_t*)md_vm_arena_push(state->allocator.frame, sizeof(vec3_t) * ALIGN_TO(num_atoms, 16));
+            vec3_t* temp_xyz = (vec3_t*)md_vm_arena_push(state->allocator.frame, sizeof(vec3_t) * MD_ALIGN_TO(num_atoms, 16));
 
             md_system_state_t temp_state = { 0 };
             temp_state.num_atoms = num_atoms;
@@ -4980,9 +6680,9 @@ void recenter_update_target_data(ApplicationState* state) {
 }
 
 bool recenter_calculate_transform(mat4_t* translation, mat4_t* rotation, const ApplicationState* app) {
-    ASSERT(translation);
-    ASSERT(rotation);
-    ASSERT(app);
+    MD_ASSERT(translation);
+    MD_ASSERT(rotation);
+    MD_ASSERT(app);
 
     *translation = mat4_ident();
     *rotation    = mat4_ident();
@@ -4993,7 +6693,7 @@ bool recenter_calculate_transform(mat4_t* translation, mat4_t* rotation, const A
 
     if (count > 0) {
         md_temp_scope_t temp = md_temp_begin_in(app->allocator.frame);
-        defer { md_temp_end(temp); };
+        MD_DEFER { md_temp_end(temp); };
 
         // Extract xyzw subset of target
         vec4_t* target_xyzw = md_temp_alloc_array(temp, vec4_t, count);
@@ -5064,16 +6764,13 @@ bool recenter_calculate_transform(mat4_t* translation, mat4_t* rotation, const A
 // Every atom of mold.state through M
 static void state_transform(ApplicationState* app, const mat4_t& M) {
     md_system_state_t& s = app->mold.state;
-    task_system::ID task = task_system::create_pool_task(STR_LIT("## Transform"), (uint32_t)s.num_atoms, [&s, M](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-        (void)thread_num;
+    task_system::parallel_for((uint32_t)s.num_atoms, 1024, [&s, M](uint32_t range_beg, uint32_t range_end) {
         mat4_batch_transform_inplace(s.xyz + range_beg, 1.0f, range_end - range_beg, M);
-    }, 1024);
-    task_system::enqueue_task(task);
-    task_system::task_wait_for(task);
+    });
 }
 
 bool apply_state_operations(ApplicationState* app, bool recenter, bool pbc, bool unwrap) {
-    ASSERT(app);
+    MD_ASSERT(app);
     md_system_t& sys = app->mold.sys;
     md_system_state_t& s = app->mold.state;
 
@@ -5111,27 +6808,20 @@ bool apply_state_operations(ApplicationState* app, bool recenter, bool pbc, bool
     // a lattice vector. That differs from frame to frame for every atom crossing the trajectory's own
     // box, and for the whole system at once whenever the target's centre lands in another image.
     if (periodic && (pbc || fresh_turn)) {
-        task_system::ID task = task_system::create_pool_task(STR_LIT("## Apply PBC"), (uint32_t)s.num_atoms, [&s](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-            (void)thread_num;
+        task_system::parallel_for((uint32_t)s.num_atoms, 1, [&s](uint32_t range_beg, uint32_t range_end) {
             md_util_pbc(s.xyz + range_beg, NULL, range_end - range_beg, &s.unitcell);
         });
-        task_system::enqueue_task(task);
-        task_system::task_wait_for(task);
     }
 
     if (unwrap) {
-        const size_t num_structures = md_structure_count(&sys.structure);
-        if (num_structures > 0) {
-            task_system::ID task = task_system::create_pool_task(STR_LIT("## Unwrap Structures"), (uint32_t)num_structures, [&s, &sys](uint32_t range_beg, uint32_t range_end, uint32_t thread_num) {
-                (void)thread_num;
+        const size_t num_molecules = md_system_molecule_count(&sys);
+        if (num_molecules > 0) {
+            task_system::parallel_for((uint32_t)num_molecules, 1, [&s, &sys](uint32_t range_beg, uint32_t range_end) {
                 for (uint32_t i = range_beg; i < range_end; ++i) {
-                    md_structure_t structure = {};
-                    md_structure_extract(&structure, &sys.structure, i);
-                    md_util_unwrap_structure(&s, &structure);
+                    const md_molecule_t mol = md_system_molecule(&sys, i);
+                    md_util_unwrap_molecule(&s, &mol);
                 }
             });
-            task_system::enqueue_task(task);
-            task_system::task_wait_for(task);
         }
     }
 
@@ -5152,7 +6842,7 @@ static bool bond_coordinates(md_system_state_t* state, const ApplicationState* a
 
     const size_t num_frames = run_num_frames(app);
     if (num_frames > 0) {
-        if (!extract_frame(app, CLAMP(frame, (int64_t)0, (int64_t)num_frames - 1), state)) {
+        if (!extract_frame(app, MD_CLAMP(frame, (int64_t)0, (int64_t)num_frames - 1), state)) {
             MD_LOG_ERROR("Failed to extract frame data");
             return false;
         }
@@ -5160,7 +6850,7 @@ static bool bond_coordinates(md_system_state_t* state, const ApplicationState* a
     }
     const md_system_state_t& shown = app->mold.state;
     if (!shown.xyz || shown.num_atoms != num_atoms) return false;
-    MEMCPY(state->xyz, shown.xyz, num_atoms * sizeof(vec3_t));
+    md_memcpy(state->xyz, shown.xyz, num_atoms * sizeof(vec3_t));
     state->unitcell = shown.unitcell;
     if (!is_identity(app->operations.state_rotation)) {
         mat4_batch_transform_inplace(state->xyz, 1.0f, num_atoms, mat4_inverse(app->operations.state_rotation));
@@ -5169,44 +6859,48 @@ static bool bond_coordinates(md_system_state_t* state, const ApplicationState* a
 }
 
 bool recompute_bonds(ApplicationState* app, int64_t frame) {
-    ASSERT(app);
+    MD_ASSERT(app);
     md_system_t& sys = app->mold.sys;
     if (sys.atom.count == 0) return false;
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     md_system_state_t state = { .alloc = temp.arena };
     if (!bond_coordinates(&state, app, frame)) return false;
 
     system_bonds_edit_begin(app);
-    md_util_infer_covalent_bonds(&sys.bond, &state, &sys, sys.alloc);
+    md_util_infer_covalent_bonds(&sys.bond, &state, &sys, sys.alloc, task_system::executor());
     md_bond_build_connectivity(&sys.bond, sys.atom.count, sys.alloc);
     md_system_topology_changed(&sys);
     // What follows from the bonds, from the same coordinates, which md_util_system_infer records as the reference
-    md_util_system_infer(&sys, &state, MD_UTIL_INFER_STRUCTURE_BIT | MD_UTIL_INFER_CHEMISTRY_BIT | MD_UTIL_INFER_LIPID_BIT);
+    md_util_system_infer(&sys, &state, MD_UTIL_INFER_MOLECULE_BIT | MD_UTIL_INFER_CHEMISTRY_BIT | MD_UTIL_INFER_LIPID_BIT | MD_UTIL_INFER_FRAGMENT_BIT, task_system::executor());
     system_bonds_changed(app, false);
     return true;
 }
 
 void system_bonds_edit_begin(ApplicationState* app) {
-    ASSERT(app);
-    if (app->script.eval) md_script_eval_interrupt(app->script.eval);
-    task_system::pool_wait_for_completion();
+    MD_ASSERT(app);
+    // An edit of the bonds is of the system as inferred
+    system_inference_finish(app);
+    if (app->script.eval) script::eval_interrupt(app->script.eval);
+    task_system::wait_all();
 }
 
 void system_bonds_changed(ApplicationState* app, bool graph_edited) {
-    ASSERT(app);
+    MD_ASSERT(app);
     md_system_t& sys = app->mold.sys;
     if (graph_edited) {
         md_system_bond_build_connectivity(&sys);
         // The molecules a bond joins are one, and a ring it closes is one. The orders are not perceived again: they
         // are what they were, and a bond added by hand has none.
-        md_util_system_infer_structures(&sys);
+        md_util_system_infer_molecules(&sys);
         md_util_system_infer_rings(&sys);
+        // And so are its fragments, which the molecules' inference clears
+        md_util_system_infer_fragments(&sys);
     }
     app->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
-    // The properties of a script are of the topology they were evaluated with (md_script_ir_compile), and the bond sets
+    // The properties of a script are of the topology they were evaluated with (script::compile), and the bond sets
     // it holds are indices of the bonds there were. Compiled in this frame, before the representations which name them
     // are evaluated, rather than once the delay for typing has passed.
     app->script.compile_ir = true;
@@ -5215,13 +6909,13 @@ void system_bonds_changed(ApplicationState* app, bool graph_edited) {
 }
 
 const md_bond_delta_t* bond_tracking_delta(const ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
     const auto& bt = app->operations.bond_tracking;
     return bt.enabled && bt.key != 0 ? &bt.delta : nullptr;
 }
 
 const md_chem_delta_t* bond_tracking_chem(const ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
     const auto& bt = app->operations.bond_tracking;
     return bt.enabled && bt.key != 0 ? &bt.chem : nullptr;
 }
@@ -5249,19 +6943,19 @@ md_atom_flags_t frame_atom_flags(const ApplicationState& app, size_t atom_idx, i
 
 bool picked_ring(const ApplicationState& app, size_t idx, const int32_t** atoms, size_t* count, md_ring_flags_t* flags) {
     const md_system_t& sys = app.mold.sys;
-    const size_t num = md_index_data_num_ranges(&sys.ring);
+    const size_t num = md_ring_data_count(&sys.ring);
     if (idx < num) {
-        *atoms = md_index_range_beg(&sys.ring, idx);
-        *count = md_index_range_size(&sys.ring, idx);
+        *atoms = md_ring_atoms(&sys.ring, idx);
+        *count = md_ring_size(&sys.ring, idx);
         *flags = md_system_ring_flags(&sys, idx);
         return true;
     }
     const md_chem_delta_t* chem = bond_tracking_chem(&app);
     idx -= num;
-    if (chem && idx < md_index_data_num_ranges(&chem->ring)) {
-        *atoms = md_index_range_beg(&chem->ring, idx);
-        *count = md_index_range_size(&chem->ring, idx);
-        *flags = chem->ring_flags[idx];
+    if (chem && idx < md_ring_data_count(&chem->ring)) {
+        *atoms = md_ring_atoms(&chem->ring, idx);
+        *count = md_ring_size(&chem->ring, idx);
+        *flags = md_ring_flags(&chem->ring, idx);
         return true;
     }
     return false;
@@ -5281,7 +6975,7 @@ static void bond_tracking_clear(ApplicationState* app) {
 }
 
 void bond_tracking_update(ApplicationState* app) {
-    ASSERT(app);
+    MD_ASSERT(app);
     auto& bt = app->operations.bond_tracking;
     const md_system_t& sys = app->mold.sys;
     if (!bt.enabled || sys.atom.count == 0) {
@@ -5291,7 +6985,7 @@ void bond_tracking_update(ApplicationState* app) {
 
     // The scope, evaluated again when the script whose names it may use changes, and in every frame when what it picks
     // depends on the frame. Empty for every atom.
-    const bool has_scope = !str_empty(str_trim(str_from_cstr(bt.scope.text)));
+    const bool has_scope = !md_str_empty(md_str_trim(md_str_from_cstr(bt.scope.text)));
     const uint64_t ir_fingerprint = app->script.ir ? app->script.ir_fingerprint : 0;
     if (bt.scope_ir_fingerprint != ir_fingerprint) {
         bt.scope_ir_fingerprint = ir_fingerprint;
@@ -5302,7 +6996,7 @@ void bond_tracking_update(ApplicationState* app) {
     }
     if (bt.scope_dirty) {
         if (has_scope) {
-            filter_evaluate(&bt.scope, &bt.scope_mask, filter_context(app), app->allocator.persistent);
+            filter_evaluate(&bt.scope, &bt.scope_mask, app->script.language, filter_context(app), app->allocator.persistent);
         } else {
             md_bitset_free(&bt.scope_mask, app->allocator.persistent);
             bt.scope.result = {};
@@ -5329,7 +7023,7 @@ void bond_tracking_update(ApplicationState* app) {
     if (key == bt.key) return;
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     md_system_state_t state = { .alloc = temp.arena };
     md_bond_delta_t delta = {};
     const md_tick_t t0 = md_tick_now();
@@ -5345,20 +7039,20 @@ void bond_tracking_update(ApplicationState* app) {
 
     // Uploaded again only when it changed: most frames of most runs have the bonds of the one before
     const bool same = bt.key != 0 && delta.num_formed == bt.delta.num_formed && md_bitset_equal(delta.broken, bt.delta.broken) &&
-        (delta.num_formed == 0 || (MEMCMP(delta.formed_pair, bt.delta.formed_pair, delta.num_formed * sizeof(md_atom_pair_t)) == 0 &&
-                                   MEMCMP(delta.formed_flags, bt.delta.formed_flags, delta.num_formed * sizeof(md_bond_flags_t)) == 0));
+        (delta.num_formed == 0 || (md_memcmp(delta.formed_pair, bt.delta.formed_pair, delta.num_formed * sizeof(md_atom_pair_t)) == 0 &&
+                                   md_memcmp(delta.formed_flags, bt.delta.formed_flags, delta.num_formed * sizeof(md_bond_flags_t)) == 0));
     md_bond_delta_free(&bt.delta, app->allocator.persistent);
     bt.delta = delta;
     bt.key = key;
     bt.time_ms = time_ms;
-    bt.formed_capacity = MAX(bt.formed_capacity, delta.num_formed);
+    bt.formed_capacity = MD_MAX(bt.formed_capacity, delta.num_formed);
     if (!same) {
         // The chemistry where the bonds changed: what is drawn there, the orders and rings of the frame. A region too
         // large to perceive leaves it empty, and the bonds formed plain.
         if (!md_chem_perceive_delta(&bt.chem, &sys, &state, &bt.delta, MD_CHEM_FLAG_PROTONATE_PH7, app->allocator.persistent)) {
             md_chem_delta_free(&bt.chem, app->allocator.persistent);
         }
-        bt.ring_capacity = MAX(bt.ring_capacity, md_index_data_num_ranges(&bt.chem.ring));
+        bt.ring_capacity = MD_MAX(bt.ring_capacity, md_ring_data_count(&bt.chem.ring));
         bt.time_ms = md_tick_to_milliseconds(md_tick_now() - t0);
         app->mold.dirty_gpu_buffers |= MolBit_DirtyBonds;
     }
@@ -5397,9 +7091,9 @@ bool picked_bond(const ApplicationState& app, size_t idx, md_atom_pair_t* pair, 
 }
 
 bool picking_range_reserve(PickingRange* out_range, PickingSpace* space, PickingDomainID domain, size_t count, uint64_t key) {
-    ASSERT(space);
+    MD_ASSERT(space);
 
-    if (count > 0 && space->num_ranges < ARRAY_SIZE(space->ranges)) {
+    if (count > 0 && space->num_ranges < MD_COUNTOF(space->ranges)) {
         PickingRange* curr_range = &space->ranges[space->num_ranges++];
         PickingRange* prev_range = space->num_ranges > 1 ? &space->ranges[space->num_ranges - 2] : NULL;
         curr_range->domain = domain;
@@ -5407,7 +7101,7 @@ bool picking_range_reserve(PickingRange* out_range, PickingSpace* space, Picking
         curr_range->end = curr_range->beg + (uint32_t)count;
         curr_range->key = key;
         if (out_range) {
-            MEMCPY(out_range, curr_range, sizeof(PickingRange));
+            md_memcpy(out_range, curr_range, sizeof(PickingRange));
         }
         return true;
     }
@@ -5416,21 +7110,21 @@ bool picking_range_reserve(PickingRange* out_range, PickingSpace* space, Picking
 }
 
 void picking_handler_new_frame(PickingHandler* handler) {
-    ASSERT(handler);
+    MD_ASSERT(handler);
     handler->frame_idx += 1;
 
-    const uint32_t slot_idx = handler->frame_idx % ARRAY_SIZE(handler->history);
+    const uint32_t slot_idx = handler->frame_idx % MD_COUNTOF(handler->history);
     handler->history[slot_idx].submitted_frame_idx = handler->frame_idx;
     handler->history[slot_idx].space = PickingSpace{};
 }
 
 PickingSpace* picking_handler_current_space(PickingHandler* handler) {
-    ASSERT(handler);
-    return &handler->history[handler->frame_idx % ARRAY_SIZE(handler->history)].space;
+    MD_ASSERT(handler);
+    return &handler->history[handler->frame_idx % MD_COUNTOF(handler->history)].space;
 }
 
 const PickingSpace* picking_handler_find_space(const PickingHandler& handler, uint32_t submitted_frame_idx) {
-    for (size_t i = 0; i < ARRAY_SIZE(handler.history); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(handler.history); ++i) {
         const auto& hist = handler.history[i];
         if (hist.submitted_frame_idx == submitted_frame_idx) {
             return &hist.space;
@@ -5441,12 +7135,12 @@ const PickingSpace* picking_handler_find_space(const PickingHandler& handler, ui
 }
 
 void picking_surface_init(PickingSurface* surface, PickingSourceID source) {
-    ASSERT(surface);
+    MD_ASSERT(surface);
 
     *surface = PickingSurface{};
     surface->source = source;
 
-    for (size_t i = 0; i < ARRAY_SIZE(surface->slots); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(surface->slots); ++i) {
         auto& slot = surface->slots[i];
         glGenBuffers(1, &slot.color_pbo);
         glBindBuffer(GL_PIXEL_PACK_BUFFER, slot.color_pbo);
@@ -5461,9 +7155,9 @@ void picking_surface_init(PickingSurface* surface, PickingSourceID source) {
 }
 
 void picking_surface_free(PickingSurface* surface) {
-    ASSERT(surface);
+    MD_ASSERT(surface);
 
-    for (size_t i = 0; i < ARRAY_SIZE(surface->slots); ++i) {
+    for (size_t i = 0; i < MD_COUNTOF(surface->slots); ++i) {
         auto& slot = surface->slots[i];
         if (slot.color_pbo) glDeleteBuffers(1, &slot.color_pbo);
         if (slot.depth_pbo) glDeleteBuffers(1, &slot.depth_pbo);
@@ -5482,7 +7176,7 @@ bool picking_surface_submit_readback(
     vec2_t screen_coord,
     const mat4_t& clip_to_world
 ) {
-    ASSERT(surface);
+    MD_ASSERT(surface);
 
     if (!fbo || width == 0 || height == 0) {
         return false;
@@ -5494,7 +7188,7 @@ bool picking_surface_submit_readback(
         return false;
     }
 
-    const uint32_t queue_idx = surface->slot_cursor % ARRAY_SIZE(surface->slots);
+    const uint32_t queue_idx = surface->slot_cursor % MD_COUNTOF(surface->slots);
     surface->slot_cursor += 1;
 
     auto& slot = surface->slots[queue_idx];
@@ -5539,7 +7233,7 @@ const PickingRange* picking_space_find_range(const PickingSpace& space, PickingD
 }
 
 static const PickingRange* find_picking_range(const PickingSpace* space, uint32_t raw_idx) {
-    ASSERT(space);
+    MD_ASSERT(space);
 
     for (size_t i = 0; i < space->num_ranges; ++i) {
         const PickingRange* range = &space->ranges[i];
@@ -5556,16 +7250,16 @@ bool picking_surface_poll_hit(
     PickingSurface* surface,
     const PickingHandler& handler
 ) {
-    ASSERT(out_hit);
-    ASSERT(surface);
+    MD_ASSERT(out_hit);
+    MD_ASSERT(surface);
 
     *out_hit = {};
 
-    if (surface->slot_cursor < ARRAY_SIZE(surface->slots)) {
+    if (surface->slot_cursor < MD_COUNTOF(surface->slots)) {
         return false;
     }
 
-    const uint32_t read_idx = surface->slot_cursor % ARRAY_SIZE(surface->slots);
+    const uint32_t read_idx = surface->slot_cursor % MD_COUNTOF(surface->slots);
     auto& slot = surface->slots[read_idx];
     if (!slot.pending) {
         return false;
@@ -5620,8 +7314,8 @@ bool picking_surface_submit_readback_and_poll_hit(
     const PickingHandler& handler,
     const PickingReadbackRequest& request
 ) {
-    ASSERT(out_hit);
-    ASSERT(surface);
+    MD_ASSERT(out_hit);
+    MD_ASSERT(surface);
 
     picking_surface_submit_readback(
         surface,
@@ -5658,7 +7352,7 @@ InteractionSurfaceState interaction_surface(InteractionSurfaceID id, const vec2_
     state.deactivated = ImGui::IsItemDeactivated();
 
     ImDrawList* draw_list = window->DrawList;
-    ASSERT(draw_list);
+    MD_ASSERT(draw_list);
 
     const ImVec2 canvas_min = ImGui::GetItemRectMin();
     const ImVec2 canvas_max = ImGui::GetItemRectMax();
@@ -5714,7 +7408,7 @@ InteractionSurfaceState interaction_surface(InteractionSurfaceID id, const vec2_
 }
 
 bool interaction_surface_hit_extract(PickingHit* out_hit, const InteractionSurfaceState& state, const InteractionSurfaceHitArgs& args) {
-    ASSERT(out_hit);
+    MD_ASSERT(out_hit);
     if (state.hovered && args.fbo && args.width && args.height) {
         const ImVec2 local_coord = ImVec2(state.mouse_local.x, state.surface_size.y - state.mouse_local.y) * ImGui::GetIO().DisplayFramebufferScale * args.pixel_scale;
 
@@ -5733,7 +7427,7 @@ bool interaction_surface_hit_extract(PickingHit* out_hit, const InteractionSurfa
 }
 
 InteractionSurfaceViewTransformResult interaction_surface_view_transform_apply(ViewTransform* target, const InteractionSurfaceState& state, const InteractionSurfaceViewTransformArgs& args) {
-    ASSERT(target);
+    MD_ASSERT(target);
     InteractionSurfaceViewTransformResult result = {};
     if (state.active || state.hovered) {
         if (state.selection_mode == InteractionSelectionMode::None) {
@@ -5770,7 +7464,7 @@ InteractionSurfaceViewTransformResult interaction_surface_view_transform_apply(V
 }
 
 void interaction_surface_event_extract(InteractionSurfaceEvent* event, const InteractionSurfaceState& state, const PickingHit& hit) {
-    ASSERT(event);
+    MD_ASSERT(event);
     *event = InteractionSurfaceEvent{};
 
     event->surface_id   = state.surface_id;
@@ -5813,10 +7507,10 @@ void point_set_region_mask_compute(md_bitmask_t* mask,
     const vec2_t& region_max,
     const vec2_t& surface_size)
 {
-    ASSERT(mask);
-    ASSERT(xyz);
+    MD_ASSERT(mask);
+    MD_ASSERT(xyz);
     // The candidates are read while the mask is written: they must not be a view of it
-    ASSERT(!candidate_mask || !candidate_mask->words || !mask->words || candidate_mask->words < mask->words || candidate_mask->words >= mask->words + mask->cap);
+    MD_ASSERT(!candidate_mask || !candidate_mask->words || !mask->words || candidate_mask->words < mask->words || candidate_mask->words >= mask->words + mask->cap);
 
     md_bitmask_clear(mask);
 
@@ -5857,28 +7551,34 @@ bool file_queue_empty(const FileQueue* queue) {
 }
 
 bool file_queue_full(const FileQueue* queue) {
-    return (queue->head + 1) % ARRAY_SIZE(queue->arr) == queue->tail;
+    return (queue->head + 1) % MD_COUNTOF(queue->arr) == queue->tail;
 }
 
-void file_queue_push(FileQueue* queue, str_t path, FileFlags flags) {
-    ASSERT(queue);
-    ASSERT(!file_queue_full(queue));
+void file_queue_push(FileQueue* queue, md_str_t path, FileFlags flags) {
+    MD_ASSERT(queue);
+    MD_ASSERT(!file_queue_full(queue));
     int prio = 5;
 
 
-    str_t ext;
-    if (extract_ext(&ext, path)) {
-        LoaderType type = loader::type_from_ext(ext);
-        LoaderFlags loader_flags = loader::type_flags(type);
-        if (str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
+    md_str_t ext = {};
+    md_extract_ext(&ext, path);
+    loader::LoaderState detected = {};
+    if (!md_str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
+        // By the contents where the extension does not tell (Amber's mdout, prmtop and inpcrd have none)
+        loader::init(&detected, path, nullptr);
+    }
+    if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION) || detected.type != LoaderType_Undefined) {
+        LoaderFlags loader_flags = detected.flags;
+        if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
             prio = 1;
         } else if (loader_flags & LoaderFlag_System) {
             prio = 2;
         } else if (loader_flags & LoaderFlag_Temporal) {
             // Joins the trajectory's run, so it goes after the trajectory when both are dropped
             prio = 4;
-        } else if (loader_flags & (LoaderFlag_Trajectory | LoaderFlag_Supplemental)) {
-            // A supplemental file (a topology) needs the system in place, same as a trajectory
+        } else if (loader_flags & (LoaderFlag_Trajectory | LoaderFlag_Supplemental | LoaderFlag_Coordinates)) {
+            // A supplemental file (a topology) needs the system in place, same as a trajectory; coordinates are
+            // for a topology, which is a system file
             prio = 3;
         } else {
             flags |= FileFlags_ShowDialogue;
@@ -5889,40 +7589,40 @@ void file_queue_push(FileQueue* queue, str_t path, FileFlags flags) {
     }
 
     uint32_t i = queue->head;
-    queue->arr[queue->head] = {str_copy(path, queue->ring), flags, prio};
-    queue->head = (queue->head + 1) % ARRAY_SIZE(queue->arr);
+    queue->arr[queue->head] = {md_str_copy(path, queue->ring), flags, prio};
+    queue->head = (queue->head + 1) % MD_COUNTOF(queue->arr);
 
     // Sort queue based on prio
-     while (i != queue->tail && queue->arr[i].prio < queue->arr[(i - 1) % ARRAY_SIZE(queue->arr)].prio) {
+     while (i != queue->tail && queue->arr[i].prio < queue->arr[(i - 1) % MD_COUNTOF(queue->arr)].prio) {
         FileQueue::Entry tmp = queue->arr[i];
-        queue->arr[i] = queue->arr[(i - 1) % ARRAY_SIZE(queue->arr)];
-        queue->arr[(i - 1) % ARRAY_SIZE(queue->arr)] = tmp;
-        i = (i - 1) % ARRAY_SIZE(queue->arr);
+        queue->arr[i] = queue->arr[(i - 1) % MD_COUNTOF(queue->arr)];
+        queue->arr[(i - 1) % MD_COUNTOF(queue->arr)] = tmp;
+        i = (i - 1) % MD_COUNTOF(queue->arr);
      }
 }
 
 FileQueue::Entry file_queue_front(const FileQueue* queue) {
-    ASSERT(!file_queue_empty(queue));
+    MD_ASSERT(!file_queue_empty(queue));
     return queue->arr[queue->tail];
 }
 
 FileQueue::Entry file_queue_pop(FileQueue* queue) {
-    ASSERT(queue);
-    ASSERT(!file_queue_empty(queue));
+    MD_ASSERT(queue);
+    MD_ASSERT(!file_queue_empty(queue));
     FileQueue::Entry front = file_queue_front(queue);
-    queue->tail = (queue->tail + 1) % ARRAY_SIZE(queue->arr);
+    queue->tail = (queue->tail + 1) % MD_COUNTOF(queue->arr);
     return front;
 }
 
 void file_queue_process(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     if (!file_queue_empty(&state->file_queue) && !state->load_dataset.show_window) {
         FileQueue::Entry e = file_queue_pop(&state->file_queue);
 
-        str_t ext;
-        extract_ext(&ext, e.path);
+        md_str_t ext;
+        md_extract_ext(&ext, e.path);
 
-        if (str_eq_ignore_case(ext, WORKSPACE_FILE_EXTENSION)) {
+        if (md_str_eq_ignore_case(ext, WORKSPACE_FILE_EXTENSION)) {
             load_workspace(state, e.path);
         } else {
             loader::LoaderState loader_state = {};
@@ -5930,7 +7630,7 @@ void file_queue_process(ApplicationState* state) {
                 
             if ((e.flags & FileFlags_ShowDialogue) || (loader_state.flags & LoaderFlag_RequiresDialogue)) {
                 state->load_dataset = LoadDatasetWindowState();
-                str_copy_to_char_buf(state->load_dataset.path_buf, sizeof(state->load_dataset.path_buf), e.path);
+                md_str_copy_to_char_buf(state->load_dataset.path_buf, sizeof(state->load_dataset.path_buf), e.path);
                 state->load_dataset.path_changed = true;
                 state->load_dataset.show_window = true;
             } else {
@@ -5944,7 +7644,16 @@ void file_queue_process(ApplicationState* state) {
 
                         if (!state->settings.keep_representations) {
                             remove_all_representations(state);
-                            create_default_representations(state);
+                            if (system_inference_pending(*state)) {
+                                // The defaults are decided from what inference tells of the system (what its residues
+                                // are, its strands, its lipids): its atoms meanwhile
+                                Representation* rep = create_representation(state, RepresentationType::SpaceFill, ColorMapping::Type);
+                                snprintf(rep->name, sizeof(rep->name), "default");
+                                md_str_copy_to_char_buf(state->mold.inference.placeholder_name, sizeof(state->mold.inference.placeholder_name), md_str_from_cstr(rep->name));
+                                state->mold.inference.defaults_pending = true;
+                            } else {
+                                create_default_representations(state);
+                            }
                         }
                         recompute_atom_visibility_mask(state);
                         state->mold.interpolate_system_state = true;
@@ -5958,39 +7667,39 @@ void file_queue_process(ApplicationState* state) {
 }
 
 void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask, float fov_y, const ViewRegion& region, const md_system_t* sys, int assembly) {
-    ASSERT(transform);
+    MD_ASSERT(transform);
     if (!state.num_atoms) return;
 
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
 
     if (sys && assembly >= 0 && (size_t)assembly < sys->assembly.count && sys->atom.count == state.num_atoms) {
-        // The atoms of the instances of each part where each of its operators puts them, framed as one: the cell has
+        // The atoms of the instances of each group where each of its operators puts them, framed as one: the cell has
         // nothing to say about an assembly. Of a large one (a virus) every k-th atom, at most about a million in all.
         const md_assembly_data_t& a = sys->assembly;
         const md_bitset_t* m = (mask && md_bitset_count(*mask) > 0) ? mask : nullptr;
-        // The parts, their instances and operators from the offsets as they are (assembly_part)
-        const size_t part_beg = a.part_offset[assembly];
-        const size_t part_end = a.part_offset[assembly + 1];
+        // The groups, their instances and operators from the offsets as they are (assembly_group)
+        const size_t part_beg = a.group_offset[assembly];
+        const size_t part_end = a.group_offset[assembly + 1];
         size_t total = 0;
         for (size_t p = part_beg; p < part_end; ++p) {
-            const AssemblyPart part = assembly_part(a, p);
+            const AssemblyGroup group = assembly_group(a, p);
             size_t atoms = 0;
-            for (const md_instance_idx_t* k = part.inst; k < part.inst_end; ++k) {
+            for (const md_instance_idx_t* k = group.inst; k < group.inst_end; ++k) {
                 const md_urange_t r = md_system_instance_atom_range(sys, (size_t)*k);
                 atoms += r.end - r.beg;
             }
-            total += atoms * (size_t)(part.oper_end - part.oper);
+            total += atoms * (size_t)(group.oper_end - group.oper);
         }
         const size_t max_points = 1000000;
-        const uint32_t stride = (uint32_t)MAX((size_t)1, DIV_UP(total, max_points));
+        const uint32_t stride = (uint32_t)MD_MAX((size_t)1, MD_DIV_UP(total, max_points));
         md_array(vec3_t) xyz = 0;
-        md_array_ensure(xyz, MIN(total, max_points) + 1, md_temp_allocator(temp));
+        md_array_ensure(xyz, MD_MIN(total, max_points) + 1, md_temp_allocator(temp));
         for (size_t p = part_beg; p < part_end; ++p) {
-            const AssemblyPart part = assembly_part(a, p);
-            for (const uint32_t* o = part.oper; o < part.oper_end; ++o) {
+            const AssemblyGroup group = assembly_group(a, p);
+            for (const uint32_t* o = group.oper; o < group.oper_end; ++o) {
                 const mat4_t M = a.oper_transform[*o];
-                for (const md_instance_idx_t* k = part.inst; k < part.inst_end; ++k) {
+                for (const md_instance_idx_t* k = group.inst; k < group.inst_end; ++k) {
                     const md_urange_t r = md_system_instance_atom_range(sys, (size_t)*k);
                     for (uint32_t i = r.beg; i < r.end; i += stride) {
                         if (m && !md_bitset_test(*m, i)) continue;
@@ -6021,7 +7730,7 @@ void reset_view(ViewTransform* transform, const md_system_state_t& state, const 
             size_t len = md_bitset_iter_extract_indices(idx, popcount, md_bitset_iter(*mask));
             if (len > popcount || len > state.num_atoms) {
                 MD_LOG_DEBUG("Error: Invalid number of indices");
-                len = MIN(popcount, state.num_atoms);
+                len = MD_MIN(popcount, state.num_atoms);
             }
             indices = idx;
             count   = len;
@@ -6049,6 +7758,72 @@ void reset_view(ViewTransform* transform, const md_system_state_t& state, const 
     transform->position = transform->position + cell_offset;
 }
 
+// Sets the bits of what a hit stands for, grown by the granularity: what hovering it highlights and clicking it selects
+void picking_hit_mask_set(md_bitmask_t* mask, const ApplicationState& app, const PickingHit& hit, SelectionGranularity granularity) {
+    MD_ASSERT(mask);
+    if (hit.domain == PickingDomain_Atom) {
+        int32_t atom_idx = hit.local_idx;
+        if (atom_idx >= 0 && (size_t)atom_idx < app.mold.sys.atom.count) {
+            // Grow the hovered atom by the current granularity so hover feedback matches what a click would select
+            mask_set_atom_by_selection_granularity(mask, (size_t)atom_idx, granularity, app.mold.sys);
+        }
+    } else if (hit.domain == PickingDomain_Bond) {
+        md_atom_pair_t pair;
+        md_bond_flags_t flags;
+        bool formed;
+        if (picked_bond(app, hit.local_idx, &pair, &flags, &formed)) {
+            // Grow both bond atoms by the current granularity, same as for atom hits
+            mask_set_atom_by_selection_granularity(mask, (size_t)pair.idx[0], granularity, app.mold.sys);
+            mask_set_atom_by_selection_granularity(mask, (size_t)pair.idx[1], granularity, app.mold.sys);
+        }
+    } else if (hit.domain == PickingDomain_BackboneSegment) {
+        const md_protein_backbone_data_t& bb = app.mold.sys.protein_backbone;
+        const size_t seg_idx = hit.local_idx;
+        if (seg_idx < bb.segment.count && bb.segment.res_idx) {
+            const md_residue_idx_t res_idx = bb.segment.res_idx[seg_idx];
+            if (res_idx >= 0) {
+                // A cartoon segment stands for the residue it stems from: at least that is hovered and selected
+                mask_set_residue_by_selection_granularity(mask, (size_t)res_idx, granularity, app.mold.sys);
+            } else {
+                // Without one (a backbone found from the bonds alone, as for an XYZ file) for its backbone atoms
+                const md_amino_acid_atoms_t& a = bb.segment.atoms[seg_idx];
+                const md_atom_idx_t atoms[] = { a.n, a.ca, a.c, a.o };
+                for (md_atom_idx_t atom : atoms) {
+                    if (atom >= 0) mask_set_atom_by_selection_granularity(mask, (size_t)atom, granularity, app.mold.sys);
+                }
+            }
+        }
+    } else if (hit.domain == PickingDomain_Ring) {
+        // The circle of an aromatic ring stands for the atoms of the ring
+        const int32_t* ring_atoms = nullptr;
+        size_t ring_count = 0;
+        md_ring_flags_t ring_flags = MD_RING_FLAG_NONE;
+        if (picked_ring(app, hit.local_idx, &ring_atoms, &ring_count, &ring_flags)) {
+            mask_set_ring_by_selection_granularity(mask, ring_atoms, ring_count, granularity, app.mold.sys);
+        }
+    } else if (hit.domain == PickingDomain_ChainGap) {
+        // The gap of a chain stands for the residues on either side of its break
+        const size_t res_idx = hit.local_idx;
+        if (res_idx + 1 < app.mold.sys.residue.count) {
+            mask_set_residue_by_selection_granularity(mask, res_idx,        granularity, app.mold.sys);
+            mask_set_residue_by_selection_granularity(mask, res_idx + 1, granularity, app.mold.sys);
+        }
+    } else if (hit.domain == PickingDomain_CartoonGlyph) {
+        // A point of the cartoon of a lipid or a nucleic acid stands for its residue, as a cartoon segment does
+        const uint32_t point_idx = cartoon_glyphs_picked_point(app.mold.cartoon_glyphs, hit.local_idx);
+        const CartoonGlyphs& glyphs = app.mold.cartoon_glyphs;
+        const int32_t res_idx = cartoon_glyphs_point_residue(glyphs, point_idx);
+        if (res_idx >= 0 && (size_t)res_idx < app.mold.sys.residue.count) {
+            mask_set_residue_by_selection_granularity(mask, (size_t)res_idx, granularity, app.mold.sys);
+        } else if (point_idx < glyphs.num_points) {
+            // Without one (a nucleic backbone found from the bonds alone) for the atoms of the point
+            for (uint32_t k = glyphs.point_offset[point_idx]; k < glyphs.point_offset[point_idx + 1]; ++k) {
+                mask_set_atom_by_selection_granularity(mask, (size_t)glyphs.point_atom[k], granularity, app.mold.sys);
+            }
+        }
+    }
+}
+
 void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_events) {
     for (size_t i = 0; i < num_events; ++i) {
         const viamd::Event& event = events[i];
@@ -6056,13 +7831,13 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
         case viamd::EventType_ViamdFrameTick:
             break;
         case viamd::EventType_ViamdPickingRangeReserve: {
-			ASSERT(event.payload_type == viamd::EventPayloadType_PickingSpace);
+			MD_ASSERT(event.payload_type == viamd::EventPayloadType_PickingSpace);
 			PickingSpace* space = (PickingSpace*)event.payload;
             size_t num_atoms = state->mold.sys.atom.count;
             // The bonds of the graph, then those formed in the frame shown, as they are drawn (picked_bond). Which
             // frame that is is not settled yet: as many as have formed in any frame are reserved for.
             const md_bond_delta_t* delta = bond_tracking_delta(state);
-            size_t num_bonds = state->mold.sys.bond.count + (delta ? MAX(delta->num_formed, state->operations.bond_tracking.formed_capacity) : 0);
+            size_t num_bonds = state->mold.sys.bond.count + (delta ? MD_MAX(delta->num_formed, state->operations.bond_tracking.formed_capacity) : 0);
             picking_range_reserve(&state->picking_range_atom, space, PickingDomain_Atom, num_atoms);
             picking_range_reserve(&state->picking_range_bond, space, PickingDomain_Bond, num_bonds);
             // One index per segment, in the order md_gl draws them: the cartoon of segment i writes beg + i
@@ -6070,19 +7845,19 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
             // One index per ring of the system, which the circle of an aromatic ring writes (only those are drawn), then
             // the rings of the frame's chemistry where its bonds changed, reserved for as the bonds formed are
             const size_t num_frame_rings = delta ? state->operations.bond_tracking.ring_capacity : 0;
-            picking_range_reserve(&state->picking_range_ring, space, PickingDomain_Ring, md_index_data_num_ranges(&state->mold.sys.ring) + num_frame_rings);
+            picking_range_reserve(&state->picking_range_ring, space, PickingDomain_Ring, md_ring_data_count(&state->mold.sys.ring) + num_frame_rings);
             // One index per point of the cartoon of the lipids and nucleic acids, which its spheres and capsules write, and
             // one per control point of its tubes after them (cartoon_glyphs_picked_point)
             picking_range_reserve(&state->picking_range_glyph, space, PickingDomain_CartoonGlyph, cartoon_glyphs_picking_count(state->mold.cartoon_glyphs));
-            // One index per component, which the gap over a break after it writes: only those are drawn
-            picking_range_reserve(&state->picking_range_gap, space, PickingDomain_ChainGap, state->mold.sys.component.count);
+            // One index per residue, which the gap over a break after it writes: only those are drawn
+            picking_range_reserve(&state->picking_range_gap, space, PickingDomain_ChainGap, state->mold.sys.residue.count);
 
             // One range per dipole group, keyed by the group's vector attribute, sized by that
             // attribute's own shape. An index within a range is then the element index inside the
             // group, so a hit carries the whole identity and nobody has to reproduce a flat
             // ordering over every (group, element) pair to speak about one dipole.
             DipoleGroup groups[16];
-            const size_t num_groups = MIN(dipole_groups_gather(groups, ARRAY_SIZE(groups), state->mold.sys), ARRAY_SIZE(groups));
+            const size_t num_groups = MD_MIN(dipole_groups_gather(groups, MD_COUNTOF(groups), state->mold.sys), MD_COUNTOF(groups));
             for (size_t j = 0; j < num_groups; ++j) {
                 picking_range_reserve(NULL, space, PickingDomain_Dipole, groups[j].count, groups[j].key);
             }
@@ -6090,7 +7865,7 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
         }
         case viamd::EventType_ViamdInteractionSurface:
             if (event.payload) {
-                ASSERT(event.payload_type == viamd::EventPayloadType_InteractionSurfaceEvent);
+                MD_ASSERT(event.payload_type == viamd::EventPayloadType_InteractionSurfaceEvent);
                 InteractionSurfaceEvent* surf = (InteractionSurfaceEvent*)event.payload;
                 switch (surf->kind) {
                 case InteractionSurfaceEventKind::Hover:
@@ -6099,68 +7874,8 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
                 case InteractionSurfaceEventKind::Click:
                     // Use highlight mask as intermediate mask for selection operations and to provide hover feedback
                     md_bitmask_clear(&state->selection.highlight_mask);
-                    if (surf->hit.domain == PickingDomain_Atom) {
-                        int32_t atom_idx = surf->hit.local_idx;
-                        if (atom_idx >= 0 && (size_t)atom_idx < state->mold.sys.atom.count) {
-                            // Grow the hovered atom by the current granularity so hover feedback matches what a click would select
-                            mask_set_atom_by_selection_granularity(&state->selection.highlight_mask, (size_t)atom_idx, state->selection.granularity, state->mold.sys);
-                        }
-                    } else if (surf->hit.domain == PickingDomain_Bond) {
-                        md_atom_pair_t pair;
-                        md_bond_flags_t flags;
-                        bool formed;
-                        if (picked_bond(*state, surf->hit.local_idx, &pair, &flags, &formed)) {
-                            // Grow both bond atoms by the current granularity, same as for atom hits
-                            mask_set_atom_by_selection_granularity(&state->selection.highlight_mask, (size_t)pair.idx[0], state->selection.granularity, state->mold.sys);
-                            mask_set_atom_by_selection_granularity(&state->selection.highlight_mask, (size_t)pair.idx[1], state->selection.granularity, state->mold.sys);
-                        }
-                    } else if (surf->hit.domain == PickingDomain_BackboneSegment) {
-                        const md_protein_backbone_data_t& bb = state->mold.sys.protein_backbone;
-                        const size_t seg_idx = surf->hit.local_idx;
-                        if (seg_idx < bb.segment.count && bb.segment.comp_idx) {
-                            const md_component_idx_t comp_idx = bb.segment.comp_idx[seg_idx];
-                            if (comp_idx >= 0) {
-                                // A cartoon segment stands for the component it stems from: at least that is hovered and selected
-                                mask_set_component_by_selection_granularity(&state->selection.highlight_mask, (size_t)comp_idx, state->selection.granularity, state->mold.sys);
-                            } else {
-                                // Without one (a backbone found from the bonds alone, as for an XYZ file) for its backbone atoms
-                                const md_amino_acid_atoms_t& a = bb.segment.atoms[seg_idx];
-                                const md_atom_idx_t atoms[] = { a.n, a.ca, a.c, a.o };
-                                for (md_atom_idx_t atom : atoms) {
-                                    if (atom >= 0) mask_set_atom_by_selection_granularity(&state->selection.highlight_mask, (size_t)atom, state->selection.granularity, state->mold.sys);
-                                }
-                            }
-                        }
-                    } else if (surf->hit.domain == PickingDomain_Ring) {
-                        // The circle of an aromatic ring stands for the atoms of the ring
-                        const int32_t* ring_atoms = nullptr;
-                        size_t ring_count = 0;
-                        md_ring_flags_t ring_flags = MD_RING_FLAG_NONE;
-                        if (picked_ring(*state, surf->hit.local_idx, &ring_atoms, &ring_count, &ring_flags)) {
-                            mask_set_ring_by_selection_granularity(&state->selection.highlight_mask, ring_atoms, ring_count, state->selection.granularity, state->mold.sys);
-                        }
-                    } else if (surf->hit.domain == PickingDomain_ChainGap) {
-                        // The gap of a chain stands for the residues on either side of its break
-                        const size_t comp_idx = surf->hit.local_idx;
-                        if (comp_idx + 1 < state->mold.sys.component.count) {
-                            mask_set_component_by_selection_granularity(&state->selection.highlight_mask, comp_idx,     state->selection.granularity, state->mold.sys);
-                            mask_set_component_by_selection_granularity(&state->selection.highlight_mask, comp_idx + 1, state->selection.granularity, state->mold.sys);
-                        }
-                    } else if (surf->hit.domain == PickingDomain_CartoonGlyph) {
-                        // A point of the cartoon of a lipid or a nucleic acid stands for its component, as a cartoon segment does
-                        const uint32_t point_idx = cartoon_glyphs_picked_point(state->mold.cartoon_glyphs, surf->hit.local_idx);
-                        const CartoonGlyphs& glyphs = state->mold.cartoon_glyphs;
-                        const int32_t comp_idx = cartoon_glyphs_point_component(glyphs, point_idx);
-                        if (comp_idx >= 0 && (size_t)comp_idx < state->mold.sys.component.count) {
-                            mask_set_component_by_selection_granularity(&state->selection.highlight_mask, (size_t)comp_idx, state->selection.granularity, state->mold.sys);
-                        } else if (point_idx < glyphs.num_points) {
-                            // Without one (a nucleic backbone found from the bonds alone) for the atoms of the point
-                            for (uint32_t k = glyphs.point_offset[point_idx]; k < glyphs.point_offset[point_idx + 1]; ++k) {
-                                mask_set_atom_by_selection_granularity(&state->selection.highlight_mask, (size_t)glyphs.point_atom[k], state->selection.granularity, state->mold.sys);
-                            }
-                        }
-                    }
-                    
+                    picking_hit_mask_set(&state->selection.highlight_mask, *state, surf->hit, state->selection.granularity);
+
                     // Commit to selection mask upon shift+click release. A plain click leaves the selection alone (double-click recenters the view).
                     if (surf->kind == InteractionSurfaceEventKind::Click && surf->selection_mode != InteractionSelectionMode::None) {
                         // The single selection sequence records the order in which individual atoms were picked
@@ -6211,13 +7926,13 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
             }
             break;
         case viamd::EventType_ViamdPickingTooltipTextRequest: {
-            ASSERT(event.payload_type == viamd::EventPayloadType_PickingTooltipTextRequest);
+            MD_ASSERT(event.payload_type == viamd::EventPayloadType_PickingTooltipTextRequest);
             PickingTooltipTextRequest* req = (PickingTooltipTextRequest*)event.payload;
             fill_picking_tooltip(req, *state, req->hit);
             break;
         }
         case viamd::EventType_ViamdViewFit: {
-            ASSERT(event.payload_type == viamd::EventPayloadType_ViewFitRequest);
+            MD_ASSERT(event.payload_type == viamd::EventPayloadType_ViewFitRequest);
             ViewFitRequest* req = (ViewFitRequest*)event.payload;
             if (req) {
                 const md_bitmask_t* m = nullptr;
@@ -6247,7 +7962,7 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
 			// Apply operators if toggled on system change
 
             // EXTRACT STATE HERE FROM PAYLOAD
-            ASSERT(event.payload_type == viamd::EventPayloadType_ApplicationState);
+            MD_ASSERT(event.payload_type == viamd::EventPayloadType_ApplicationState);
             ApplicationState* app = (ApplicationState*)event.payload;
 
             // The event means mold.state was just written from its source, in the lattice frame of its
@@ -6273,25 +7988,33 @@ void ViamdEventHandler::process_events(const viamd::Event* events, size_t num_ev
     }
 }
 
-md_script_ir_t* script_ir_create(ApplicationState* state) {
-    ASSERT(state);
-    md_script_ir_t* ir = md_script_ir_create(state->allocator.persistent);
+script::Program* script_ir_create(ApplicationState* state, md_str_t src, const script::CompileDesc& desc) {
+    MD_ASSERT(state);
+    script::Program* ir = script::compile(state->script.language, src, desc, state->allocator.persistent);
     md_array_push(state->script.all_irs, ir, state->allocator.persistent);
     return ir;
 }
 
+void script_set_language(ApplicationState* state, script::Language lang) {
+    MD_ASSERT(state);
+    if (state->script.language == lang) return;
+    state->script.language = lang;
+    state->editor.SetLanguage(script_editor::language(lang));
+    script_editor::enable_autocomplete(state->editor, lang, &state->mold.sys);
+    state->script.compile_ir = true;
+    state->script.time_since_last_change = 1.0e9;     // now, not after the pause that follows an edit
+    flag_all_representations_as_dirty(state);
+}
+
 void script_ir_collect(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 
-    // A running task may be on an IR the fields have since moved on from
-    if (task_system::task_is_running(state->tasks.evaluate) || task_system::task_is_running(state->script.vis_task)) {
-        return;
-    }
-
+    // Freed once neither field points at it and no task holds it: a long evaluation keeps the IR it runs on, not every
+    // IR compiled while it runs
     for (size_t i = 0; i < md_array_size(state->script.all_irs);) {
-        md_script_ir_t* ir = state->script.all_irs[i];
-        if (ir != state->script.ir && ir != state->script.eval_ir) {
-            md_script_ir_free(ir);
+        script::Program* ir = state->script.all_irs[i];
+        if (ir != state->script.ir && ir != state->script.eval_ir && script::program_users(ir) == 0) {
+            script::program_free(ir);
             md_array_swap_back_and_pop(state->script.all_irs, i);
         } else {
             ++i;
@@ -6299,15 +8022,15 @@ void script_ir_collect(ApplicationState* state) {
     }
 }
 
-const md_script_ir_t* script_ir_of(const ApplicationState* state, md_script_vis_ref_t ref) {
-    ASSERT(state);
-    if (md_script_vis_ref_valid(state->script.ir, ref))      return state->script.ir;
-    if (md_script_vis_ref_valid(state->script.eval_ir, ref)) return state->script.eval_ir;
+const script::Program* script_ir_of(const ApplicationState* state, script::Ref ref) {
+    MD_ASSERT(state);
+    if (script::ref_valid(state->script.ir, ref))      return state->script.ir;
+    if (script::ref_valid(state->script.eval_ir, ref)) return state->script.eval_ir;
     return nullptr;
 }
 
-void script_visualize_ref(ApplicationState* state, md_script_vis_ref_t ref, int subidx, md_script_vis_flags_t flags) {
-    ASSERT(state);
+void script_visualize_ref(ApplicationState* state, script::Ref ref, int subidx, uint32_t flags) {
+    MD_ASSERT(state);
     // Resolved in the IR which made it: an editor token and a plotted property may come from different ones
     if (!script_ir_of(state, ref)) {
         return;
@@ -6320,60 +8043,66 @@ void script_visualize_ref(ApplicationState* state, md_script_vis_ref_t ref, int 
     t.flags  = flags;
 }
 
-void script_visualize_str(ApplicationState* state, str_t str, md_script_vis_flags_t flags) {
-    ASSERT(state);
-    if (str_empty(str)) {
+void script_visualize_str(ApplicationState* state, md_str_t str, uint32_t flags) {
+    MD_ASSERT(state);
+    if (md_str_empty(str)) {
         return;
     }
     ScriptVisTarget& t = state->script.vis_target;
     t = {};
     t.kind  = ScriptVisTarget::Str;
-    t.str   = str_copy(str, state->allocator.frame);
+    t.str   = md_str_copy(str, state->allocator.frame);
     t.flags = flags;
 }
 
 // A visualization computed off the main thread. Everything it reads is its own or outlives it: a copy of the
-// atoms' state, the IR (not freed while the task runs, see script_ir_collect), the system (which stays until the
+// atoms' state, the IR (retained until the job is freed, see script_ir_collect), the system (which stays until the
 // pool has finished, see interrupt_async_tasks). Everything it makes is in its arena.
 struct ScriptVisJob {
     uint64_t key = 0;               // what it is of: the target, and the IR the target is resolved in
     uint64_t state_key = 0;         // where the atoms were
     md_allocator_i* arena = nullptr;
     ScriptVisTarget target = {};    // str in the arena
-    const md_script_ir_t* ir = nullptr;
+    const script::Program* ir = nullptr;
     const md_system_t* sys = nullptr;
+    md_str_t run = {};                 // the run v2 reads frames of (at(), an sdf's reference), in the arena
     md_system_state_t state = {};
-    md_script_vis_t vis = {};
-    str_t value_text = {};          // Ref: what the value is where the atoms were (md_script_vis_value_text), in the arena
+    script::Drawing vis = {};
+    md_str_t value_text = {};          // Ref: what the value is where the atoms were (script::value_text), in the arena
+    double value_scale = 1.0;       // Ref: into the display unit of its unit, as the mark's text shows it
     bool ok = false;
 };
 
 static void vis_job_free(ScriptVisJob* job) {
     if (job) {
+        script::program_release(job->ir);     // held from dispatch: its result is keyed by it
         md_arena_allocator_destroy(job->arena);
         delete job;
     }
 }
 
 // The IR a target is resolved in: the one which made the reference, or the script being edited for an expression
-static const md_script_ir_t* vis_target_ir(const ApplicationState* state, const ScriptVisTarget& t) {
+static const script::Program* vis_target_ir(const ApplicationState* state, const ScriptVisTarget& t) {
     return t.kind == ScriptVisTarget::Ref ? script_ir_of(state, t.ref) : state->script.ir;
 }
 
 static uint64_t vis_target_key(const ApplicationState* state, const ScriptVisTarget& t) {
-    const md_script_ir_t* ir = vis_target_ir(state, t);
+    const script::Program* ir = vis_target_ir(state, t);
     const uintptr_t ir_ptr = (uintptr_t)ir;
-    const uint64_t fingerprint = md_script_ir_fingerprint(ir);
+    const uint64_t fingerprint = script::fingerprint(ir);
     uint64_t h = md_hash64(&t.kind, sizeof(t.kind), 0);
     h = md_hash64(&t.subidx, sizeof(t.subidx), h);
     h = md_hash64(&t.flags, sizeof(t.flags), h);
-    h = md_hash64(&t.ref.ir_id, sizeof(t.ref.ir_id), h);
-    h = md_hash64(&t.ref.node_idx, sizeof(t.ref.node_idx), h);
+    h = md_hash64(&t.ref.program, sizeof(t.ref.program), h);
+    h = md_hash64(&t.ref.node, sizeof(t.ref.node), h);
     if (t.kind == ScriptVisTarget::Str) {
         h = md_hash64(t.str.ptr, t.str.len, h);
     }
     h = md_hash64(&ir_ptr, sizeof(ir_ptr), h);
     h = md_hash64(&fingerprint, sizeof(fingerprint), h);
+    // The value's text is in the display units
+    const uint64_t units = display_units::version();
+    h = md_hash64(&units, sizeof(units), h);
     return h;
 }
 
@@ -6394,7 +8123,7 @@ static uint64_t vis_state_key(const md_system_state_t& st) {
 
 static void vis_job_dispatch(ApplicationState* state, uint64_t key, uint64_t state_key) {
     const ScriptVisTarget& t = state->script.vis_target;
-    const md_script_ir_t* ir = vis_target_ir(state, t);
+    const script::Program* ir = vis_target_ir(state, t);
     if (t.kind == ScriptVisTarget::Ref && !ir) {
         return;
     }
@@ -6402,52 +8131,120 @@ static void vis_job_dispatch(ApplicationState* state, uint64_t key, uint64_t sta
     ScriptVisJob* job = new ScriptVisJob();
     job->key = key;
     job->state_key = state_key;
-    job->arena = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(1));
+    job->arena = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(1));
     job->target = t;
-    job->target.str = str_copy(t.str, job->arena);
+    job->target.str = md_str_copy(t.str, job->arena);
     job->ir = ir;
+    script::program_retain(ir);
     job->sys = &state->mold.sys;
+    job->run = md_str_copy(md_str_from_cstr(state->mold.run), job->arena);
     job->state.alloc = job->arena;
     md_system_state_copy(&job->state, &state->mold.state);
-    md_script_vis_init(&job->vis, job->arena);
+    script::drawing_init(&job->vis, job->arena);
+    if (t.kind == ScriptVisTarget::Ref) {
+        // The value in the unit its mark shows it in
+        const size_t nm = script::num_marks(ir);
+        const script::Mark* mk = script::marks(ir);
+        for (size_t i = 0; i < nm; ++i) {
+            if (mk[i].ref.program == t.ref.program && mk[i].ref.node == t.ref.node && !md_unit_is_none(mk[i].unit)) {
+                job->value_scale = display_units::factor(nullptr, mk[i].unit);
+                break;
+            }
+        }
+    }
 
-    const task_system::ID task = task_system::create_pool_task(STR_LIT("##Visualize script"), [job]() {
-        md_script_vis_ctx_t ctx = {
-            .ir    = job->ir,
+    state->script.vis_task.start({}, [job]() {
+        script::DrawCtx ctx = {
+            .prog  = job->ir,
             .sys   = job->sys,
             .state = &job->state,
+            .run   = job->run,
         };
+        ctx.value_scale = job->value_scale;
         const ScriptVisTarget& tgt = job->target;
         job->ok = (tgt.kind == ScriptVisTarget::Ref)
-            ? md_script_vis_eval_ref(&job->vis, tgt.ref, tgt.subidx, &ctx, tgt.flags)
-            : md_script_vis_eval_string(&job->vis, tgt.str, &ctx, tgt.flags);
+            ? script::draw_ref(&job->vis, tgt.ref, tgt.subidx, ctx, tgt.flags)
+            : script::draw_text(&job->vis, tgt.str, ctx, tgt.flags);
         if (job->ok && tgt.kind == ScriptVisTarget::Ref) {
             char buf[2048];
-            const size_t len = md_script_vis_value_text(buf, sizeof(buf), tgt.ref, tgt.subidx, &ctx);
+            const size_t len = script::value_text(buf, sizeof(buf), tgt.ref, tgt.subidx, ctx);
             if (len) {
-                job->value_text = str_copy({buf, len}, job->arena);
+                job->value_text = md_str_copy({buf, len}, job->arena);
             }
         }
     });
-    task_system::enqueue_task(task);
 
     state->script.vis_running = job;
-    state->script.vis_task = task;
+}
+
+bool energy_term_groups(md_edr_term_groups_t* out, const ApplicationState* state, const md_attribute_t* attr) {
+    MD_ASSERT(out);
+    MD_ASSERT(state);
+    if (!attr || state->mold.sys.group.count == 0) return false;
+    // The label is the name as the file has it; an unlabelled series has its leaf as its name
+    const md_str_t name = md_str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label;
+    return md_edr_term_groups(out, &state->mold.sys, name);
+}
+
+bool energy_term_names_groups(const md_attribute_t* attr) {
+    if (!attr) return false;
+    return md_edr_term_is_of_groups(md_str_empty(attr->label) ? md_attribute_leaf(attr) : attr->label);
+}
+
+size_t energy_term_groups_text(char* buf, size_t cap, const ApplicationState* state, const md_edr_term_groups_t& tg) {
+    MD_ASSERT(state);
+    const md_group_data_t& g = state->mold.sys.group;
+    if (!cap) return 0;
+    buf[0] = '\0';
+    if (tg.group[0] >= g.count || tg.group[1] >= g.count) return 0;
+    const md_str_t a = g.name[tg.group[0]], b = g.name[tg.group[1]];
+    int n = (tg.count == 2 && tg.group[0] != tg.group[1]) ? snprintf(buf, cap, MD_STR_FMT " and " MD_STR_FMT, MD_STR_ARG(a), MD_STR_ARG(b))
+          : tg.count == 2 ? snprintf(buf, cap, MD_STR_FMT " with itself", MD_STR_ARG(a))
+          : snprintf(buf, cap, MD_STR_FMT, MD_STR_ARG(a));
+    return n > 0 ? MD_MIN((size_t)n, cap - 1) : 0;
+}
+
+bool highlight_energy_term_groups(ApplicationState* state, const md_attribute_t* attr) {
+    MD_ASSERT(state);
+    md_edr_term_groups_t tg;
+    if (!energy_term_groups(&tg, state, attr)) return false;
+    const md_group_data_t& g = state->mold.sys.group;
+    const uint32_t count = (tg.count == 2 && tg.group[0] != tg.group[1]) ? 2 : 1;
+    // Group 0 in the highlight's own colour, group 1 in the first colour of the groups after it
+    md_bitset_t* sets = (md_bitset_t*)md_alloc(state->allocator.frame, 2 * sizeof(md_bitset_t));
+    sets[0] = g.atoms[tg.group[0]];
+    sets[1] = g.atoms[tg.group[1]];
+    md_bitmask_assign(&state->selection.highlight_mask, sets[0]);
+    if (count == 2) md_bitmask_or(&state->selection.highlight_mask, sets[1]);
+    if (count == 2) {
+        uint64_t key = md_hash64(tg.group, sizeof(tg.group), state->mold.sys.topology_version);
+        state->selection.highlight_groups = {sets, count, key ? key : 1};
+    }
+    state->selection.term_groups_highlighted = true;
+    return true;
 }
 
 void script_vis_begin_frame(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     state->script.vis_target = {};
     state->script.vis_shown = nullptr;
     state->selection.highlight_groups = {};
 }
 
 void script_vis_update(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     auto& sc = state->script;
 
+    // The groups of an energy term are hovered no more
+    auto& sel = state->selection;
+    if (sel.term_groups_highlighted_prev && !sel.term_groups_highlighted) {
+        md_bitmask_clear(&sel.highlight_mask);
+    }
+    sel.term_groups_highlighted_prev = sel.term_groups_highlighted;
+    sel.term_groups_highlighted = false;
+
     // A finished computation becomes the result
-    if (sc.vis_running && !task_system::task_is_running(sc.vis_task)) {
+    if (sc.vis_running && !sc.vis_task.running()) {
         vis_job_free(sc.vis_result);
         sc.vis_result = sc.vis_running;
         sc.vis_running = nullptr;
@@ -6485,15 +8282,15 @@ void script_vis_update(ApplicationState* state) {
 }
 
 uint64_t script_vis_shown_key(const ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     const auto& sc = state->script;
     if (!sc.vis_shown || !sc.vis_result) return 0;
     const uint64_t key = md_hash64(&sc.vis_result->state_key, sizeof(sc.vis_result->state_key), sc.vis_result->key);
     return key ? key : 1;
 }
 
-str_t script_vis_value_text(ApplicationState* state) {
-    ASSERT(state);
+md_str_t script_vis_value_text(ApplicationState* state) {
+    MD_ASSERT(state);
     const auto& sc = state->script;
     if (sc.vis_target.kind != ScriptVisTarget::Ref || !sc.vis_result || !sc.vis_result->ok) {
         return {};
@@ -6506,10 +8303,10 @@ str_t script_vis_value_text(ApplicationState* state) {
 }
 
 void script_vis_reset(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     auto& sc = state->script;
     if (sc.vis_running) {
-        task_system::task_wait_for(sc.vis_task);
+        sc.vis_task.wait();
         vis_job_free(sc.vis_running);
         sc.vis_running = nullptr;
     }
@@ -6519,13 +8316,13 @@ void script_vis_reset(ApplicationState* state) {
     sc.vis_target = {};
 }
 
-void script_set_hovered_property(ApplicationState* state, str_t label, int population_idx) {
+void script_set_hovered_property(ApplicationState* state, md_str_t label, int population_idx) {
     // The label, a script property's identifier, is copied. One too long to fit is taken as none: the views match
     // it against identifiers, and a cut one would match the wrong property or nothing.
     char* dst = state->hovered_property_label;
     const size_t cap = sizeof(state->hovered_property_label);
     if (label.ptr && label.len < cap) {
-        MEMCPY(dst, label.ptr, label.len);
+        md_memcpy(dst, label.ptr, label.len);
         dst[label.len] = '\0';
     } else {
         dst[0] = '\0';

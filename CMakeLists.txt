@@ -3,14 +3,8 @@
 include(ext/mdlib/cmake/CheckVCPKG.cmake)
 
 # Must be set before project() so the toolchain picks it up.
-#
-# 13.0 is the floor the code actually holds to: the Metal backend guards its one
-# macOS 13 API with @available and reaches MTLResidencySet (macOS 15) through
-# NSClassFromString/performSelector precisely so it can be built against an older
-# target. release.yml passes the same value, so a local build and a released build
-# agree on what they are allowed to call.
 if (APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS deployment version")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS deployment version")
 endif()
 
 project(viamd LANGUAGES C CXX)
@@ -124,7 +118,6 @@ add_subdirectory(ext/stb)
 add_subdirectory(ext/enkiTS)
 add_subdirectory(ext/ImGuiColorTextEdit)
 add_subdirectory(ext/implot)
-add_subdirectory(ext/atomic_queue)
 add_subdirectory(ext/imgui_notify)
 add_subdirectory(ext/md4c)
 add_subdirectory(ext/imgui_md)
@@ -175,10 +168,15 @@ set(SRC_FILES
     src/cartoon_glyphs.cpp
     src/color_scale.cpp
     src/color_utils.cpp
+    src/density_map.cpp
+    src/layer_groups.cpp
     src/display_units.cpp
+    src/display_units_settings.cpp
     src/surface_field.cpp
     src/event.cpp
     src/file_list.cpp
+    src/load_order.h
+    src/load_order.cpp
     src/filter_input.cpp
     src/image.cpp
     src/imgui_widgets.cpp
@@ -186,17 +184,30 @@ set(SRC_FILES
     src/loader.cpp
     src/main.cpp
     src/plot_series.cpp
+    src/plot_periodic.cpp
+    src/plot_periodic_core.cpp
     src/property_grid.cpp
     src/representation.cpp
     src/representation_tree.cpp
     src/script_editor.cpp
+    src/script_engine.h
+    src/script_engine_impl.h
+    src/script_engine.cpp
+    src/script_engine_v1.cpp
+    src/script_engine_v2.cpp
     src/script_reference.cpp
+    src/script_suggestions.cpp
+    src/script_suggestions_vial.cpp
     src/serialization_utils.cpp
     src/task_system.cpp
     src/timeline_periods.cpp
     src/timeline_periods_ui.cpp
     src/viamd.cpp
     src/iso_meshes.cpp
+    src/es_planes.cpp
+    src/plane.cpp
+    src/transfer_function.cpp
+    src/transfer_function_widget.cpp
 
     src/app_settings.h
     src/cartoon_glyphs.h
@@ -213,11 +224,14 @@ set(SRC_FILES
     src/implot_widgets.h
     src/loader.h
     src/plot_series.h
+    src/plot_periodic.h
+    src/plot_periodic_core.h
     src/property_grid.h
     src/representation.h
     src/representation_tree.h
     src/script_editor.h
     src/script_reference.h
+    src/script_suggestions.h
     src/serialization_utils.h
     src/task_system.h
     src/timeline_periods.h
@@ -320,6 +334,9 @@ create_resources("${SHADER_FILES}" "gen/shaders.inl")
 set(SCRIPT_REFERENCE_MD "${CMAKE_CURRENT_SOURCE_DIR}/ext/mdlib/docs/script_reference.md")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SCRIPT_REFERENCE_MD}")
 create_resources("${SCRIPT_REFERENCE_MD}" "gen/script_reference.inl")
+set(VIAL_REFERENCE_MD "${CMAKE_CURRENT_SOURCE_DIR}/ext/mdlib/docs/vial_reference.md")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${VIAL_REFERENCE_MD}")
+create_resources("${VIAL_REFERENCE_MD}" "gen/vial_reference.inl")
 
 source_group("src" FILES ${SRC_FILES})
 source_group("src/app" FILES ${APP_FILES})
@@ -445,7 +462,6 @@ target_link_libraries(viamd
     enkiTS
     ImGuiColorTextEdit
     implot
-    atomic_queue
     imgui_notify
     imgui_md
     ${VIAMD_EXTRA_LIBS}

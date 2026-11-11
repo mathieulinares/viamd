@@ -33,9 +33,9 @@ static inline bool atom_is_bead(const md_system_t& sys, size_t i) {
     return md_atom_particle_kind(&sys.atom, i) != MD_PARTICLE_ATOM && md_atom_atomic_number(&sys.atom, i) == 0;
 }
 
-// The component of an atom
-static int32_t component_of_atom(const md_system_t& sys, int32_t atom) {
-    return (int32_t)md_system_component_find_by_atom_idx(&sys, (size_t)atom);
+// The residue of an atom
+static int32_t residue_of_atom(const md_system_t& sys, int32_t atom) {
+    return (int32_t)md_system_residue_find_by_atom_idx(&sys, (size_t)atom);
 }
 
 // The phosphorus of a phosphate, or a Martini phosphate bead: PO and digits (PO4, PO1, PO41), not the P1 .. P5 of the
@@ -43,7 +43,7 @@ static int32_t component_of_atom(const md_system_t& sys, int32_t atom) {
 static bool is_phosphate_center(const md_system_t& sys, int32_t atom) {
     const md_atomic_number_t z = md_atom_atomic_number(&sys.atom, atom);
     if (z != 0) return z == 15;
-    const str_t name = md_atom_name(&sys.atom, atom);
+    const md_str_t name = md_atom_name(&sys.atom, atom);
     if (name.len < 3 || name.ptr[0] != 'P' || name.ptr[1] != 'O') return false;
     for (size_t i = 2; i < name.len; ++i) {
         if (name.ptr[i] < '0' || name.ptr[i] > '9') return false;
@@ -70,7 +70,7 @@ static int32_t head_color_atom(const md_system_t& sys, const int32_t* atoms, siz
 // The radius of the sphere of a head (or a part of one) of n heavy atoms or beads
 static float head_radius(const md_system_t& sys, const int32_t* atoms, size_t n) {
     const float heavy = (float)n * (atom_is_bead(sys, atoms[0]) ? HEAVY_ATOMS_PER_BEAD : 1.0f);
-    return CLAMP(HEAD_RADIUS_SCALE * cbrtf(heavy), HEAD_RADIUS_MIN, HEAD_RADIUS_MAX);
+    return MD_CLAMP(HEAD_RADIUS_SCALE * cbrtf(heavy), HEAD_RADIUS_MIN, HEAD_RADIUS_MAX);
 }
 
 // A head split at its phosphates into the head group beyond them, the phosphates with it (a phosphocholine, a
@@ -145,7 +145,7 @@ static bool split_head(HeadSplit* out, const md_system_t& sys, const int32_t* at
     if (any_center) {
         // The parts without the phosphates: those the tails hang off are the backbone, the rest and the phosphates the head group
         const int32_t num_parts = head_label_parts(label, keep, sys, atoms, n, stack);
-        MEMSET(anchored, 0, n);
+        md_memset(anchored, 0, n);
         bool anchors_ok = true;
         for (size_t k = 0; k < num_anchors; ++k) {
             const int32_t a = head_local(atoms, n, anchors[k]);
@@ -190,7 +190,7 @@ struct GlyphBuilder {
     md_allocator_i* alloc;
 
     // The mean of the atoms, or their weighted sum with the weights (n of them)
-    uint32_t point(const int32_t* atoms, size_t n, int32_t ref, int32_t color_atom, int32_t comp, float radius, CartoonGlyphKind kind, CartoonGlyphVariant variant = CartoonGlyphVariant_Always, const float* weights = nullptr) {
+    uint32_t point(const int32_t* atoms, size_t n, int32_t ref, int32_t color_atom, int32_t res, float radius, CartoonGlyphKind kind, CartoonGlyphVariant variant = CartoonGlyphVariant_Always, const float* weights = nullptr) {
         const uint32_t idx = (uint32_t)md_array_size(g->point_ref);
         md_array_push(g->point_variant, (uint8_t)variant, alloc);
         md_array_push_array(g->point_atom, atoms, n, alloc);
@@ -198,7 +198,7 @@ struct GlyphBuilder {
         md_array_push(g->point_offset, (uint32_t)md_array_size(g->point_atom), alloc);
         md_array_push(g->point_ref, ref, alloc);
         md_array_push(g->point_color_atom, color_atom, alloc);
-        md_array_push(g->point_comp, comp, alloc);
+        md_array_push(g->point_res, res, alloc);
         md_array_push(g->point_radius, radius, alloc);
         md_array_push(g->point_kind, (uint8_t)kind, alloc);
         return idx;
@@ -254,16 +254,16 @@ struct TubeRoot {
 // rings cannot lay it out (fewer than three ring atoms, no reference positions): a round tube then.
 static bool sterol_slab(GlyphBuilder& b, const md_system_t& sys, const md_lipid_data_t& L, uint32_t t, uint32_t head_point, int32_t ref,
                         const uint8_t* in_ring, md_allocator_i* temp_alloc) {
-    const int32_t* atoms = md_index_range_beg(&L.tail.atoms, t);
-    const size_t num_atoms = md_index_range_size(&L.tail.atoms, t);
-    const int32_t* spine = md_index_range_beg(&L.tail.spine, t);
-    const size_t len = md_index_range_size(&L.tail.spine, t);
+    const int32_t* atoms = md_lipid_tail_atoms(&L, t);
+    const size_t num_atoms = md_lipid_tail_atom_count(&L, t);
+    const int32_t* spine = md_lipid_tail_spine(&L, t);
+    const size_t len = md_lipid_tail_spine_size(&L, t);
     const md_system_state_t& refs = sys.reference;
     if (!refs.xyz || refs.num_atoms != sys.atom.count || len == 0) return false;
 
     auto is_ring = [&](int32_t i) -> bool {
         if (atom_is_bead(sys, i)) {
-            const str_t name = md_atom_name(&sys.atom, i);
+            const md_str_t name = md_atom_name(&sys.atom, i);
             return name.len >= 2 && name.ptr[0] == 'R' && name.ptr[1] >= '0' && name.ptr[1] <= '9';
         }
         return in_ring && in_ring[i] && md_atom_atomic_number(&sys.atom, i) != MD_Z_H;
@@ -301,8 +301,8 @@ static bool sterol_slab(GlyphBuilder& b, const md_system_t& sys, const md_lipid_
         const vec3_t x = vec3_sub(d[k], c);
         along[k] = vec3_dot(x, axis);
         across[k] = vec3_dot(x, width);
-        lo = MIN(lo, along[k]);
-        hi = MAX(hi, along[k]);
+        lo = MD_MIN(lo, along[k]);
+        hi = MD_MAX(hi, along[k]);
     }
 
     // The ring atoms on either side of the axis, each side in order along it. A section takes a share of each side in
@@ -329,7 +329,7 @@ static bool sterol_slab(GlyphBuilder& b, const md_system_t& sys, const md_lipid_
     if (num_pos == 0 || num_neg == 0) return false;
     sort_along(pos, num_pos);
     sort_along(neg, num_neg);
-    const size_t num_sections = (size_t)CLAMP((int)((hi - lo) / STEROL_SECTION + 0.5f), 1, (int)MIN(num_pos, num_neg));
+    const size_t num_sections = (size_t)MD_CLAMP((int)((hi - lo) / STEROL_SECTION + 0.5f), 1, (int)MD_MIN(num_pos, num_neg));
 
     const float flat = STEROL_HALF_WIDTH - STEROL_HALF_THICKNESS;
     md_array(int32_t) group = nullptr;
@@ -343,8 +343,8 @@ static bool sterol_slab(GlyphBuilder& b, const md_system_t& sys, const md_lipid_
         const size_t m = md_array_size(group);
         for (size_t i = nb; i < ne; ++i) md_array_push(group, ring[neg[i]], temp_alloc);
         const size_t g = md_array_size(group);
-        const uint32_t p = b.point(group, g, ref, group[0], component_of_atom(sys, group[0]), 0.0f, CartoonGlyph_SterolSkeleton);
-        const uint32_t side = b.point(group, m, ref, group[0], component_of_atom(sys, group[0]), 0.0f, CartoonGlyph_SterolSkeleton);
+        const uint32_t p = b.point(group, g, ref, group[0], residue_of_atom(sys, group[0]), 0.0f, CartoonGlyph_SterolSkeleton);
+        const uint32_t side = b.point(group, m, ref, group[0], residue_of_atom(sys, group[0]), 0.0f, CartoonGlyph_SterolSkeleton);
         md_array_push(points, p, temp_alloc);
         md_array_push(sides, side, temp_alloc);
     }
@@ -368,16 +368,16 @@ static bool sterol_slab(GlyphBuilder& b, const md_system_t& sys, const md_lipid_
     for (size_t i = 0; i < md_array_size(points); ++i) {
         b.tube_point(points[i], STEROL_HALF_THICKNESS, flat, UINT32_MAX, sides[i]);
     }
-    const int32_t chain_comp = component_of_atom(sys, spine[len - 1]);
+    const int32_t chain_res = residue_of_atom(sys, spine[len - 1]);
     size_t k = chain_beg;
     if (k < len && !atom_is_bead(sys, spine[k])) {
         for (; k + 1 < len; k += 2) {
-            b.tube_point(b.point(spine + k, 2, ref, spine[k], chain_comp, 0.0f, CartoonGlyph_SterolSkeleton), TAIL_RADIUS, 0.0f, UINT32_MAX, last_side);
+            b.tube_point(b.point(spine + k, 2, ref, spine[k], chain_res, 0.0f, CartoonGlyph_SterolSkeleton), TAIL_RADIUS, 0.0f, UINT32_MAX, last_side);
         }
         k = len - 1;
     }
     for (; k < len; ++k) {
-        b.tube_point(b.point(spine + k, 1, ref, spine[k], chain_comp, 0.0f, CartoonGlyph_SterolSkeleton), TAIL_RADIUS, 0.0f, UINT32_MAX, last_side);
+        b.tube_point(b.point(spine + k, 1, ref, spine[k], chain_res, 0.0f, CartoonGlyph_SterolSkeleton), TAIL_RADIUS, 0.0f, UINT32_MAX, last_side);
     }
     b.tube_end();
     return true;
@@ -389,21 +389,21 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
     md_allocator_i* temp_alloc = md_temp_allocator(temp);
     // The atoms of rings, which lay out the ring system of a sterol
     uint8_t* in_ring = nullptr;
-    const size_t num_rings = md_index_data_num_ranges(&sys.ring);
+    const size_t num_rings = md_ring_data_count(&sys.ring);
     if (num_rings > 0) {
         in_ring = (uint8_t*)md_alloc(temp_alloc, sys.atom.count);
-        MEMSET(in_ring, 0, sys.atom.count);
+        md_memset(in_ring, 0, sys.atom.count);
         for (size_t r = 0; r < num_rings; ++r) {
-            const int32_t* ra = md_index_range_beg(&sys.ring, r);
-            for (size_t k = 0; k < md_index_range_size(&sys.ring, r); ++k) in_ring[ra[k]] = 1;
+            const int32_t* ra = md_ring_atoms(&sys.ring, r);
+            for (size_t k = 0; k < md_ring_size(&sys.ring, r); ++k) in_ring[ra[k]] = 1;
         }
     }
     md_array(TubeRoot) roots = nullptr;     // Of the heads of the lipid
     md_array(int32_t) anchors = nullptr;
     md_array(int32_t) whole = nullptr;
     for (size_t l = 0; l < L.count; ++l) {
-        const int32_t* comps = md_index_range_beg(&L.comps, l);
-        const size_t num_comps = md_index_range_size(&L.comps, l);
+        const int32_t* residues = md_lipid_residues(&L, l);
+        const size_t num_residues = md_lipid_residue_count(&L, l);
         const uint32_t h0 = L.head_offset[l];
         const uint32_t h1 = L.head_offset[l + 1];
         const uint32_t t0 = L.tail_offset[l];
@@ -413,8 +413,8 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
             // beads tell no head from a tail: a hopanoid, a bile acid, a part of a lipid A on its own): one sphere for all
             // of it, at the centre of its heavy atoms, so that it is not missing from the cartoon
             md_array_shrink(whole, 0);
-            for (size_t c = 0; c < num_comps; ++c) {
-                const md_urange_t r = md_component_atom_range(&sys.component, (size_t)comps[c]);
+            for (size_t c = 0; c < num_residues; ++c) {
+                const md_urange_t r = md_system_residue_atom_range(&sys, (size_t)residues[c]);
                 for (uint32_t i = r.beg; i < r.end; ++i) {
                     if (md_atom_atomic_number(&sys.atom, i) != MD_Z_H) md_array_push(whole, (int32_t)i, temp_alloc);
                 }
@@ -422,18 +422,18 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
             const size_t n = md_array_size(whole);
             if (n == 0) continue;
             const int32_t color = head_color_atom(sys, whole, n);
-            b.point(whole, n, whole[0], color, component_of_atom(sys, color), head_radius(sys, whole, n), CartoonGlyph_LipidHead);
+            b.point(whole, n, whole[0], color, residue_of_atom(sys, color), head_radius(sys, whole, n), CartoonGlyph_LipidHead);
             continue;
         }
         md_array_shrink(roots, 0);
         // Every point of the lipid in the image of its first head atom
-        const int32_t ref = md_index_range_beg(&L.head.atoms, h0)[0];
+        const int32_t ref = md_lipid_head_atoms(&L, h0)[0];
 
         for (uint32_t h = h0; h < h1; ++h) {
-            const int32_t* atoms = md_index_range_beg(&L.head.atoms, h);
-            const size_t n = md_index_range_size(&L.head.atoms, h);
+            const int32_t* atoms = md_lipid_head_atoms(&L, h);
+            const size_t n = md_lipid_head_atom_count(&L, h);
             const int32_t color = head_color_atom(sys, atoms, n);
-            const int32_t comp = component_of_atom(sys, color);
+            const int32_t res = residue_of_atom(sys, color);
 
             // The atoms of the head its tails hang off
             md_array_shrink(anchors, 0);
@@ -444,7 +444,7 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
 
             HeadSplit split = {};
             if (!split_head(&split, sys, atoms, n, anchors, md_array_size(anchors), temp_alloc)) {
-                const uint32_t p = b.point(atoms, n, ref, color, comp, head_radius(sys, atoms, n), CartoonGlyph_LipidHead);
+                const uint32_t p = b.point(atoms, n, ref, color, res, head_radius(sys, atoms, n), CartoonGlyph_LipidHead);
                 md_array_push(roots, (TubeRoot{h, -1, p, (uint32_t)n}), temp_alloc);
                 continue;
             }
@@ -452,16 +452,16 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
             // One sphere for the head, or two (or more): a sphere for each group of the split, and a point without a
             // sphere at each part of the backbone where its tails start
             b.g->num_split_heads += 1;
-            b.point(atoms, n, ref, color, comp, head_radius(sys, atoms, n), CartoonGlyph_LipidHead, CartoonGlyphVariant_OneHeadSphere);
+            b.point(atoms, n, ref, color, res, head_radius(sys, atoms, n), CartoonGlyph_LipidHead, CartoonGlyphVariant_OneHeadSphere);
             for (uint32_t k = 0; k < head_split_count(split); ++k) {
                 const int32_t* g_atoms = split.atoms + split.offset[k];
                 const size_t   g_n     = split.offset[k + 1] - split.offset[k];
                 const int32_t  g_color = head_color_atom(sys, g_atoms, g_n);
-                const int32_t  g_comp  = component_of_atom(sys, g_color);
+                const int32_t  g_res   = residue_of_atom(sys, g_color);
                 const CartoonGlyphKind kind = split.outer[k] ? CartoonGlyph_LipidHead : CartoonGlyph_LipidBackbone;
-                b.point(g_atoms, g_n, ref, g_color, g_comp, head_radius(sys, g_atoms, g_n), kind, CartoonGlyphVariant_TwoHeadSpheres);
+                b.point(g_atoms, g_n, ref, g_color, g_res, head_radius(sys, g_atoms, g_n), kind, CartoonGlyphVariant_TwoHeadSpheres);
                 if (split.outer[k]) continue;
-                const uint32_t root = b.point(g_atoms, g_n, ref, g_color, g_comp, 0.0f, kind);
+                const uint32_t root = b.point(g_atoms, g_n, ref, g_color, g_res, 0.0f, kind);
                 for (size_t a = 0; a < md_array_size(anchors); ++a) {
                     if (head_local(g_atoms, g_n, anchors[a]) >= 0) {
                         md_array_push(roots, (TubeRoot{h, anchors[a], root, (uint32_t)g_n}), temp_alloc);
@@ -482,13 +482,13 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
         };
 
         for (uint32_t t = t0; t < t1; ++t) {
-            const int32_t* spine = md_index_range_beg(&L.tail.spine, t);
-            const size_t len = md_index_range_size(&L.tail.spine, t);
+            const int32_t* spine = md_lipid_tail_spine(&L, t);
+            const size_t len = md_lipid_tail_spine_size(&L, t);
             if (len == 0) continue;
             const bool skeleton = L.tail.kind[t] == MD_LIPID_TAIL_SKELETON;
             const CartoonGlyphKind kind = skeleton ? CartoonGlyph_SterolSkeleton : CartoonGlyph_LipidTail;
             const float radius = skeleton ? SKELETON_RADIUS : TAIL_RADIUS;
-            const int32_t comp = component_of_atom(sys, spine[0]);
+            const int32_t res = residue_of_atom(sys, spine[0]);
             const bool beads = atom_is_bead(sys, spine[0]);
 
             // The control points of the tube are points without a sphere of their own (a radius of 0)
@@ -501,19 +501,19 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
             if (skeleton && sterol_slab(b, sys, L, t, beg.point, ref, in_ring, temp_alloc)) continue;
             b.tube_point(beg.point, radius);
             if (beg.size > 1) {
-                b.tube_point(b.point(&anchor_beg, 1, ref, spine[0], comp, 0.0f, kind), radius);
+                b.tube_point(b.point(&anchor_beg, 1, ref, spine[0], res, 0.0f, kind), radius);
             }
 
             // Along the spine: a control point per bead, or per two atoms, and the tip
             size_t k = 0;
             if (!beads) {
                 for (; k + 1 < len; k += 2) {
-                    b.tube_point(b.point(spine + k, 2, ref, spine[k], comp, 0.0f, kind), radius);
+                    b.tube_point(b.point(spine + k, 2, ref, spine[k], res, 0.0f, kind), radius);
                 }
                 k = len - 1;
             }
             for (; k < len; ++k) {
-                b.tube_point(b.point(spine + k, 1, ref, spine[k], comp, 0.0f, kind), radius);
+                b.tube_point(b.point(spine + k, 1, ref, spine[k], res, 0.0f, kind), radius);
             }
 
             // A spanning chain goes on to its other head
@@ -522,7 +522,7 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
                 const TubeRoot end = root_of(L.tail.head_end[t], anchor_end);
                 if (end.point != UINT32_MAX) {
                     if (end.size > 1) {
-                        b.tube_point(b.point(&anchor_end, 1, ref, spine[len - 1], comp, 0.0f, kind), radius);
+                        b.tube_point(b.point(&anchor_end, 1, ref, spine[len - 1], res, 0.0f, kind), radius);
                     }
                     b.tube_point(end.point, radius);
                 }
@@ -534,33 +534,33 @@ static void build_lipids(GlyphBuilder& b, const md_system_t& sys) {
 }
 
 // The rings of each component which lie within it, as (component, ring) sorted by component
-struct CompRing {
-    int32_t  comp;
+struct ResRing {
+    int32_t  res;
     uint32_t ring;
 };
 
-static md_array(CompRing) rings_by_component(const md_system_t& sys, md_allocator_i* alloc) {
-    md_array(CompRing) out = nullptr;
-    const size_t num_rings = md_index_data_num_ranges(&sys.ring);
+static md_array(ResRing) rings_by_residue(const md_system_t& sys, md_allocator_i* alloc) {
+    md_array(ResRing) out = nullptr;
+    const size_t num_rings = md_ring_data_count(&sys.ring);
     for (size_t r = 0; r < num_rings; ++r) {
-        const int32_t* atoms = md_index_range_beg(&sys.ring, r);
-        const size_t n = md_index_range_size(&sys.ring, r);
+        const int32_t* atoms = md_ring_atoms(&sys.ring, r);
+        const size_t n = md_ring_size(&sys.ring, r);
         if (n < 3) continue;
-        const md_component_idx_t comp = md_system_component_find_by_atom_idx(&sys, (size_t)atoms[0]);
-        if (comp < 0) continue;
-        const md_urange_t range = md_component_atom_range(&sys.component, (size_t)comp);
+        const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, (size_t)atoms[0]);
+        if (res < 0) continue;
+        const md_urange_t range = md_system_residue_atom_range(&sys, (size_t)res);
         bool within = true;
         for (size_t k = 0; k < n; ++k) {
             within &= range.beg <= (uint32_t)atoms[k] && (uint32_t)atoms[k] < range.end;
         }
-        if (within) md_array_push(out, (CompRing{comp, (uint32_t)r}), alloc);
+        if (within) md_array_push(out, (ResRing{res, (uint32_t)r}), alloc);
     }
-    // Rings come in the order of their atoms, which is nearly that of the components: sort to be sure
+    // Rings come in the order of their atoms, which is nearly that of the residues: sort to be sure
     const size_t n = md_array_size(out);
     for (size_t i = 1; i < n; ++i) {
-        const CompRing x = out[i];
+        const ResRing x = out[i];
         size_t j = i;
-        while (j > 0 && out[j - 1].comp > x.comp) {
+        while (j > 0 && out[j - 1].res > x.res) {
             out[j] = out[j - 1];
             --j;
         }
@@ -570,8 +570,8 @@ static md_array(CompRing) rings_by_component(const md_system_t& sys, md_allocato
 }
 
 static bool ring_has_atom(const md_system_t& sys, uint32_t ring, int32_t atom) {
-    const int32_t* atoms = md_index_range_beg(&sys.ring, ring);
-    const size_t n = md_index_range_size(&sys.ring, ring);
+    const int32_t* atoms = md_ring_atoms(&sys.ring, ring);
+    const size_t n = md_ring_size(&sys.ring, ring);
     for (size_t k = 0; k < n; ++k) {
         if (atoms[k] == atom) return true;
     }
@@ -579,7 +579,7 @@ static bool ring_has_atom(const md_system_t& sys, uint32_t ring, int32_t atom) {
 }
 
 // The rings of 3 to 7 atoms of each atom: atom a is in ring[offset[a] .. offset[a + 1]). For the nucleotides without a
-// component (their backbones found from the bonds alone, as for an XYZ file), whose rings are found from their atoms.
+// residue (their backbones found from the bonds alone, as for an XYZ file), whose rings are found from their atoms.
 struct AtomRings {
     md_array(uint32_t) offset = nullptr;    // [num_atoms + 1]
     md_array(uint32_t) ring = nullptr;
@@ -588,22 +588,22 @@ struct AtomRings {
 static AtomRings rings_by_atom(const md_system_t& sys, md_allocator_i* alloc) {
     AtomRings out;
     const size_t num_atoms = sys.atom.count;
-    const size_t num_rings = md_index_data_num_ranges(&sys.ring);
+    const size_t num_rings = md_ring_data_count(&sys.ring);
     md_array_resize(out.offset, num_atoms + 1, alloc);
-    MEMSET(out.offset, 0, sizeof(uint32_t) * (num_atoms + 1));
+    md_memset(out.offset, 0, sizeof(uint32_t) * (num_atoms + 1));
     for (size_t r = 0; r < num_rings; ++r) {
-        const int32_t* atoms = md_index_range_beg(&sys.ring, r);
-        const size_t n = md_index_range_size(&sys.ring, r);
+        const int32_t* atoms = md_ring_atoms(&sys.ring, r);
+        const size_t n = md_ring_size(&sys.ring, r);
         if (n < 3 || n > 7) continue;
         for (size_t k = 0; k < n; ++k) out.offset[atoms[k] + 1] += 1;
     }
     for (size_t i = 0; i < num_atoms; ++i) out.offset[i + 1] += out.offset[i];
     md_array_resize(out.ring, out.offset[num_atoms], alloc);
     uint32_t* cursor = (uint32_t*)md_alloc(alloc, sizeof(uint32_t) * (num_atoms + 1));
-    MEMCPY(cursor, out.offset, sizeof(uint32_t) * num_atoms);
+    md_memcpy(cursor, out.offset, sizeof(uint32_t) * num_atoms);
     for (size_t r = 0; r < num_rings; ++r) {
-        const int32_t* atoms = md_index_range_beg(&sys.ring, r);
-        const size_t n = md_index_range_size(&sys.ring, r);
+        const int32_t* atoms = md_ring_atoms(&sys.ring, r);
+        const size_t n = md_ring_size(&sys.ring, r);
         if (n < 3 || n > 7) continue;
         for (size_t k = 0; k < n; ++k) out.ring[cursor[atoms[k]]++] = (uint32_t)r;
     }
@@ -617,7 +617,7 @@ static bool array_has(const uint32_t* arr, size_t n, uint32_t x) {
     return false;
 }
 
-// The rings of a nucleotide from its atoms rather than from its component: the sugar, the ring with its C1'; then those
+// The rings of a nucleotide from its atoms rather than from its residue: the sugar, the ring with its C1'; then those
 // of its base, the ring with the atom bonded to the C1' outside the sugar (the glycosidic N) and the rings fused to it,
 // which share a bond with it (the second ring of a purine).
 static void nucleotide_rings(md_array(uint32_t)* out, const AtomRings& ar, const md_system_t& sys, int32_t c1, md_allocator_i* alloc) {
@@ -645,8 +645,8 @@ static void nucleotide_rings(md_array(uint32_t)* out, const AtomRings& ar, const
     }
     for (size_t i = first; i < md_array_size(*out); ++i) {
         const uint32_t ring = (*out)[i];
-        const int32_t* atoms = md_index_range_beg(&sys.ring, ring);
-        const size_t n = md_index_range_size(&sys.ring, ring);
+        const int32_t* atoms = md_ring_atoms(&sys.ring, ring);
+        const size_t n = md_ring_size(&sys.ring, ring);
         for (size_t k = 0; k < n; ++k) {
             for (uint32_t j = ar.offset[atoms[k]]; j < ar.offset[atoms[k] + 1]; ++j) {
                 const uint32_t other = ar.ring[j];
@@ -681,7 +681,7 @@ static constexpr uint32_t NUCLEOBASE_RING6[] = { 0, 1, 2, 3, 4, 5 };    // N1 C2
 static constexpr uint32_t NUCLEOBASE_RING5[] = { 3, 4, 6, 7, 8 };       // C4 C5 N7 C8 N9
 
 // The base of a nucleotide by its name: DA, A, RA, and those of a terminal one (DA5, A3). 0 for none.
-static char nucleotide_base(str_t name) {
+static char nucleotide_base(md_str_t name) {
     while (name.len > 1 && (name.ptr[name.len - 1] == '3' || name.ptr[name.len - 1] == '5')) name.len -= 1;
     char c = 0;
     if (name.len == 1) c = name.ptr[0];
@@ -692,10 +692,10 @@ static char nucleotide_base(str_t name) {
 // The base of a coarse grained nucleotide with the rings of an ideal one: a point for each ring atom, a weighted sum of
 // the real beads of the base, taken whole about ref, and a slab for each ring. The point of the glycosidic N, or
 // UINT32_MAX for a base of none of the models (another name, number of beads, a bead missing), which is not drawn.
-static uint32_t coarse_grained_base(GlyphBuilder& b, const md_system_t& sys, int32_t comp, int32_t ref) {
-    const char base = nucleotide_base(md_component_name(&sys.component, comp));
+static uint32_t coarse_grained_base(GlyphBuilder& b, const md_system_t& sys, int32_t res, int32_t ref) {
+    const char base = nucleotide_base(md_system_residue_name(&sys, res));
     if (!base) return UINT32_MAX;
-    const md_urange_t range = md_component_atom_range(&sys.component, comp);
+    const md_urange_t range = md_system_residue_atom_range(&sys, res);
     uint32_t num_beads = 0;
     for (uint32_t i = range.beg; i < range.end; ++i) {
         num_beads += (md_atom_flags(&sys.atom, i) & MD_ATOM_FLAG_NUCLEOBASE) ? 1 : 0;
@@ -713,22 +713,22 @@ static uint32_t coarse_grained_base(GlyphBuilder& b, const md_system_t& sys, int
     for (uint32_t k = 0; k < t->num_real; ++k) {
         real[k] = -1;
         for (uint32_t i = range.beg; i < range.end && real[k] < 0; ++i) {
-            if (str_eq_cstr(md_atom_name(&sys.atom, i), t->real[k])) real[k] = (int32_t)i;
+            if (md_str_eq_cstr(md_atom_name(&sys.atom, i), t->real[k])) real[k] = (int32_t)i;
         }
         if (real[k] < 0) return UINT32_MAX;
     }
 
     uint32_t corner[NUCLEOBASE_MAX_CORNERS];
     for (uint32_t k = 0; k < t->num_corners; ++k) {
-        corner[k] = b.point(real, t->num_real, ref, real[0], comp, 0.0f, CartoonGlyph_NucleicBase, CartoonGlyphVariant_Always, t->weight[k]);
+        corner[k] = b.point(real, t->num_real, ref, real[0], res, 0.0f, CartoonGlyph_NucleicBase, CartoonGlyphVariant_Always, t->weight[k]);
     }
     const bool purine = t->num_corners == 9;
     uint32_t ring[6];
-    for (uint32_t k = 0; k < ARRAY_SIZE(NUCLEOBASE_RING6); ++k) ring[k] = corner[NUCLEOBASE_RING6[k]];
-    b.slab(ring, ARRAY_SIZE(NUCLEOBASE_RING6));
+    for (uint32_t k = 0; k < MD_COUNTOF(NUCLEOBASE_RING6); ++k) ring[k] = corner[NUCLEOBASE_RING6[k]];
+    b.slab(ring, MD_COUNTOF(NUCLEOBASE_RING6));
     if (purine) {
-        for (uint32_t k = 0; k < ARRAY_SIZE(NUCLEOBASE_RING5); ++k) ring[k] = corner[NUCLEOBASE_RING5[k]];
-        b.slab(ring, ARRAY_SIZE(NUCLEOBASE_RING5));
+        for (uint32_t k = 0; k < MD_COUNTOF(NUCLEOBASE_RING5); ++k) ring[k] = corner[NUCLEOBASE_RING5[k]];
+        b.slab(ring, MD_COUNTOF(NUCLEOBASE_RING5));
     }
     return purine ? corner[8] : corner[0];
 }
@@ -747,14 +747,14 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
 
     md_temp_scope_t temp = md_temp_begin();
     md_allocator_i* temp_alloc = md_temp_allocator(temp);
-    md_array(CompRing) comp_rings = rings_by_component(sys, temp_alloc);
-    const size_t num_comp_rings = md_array_size(comp_rings);
+    md_array(ResRing) res_rings = rings_by_residue(sys, temp_alloc);
+    const size_t num_res_rings = md_array_size(res_rings);
 
-    // Nucleotides without a component have their rings found from their atoms
-    bool without_comp = false;
-    for (size_t s = 0; s < bb.segment.count && !without_comp; ++s) without_comp = bb.segment.comp_idx[s] < 0;
+    // Nucleotides without a residue have their rings found from their atoms
+    bool without_res = false;
+    for (size_t s = 0; s < bb.segment.count && !without_res; ++s) without_res = bb.segment.res_idx[s] < 0;
     AtomRings atom_rings = {};
-    if (without_comp) atom_rings = rings_by_atom(sys, temp_alloc);
+    if (without_res) atom_rings = rings_by_atom(sys, temp_alloc);
 
     // The point of each atom of the current nucleotide, its rings, and the corners of a slab
     md_array(int32_t)  corner_atom = nullptr;
@@ -767,7 +767,7 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
         bool open = false;
         for (uint32_t s = bb.range.offset[r]; s < bb.range.offset[r + 1]; ++s) {
             const md_nucleic_acid_atoms_t& atoms = bb.segment.atoms[s];
-            const int32_t comp = bb.segment.comp_idx[s];
+            const int32_t res = bb.segment.res_idx[s];
             if (atoms.c4 < 0) {
                 if (open) b.tube_end(true);
                 open = false;
@@ -780,7 +780,7 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
                 for (size_t i = 0; i < md_array_size(corner_atom); ++i) {
                     if (corner_atom[i] == atom) return corner_point[i];
                 }
-                const uint32_t p = b.point(&atom, 1, ref, atom, comp, 0.0f, kind);
+                const uint32_t p = b.point(&atom, 1, ref, atom, res, 0.0f, kind);
                 md_array_push(corner_atom, atom, temp_alloc);
                 md_array_push(corner_point, p, temp_alloc);
                 return p;
@@ -790,7 +790,7 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
             uint32_t base_n = UINT32_MAX;
 
             if (beads) {
-                base_n = coarse_grained_base(b, sys, comp, ref);
+                base_n = coarse_grained_base(b, sys, res, ref);
                 if (base_n != UINT32_MAX) {
                     // The stick from the band, whose colour it takes
                     const uint32_t stick[2] = { c4, base_n };
@@ -801,18 +801,18 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
                 continue;
             }
 
-            // The rings of the nucleotide: those within its component (binary search for its first), or without one
+            // The rings of the nucleotide: those within its residue (binary search for its first), or without one
             // those found from its C1'
             md_array_shrink(seg_rings, 0);
-            if (comp >= 0) {
-                size_t lo = 0, hi = num_comp_rings;
+            if (res >= 0) {
+                size_t lo = 0, hi = num_res_rings;
                 while (lo < hi) {
                     const size_t mid = (lo + hi) / 2;
-                    if (comp_rings[mid].comp < comp) lo = mid + 1;
+                    if (res_rings[mid].res < res) lo = mid + 1;
                     else hi = mid;
                 }
-                for (size_t i = lo; i < num_comp_rings && comp_rings[i].comp == comp; ++i) {
-                    md_array_push(seg_rings, comp_rings[i].ring, temp_alloc);
+                for (size_t i = lo; i < num_res_rings && res_rings[i].res == res; ++i) {
+                    md_array_push(seg_rings, res_rings[i].ring, temp_alloc);
                 }
             } else {
                 nucleotide_rings(&seg_rings, atom_rings, sys, atoms.c1, temp_alloc);
@@ -820,8 +820,8 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
             uint32_t sugar_c1 = UINT32_MAX;
             for (size_t i = 0; i < md_array_size(seg_rings); ++i) {
                 const uint32_t ring = seg_rings[i];
-                const int32_t* ring_atoms = md_index_range_beg(&sys.ring, ring);
-                const size_t n = md_index_range_size(&sys.ring, ring);
+                const int32_t* ring_atoms = md_ring_atoms(&sys.ring, ring);
+                const size_t n = md_ring_size(&sys.ring, ring);
                 if (n > 7) continue;
                 const bool sugar = atoms.c1 >= 0 && ring_has_atom(sys, ring, atoms.c1);
                 const CartoonGlyphKind kind = sugar ? CartoonGlyph_NucleicSugar : CartoonGlyph_NucleicBase;
@@ -870,8 +870,8 @@ static void build_nucleic_acids(GlyphBuilder& b, const md_system_t& sys) {
 }
 
 void cartoon_glyphs_init(CartoonGlyphs* g, const md_system_t& sys, md_gl_mol_t gl_mol, md_allocator_i* alloc) {
-    ASSERT(g);
-    ASSERT(alloc);
+    MD_ASSERT(g);
+    MD_ASSERT(alloc);
     cartoon_glyphs_free(g);
     g->alloc = alloc;
     md_array_push(g->point_offset, 0, alloc);
@@ -917,7 +917,7 @@ void cartoon_glyphs_init(CartoonGlyphs* g, const md_system_t& sys, md_gl_mol_t g
 }
 
 void cartoon_glyphs_free(CartoonGlyphs* g) {
-    ASSERT(g);
+    MD_ASSERT(g);
     if (g->gl_mol.id) md_gl_mol_destroy(g->gl_mol);
     if (g->alloc) {
         md_array_free(g->point_offset, g->alloc);
@@ -925,7 +925,7 @@ void cartoon_glyphs_free(CartoonGlyphs* g) {
         md_array_free(g->point_weight, g->alloc);
         md_array_free(g->point_ref, g->alloc);
         md_array_free(g->point_color_atom, g->alloc);
-        md_array_free(g->point_comp, g->alloc);
+        md_array_free(g->point_res, g->alloc);
         md_array_free(g->point_radius, g->alloc);
         md_array_free(g->point_kind, g->alloc);
         md_array_free(g->point_variant, g->alloc);
@@ -943,7 +943,7 @@ void cartoon_glyphs_free(CartoonGlyphs* g) {
 }
 
 void cartoon_glyphs_update_positions(CartoonGlyphs* g, const md_system_state_t& state) {
-    ASSERT(g);
+    MD_ASSERT(g);
     if (!cartoon_glyphs_valid(*g)) return;
     const md_unitcell_t* cell = md_unitcell_flags(&state.unitcell) ? &state.unitcell : nullptr;
     // The positions on the CPU only place the tubes for their culling, and must be those of every atom

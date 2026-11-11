@@ -12,8 +12,6 @@
 #include <md_util.h>
 #include <md_gl.h>
 #include <md_gfx.h>
-#include <md_filter.h>
-#include <md_script.h>
 #include <md_system.h>
 #include <md_xvg.h>
 #include <md_csv.h>
@@ -24,7 +22,7 @@
 #include <core/md_log.h>
 #include <core/md_str.h>
 #include <core/md_array.h>
-#include <core/md_intrinsics.h>
+#include <core/md_common.h>
 #include <core/md_allocator.h>
 #include <core/md_arena_allocator.h>
 #include <core/md_ring_allocator.h>
@@ -46,6 +44,8 @@
 #include <gfx/volumerender_utils.h>
 #include <gfx/isomesh_utils.h>
 #include <iso_meshes.h>
+#include <es_planes.h>
+#include <surface_field.h>
 #include <md_gto_iso.h>
 
 #include <resource_path.h>
@@ -71,7 +71,9 @@
 #include <viamd.h>
 #include <representation.h>
 #include <timeline_periods_ui.h>
+#include <plot_periodic.h>
 #include <script_reference.h>
+#include <script_suggestions.h>
 #include <viamd_event.h>
 #include <event.h>
 
@@ -80,7 +82,7 @@
 #define NOTIFICATION_DISPLAY_TIME_IN_SECONDS 5.0
 #define MEASURE_EVALUATION_TIME 1
 #define VIAMD_RECOMPUTE_ORBITAL_PER_FRAME 0
-#define VIS_FLAGS (MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT)
+#define VIS_FLAGS (script::DRAW_ATOMS | script::DRAW_GEOMETRY | script::DRAW_TEXT)
 
 // Global data for application
 static md_allocator_i* frame_alloc = 0; // Linear allocator for scratch data which only is valid for the frame and then is reset
@@ -93,7 +95,7 @@ static bool use_gfx = false;
 static isomesh::Target iso_mesh_target;
 static bool iso_mesh_converged = true;
 
-constexpr str_t shader_output_snippet = STR_LIT(R"(
+constexpr md_str_t shader_output_snippet = MD_STR_LIT(R"(
 layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_normal;
 layout(location = 2) out vec4 out_velocity;
@@ -137,8 +139,8 @@ void write_fragment(vec3 view_coord, vec3 view_vel, vec3 view_normal, vec4 color
 
 // The G-buffer's snippet as the shaders are made of it: with the saturation of the dimmed atoms in it
 static_assert(AtomBit_Dimmed == 16u, "The G-buffer's snippet tests the flags by this bit");
-static str_t output_snippet(const ApplicationState& state) {
-    return str_printf(persistent_alloc, "#define DIMMED_SATURATION %.3f\n%.*s", CLAMP(state.selection.color.saturation, 0.0f, 1.0f), STR_ARG(shader_output_snippet));
+static md_str_t output_snippet(const ApplicationState& state) {
+    return md_str_printf(persistent_alloc, "#define DIMMED_SATURATION %.3f\n%.*s", MD_CLAMP(state.selection.color.saturation, 0.0f, 1.0f), MD_STR_ARG(shader_output_snippet));
 }
 
 // The marks of the selection and the highlight (the mark pass, draw_representations_marks): of the selected, 1 in r
@@ -150,7 +152,7 @@ static str_t output_snippet(const ApplicationState& state) {
 // depth: about two pixels' worth of its slope.
 static_assert(AtomBit_Highlighted == 1u && AtomBit_Selected == 2u && AtomBit_GroupShift == 5 && HIGHLIGHT_GROUP_COLORS == 8,
               "The marks snippet tests the flags by these bits");
-constexpr str_t shader_output_snippet_marks = STR_LIT(R"(
+constexpr md_str_t shader_output_snippet_marks = MD_STR_LIT(R"(
 layout(location = 0) out vec4 out_marks;
 layout(location = 1) out vec4 out_group;
 uniform sampler2D md_user_texture_0;
@@ -186,15 +188,15 @@ void write_fragment(vec3 view_coord, vec3 view_vel, vec3 view_normal, vec4 color
 )");
 
 
-// What Evaluate would do with the script as it is in the editor (md_script_eval_plan): how each of its properties
+// What Evaluate would do with the script as it is in the editor (script::plan): how each of its properties
 // stands against what is evaluated, and so how what is shown stands against what the script now says
 struct ScriptPlan {
     bool valid = false;         // the editor's script compiles, and there are frames to evaluate
     bool running = false;       // an evaluation is running
     bool same = false;          // the editor's script is the one evaluated
     bool changes = false;       // Evaluate would change which properties there are, or what they are called
-    const md_script_eval_plan_t* props = nullptr;   // one per property of the editor's script
-    const str_t* names = nullptr;
+    const script::Plan* props = nullptr;            // one per property of the editor's script
+    const md_str_t* names = nullptr;
     size_t   num_props = 0;
     uint32_t num_frames = 0;
     uint32_t num_pending = 0;   // the frames Evaluate would evaluate
@@ -202,18 +204,18 @@ struct ScriptPlan {
 
 static ScriptPlan script_plan(const ApplicationState& state, md_allocator_i* alloc) {
     ScriptPlan plan;
-    const md_script_ir_t* ir = state.script.ir;
+    const script::Program* ir = state.script.ir;
     plan.num_frames = (uint32_t)run_num_frames(&state);
-    plan.valid = md_script_ir_valid(ir) && plan.num_frames > 0;
-    plan.running = task_system::task_is_running(state.tasks.evaluate);
+    plan.valid = script::valid(ir) && plan.num_frames > 0;
+    plan.running = state.tasks.evaluate.running();
     if (!plan.valid) return plan;
 
     plan.same = state.script.eval && ir == state.script.eval_ir;
-    plan.num_props = md_script_ir_property_count(ir);
-    plan.names = md_script_ir_property_names(ir);
-    md_script_eval_plan_t* props = (md_script_eval_plan_t*)md_alloc(alloc, MAX(plan.num_props, 1) * sizeof(md_script_eval_plan_t));
+    plan.num_props = script::num_outputs(ir);
+    plan.names = script::output_names(ir);
+    script::Plan* props = (script::Plan*)md_alloc(alloc, MD_MAX(plan.num_props, 1) * sizeof(script::Plan));
     md_bitset_t pending = md_bitset_empty_set();
-    if (!md_script_eval_plan(props, plan.num_props, &pending, state.script.eval, ir, plan.num_frames, alloc)) {
+    if (!script::plan(props, plan.num_props, &pending, state.script.eval, ir, plan.num_frames, alloc)) {
         plan.valid = false;
         return plan;
     }
@@ -221,34 +223,34 @@ static ScriptPlan script_plan(const ApplicationState& state, md_allocator_i* all
     plan.num_pending = (uint32_t)md_bitset_count(pending);
 
     // A property gone, or renamed, changes what is shown without anything to evaluate
-    const size_t num_evaluated = state.script.eval ? md_script_eval_property_count(state.script.eval) : 0;
+    const size_t num_evaluated = state.script.eval ? script::eval_num_outputs(state.script.eval) : 0;
     plan.changes = num_evaluated != plan.num_props;
     for (size_t i = 0; i < plan.num_props; ++i) {
-        plan.changes |= props[i].status != MD_SCRIPT_EVAL_STATUS_HELD || !str_eq(props[i].from, plan.names[i]);
+        plan.changes |= props[i].status != script::Status::Held || !md_str_eq(props[i].from, plan.names[i]);
     }
     return plan;
 }
 
 // How property i of the plan stands, as a line of text
 static void script_plan_describe(char* buf, size_t cap, const ScriptPlan& plan, size_t i) {
-    const md_script_eval_plan_t& p = plan.props[i];
-    const str_t name = plan.names[i];
+    const script::Plan& p = plan.props[i];
+    const md_str_t name = plan.names[i];
     switch (p.status) {
-    case MD_SCRIPT_EVAL_STATUS_NEW:
-        snprintf(buf, cap, STR_FMT ": not evaluated yet, %u frames to evaluate", STR_ARG(name), p.num_pending);
+    case script::Status::New:
+        snprintf(buf, cap, MD_STR_FMT ": not evaluated yet, %u frames to evaluate", MD_STR_ARG(name), p.num_pending);
         break;
-    case MD_SCRIPT_EVAL_STATUS_CHANGED:
-        snprintf(buf, cap, STR_FMT ": changed since it was evaluated, %u frames to evaluate", STR_ARG(name), p.num_pending);
+    case script::Status::Changed:
+        snprintf(buf, cap, MD_STR_FMT ": changed since it was evaluated, %u frames to evaluate", MD_STR_ARG(name), p.num_pending);
         break;
-    case MD_SCRIPT_EVAL_STATUS_HELD: {
+    case script::Status::Held: {
         char from[96] = "";
-        if (!str_eq(p.from, name)) snprintf(from, sizeof(from), ", computed as " STR_FMT " was", STR_ARG(p.from));
+        if (!md_str_eq(p.from, name)) snprintf(from, sizeof(from), ", computed as " MD_STR_FMT " was", MD_STR_ARG(p.from));
         if (p.num_pending == 0) {
-            snprintf(buf, cap, STR_FMT ": up to date%s", STR_ARG(name), from);
+            snprintf(buf, cap, MD_STR_FMT ": up to date%s", MD_STR_ARG(name), from);
         } else if (p.num_frames < plan.num_frames) {
-            snprintf(buf, cap, STR_FMT ": %u of %u frames evaluated%s", STR_ARG(name), p.num_frames, plan.num_frames, from);
+            snprintf(buf, cap, MD_STR_FMT ": %u of %u frames evaluated%s", MD_STR_ARG(name), p.num_frames, plan.num_frames, from);
         } else {
-            snprintf(buf, cap, STR_FMT ": %u frames to add or take out over periods%s", STR_ARG(name), p.num_pending, from);
+            snprintf(buf, cap, MD_STR_FMT ": %u frames to add or take out over periods%s", MD_STR_ARG(name), p.num_pending, from);
         }
         break;
     }
@@ -259,11 +261,11 @@ static void script_plan_describe(char* buf, size_t cap, const ScriptPlan& plan, 
 // from it into the window which shows its kind.
 struct ScriptGutterMark {
     int line;
-    md_script_eval_status_t status;
+    script::Status status;
     float done;                 // the fraction of what it needs which it holds
     char text[160];
     char ident[64];
-    uint32_t kinds;             // MD_SCRIPT_PROPERTY_FLAG_*
+    uint32_t kinds;             // script::OUTPUT_*
 };
 
 static void draw_script_gutter_mark(ApplicationState* app, const TextEditor::Decorator& d, const ScriptGutterMark& m) {
@@ -275,13 +277,13 @@ static void draw_script_gutter_mark(ApplicationState* app, const TextEditor::Dec
     const ImU32 amber = IM_COL32(240, 170, 60, 255);
     const ImU32 gray  = IM_COL32(150, 150, 150, 255);
     switch (m.status) {
-    case MD_SCRIPT_EVAL_STATUS_NEW:
+    case script::Status::New:
         dl->AddCircle(c, r, gray, 0, 1.5f);
         break;
-    case MD_SCRIPT_EVAL_STATUS_CHANGED:
+    case script::Status::Changed:
         dl->AddCircleFilled(c, r, amber);
         break;
-    case MD_SCRIPT_EVAL_STATUS_HELD:
+    case script::Status::Held:
         if (m.done >= 1.0f) {
             dl->AddCircleFilled(c, r, green);
         } else {
@@ -300,13 +302,13 @@ static void draw_script_gutter_mark(ApplicationState* app, const TextEditor::Dec
     // a volume to the density volume
     const char* dnd_type = nullptr;
     const char* hint = "";
-    if (m.kinds & MD_SCRIPT_PROPERTY_FLAG_TEMPORAL) {
+    if (m.kinds & script::OUTPUT_TEMPORAL) {
         dnd_type = TIMELINE_SERIES_DND;
         hint = "Drag into a Timelines or Distributions subplot";
-    } else if (m.kinds & MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION) {
+    } else if (m.kinds & script::OUTPUT_DISTRIBUTION) {
         dnd_type = DISTRIBUTION_SERIES_DND;
         hint = "Drag into a Distributions subplot";
-    } else if (m.kinds & MD_SCRIPT_PROPERTY_FLAG_VOLUME) {
+    } else if (m.kinds & script::OUTPUT_VOLUME) {
         dnd_type = VOLUME_SERIES_DND;
         hint = "Drag into the Density Volume";
     }
@@ -314,7 +316,7 @@ static void draw_script_gutter_mark(ApplicationState* app, const TextEditor::Dec
     if (dnd_type && ImGui::BeginDragDropSource()) {
         char path[SERIES_PATH_CAP];
         snprintf(path, sizeof(path), "script/%s", m.ident);
-        const SeriesKey key = series_key(SeriesSource_Script, str_from_cstr(path));
+        const SeriesKey key = series_key(SeriesSource_Script, md_str_from_cstr(path));
         char label[96];
         series_label(label, sizeof(label), app, key);
         series_set_drag_payload(dnd_type, key, -1, label, series_default_color(app, key));
@@ -326,9 +328,9 @@ static void draw_script_gutter_mark(ApplicationState* app, const TextEditor::Dec
 
 static double frame_to_time(double frame, const ApplicationState& data) {
     const int64_t num_frames = md_array_size(data.timeline.x_values);
-    ASSERT(num_frames);
-    const int64_t f0 = CLAMP((int64_t)frame + 0, 0, num_frames - 1);
-    const int64_t f1 = CLAMP((int64_t)frame + 1, 0, num_frames - 1);
+    MD_ASSERT(num_frames);
+    const int64_t f0 = MD_CLAMP((int64_t)frame + 0, 0, num_frames - 1);
+    const int64_t f1 = MD_CLAMP((int64_t)frame + 1, 0, num_frames - 1);
     return lerp(data.timeline.x_values[f0], data.timeline.x_values[f1], fract(frame));
 }
 
@@ -339,13 +341,13 @@ static double time_to_frame(double time, const md_array(float) frame_times) {
 
     const double beg = frame_times[0];
     const double end = frame_times[num_frames - 1];
-    time = CLAMP(time, beg, end);
+    time = MD_CLAMP(time, beg, end);
 
     // Estimate the frame
-    const double frame_est = CLAMP(((time - beg) / (end-beg)) * (num_frames - 1), 0, num_frames - 1);
+    const double frame_est = MD_CLAMP(((time - beg) / (end-beg)) * (num_frames - 1), 0, num_frames - 1);
 
-    int64_t prev_frame_idx = CLAMP((int64_t)frame_est,     0, num_frames - 1);
-    int64_t next_frame_idx = CLAMP((int64_t)frame_est + 1, 0, num_frames - 1);
+    int64_t prev_frame_idx = MD_CLAMP((int64_t)frame_est,     0, num_frames - 1);
+    int64_t next_frame_idx = MD_CLAMP((int64_t)frame_est + 1, 0, num_frames - 1);
 
     if (time < (double)frame_times[prev_frame_idx]) {
         // Linear search down
@@ -366,7 +368,7 @@ static double time_to_frame(double time, const md_array(float) frame_times) {
 
     // Compute true fraction between timestamps
     double t = (time - (double)frame_times[prev_frame_idx]) / ((double)frame_times[next_frame_idx] - (double)frame_times[prev_frame_idx]);
-    t = CLAMP(t, 0.0, 1.0);
+    t = MD_CLAMP(t, 0.0, 1.0);
 
     // Compose frame value (base + fraction)
     return (double)prev_frame_idx + t;
@@ -385,9 +387,9 @@ static constexpr float SHADOW_SOFTNESS_MAX = 20.0f;
 
 // The G-buffer's size for an image shown of out_w x out_h: the render scale of each side, at least a pixel
 static void render_size(const ApplicationState* state, uint32_t out_w, uint32_t out_h, uint32_t* w, uint32_t* h) {
-    const float s = CLAMP(state->settings.render_scale, RENDER_SCALE_MIN, 1.0f);
-    *w = MAX((uint32_t)(out_w * s + 0.5f), 1U);
-    *h = MAX((uint32_t)(out_h * s + 0.5f), 1U);
+    const float s = MD_CLAMP(state->settings.render_scale, RENDER_SCALE_MIN, 1.0f);
+    *w = MD_MAX((uint32_t)(out_w * s + 0.5f), 1U);
+    *h = MD_MAX((uint32_t)(out_h * s + 0.5f), 1U);
 }
 
 // The lengths of the jitter offered (Visuals > Anti-Aliasing): powers of two, so that each divides the isosurface
@@ -402,7 +404,7 @@ static_assert(isomesh::MAX_FRAMES % JITTER_SEQUENCE_MAX == 0, "Each length divid
 // The option nearest to n (a file can hold anything), by its index
 static int jitter_samples_index(int n) {
     int best = 0;
-    for (int i = 1; i < (int)ARRAY_SIZE(jitter_samples_options); ++i) {
+    for (int i = 1; i < (int)MD_COUNTOF(jitter_samples_options); ++i) {
         if (abs(jitter_samples_options[i] - n) < abs(jitter_samples_options[best] - n)) best = i;
     }
     return best;
@@ -413,12 +415,12 @@ static int jitter_samples_index(int n) {
 // JITTER_SEQUENCE_MAX
 static uint32_t jitter_count(const ApplicationState* state) {
     const uint32_t base = (uint32_t)jitter_samples_options[jitter_samples_index(state->visuals.temporal_aa.jitter_samples)];
-    const float sx = (float)state->gbuffer.width  / (float)MAX(state->gbuffer.out_width, 1U);
-    const float sy = (float)state->gbuffer.height / (float)MAX(state->gbuffer.out_height, 1U);
-    const float n  = (float)base / MAX(sx * sy, 1.0e-3f);
+    const float sx = (float)state->gbuffer.width  / (float)MD_MAX(state->gbuffer.out_width, 1U);
+    const float sy = (float)state->gbuffer.height / (float)MD_MAX(state->gbuffer.out_height, 1U);
+    const float n  = (float)base / MD_MAX(sx * sy, 1.0e-3f);
     uint32_t count = base;
     while ((float)count < n && count < JITTER_SEQUENCE_MAX) count *= 2;
-    return MIN(count, (uint32_t)JITTER_SEQUENCE_MAX);
+    return MD_MIN(count, (uint32_t)JITTER_SEQUENCE_MAX);
 }
 
 // Which anti-aliasing passes run: the switch and the mode. Temporal carries more than the smoothing (the jitter,
@@ -445,10 +447,19 @@ static inline bool occlusion_temporal_active(const ApplicationState* state) {
 // is shown; without, the image alone at the screenshot's size (the window's or another), the view not moved over for
 // the windows. Either way it is made as the view is, frame by frame, until it has settled.
 static inline bool screenshot_pending(const ApplicationState* state) {
-    return !str_empty(state->screenshot.path_to_file);
+    return !md_str_empty(state->screenshot.path_to_file);
 }
 static inline bool screenshot_offscreen(const ApplicationState* state) {
     return screenshot_pending(state) && state->screenshot.hide_gui;
+}
+
+// The colour and alpha of a slice's edge as the slices are drawn (behind what of them is in front): none for the one
+// picked (the gizmo's outline is drawn over the view instead) and in an image without the GUI (as nothing of the
+// gizmo is); faint for a hidden one
+static vec4_t es_slice_edge_color(const ApplicationState* state, uint32_t rep_id, int i, bool enabled) {
+    if (screenshot_offscreen(state)) return vec4_set(0, 0, 0, 0);
+    if (state->representation.gizmo.rep_id == rep_id && state->representation.gizmo.plane == i) return vec4_set(0, 0, 0, 0);
+    return enabled ? vec4_set(1.0f, 1.0f, 1.0f, 0.85f) : vec4_set(0.78f, 0.78f, 0.78f, 0.4f);
 }
 
 // Where the view's focus is seen (ViewRegion): where the windows leave it uncovered, moved over in clip space by this. Not
@@ -508,12 +519,12 @@ static void draw_ops_timed(md_gl_draw_args_t args, const md_gl_draw_op_t* ops, s
     md_array(md_gl_draw_op_t) group = 0;
     for (size_t i = 0; i < count; ++i) {
         const uint32_t type = (uint32_t)ops[i].type;
-        if (type < ARRAY_SIZE(done) && done[type]) continue;
+        if (type < MD_COUNTOF(done) && done[type]) continue;
         md_array_shrink(group, 0);
         for (size_t k = i; k < count; ++k) {
             if (ops[k].type == ops[i].type) md_array_push(group, ops[k], alloc);
         }
-        if (type < ARRAY_SIZE(done)) done[type] = true;
+        if (type < MD_COUNTOF(done)) done[type] = true;
         args.draw_operations = { .count = (uint32_t)md_array_size(group), .ops = group };
         PUSH_GPU_SECTION(geometry_stage_name[geometry_stage(ops[i].type, glyphs)]);
         md_gl_draw(&args);
@@ -539,7 +550,7 @@ static void draw_distribution_window(ApplicationState* state);
 static void draw_async_task_window(ApplicationState* state);
 static void draw_script_editor_window(ApplicationState* state);
 static void draw_script_reference_window(ApplicationState* state);
-static void open_script_reference(ApplicationState* state, str_t topic, bool take_focus = true);
+static void open_script_reference(ApplicationState* state, md_str_t topic, bool take_focus = true);
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current);
 
 static void draw_debug_window(ApplicationState* state);
@@ -549,12 +560,12 @@ static void draw_structure_export_window(ApplicationState* state);
 static void draw_notifications_window();
 
 static void update_md_buffers(ApplicationState* state);
-static str_t create_unique_identifier(const md_script_ir_t* ir, str_t base, md_allocator_i* alloc);
+static md_str_t create_unique_identifier(const script::Program* ir, md_str_t base, md_allocator_i* alloc);
 
-static bool export_xvg(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, str_t filename);
-static bool export_csv(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, str_t filename);
+static bool export_xvg(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, md_str_t filename);
+static bool export_csv(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, md_str_t filename);
 
-static void create_screenshot(str_t path);
+static void create_screenshot(md_str_t path);
 
 // The sizes offered in the Settings menu. The stored setting is the size itself, not an
 // index into this table, so the table can change without invalidating anyone's .ini.
@@ -564,7 +575,7 @@ static const char* font_size_names[] = { "10", "12", "14", "16", "18", "20", "24
 static int nearest_font_size_index(float size) {
     int   best_idx  = 0;
     float best_dist = FLT_MAX;
-    for (int i = 0; i < (int)ARRAY_SIZE(font_sizes); ++i) {
+    for (int i = 0; i < (int)MD_COUNTOF(font_sizes); ++i) {
         const float dist = fabsf(font_sizes[i] - size);
         if (dist < best_dist) {
             best_dist = dist;
@@ -608,8 +619,8 @@ static void apply_visual_settings(void* user_data) {
     if (!(0 <= (int)v.ssao.mode && (int)v.ssao.mode < postprocess_pipeline::SsaoMode_Count)) v.ssao.mode = factory.ssao.mode;
     if (!(0 <= (int)v.anti_aliasing.mode && (int)v.anti_aliasing.mode < (int)AntiAliasingMode::Count)) v.anti_aliasing.mode = factory.anti_aliasing.mode;
     v.temporal_aa.jitter_samples = jitter_samples_options[jitter_samples_index(v.temporal_aa.jitter_samples)];
-    state->settings.render_scale = CLAMP(state->settings.render_scale, RENDER_SCALE_MIN, 1.0f);
-    v.shadows.softness = CLAMP(v.shadows.softness, SHADOW_SOFTNESS_MIN, SHADOW_SOFTNESS_MAX);
+    state->settings.render_scale = MD_CLAMP(state->settings.render_scale, RENDER_SCALE_MIN, 1.0f);
+    v.shadows.softness = MD_CLAMP(v.shadows.softness, SHADOW_SOFTNESS_MIN, SHADOW_SOFTNESS_MAX);
     if (!(0 <= (int)look.shading.mode && (int)look.shading.mode < postprocess_pipeline::ShadingMode_Count)) look.shading.mode = factory.shading.mode;
     if (!(0 <= (int)look.shading.colors && (int)look.shading.colors < postprocess_pipeline::ColorSpace_Count)) look.shading.colors = factory.shading.colors;
     if (!(0 <= (int)look.tonemapping.tonemapper && (int)look.tonemapping.tonemapper < postprocess_pipeline::Tonemapper_Count)) look.tonemapping.tonemapper = factory.tonemapping.tonemapper;
@@ -621,7 +632,7 @@ static void apply_visual_settings(void* user_data) {
 // rather than compounding factors, and the visible range is moved by the ratio so the user keeps
 // looking at the same stretch of trajectory.
 static void update_timeline_time_unit(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 
     if (state->timeline.units_version == display_units::version()) {
         return;
@@ -650,19 +661,19 @@ static void update_timeline_time_unit(ApplicationState* state) {
 }
 
 static void modify_selection(ApplicationState* state, md_bitset_t atom_mask, SelectionOperator op = SelectionOperator::Set) {
-    ASSERT(state);
+    MD_ASSERT(state);
     modify_field(&state->selection.selection_mask, atom_mask, op);
 }
 
 int main(int argc, char** argv) {
-#if DEBUG
+#if MD_DEBUG
     persistent_alloc = md_tracking_allocator_create(md_get_heap_allocator());
-#elif RELEASE
+#elif MD_RELEASE
     persistent_alloc = md_get_heap_allocator();
 #else
 #error "Must define DEBUG or RELEASE"
 #endif
-    frame_alloc = md_vm_arena_create(GIGABYTES(4));
+    frame_alloc = md_vm_arena_create(MD_GIGABYTES(4));
 
     struct NotificationState {
         md_mutex_t lock;
@@ -719,10 +730,10 @@ int main(int argc, char** argv) {
 
     state.allocator.persistent = persistent_alloc;
     state.allocator.frame = frame_alloc;
-    state.file_queue.ring = md_ring_allocator_create(md_alloc(persistent_alloc, MEGABYTES(1)), MEGABYTES(1));
+    state.file_queue.ring = md_ring_allocator_create(md_alloc(persistent_alloc, MD_MEGABYTES(1)), MD_MEGABYTES(1));
     // One arena per dataset, held by the system and the state that share it. Both are rewound
     // rather than destroyed between loads, so this handle is set once and never reassigned.
-    state.mold.sys.alloc   = md_arena_allocator_create(persistent_alloc, MEGABYTES(1));
+    state.mold.sys.alloc   = md_arena_allocator_create(persistent_alloc, MD_MEGABYTES(1));
     state.mold.state.alloc = state.mold.sys.alloc;
 
     md_temp_arena_system_init();
@@ -740,55 +751,55 @@ int main(int argc, char** argv) {
 
     // Init platform
     VIAMD_LOG_DEBUG("Initializing GL...");
-    if (!application::initialize(&state.app, 0, 0, STR_LIT("VIAMD"))) {
+    if (!application::initialize(&state.app, 0, 0, MD_STR_LIT("VIAMD"))) {
         VIAMD_LOG_ERROR("Could not initialize application...\n");
         return -1;
     }
 
     // Application settings live in the ImGui .ini. Bind first, then initialize: that call
     // reads the file, so the bound values are current by the time the loop starts.
-    app_settings::bind(STR_LIT("keep_representations"), &state.settings.keep_representations);
-    app_settings::bind(STR_LIT("exact_isosurfaces"), &state.settings.exact_isosurfaces);
-    app_settings::bind(STR_LIT("isosurface_rendering"), &state.settings.isosurface_rendering);
-    app_settings::bind(STR_LIT("focus_in_free_space"), &state.settings.focus_in_free_space);
-    app_settings::bind(STR_LIT("font_size"), &state.settings.font_size);
+    app_settings::bind(MD_STR_LIT("keep_representations"), &state.settings.keep_representations);
+    app_settings::bind(MD_STR_LIT("exact_isosurfaces"), &state.settings.exact_isosurfaces);
+    app_settings::bind(MD_STR_LIT("isosurface_rendering"), &state.settings.isosurface_rendering);
+    app_settings::bind(MD_STR_LIT("focus_in_free_space"), &state.settings.focus_in_free_space);
+    app_settings::bind(MD_STR_LIT("font_size"), &state.settings.font_size);
     app_settings::on_apply(apply_font_size, &state);
     // What the computer can handle, not what a figure looks like: kept per user as it is, never in a workspace
     state.app.window.vsync = true;
-    app_settings::bind(STR_LIT("vsync"), &state.app.window.vsync);
-    app_settings::bind(STR_LIT("render_scale"), &state.settings.render_scale);
-    app_settings::bind(STR_LIT("lazy_rendering"), &state.settings.lazy_rendering);
-    app_settings::bind(STR_LIT("shadows"), &state.visuals.shadows.enabled);
-    app_settings::bind(STR_LIT("shadows_softness"), &state.visuals.shadows.softness);
-    app_settings::bind(STR_LIT("ssao"), &state.visuals.ssao.enabled);
-    app_settings::bind_enum(STR_LIT("ssao_mode"), &state.visuals.ssao.mode);
-    app_settings::bind(STR_LIT("ssao_intensity"), &state.visuals.ssao.intensity);
-    app_settings::bind(STR_LIT("occlusion_temporal"), &state.visuals.occlusion_temporal);
-    app_settings::bind(STR_LIT("anti_aliasing"), &state.visuals.anti_aliasing.enabled);
-    app_settings::bind_enum(STR_LIT("anti_aliasing_mode"), &state.visuals.anti_aliasing.mode);
-    app_settings::bind(STR_LIT("taa_jitter_samples"), &state.visuals.temporal_aa.jitter_samples);
-    app_settings::bind(STR_LIT("taa_history_min"), &state.visuals.temporal_aa.feedback_min);
-    app_settings::bind(STR_LIT("taa_history_max"), &state.visuals.temporal_aa.feedback_max);
-    app_settings::bind(STR_LIT("motion_blur"), &state.visuals.temporal_aa.motion_blur.enabled);
-    app_settings::bind(STR_LIT("motion_blur_strength"), &state.visuals.temporal_aa.motion_blur.motion_scale);
-    app_settings::bind(STR_LIT("sharpen"), &state.visuals.sharpen.enabled);
-    app_settings::bind(STR_LIT("sharpen_strength"), &state.visuals.sharpen.weight);
+    app_settings::bind(MD_STR_LIT("vsync"), &state.app.window.vsync);
+    app_settings::bind(MD_STR_LIT("render_scale"), &state.settings.render_scale);
+    app_settings::bind(MD_STR_LIT("lazy_rendering"), &state.settings.lazy_rendering);
+    app_settings::bind(MD_STR_LIT("shadows"), &state.visuals.shadows.enabled);
+    app_settings::bind(MD_STR_LIT("shadows_softness"), &state.visuals.shadows.softness);
+    app_settings::bind(MD_STR_LIT("ssao"), &state.visuals.ssao.enabled);
+    app_settings::bind_enum(MD_STR_LIT("ssao_mode"), &state.visuals.ssao.mode);
+    app_settings::bind(MD_STR_LIT("ssao_intensity"), &state.visuals.ssao.intensity);
+    app_settings::bind(MD_STR_LIT("occlusion_temporal"), &state.visuals.occlusion_temporal);
+    app_settings::bind(MD_STR_LIT("anti_aliasing"), &state.visuals.anti_aliasing.enabled);
+    app_settings::bind_enum(MD_STR_LIT("anti_aliasing_mode"), &state.visuals.anti_aliasing.mode);
+    app_settings::bind(MD_STR_LIT("taa_jitter_samples"), &state.visuals.temporal_aa.jitter_samples);
+    app_settings::bind(MD_STR_LIT("taa_history_min"), &state.visuals.temporal_aa.feedback_min);
+    app_settings::bind(MD_STR_LIT("taa_history_max"), &state.visuals.temporal_aa.feedback_max);
+    app_settings::bind(MD_STR_LIT("motion_blur"), &state.visuals.temporal_aa.motion_blur.enabled);
+    app_settings::bind(MD_STR_LIT("motion_blur_strength"), &state.visuals.temporal_aa.motion_blur.motion_scale);
+    app_settings::bind(MD_STR_LIT("sharpen"), &state.visuals.sharpen.enabled);
+    app_settings::bind(MD_STR_LIT("sharpen_strength"), &state.visuals.sharpen.weight);
     // The look a session starts with (Visuals > Save as Default)
     {
         auto& look = state.settings.look;
-        app_settings::bind(STR_LIT("look_background"), look.background.color.elem, 3);
-        app_settings::bind_enum(STR_LIT("look_shading"), &look.shading.mode);
-        app_settings::bind_enum(STR_LIT("look_colors"), &look.shading.colors);
-        app_settings::bind(STR_LIT("look_light"), &look.shading.light);
-        app_settings::bind(STR_LIT("look_environment"), &look.shading.environment);
-        app_settings::bind(STR_LIT("look_ambient"), &look.shading.ambient);
-        app_settings::bind(STR_LIT("look_specular"), &look.shading.specular);
-        app_settings::bind(STR_LIT("look_tonemapping"), &look.tonemapping.enabled);
-        app_settings::bind_enum(STR_LIT("look_tonemapper"), &look.tonemapping.tonemapper);
-        app_settings::bind(STR_LIT("look_exposure"), &look.tonemapping.exposure);
-        app_settings::bind(STR_LIT("look_gamma"), &look.tonemapping.gamma);
-        app_settings::bind(STR_LIT("look_dof"), &look.dof.enabled);
-        app_settings::bind(STR_LIT("look_dof_strength"), &look.dof.aperture);
+        app_settings::bind(MD_STR_LIT("look_background"), look.background.color.elem, 3);
+        app_settings::bind_enum(MD_STR_LIT("look_shading"), &look.shading.mode);
+        app_settings::bind_enum(MD_STR_LIT("look_colors"), &look.shading.colors);
+        app_settings::bind(MD_STR_LIT("look_light"), &look.shading.light);
+        app_settings::bind(MD_STR_LIT("look_environment"), &look.shading.environment);
+        app_settings::bind(MD_STR_LIT("look_ambient"), &look.shading.ambient);
+        app_settings::bind(MD_STR_LIT("look_specular"), &look.shading.specular);
+        app_settings::bind(MD_STR_LIT("look_tonemapping"), &look.tonemapping.enabled);
+        app_settings::bind_enum(MD_STR_LIT("look_tonemapper"), &look.tonemapping.tonemapper);
+        app_settings::bind(MD_STR_LIT("look_exposure"), &look.tonemapping.exposure);
+        app_settings::bind(MD_STR_LIT("look_gamma"), &look.tonemapping.gamma);
+        app_settings::bind(MD_STR_LIT("look_dof"), &look.dof.enabled);
+        app_settings::bind(MD_STR_LIT("look_dof_strength"), &look.dof.aperture);
     }
     app_settings::on_apply(apply_visual_settings, &state);
     display_units::register_settings();
@@ -818,6 +829,15 @@ int main(int argc, char** argv) {
         if (!state.gpu_volume) {
             VIAMD_LOG_ERROR("Failed to create the GPU evaluation volume: %s", md_gpu_last_error());
         }
+        md_gpu_texture_desc_t plane_desc = vol_desc;
+        plane_desc.width = GPU_PLANE_DIM;
+        plane_desc.height = GPU_PLANE_DIM;
+        plane_desc.depth_or_layers = 1;
+        plane_desc.label = "Evaluation plane";
+        state.gpu_plane = md_gpu_texture_create(state.gpu_stream, &plane_desc);
+        if (!state.gpu_plane) {
+            VIAMD_LOG_ERROR("Failed to create the GPU evaluation plane: %s", md_gpu_last_error());
+        }
 
         // Potentials (surface fields). Kernels are made on first use, so this costs nothing until a
         // surface is coloured by one.
@@ -828,9 +848,9 @@ int main(int argc, char** argv) {
 #endif
 
     state.app.file_drop.user_data = &state;
-    state.app.file_drop.callback = [](size_t num_files, const str_t file_paths[], void* user_data) {
+    state.app.file_drop.callback = [](size_t num_files, const md_str_t file_paths[], void* user_data) {
         ApplicationState* state = (ApplicationState*)user_data;
-        ASSERT(state);
+        MD_ASSERT(state);
 
         for (size_t i = 0; i < num_files; ++i) {
             file_queue_push(&state->file_queue, file_paths[i], FileFlags_None);
@@ -841,7 +861,7 @@ int main(int argc, char** argv) {
     gbuffer_init(&state.gbuffer, state.app.framebuffer.width, state.app.framebuffer.height);
     picking_surface_init(&state.picking_surface, interaction_surface_main);
 
-    for (int i = 0; i < (int)ARRAY_SIZE(state.view.jitter.sequence); ++i) {
+    for (int i = 0; i < (int)MD_COUNTOF(state.view.jitter.sequence); ++i) {
         state.view.jitter.sequence[i].x = md_halton(i + 1, 2);
         state.view.jitter.sequence[i].y = md_halton(i + 1, 3);
     }
@@ -868,8 +888,8 @@ int main(int argc, char** argv) {
 	md_os_sys_info_query(&sys_info);
 
     int num_threads = VIAMD_NUM_WORKER_THREADS == 0 ? sys_info.num_physical_cores : VIAMD_NUM_WORKER_THREADS;
-	num_threads = CLAMP(num_threads, 2, sys_info.num_physical_cores);
-    task_system::initialize((size_t)num_threads);
+	num_threads = MD_CLAMP(num_threads, 2, sys_info.num_physical_cores);
+    task_system::initialize((uint32_t)num_threads);
 
     md_gl_initialize();
     state.gl.shaders                = md_gl_shaders_create(output_snippet(state));
@@ -890,18 +910,31 @@ int main(int argc, char** argv) {
 
     ImGui::init_theme();
 
-    state.editor.SetLanguage(script_editor::language());
+    state.editor.SetLanguage(script_editor::language(state.script.language));
     state.editor.SetPalette(TextEditor::GetDarkPalette());
     state.editor.SetInsertSpacesOnTabs(true);
     // The marks of how each property stands, left of the line numbers (see draw_script_gutter_mark)
     state.editor.SetDecorationsBeforeLineNumbers(true);
-    script_editor::enable_autocomplete(state.editor, &state.mold.sys);
+    script_editor::enable_autocomplete(state.editor, state.script.language, &state.mold.sys);
 
     {
+        // Assume argv[1..] are files to load
+        // Currently we do not support any command line flags
+        // So anything here which is a file path is assumed to be a file to load
+        size_t num_files = 0;
+        for (int i = 1; i < argc; ++i) {
+            md_str_t path = md_str_from_cstr(argv[i]);
+            if (md_path_is_valid(path)) {
+                file_queue_push(&state.file_queue, path);
+                num_files += 1;
+            }
+        }
 #ifdef VIAMD_DEFAULT_DATASET
-        {
+        // The default dataset is for a start with nothing to open. Loaded beside the files it would build a system the
+        // first of them replaces at once, or - a workspace goes first - replace the workspace's system itself.
+        if (num_files == 0) {
             md_str_writer_t sb = md_str_writer_create(frame_alloc);
-            str_t path = viamd::resource_path(&sb, STR_LIT(VIAMD_DEFAULT_DATASET));
+            md_str_t path = viamd::resource_path(&sb, MD_STR_LIT(VIAMD_DEFAULT_DATASET));
             if (md_path_is_valid(path)) {
                 // @NOTE: We want explicitly to disable writing of cache files for the default dataset
                 // The motivation is that the dataset may reside in a shared folder on the system that has no write access.
@@ -910,17 +943,6 @@ int main(int argc, char** argv) {
             }
         }
 #endif
-        if (argc > 1) {
-            // Assume argv[1..] are files to load
-            // Currently we do not support any command line flags
-            // So anything here which is a file path is assumed to be a file to load
-            for (int i = 1; i < argc; ++i) {
-                str_t path = str_from_cstr(argv[i]);
-                if (md_path_is_valid(path)) {
-                    file_queue_push(&state.file_queue, path);
-                }
-            }
-        }
     }
 
 #if EXPERIMENTAL_SDF == 1
@@ -949,6 +971,7 @@ int main(int argc, char** argv) {
         const double   max_frame = (double)last_frame;
 
         file_queue_process(&state);
+        system_inference_update(&state);
 
         script_vis_begin_frame(&state);
 
@@ -964,6 +987,12 @@ int main(int argc, char** argv) {
             md_gpu_device_poll(state.gpu_device);
         }
 #endif
+        // The density evaluations whose counts have come back: the rest of them issued, their readbacks queued
+        gpu_volume_jobs_poll(&state);
+        // What the isosurface meshes' pool tasks left behind that nobody wants any more
+        iso_meshes_collect();
+        // and what the ELF and LOL evaluations left (es_jobs_collect)
+        es_jobs_collect(&state);
 
         viamd::event_system_broadcast_event(viamd::EventType_ViamdFrameTick, viamd::EventPayloadType_ApplicationState, &state);
 
@@ -1000,7 +1029,13 @@ int main(int argc, char** argv) {
         ImGui::BeginCanvas("Main interaction window", true);
         const ImGuiWindow* canvas_window = ImGui::GetCurrentWindow();
         ImVec2 view_size = ImGui::GetContentRegionAvail();
+        // The planes of the representations first (es_planes.h): while the mouse is theirs, the view neither turns nor picks
+        // (over the whole viewport, as the scene is drawn: the canvas's content starts under its menu bar)
+        const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+        const bool planes_capture = es_planes_gizmo(&state, vec_cast(main_viewport->Pos), vec_cast(main_viewport->Size));
+        if (planes_capture) ImGui::BeginDisabled();
         InteractionSurfaceState surface_state = interaction_surface(interaction_surface_main, vec_cast(view_size));
+        if (planes_capture) ImGui::EndDisabled();
         ImGui::EndCanvas();
 
         const mat4_t clip_to_world = camera_view_to_world_matrix(state.view.camera) * state.view.param.matrix.inv.proj;
@@ -1016,7 +1051,7 @@ int main(int argc, char** argv) {
                 .width = state.gbuffer.width,
                 .height = state.gbuffer.height,
                 .clip_to_world = clip_to_world,
-                .pixel_scale = (float)state.gbuffer.width / (float)MAX(state.app.framebuffer.width, 1),
+                .pixel_scale = (float)state.gbuffer.width / (float)MD_MAX(state.app.framebuffer.width, 1),
             };
 
             interaction_surface_hit_extract(&hit, surface_state, args);
@@ -1026,6 +1061,14 @@ int main(int argc, char** argv) {
 
             event.clip_to_world = clip_to_world;
             event.world_to_clip = world_to_clip;
+
+            // A click on nothing (no outline or handle of a plane, which would have taken the mouse, and nothing of the
+            // scene: the background) lets go of the plane picked for the gizmo, as a click on its outline picks it
+            if (surface_state.deactivated && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                ImGui::GetIO().MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < 9.0f &&
+                hit.raw_idx == INVALID_PICKING_IDX && hit.depth >= 1.0f) {
+                state.representation.gizmo.plane = -1;
+            }
 
             if (event.kind == InteractionSurfaceEventKind::RegionSelect) {
                 md_bitset_t candidate_mask = md_bitmask_view(&state.representation.visibility_mask);
@@ -1052,6 +1095,7 @@ int main(int argc, char** argv) {
                     single_selection_sequence_clear(&state.selection.single_selection_sequence);
                 }
             } else if (event.kind == InteractionSurfaceEventKind::ContextMenu) {
+                state.context_menu_hit = event.hit;
                 ImGui::OpenPopup("Context Popup");
             }
             
@@ -1083,7 +1127,7 @@ int main(int argc, char** argv) {
             state.view.target = reset_transform;
         }
 
-        draw_context_popup(&state, hit);
+        draw_context_popup(&state, state.context_menu_hit);
 
         camera_animate(&state.view.camera, state.view.target, state.app.timing.delta_s);
         camera_animate_shift(&state.view.shift, view_region_center(state.view.region), state.app.timing.delta_s);
@@ -1091,7 +1135,7 @@ int main(int argc, char** argv) {
 
         ImGuiWindow* win = ImGui::GetCurrentContext()->HoveredWindow;
         if (win && strcmp(win->Name, "Main interaction window") == 0) {
-            script_set_hovered_property(&state,  STR_LIT(""));
+            script_set_hovered_property(&state,  MD_STR_LIT(""));
         }
         POP_GPU_SECTION();
 
@@ -1130,7 +1174,7 @@ int main(int argc, char** argv) {
                         }
                         break;
                     default:
-                        ASSERT(false);
+                        MD_ASSERT(false);
                 }
 
             }
@@ -1138,14 +1182,14 @@ int main(int argc, char** argv) {
             if (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME) || ImGui::IsKeyPressed(KEY_SKIP_TO_NEXT_FRAME)) {
                 double step = ImGui::IsKeyDown(ImGuiMod_Ctrl) ? 10.0 : 1.0;
                 if (ImGui::IsKeyPressed(KEY_SKIP_TO_PREV_FRAME)) step = -step;
-                state.animation.frame = CLAMP(state.animation.frame + step, 0.0, max_frame);
+                state.animation.frame = MD_CLAMP(state.animation.frame + step, 0.0, max_frame);
             }
         }
 
         // Not while a screenshot is pending: it is of the frame shown, made until it has settled
         if (state.animation.mode == PlaybackMode::Playing && !screenshot_pending(&state)) {
             state.animation.frame += state.app.timing.delta_s * state.animation.fps;
-            state.animation.frame = CLAMP(state.animation.frame, 0.0, max_frame);
+            state.animation.frame = MD_CLAMP(state.animation.frame, 0.0, max_frame);
             if (state.animation.frame >= max_frame) {
                 state.animation.mode = PlaybackMode::Stopped;
                 state.animation.frame = max_frame;
@@ -1198,8 +1242,32 @@ int main(int argc, char** argv) {
         }
 
         {
+            // The script is compiled again whatever changed its text. Typing is reported by the editor (its Render,
+            // above in the frame, which asks for a compilation once typing pauses), but an edit through the editor's
+            // API is not: Render takes its change as its own state before the keyboard's, and reports only that.
+            // Such an edit is a line added from the context menu, an example inserted from the script reference, a
+            // file loaded, an undo from the Edit menu; or any edit while the Script Editor window is closed, and its
+            // Render not called at all. Those are whole edits, not typing under way: compiled in this frame.
             std::string text = state.editor.GetText();
-            state.script.text_hash = md_hash64(text.c_str(), text.length(), 0);
+            const uint64_t text_hash = md_hash64(text.c_str(), text.length(), 0);
+            if (text_hash != state.script.text_hash && !state.script.compile_ir) {
+                state.script.compile_ir = true;
+                state.script.time_since_last_change = 1.0e9;
+            }
+            state.script.text_hash = text_hash;
+        }
+
+        // The display units changed: the marks' texts are written again, from the IR their markers came from
+        if (state.script.ir && !state.script.compile_ir && state.script.marks_units_version &&
+            state.script.marks_units_version != display_units::version()) {
+            state.script.marks_units_version = display_units::version();
+            const size_t num_tokens = script::num_marks(state.script.ir);
+            const script::Mark* vis_tokens = script::marks(state.script.ir);
+            for (size_t i = 0; i < num_tokens; ++i) {
+                char text_buf[256];
+                const md_str_t text = script::mark_text(text_buf, sizeof(text_buf), vis_tokens[i]);
+                script_editor::markers_set_text(&state.editor_markers, state.script.first_mark_marker + i, text);
+            }
         }
 
         if (state.script.compile_ir) {
@@ -1210,11 +1278,11 @@ int main(int argc, char** argv) {
             if (state.script.time_since_last_change > COMPILATION_TIME_DELAY_IN_SECONDS) {
                 // The evaluations are of what is about to be replaced, so they are stopped. Their IR is not
                 // affected: the compilation goes into a new one, and the old is freed once nothing holds it.
-                if (state.script.eval) md_script_eval_interrupt(state.script.eval);
+                if (state.script.eval) script::eval_interrupt(state.script.eval);
 
                 // Try aquire all semaphores
                 {
-                    defer {
+                    MD_DEFER {
                         flag_all_representations_as_dirty(&state);
                     };
 
@@ -1222,66 +1290,73 @@ int main(int argc, char** argv) {
                     state.script.compile_ir = false;
                     state.script.time_since_last_change = 0;
 
-                    // The previous IR is freed once nothing uses it (script_ir_collect)
-                    state.script.ir = script_ir_create(&state);
-
                     std::string src = state.editor.GetText();
-                    str_t src_str {src.data(), src.length()};
+                    md_str_t src_str {src.data(), src.length()};
 
                     char buf[1024];
                     size_t len = md_path_write_cwd(buf, sizeof(buf));
-                    str_t old_cwd = {buf, len};
-                    defer {
+                    md_str_t old_cwd = {buf, len};
+                    MD_DEFER {
                         md_path_set_cwd(old_cwd);
                     };
                     
-                    str_t cwd = {};
+                    md_str_t cwd = {};
                     if (state.files.workspace[0] != '\0') {
-                        extract_folder_path(&cwd, str_from_cstr(state.files.workspace));
+                        md_extract_folder_path(&cwd, md_str_from_cstr(state.files.workspace));
                     } else if (const FileEntry* run_file = file_list_run_file(&state.files.list)) {
                         // The trajectory's folder, else the structure's
-                        extract_folder_path(&cwd, str_from_cstr(run_file->path));
+                        md_extract_folder_path(&cwd, md_str_from_cstr(run_file->path));
                     }
-                    if (!str_empty(cwd)) {
+                    if (!md_str_empty(cwd)) {
                         md_path_set_cwd(cwd);
                     }
 
                     const size_t num_stored_selections = md_array_size(state.selection.stored_selections);                       
+                    script::NamedSet* sets = (script::NamedSet*)md_alloc(frame_alloc, MD_MAX(num_stored_selections, 1) * sizeof(script::NamedSet));
                     for (size_t i = 0; i < num_stored_selections; ++i) {
-                        str_t name = str_from_cstr(state.selection.stored_selections[i].name);
-                        const md_bitset_t* bf = &state.selection.stored_selections[i].atom_mask;
-                        md_script_ir_add_identifier_bitset(state.script.ir, name, *bf);
+                        sets[i].name  = md_str_from_cstr(state.selection.stored_selections[i].name);
+                        sets[i].atoms = state.selection.stored_selections[i].atom_mask;
                     }
+
+                    // The previous IR is freed once nothing uses it (script_ir_collect). Empty text is not compiled:
+                    // the IR holds the stored selections only.
+                    state.script.ir = script_ir_create(&state, src_str, script::CompileDesc{&state.mold.sys, sets, num_stored_selections, md_str_from_cstr(state.mold.run)});
                     
                     if (src_str) {
-                        md_script_ir_compile_from_source(state.script.ir, src_str, &state.mold.sys, NULL);
-
                         // The markers copy what they need from the IR (it is freed below if it did not compile)
                         script_editor::Markers* markers = &state.editor_markers;
                         script_editor::markers_set_source(markers, src_str);
 
-                        const size_t num_errors = md_script_ir_num_errors(state.script.ir);
-                        const md_log_token_t* errors = md_script_ir_errors(state.script.ir);
+                        const size_t num_errors = script::num_errors(state.script.ir);
+                        const script::Diagnostic* errors = script::errors(state.script.ir);
                         for (size_t i = 0; i < num_errors; ++i) {
                             // Errors win over everything they overlap
                             script_editor::markers_add(markers, script_editor::MarkerType_Error, INT32_MAX, errors[i].range, errors[i].text, errors[i].context);
                         }
 
-                        const size_t num_warnings = md_script_ir_num_warnings(state.script.ir);
-                        const md_log_token_t* warnings = md_script_ir_warnings(state.script.ir);
+                        const size_t num_warnings = script::num_warnings(state.script.ir);
+                        const script::Diagnostic* warnings = script::warnings(state.script.ir);
                         for (size_t i = 0; i < num_warnings; ++i) {
                             script_editor::markers_add(markers, script_editor::MarkerType_Warning, INT32_MAX - 1, warnings[i].range, warnings[i].text, warnings[i].context);
                         }
 
-                        const size_t num_tokens = md_script_ir_num_vis_tokens(state.script.ir);
-                        const md_script_vis_token_t* vis_tokens = md_script_ir_vis_tokens(state.script.ir);
+                        // A mark's unit, and its value, are shown in the display units: written again when those change
+                        const size_t num_tokens = script::num_marks(state.script.ir);
+                        const script::Mark* vis_tokens = script::marks(state.script.ir);
+                        state.script.first_mark_marker = script_editor::markers_count(markers);
+                        state.script.marks_units_version = display_units::version();
                         for (size_t i = 0; i < num_tokens; ++i) {
-                            const md_script_vis_token_t& tok = vis_tokens[i];
-                            script_editor::markers_add(markers, script_editor::MarkerType_Visualization, tok.depth, tok.range, tok.text, nullptr, tok.ref);
+                            const script::Mark& tok = vis_tokens[i];
+                            char text_buf[256];
+                            const md_str_t text = script::mark_text(text_buf, sizeof(text_buf), tok);
+                            script_editor::markers_add(markers, script_editor::MarkerType_Visualization, tok.depth, tok.range, text, nullptr, tok.ref);
                         }
+                        // What evaluating finds to fail is added after these (below), and replaced as it changes
+                        state.script.num_compile_markers = script_editor::markers_count(markers);
+                        state.script.eval_errors_version = 0;
 
-                        if (md_script_ir_valid(state.script.ir)) {
-                            uint64_t ir_figerprint = md_script_ir_fingerprint(state.script.ir);
+                        if (script::valid(state.script.ir)) {
+                            uint64_t ir_figerprint = script::fingerprint(state.script.ir);
                             if (state.script.ir_fingerprint != ir_figerprint) {
                                 state.script.ir_fingerprint = ir_figerprint;
                             }
@@ -1293,34 +1368,43 @@ int main(int argc, char** argv) {
             }
         }
 
+        // A script whose every property the evaluation holds as it is, moved to other lines or edited around them,
+        // takes the evaluation over at once: nothing is computed, and its hover and marks follow the new text
+        if (state.script.eval && state.script.ir && state.script.eval_ir != state.script.ir && !state.script.eval_init &&
+            state.script.language == script::Language::V2 && !state.tasks.evaluate.running()) {
+            const ScriptPlan p = script_plan(state, frame_alloc);
+            if (p.valid && !p.changes && p.num_pending == 0) state.script.eval_init = true;
+        }
+
         // IRs replaced, once no task may be on them. Before the evaluation is started again below, which could
         // otherwise keep a task running every frame
         script_ir_collect(&state);
 
         if (num_frames > 0) {
             if (state.script.eval_init) {
-                if (task_system::task_is_running(state.tasks.evaluate)) {
-                    md_script_eval_interrupt(state.script.eval);
+                if (state.tasks.evaluate.running()) {
+                    script::eval_interrupt(state.script.eval);
                 } else {
                     state.script.eval_init = false;
 
                     // The new evaluation takes over from the previous one: every property computed from the
-                    // same thing keeps its values and is not evaluated again (md_script_eval_create_from).
+                    // same thing keeps its values and is not evaluated again (script::eval_create).
                     // Not remade if the last compilation failed (in the same frame as the request).
-                    md_script_eval_t* prev = state.script.eval;
+                    script::Eval* prev = state.script.eval;
                     state.script.eval = nullptr;
 
-                    if (md_script_ir_valid(state.script.ir)) {
+                    if (script::valid(state.script.ir)) {
                         state.script.eval_ir = state.script.ir;
                         // The slots over periods come along, and what they hold where their property is taken over
-                        const md_script_eval_desc_t desc = { .num_frames = num_frames };
-                        state.script.eval = md_script_eval_create_from(prev, state.script.eval_ir, &desc, state.allocator.persistent);
+                        const script::EvalDesc desc = { .num_frames = num_frames, .sys = &state.mold.sys, .run = md_str_from_cstr(state.mold.run),
+                                                        .executor = task_system::executor() };
+                        state.script.eval = script::eval_create(prev, state.script.eval_ir, desc, state.allocator.persistent);
                     }
 
                     if (prev) {
                         // The versions of the new evaluation carry on from the previous one's, so nothing derived
                         // from those can be taken for these: the caches stay
-                        md_script_eval_free(prev);
+                        script::eval_free(prev);
                     } else {
                         // Its versions start over, in tables possibly allocated where earlier ones were
                         series_cache_free(&state);
@@ -1330,23 +1414,23 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (state.script.eval && md_script_ir_valid(state.script.eval_ir) &&
-                md_script_eval_ir_fingerprint(state.script.eval) == md_script_ir_fingerprint(state.script.eval_ir))
+            if (state.script.eval && script::valid(state.script.eval_ir) &&
+                script::eval_fingerprint(state.script.eval) == script::fingerprint(state.script.eval_ir))
             {
                 // The slots over periods follow their periods at once, also while evaluating (series_resolve_histogram).
                 // Nothing is evaluated for them until Evaluate is pressed: what needs evaluation only starts when
                 // asked to. A distribution needs none, it is kept per frame.
                 if (state.script.evaluate) {
-                    if (task_system::task_is_running(state.tasks.evaluate)) {
+                    if (state.tasks.evaluate.running()) {
                         // Started again once it has stopped, over the frames which remain then. Nothing it has
                         // done is lost.
-                        md_script_eval_interrupt(state.script.eval);
+                        script::eval_interrupt(state.script.eval);
                     } else {
                         state.script.evaluate = false;
-                        md_script_eval_reset_interrupt(state.script.eval);
+                        script::eval_reset_interrupt(state.script.eval);
 
                         // What is left to do, for the properties and the slots
-                        const md_bitset_t pending = md_script_eval_pending_frames(state.script.eval, frame_alloc);
+                        const md_bitset_t pending = script::eval_pending_frames(state.script.eval, frame_alloc);
                         const size_t count = md_bitset_count(pending);
                         if (count > 0) {
                             md_array_resize(state.script.eval_frames, count, state.allocator.persistent);
@@ -1356,28 +1440,50 @@ int main(int argc, char** argv) {
                                 state.script.eval_frames[n++] = (uint32_t)it.idx;
                             }
 
-                            // The IR is taken now: eval_ir may be replaced while it runs, and the IR it runs on is
-                            // not freed until it has finished. Nor are the frames touched.
-                            const md_script_ir_t* ir = state.script.eval_ir;
-                            md_script_eval_t* eval = state.script.eval;
+                            // The IR is taken now and held until the task has finished: eval_ir may be replaced while
+                            // it runs. Nor are the frames touched.
+                            const script::Program* ir = state.script.eval_ir;
+                            script::program_retain(ir);
+                            script::Eval* eval = state.script.eval;
                             const uint32_t* frames = state.script.eval_frames;
-                            state.tasks.evaluate = task_system::create_pool_task(STR_LIT("Evaluate script"), (uint32_t)n, [&state, ir, eval, frames](uint32_t beg, uint32_t end, uint32_t thread_num) {
-                                (void)thread_num;
-                                md_script_eval_frames(eval, ir, &state.mold.sys, str_from_cstr(state.mold.run), frames + beg, end - beg);
-                            });
-
+                            // Once it has ended, run or cancelled: the IR it held goes
 #if MEASURE_EVALUATION_TIME
-                            uint64_t time = (uint64_t)md_tick_now();
-                            task_system::ID time_task = task_system::create_pool_task(STR_LIT("##Time Eval"), [t0 = time, n]() {
-                                uint64_t t1 = md_tick_now();
-                                double s = md_tick_to_seconds(t1 - t0);
-                                VIAMD_LOG_INFO("Evaluation of %zu frames completed in: %.3fs", n, s);
-                            });
-                            task_system::set_task_dependency(time_task, state.tasks.evaluate);
+                            const uint64_t t0 = (uint64_t)md_tick_now();
+                            auto on_main = [ir, t0, n](task_system::Status) {
+                                VIAMD_LOG_INFO("Evaluation of %zu frames completed in: %.3fs", n, md_tick_to_seconds(md_tick_now() - t0));
+                                script::program_release(ir);
+                            };
+#else
+                            auto on_main = [ir](task_system::Status) { script::program_release(ir); };
 #endif
-                            task_system::enqueue_task(state.tasks.evaluate);
+                            if (script::eval_whole(eval)) {
+                                // v2: one call evaluates every pending frame, spreading them over the pool itself
+                                state.tasks.evaluate.start(MD_STR_LIT("Evaluate script"), [&state, ir, eval]() {
+                                    script::eval_frames(eval, ir, &state.mold.sys, md_str_from_cstr(state.mold.run), nullptr, 0);
+                                }, on_main);
+                            } else {
+                                state.tasks.evaluate.start_for(MD_STR_LIT("Evaluate script"), (uint32_t)n, 1, [&state, ir, eval, frames](uint32_t beg, uint32_t end) {
+                                    script::eval_frames(eval, ir, &state.mold.sys, md_str_from_cstr(state.mold.run), frames + beg, end - beg);
+                                }, on_main);
+                            }
                         }
                     }
+                }
+            }
+        }
+
+        // What the evaluation found to fail, marked in the source it was compiled from: the editor's while the
+        // evaluation is of the program last compiled
+        if (!state.script.compile_ir && state.script.eval && state.script.ir && state.script.eval_ir == state.script.ir) {
+            const script::EvalErrors er = script::eval_errors(state.script.eval);
+            if (er.version && er.version != state.script.eval_errors_version) {
+                state.script.eval_errors_version = er.version;
+                script_editor::markers_truncate(&state.editor_markers, state.script.num_compile_markers);
+                for (size_t i = 0; i < er.count; ++i) {
+                    script_editor::markers_add(&state.editor_markers, script_editor::MarkerType_Error, INT32_MAX, er.items[i].range, er.items[i].text, er.items[i].context);
+                }
+                for (size_t i = 0; i < er.num_warnings; ++i) {
+                    script_editor::markers_add(&state.editor_markers, script_editor::MarkerType_Warning, INT32_MAX - 1, er.warnings[i].range, er.warnings[i].text, er.warnings[i].context);
                 }
             }
         }
@@ -1403,7 +1509,7 @@ int main(int argc, char** argv) {
             ImGuiWindow* window = ImGui::FindWindowByName("Main interaction window");
             if (window) {
                 ImDrawList* dl = window->DrawList;
-                ASSERT(dl);
+                MD_ASSERT(dl);
 
                 const vec2_t res = { (float)state.app.window.width, (float)state.app.window.height };
                 const mat4_t mvp = state.view.param.matrix.curr.proj_no_jitter * state.view.param.matrix.curr.view;
@@ -1412,23 +1518,23 @@ int main(int argc, char** argv) {
                 const ImU32 text_color = convert_color(state.script.text_color);
                 const ImU32 rect_color = convert_color(state.script.text_bg_color);
 
-                const md_script_vis_text_t* texts = state.script.vis_shown->text;
+                const script::Text* texts = state.script.vis_shown->text;
                 size_t num_text = md_array_size(texts);
                 for (size_t i = 0; i < num_text; ++i) {
-                    const md_script_vis_text_t& vis_text = texts[i];
+                    const script::Text& vis_text = texts[i];
 
                     // A label carrying a unit is a quantity, so it is shown in the same unit as the
                     // plots and re-formatted here rather than taken as mdlib spelled it. Anything
                     // else is drawn as it came.
                     char buf[64];
-                    str_t str = vis_text.str;
+                    md_str_t str = vis_text.str;
                     if (!md_unit_is_none(vis_text.unit)) {
                         char unit_buf[32];
                         const double scl = display_units::factor_print(unit_buf, sizeof(unit_buf), vis_text.unit);
                         // The degree sign hugs the number the way the convention has it, everything else takes a space.
                         const char* sep = strcmp(unit_buf, "\xC2\xB0") == 0 ? "" : " ";
                         const int len = snprintf(buf, sizeof(buf), "%.2f%s%s", vis_text.value * scl, sep, unit_buf);
-                        str = {buf, (size_t)CLAMP(len, 0, (int)sizeof(buf) - 1)};
+                        str = {buf, (size_t)MD_CLAMP(len, 0, (int)sizeof(buf) - 1)};
                     }
 
                     immediate::scene_label(dl, mvp, ImVec2(res.x, res.y), vis_text.pos,
@@ -1481,7 +1587,7 @@ int main(int argc, char** argv) {
                 }
 
 				vec3_t ext = max_obb - min_obb;
-				float max_ext = MAX(ext.x, MAX(ext.y, ext.z));
+				float max_ext = MD_MAX(ext.x, MD_MAX(ext.y, ext.z));
 
                 if (max_ext > 3.0f) {
                     vec3_t half_ext = (max_obb - min_obb) * 0.5f;
@@ -1516,7 +1622,7 @@ int main(int argc, char** argv) {
             const Representation& rep = state.representation.reps[i];
             const uint32_t kind[3] = { (uint32_t)rep.type, (uint32_t)rep.color_mapping, (uint32_t)representation_shown(state, rep) };
             r_hash = md_hash64(kind, sizeof(kind), r_hash);
-            const str_t filt = str_from_cstrn(rep.filter.text, sizeof(rep.filter.text));
+            const md_str_t filt = md_str_from_cstrn(rep.filter.text, sizeof(rep.filter.text));
             r_hash = md_hash64(filt.ptr, filt.len, r_hash);
             r_hash = md_bitset_hash64(rep.atom_mask, r_hash);
         }
@@ -1577,7 +1683,7 @@ int main(int argc, char** argv) {
         POP_GPU_SECTION();
 
         PUSH_GPU_SECTION("Main thread tasks");
-        task_system::execute_main_task_queue();
+        task_system::run_main_queue();
         POP_GPU_SECTION();
         profiler::frame_end();
 
@@ -1602,6 +1708,7 @@ int main(int argc, char** argv) {
     immediate::queue_destroy(state.gfx.color_overlay);
     immediate::queue_destroy(state.gfx.overlay);
     immediate::shutdown();
+    es_planes_shutdown();
 
     state.gfx.world = nullptr;
     state.gfx.depth_overlay = nullptr;
@@ -1617,7 +1724,11 @@ int main(int argc, char** argv) {
     isomesh::target_free(&iso_mesh_target);
     for (size_t i = 0; i < md_array_size(state.representation.reps); ++i) {
         electronic_structure_mesh_free(&state, &state.representation.reps[i].electronic_structure);
+        // what its field has under way holds the GPU stream and pool tasks: both still here
+        surface_field_free(&state.representation.reps[i].electronic_structure.field_vol);
     }
+    iso_meshes_shutdown(&state);    // what the isosurface meshes' pool tasks made, on the GPU stream
+    es_jobs_shutdown(&state);       // the ELF and LOL evaluations under way: their streams before the device
     isomesh::shutdown();
     VIAMD_LOG_DEBUG("Shutting down task system...");
     task_system::shutdown();
@@ -1634,6 +1745,8 @@ int main(int argc, char** argv) {
 
         md_gpu_free(state.gpu_stream, state.gpu_coeff);
         md_gpu_texture_destroy(state.gpu_volume);
+        if (state.gpu_plane) md_gpu_texture_destroy(state.gpu_plane);
+        state.gpu_plane = nullptr;
         state.gpu_coeff = 0;
         state.gpu_coeff_capacity = 0;
         state.gpu_volume = nullptr;
@@ -1755,7 +1868,7 @@ static ViewRegion main_view_uncovered_region(const ApplicationState& state, cons
 
 // ### DRAW WINDOWS ###
 static void draw_main_menu(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
     bool new_clicked = false;
     char path_buf[2048] = "";
 
@@ -1763,12 +1876,12 @@ static void draw_main_menu(ApplicationState* data) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Open File...", "CTRL+L")) {
                 if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Open)) {
-                    file_queue_push(&data->file_queue, str_from_cstr(path_buf), FileFlags_ShowDialogue);
+                    file_queue_push(&data->file_queue, md_str_from_cstr(path_buf), FileFlags_ShowDialogue);
                 }
             }
             if (ImGui::MenuItem("Open Workspace...", "CTRL+O")) {
                 if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Open, WORKSPACE_FILE_EXTENSION)) {
-                    load_workspace(data, str_from_cstr(path_buf));
+                    load_workspace(data, md_str_from_cstr(path_buf));
                 }
             }
             if (ImGui::MenuItem("Save Workspace", "CTRL+S")) {
@@ -1777,7 +1890,7 @@ static void draw_main_menu(ApplicationState* data) {
                         save_workspace(data, {path_buf, strnlen(path_buf, sizeof(path_buf))});
                     }
                 } else {
-                    save_workspace(data, str_from_cstr(data->files.workspace));
+                    save_workspace(data, md_str_from_cstr(data->files.workspace));
                 }
             }
             if (ImGui::MenuItem("Save Workspace As...")) {
@@ -1839,7 +1952,7 @@ static void draw_main_menu(ApplicationState* data) {
                 ImGui::SetNextItemWidth(prop::control_width_before(size_text));
                 float percent = data->settings.render_scale * 100.0f;
                 if (ImGui::SliderFloat("##resolution", &percent, RENDER_SCALE_MIN * 100.0f, 100.0f, "%.0f %%")) {
-                    data->settings.render_scale = CLAMP(roundf(percent / 5.0f) * 0.05f, RENDER_SCALE_MIN, 1.0f);
+                    data->settings.render_scale = MD_CLAMP(roundf(percent / 5.0f) * 0.05f, RENDER_SCALE_MIN, 1.0f);
                     machine_dirty = true;
                 }
                 ImGui::SameLine(0.0f, 2.0f * gap);
@@ -1856,7 +1969,7 @@ static void draw_main_menu(ApplicationState* data) {
                 prop::row("camera");
                 const char* reset_label = "reset";
                 const float reset_w = ImGui::CalcTextSize(reset_label).x + 2.0f * ImGui::GetStyle().FramePadding.x;
-                ImGui::SetNextItemWidth(MAX(prop::control_width() - reset_w - gap, 1.0f));
+                ImGui::SetNextItemWidth(MD_MAX(prop::control_width() - reset_w - gap, 1.0f));
                 ImGui::Combo("##camera", (int*)(&data->view.mode), "Perspective\0Orthographic\0");
                 ImGui::SameLine(0.0f, gap);
                 if (ImGui::Button(reset_label)) {
@@ -1865,10 +1978,10 @@ static void draw_main_menu(ApplicationState* data) {
                 }
                 ImGui::SetItemTooltip("Frame what is shown again, from the default direction");
                 if (data->view.mode == CameraMode::Perspective) {
-                    float fov = RAD_TO_DEG(data->view.camera.fov_y);
+                    float fov = MD_RAD_TO_DEG(data->view.camera.fov_y);
                     prop::row("field of view");
                     if (ImGui::SliderFloat("##fov", &fov, 12.5f, 80.0f, (const char*)u8"%.1f°")) {
-                        data->view.camera.fov_y = DEG_TO_RAD(fov);
+                        data->view.camera.fov_y = MD_DEG_TO_RAD(fov);
                     }
                 }
                 const md_assembly_data_t& assemblies = data->mold.sys.assembly;
@@ -1878,23 +1991,30 @@ static void draw_main_menu(ApplicationState* data) {
                                           "The atoms of a copy are those of the file, and pick and select as them. The operators place\n"
                                           "the coordinates as the file gives them: centering, wrapping and making whole (Operations)\n"
                                           "are not applied while one is shown, and coordinates they moved before stay moved.");
-                    // A chain of an assembly: a copy of a polymer instance
+                    // A chain of an assembly: a copy of a polymer strand, a part of the instances it copies
                     auto num_chains = [&](size_t asm_idx) {
+                        const md_system_t& sys = data->mold.sys;
                         size_t n = 0;
-                        for (size_t p = assemblies.part_offset[asm_idx]; p < assemblies.part_offset[asm_idx + 1]; ++p) {
-                            const AssemblyPart part = assembly_part(assemblies, p);
+                        for (size_t g = assemblies.group_offset[asm_idx]; g < assemblies.group_offset[asm_idx + 1]; ++g) {
+                            const AssemblyGroup group = assembly_group(assemblies, g);
                             size_t polymers = 0;
-                            for (const md_instance_idx_t* k = part.inst; k < part.inst_end; ++k) {
-                                polymers += md_entity_kind_is_polymer(md_system_instance_entity_kind(&data->mold.sys, (size_t)*k)) ? 1 : 0;
+                            for (const md_instance_idx_t* k = group.inst; k < group.inst_end; ++k) {
+                                const md_urange_t res = md_system_instance_residue_range(&sys, (size_t)*k);
+                                for (uint32_t r = res.beg; r < res.end;) {
+                                    const md_part_idx_t part = md_system_part_find_by_residue_idx(&sys, r);
+                                    if (part < 0) break;
+                                    polymers += md_part_kind_is_polymer(md_system_part_kind(&sys, (size_t)part)) ? 1 : 0;
+                                    r = md_system_part_residue_range(&sys, (size_t)part).end;
+                                }
                             }
-                            n += polymers * (size_t)(part.oper_end - part.oper);
+                            n += polymers * (size_t)(group.oper_end - group.oper);
                         }
                         return n;
                     };
                     char preview[64] = "As deposited";
                     if (data->view.assembly >= 0 && (size_t)data->view.assembly < assemblies.count) {
-                        const str_t id = md_assembly_id(&assemblies, (size_t)data->view.assembly);
-                        snprintf(preview, sizeof(preview), "Assembly " STR_FMT " (%zu chains)", STR_ARG(id), num_chains((size_t)data->view.assembly));
+                        const md_str_t id = md_assembly_id(&assemblies, (size_t)data->view.assembly);
+                        snprintf(preview, sizeof(preview), "Assembly " MD_STR_FMT " (%zu chains)", MD_STR_ARG(id), num_chains((size_t)data->view.assembly));
                     }
                     int chosen = data->view.assembly;
                     ImGui::SetNextItemWidth(prop::control_width());
@@ -1902,8 +2022,8 @@ static void draw_main_menu(ApplicationState* data) {
                         if (ImGui::Selectable("As deposited", data->view.assembly < 0)) chosen = -1;
                         for (size_t k = 0; k < assemblies.count; ++k) {
                             char label[64];
-                            const str_t id = md_assembly_id(&assemblies, k);
-                            snprintf(label, sizeof(label), "Assembly " STR_FMT " (%zu chains)##%zu", STR_ARG(id), num_chains(k), k);
+                            const md_str_t id = md_assembly_id(&assemblies, k);
+                            snprintf(label, sizeof(label), "Assembly " MD_STR_FMT " (%zu chains)##%zu", MD_STR_ARG(id), num_chains(k), k);
                             if (ImGui::Selectable(label, data->view.assembly == (int)k)) chosen = (int)k;
                         }
                         ImGui::EndCombo();
@@ -1915,7 +2035,7 @@ static void draw_main_menu(ApplicationState* data) {
                         assembly_transforms(&data->view.assembly_transforms, &data->view.assembly_copy_offset, data->mold.sys, chosen, persistent_alloc);
                         reset_view(&data->view.target, data->mold.state, &data->representation.visibility_mask, data->view.camera.fov_y, data->view.region, &data->mold.sys, chosen);
                         // Room to zoom out to all of it
-                        data->view.trackball_param.max_distance = MAX(data->view.trackball_param.max_distance, data->view.target.distance * 10.0f);
+                        data->view.trackball_param.max_distance = MD_MAX(data->view.trackball_param.max_distance, data->view.target.distance * 10.0f);
                     }
                 }
                 if (md_unitcell_flags(&data->mold.state.unitcell) != 0) {
@@ -2053,8 +2173,8 @@ static void draw_main_menu(ApplicationState* data) {
                     postprocess_pipeline::Tonemapper_Passthrough,
                 };
                 static const char* tonemapper_names[] = {"ACES", "Neutral", "Filmic", "None"};
-                int idx = (int)ARRAY_SIZE(tonemappers) - 1;
-                for (int i = 0; i < (int)ARRAY_SIZE(tonemappers); ++i) {
+                int idx = (int)MD_COUNTOF(tonemappers) - 1;
+                for (int i = 0; i < (int)MD_COUNTOF(tonemappers); ++i) {
                     if (tonemappers[i] == data->visuals.tonemapping.tonemapper) idx = i;
                 }
                 prop::row("curve", "ACES: a filmic curve with more contrast, which shifts and desaturates the colors.\n"
@@ -2126,7 +2246,7 @@ static void draw_main_menu(ApplicationState* data) {
             machine_dirty |= aa_toggled;
 
             if (prop::section("Isosurfaces", false)) {
-                int rendering = CLAMP(data->settings.isosurface_rendering, 0, 1);
+                int rendering = MD_CLAMP(data->settings.isosurface_rendering, 0, 1);
                 prop::row("rendering", "Ray Casting: the surfaces are found in the evaluated volume, ray by ray, every frame.\n"
                                        "Mesh: the surfaces of orbitals and densities are extracted as triangle meshes from the\n"
                                        "field itself rather than from the volume, at a spacing set by the representation's resolution,\n"
@@ -2197,8 +2317,15 @@ static void draw_main_menu(ApplicationState* data) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Selection")) {
-            ImGui::Combo("Select by", (int*)(&data->selection.granularity), selection_granularity_str, (int)SelectionGranularity::Count);
-            ImGui::SetItemTooltip("What a click or a dragged region in the viewport selects: single atoms,\nwhole components (residues) or whole instances (chains, molecules)");
+            if (ImGui::BeginCombo("Select by", selection_granularity_str[(int)data->selection.granularity])) {
+                for (SelectionGranularity g : selection_granularity_order) {
+                    const bool current = g == data->selection.granularity;
+                    if (ImGui::Selectable(selection_granularity_str[(int)g], current)) data->selection.granularity = g;
+                    if (current) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip("What a click or a dragged region in the viewport selects: single atoms,\nwhole fragments (a ring system, a functional group, a backbone, an alkyl chain), whole residues,\nwhole parts (a covalent piece of a molecule: a strand of a polymer with its caps, a glycan, a ligand),\nwhole chains (all that the file gives the chain id, or the molecule where it gives none),\nor whole molecules (atoms joined by bonds, with their residues and polymer chains)");
             size_t num_selected_atoms = md_bitmask_count(&data->selection.selection_mask);
             if (ImGui::MenuItem("Invert")) {
                 md_bitmask_invert_range(&data->selection.selection_mask, 0, data->mold.sys.atom.count);
@@ -2228,15 +2355,15 @@ static void draw_main_menu(ApplicationState* data) {
                 ImGui::Text("Stored Selections");
                 for (int i = 0; i < (int)md_array_size(data->selection.stored_selections); i++) {
                     auto& sel = data->selection.stored_selections[i];
-                    const str_t name_str = str_from_cstr(sel.name);
-                    bool is_valid = md_script_identifier_name_valid(name_str);
+                    const md_str_t name_str = md_str_from_cstr(sel.name);
+                    bool is_valid = script::name_valid(data->script.language, name_str);
                     char error[64] = "";
                     if (!is_valid) {
                         snprintf(error, sizeof(error), "'%s' is not a valid identifier.", sel.name);
                     }
 
                     for (int j = 0; j < i; ++j) {
-                        if (str_eq_cstr(name_str, data->selection.stored_selections[j].name)) {
+                        if (md_str_eq_cstr(name_str, data->selection.stored_selections[j].name)) {
                             is_valid = false;
                             snprintf(error, sizeof(error), "identifier '%s' is already taken.", sel.name);
                             break;
@@ -2272,7 +2399,7 @@ static void draw_main_menu(ApplicationState* data) {
                 if (ImGui::Button("Create New")) {
                     char name_buf[64];
                     snprintf(name_buf, sizeof(name_buf), "sel%i", (int)md_array_size(data->selection.stored_selections) + 1);
-                    create_selection(data, str_from_cstr(name_buf), md_bitmask_view(&data->selection.selection_mask));
+                    create_selection(data, md_str_from_cstr(name_buf), md_bitmask_view(&data->selection.selection_mask));
                 }
 
                 //ImGui::PopItemFlag();
@@ -2282,7 +2409,7 @@ static void draw_main_menu(ApplicationState* data) {
         if (ImGui::BeginMenu("Screenshot")) {
             ImGui::Checkbox("Hide GUI", &data->screenshot.hide_gui);
             if (data->screenshot.hide_gui) {
-                data->screenshot.resolution = (ScreenshotResolution)MIN((int)data->screenshot.resolution, (int)ScreenshotResolution::Count - 1);
+                data->screenshot.resolution = (ScreenshotResolution)MD_MIN((int)data->screenshot.resolution, (int)ScreenshotResolution::Count - 1);
                 if (ImGui::BeginCombo("Resolution", screenshot_resolution_str[(int)data->screenshot.resolution])) {
                     for (int i = 0; i < (int)ScreenshotResolution::Count; ++i) {
                         if (ImGui::Selectable(screenshot_resolution_str[i], (i == (int)data->screenshot.resolution))) {
@@ -2317,26 +2444,26 @@ static void draw_main_menu(ApplicationState* data) {
                     ImGui::InputInt("Res X", &data->screenshot.res_x);
                     ImGui::InputInt("Res Y", &data->screenshot.res_y);
 
-                    data->screenshot.res_x = CLAMP(data->screenshot.res_x, 640, 16384);
-                    data->screenshot.res_y = CLAMP(data->screenshot.res_y, 480, 16384);
+                    data->screenshot.res_x = MD_CLAMP(data->screenshot.res_x, 640, 16384);
+                    data->screenshot.res_y = MD_CLAMP(data->screenshot.res_y, 480, 16384);
                     break;
                 default:
-                    ASSERT(false);
+                    MD_ASSERT(false);
                 }
             } else {
                 data->screenshot.res_x = data->app.framebuffer.width;
                 data->screenshot.res_y = data->app.framebuffer.height;
             }
             if (ImGui::MenuItem("Take Screenshot")) {
-                if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, STR_LIT("jpg,jpeg,png,bmp"))) {
+                if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, MD_STR_LIT("jpg,jpeg,png,bmp"))) {
                     size_t path_len = strnlen(path_buf, sizeof(path_buf));
-                    str_t ext;
-                    if (!extract_ext(&ext, {path_buf, path_len})) {
+                    md_str_t ext;
+                    if (!md_extract_ext(&ext, {path_buf, path_len})) {
                         path_len += snprintf(path_buf + path_len, sizeof(path_buf) - path_len, ".jpg");
-                        ext = STR_LIT("jpg");
+                        ext = MD_STR_LIT("jpg");
                     }
                     if (image_format_from_ext(ext) != ImageFormat_Unknown) {
-                        data->screenshot.path_to_file = str_copy({path_buf, path_len}, persistent_alloc);
+                        data->screenshot.path_to_file = md_str_copy({path_buf, path_len}, persistent_alloc);
                     }
                     else {
                         VIAMD_LOG_ERROR("Supplied image extension is not supported");
@@ -2431,7 +2558,7 @@ static void draw_main_menu(ApplicationState* data) {
                 if (data->operations.recenter_query.enabled) {
                     auto& recenter_query = data->operations.recenter_query;
                     ImGui::SameLine();
-                    if (filter_input("##recenter-query", &recenter_query.filter, filter_context(data))) {
+                    if (filter_input("##recenter-query", &recenter_query.filter, data->script.language, filter_context(data))) {
                         recenter_mark_query_dirty(data);
                     }
                 }
@@ -2486,7 +2613,7 @@ static void draw_main_menu(ApplicationState* data) {
                 ImGui::TableSetColumnIndex(2);
                 if (tracking.enabled) {
                     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-                    if (filter_input("##track-bonds-scope", &tracking.scope, filter_context(data), 0, nullptr, "all atoms")) {
+                    if (filter_input("##track-bonds-scope", &tracking.scope, data->script.language, filter_context(data), 0, nullptr, "all atoms")) {
                         tracking.scope_dirty = true;
                     }
                     if (ImGui::IsItemHovered() && !filter_completions_open() && tracking.scope.result.success) {
@@ -2525,12 +2652,15 @@ static void draw_main_menu(ApplicationState* data) {
                 }
 
                 ImGui::SameLine();
+                // VIAL has no bond changes per frame yet: its bonds() are the system's
+                const bool v2 = data->script.language == script::Language::V2;
+                ImGui::BeginDisabled(v2);
                 if (ImGui::SmallButton("Copy to Script")) {
                     // The same as a script value, to count or plot: formed(d), broken(d), bond(d)
                     char args[512] = "";
                     int len = 0;
-                    const str_t scope = str_trim(str_from_cstr(tracking.scope.text));
-                    if (!str_empty(scope)) len += snprintf(args + len, sizeof(args) - len, STR_FMT, STR_ARG(scope));
+                    const md_str_t scope = md_str_trim(md_str_from_cstr(tracking.scope.text));
+                    if (!md_str_empty(scope)) len += snprintf(args + len, sizeof(args) - len, MD_STR_FMT, MD_STR_ARG(scope));
                     if (tracking.tolerance != MD_BOND_DELTA_TOLERANCE && len < (int)sizeof(args)) {
                         len += snprintf(args + len, sizeof(args) - len, "%stolerance=%.3g", len ? ", " : "", tracking.tolerance);
                     }
@@ -2544,13 +2674,18 @@ static void draw_main_menu(ApplicationState* data) {
                         }
                         if (len < (int)sizeof(args)) len += snprintf(args + len, sizeof(args) - len, "}");
                     }
-                    const str_t ident = create_unique_identifier(data->script.ir, STR_LIT("bonds_delta"), data->allocator.frame);
+                    const md_str_t ident = create_unique_identifier(data->script.ir, MD_STR_LIT("bonds_delta"), data->allocator.frame);
                     char line[640];
-                    snprintf(line, sizeof(line), STR_FMT " = bond_delta(%s);", STR_ARG(ident), args);
-                    script_editor::append_line(data->editor, str_from_cstr(line));
+                    snprintf(line, sizeof(line), MD_STR_FMT " = bond_delta(%s);", MD_STR_ARG(ident), args);
+                    script_editor::append_line(data->editor, md_str_from_cstr(line));
                 }
-                ImGui::SetItemTooltip("Add the same bond changes to the script, to count them over the frames\n"
-                                      "(count(formed(d))) or select them (bond(d) is the bonds of each frame)");
+                ImGui::EndDisabled();
+                if (v2) {
+                    ImGui::SetItemTooltip("VIAL does not track bond changes yet: bond() gives the bonds of the system");
+                } else {
+                    ImGui::SetItemTooltip("Add the same bond changes to the script, to count them over the frames\n"
+                                          "(count(formed(d))) or select them (bond(d) is the bonds of each frame)");
+                }
 
                 if (ImGui::TreeNode("Advanced##track-bonds")) {
                     float tolerance = tracking.tolerance;
@@ -2613,7 +2748,7 @@ static void draw_main_menu(ApplicationState* data) {
 
             // Font
             int font_size_idx = nearest_font_size_index(data->settings.font_size);
-            if (ImGui::Combo("Font Size", &font_size_idx, font_size_names, (int)ARRAY_SIZE(font_size_names))) {
+            if (ImGui::Combo("Font Size", &font_size_idx, font_size_names, (int)MD_COUNTOF(font_size_names))) {
                 data->settings.font_size = font_sizes[font_size_idx];
                 apply_font_size(data);
                 app_settings::mark_dirty();
@@ -2643,7 +2778,7 @@ static void draw_main_menu(ApplicationState* data) {
             }
 
             char fps_buf[64];
-            snprintf(fps_buf, ARRAY_SIZE(fps_buf), "%.2f ms (%.1f fps)", avg_ms, 1000.f / avg_ms);
+            snprintf(fps_buf, MD_COUNTOF(fps_buf), "%.2f ms (%.1f fps)", avg_ms, 1000.f / avg_ms);
             const float w = ImGui::CalcTextSize(fps_buf).x;
             ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - w);
             ImGui::Text("%s", fps_buf);
@@ -2703,18 +2838,19 @@ void draw_load_dataset_window(ApplicationState* data) {
             }
         }
 
-        str_t path = str_from_cstr(state.path_buf);
+        md_str_t path = md_str_from_cstr(state.path_buf);
 
         if (state.path_changed) {
             state.path_changed = false;
             state.path_is_valid = md_path_is_valid(path) && !md_path_is_directory(path);
 
-            // Try to assign loader_idx from extension
-            state.loader_idx = 0;
-            str_t ext;
-            if (extract_ext(&ext, path)) {
-                state.loader_idx = (int)loader::type_from_ext(ext);
+            // The loader a dropped file would get: from the extension, and from the contents where the extension
+            // does not tell (Amber's mdout, prmtop and inpcrd have none, a .top may be Amber's)
+            loader::LoaderState detected = {};
+            if (state.path_is_valid) {
+                loader::init(&detected, path, &data->mold.sys);
             }
+            state.loader_idx = (int)detected.type;
         }
 
         if (ImGui::BeginCombo("Loader", loader::type_name(state.loader_idx).ptr)) {
@@ -2747,7 +2883,7 @@ void draw_load_dataset_window(ApplicationState* data) {
 				const char* format_str = atom_format_strings[format];
                 snprintf(state.atom_format_buf, sizeof(state.atom_format_buf), "%s", format_str);
             }
-            state.atom_format_idx = CLAMP(state.atom_format_idx, 0, MD_LAMMPS_ATOM_FORMAT_COUNT - 1);
+            state.atom_format_idx = MD_CLAMP(state.atom_format_idx, 0, MD_LAMMPS_ATOM_FORMAT_COUNT - 1);
 
             if (ImGui::BeginCombo("Atom Format", state.atom_format_idx > 0 ? atom_format_names[state.atom_format_idx] : "user defined")) {
                 for (int i = 0; i < MD_LAMMPS_ATOM_FORMAT_COUNT; ++i) {
@@ -2809,10 +2945,10 @@ void draw_load_dataset_window(ApplicationState* data) {
             if (type == LoaderType_LAMMPSDATA) {
                 load_state.arg = state.atom_format_buf;
             }
-            // A loader other than the extension would pick has to be stored with the file in a workspace
-            str_t ext = {};
-            extract_ext(&ext, path);
-            if (type != loader::type_from_ext(ext)) {
+            // A loader other than the file would get on its own has to be stored with it in a workspace
+            loader::LoaderState detected = {};
+            loader::init(&detected, path, &data->mold.sys);
+            if (type != detected.type) {
                 load_state.flags |= LoaderFlag_ExplicitType;
             }
 
@@ -2847,17 +2983,17 @@ void clear_atom_elem_mappings(ApplicationState* data) {
     md_array_shrink(data->dataset.atom_element_remappings, 0);
 }
 
-AtomElementMapping* add_atom_elem_mapping(ApplicationState* data, str_t lbl, md_element_t elem) {
+AtomElementMapping* add_atom_elem_mapping(ApplicationState* data, md_str_t lbl, md_element_t elem) {
     // Check if we already have a mapping for the label -> overwrite
     size_t i = 0;
     for (; i < md_array_size(data->dataset.atom_element_remappings); ++i) {
-        if (str_eq_cstr(lbl, data->dataset.atom_element_remappings[i].lbl)) break;
+        if (md_str_eq_cstr(lbl, data->dataset.atom_element_remappings[i].lbl)) break;
     }
     if (i == md_array_size(data->dataset.atom_element_remappings)) {
         AtomElementMapping mapping = {
             .elem = elem,
         };
-        str_copy_to_char_buf(mapping.lbl, sizeof(mapping.lbl), lbl);
+        md_str_copy_to_char_buf(mapping.lbl, sizeof(mapping.lbl), lbl);
         md_array_push(data->dataset.atom_element_remappings, mapping, persistent_alloc);
         return md_array_last(data->dataset.atom_element_remappings);
     } else {
@@ -2872,13 +3008,13 @@ void apply_atom_elem_mappings(ApplicationState* data) {
     }
 
     for (size_t j = 0; j < md_array_size(data->dataset.atom_element_remappings); ++j) {
-        str_t lbl = str_from_cstr(data->dataset.atom_element_remappings[j].lbl);
+        md_str_t lbl = md_str_from_cstr(data->dataset.atom_element_remappings[j].lbl);
         md_element_t elem = data->dataset.atom_element_remappings[j].elem;
         float radius = md_util_element_vdw_radius(elem);
         float mass = md_util_element_atomic_mass(elem);
 
         for (size_t i = 0; i < data->mold.sys.atom.count; ++i) {
-            if (str_eq(lbl, data->mold.sys.atom.type[i])) {
+            if (md_str_eq(lbl, data->mold.sys.atom.type[i])) {
                 data->mold.sys.atom.element[i] = elem;
                 data->mold.sys.atom.radius[i] = radius;
                 data->mold.sys.atom.mass[i] = mass;
@@ -2895,311 +3031,236 @@ void apply_atom_elem_mappings(ApplicationState* data) {
     md_array_free(mol->bond.conn.atom_idx, data->mold.sys.alloc);
     md_array_free(mol->bond.conn.bond_idx, data->mold.sys.alloc);
 
-    md_index_data_free(&mol->structure);
-    md_index_data_free(&mol->ring);
+    md_index_data_free(&mol->molecule);
+    md_ring_data_free(&mol->ring, data->mold.sys.alloc);
     
     md_system_state_t mol_state = {0};
-    md_util_system_infer(mol, &mol_state, data->mold.sys.alloc, MD_UTIL_INFER_BOND_BIT | MD_UTIL_INFER_STRUCTURE_BIT);
+    md_util_system_infer(mol, &mol_state, data->mold.sys.alloc, MD_UTIL_INFER_BOND_BIT | MD_UTIL_INFER_MOLECULE_BIT, NULL);
     data->mold.dirty_buffers |= MolBit_DirtyBonds;
 
     flag_all_representations_as_dirty(data);
 }
 */
 
-// Create a textual script describing a selection from a bitfield with respect to some reference index
-// @TODO(Robin): Clean this up, it is a mess. Just provide complete suggestions based on bitfield and molecule input.
-static void write_script_range(md_str_writer_t& sb, const int* indices, size_t num_indices, int ref_idx = 0) {
-    if (num_indices == 0) return;
-    if (num_indices == 1) {
-        md_str_writer_fmt(&sb, "%i", indices[0] - ref_idx + 1);
-        return;
-    }
-    
-    int range_beg = indices[0];
-    int prev_idx  = -1;
-
-    md_temp_scope_t temp = md_temp_begin();
-    md_allocator_i* temp_alloc = md_temp_allocator(temp);
-
-    md_array(md_irange_t) items = 0;
-    
-    for (size_t i = 0; i < num_indices; ++i) {
-        int idx = indices[i];
-        
-        if (idx - prev_idx > 1) {
-            if (prev_idx > range_beg) {
-                md_irange_t item = {range_beg - ref_idx + 1, prev_idx - ref_idx + 1};
-                md_array_push(items, item, temp_alloc);
-            } else if (prev_idx != -1) {
-                md_irange_t item = {prev_idx - ref_idx + 1, prev_idx - ref_idx + 1};
-                md_array_push(items, item, temp_alloc);
-            }
-            range_beg = idx;
-        }
-
-        prev_idx = idx;
-    }
-
-    if (prev_idx - range_beg > 0) {
-        md_irange_t item = {range_beg - ref_idx + 1, prev_idx - ref_idx + 1};
-        md_array_push(items, item, temp_alloc);
-    } else if (prev_idx != -1) {
-        md_irange_t item = {prev_idx - ref_idx + 1, prev_idx - ref_idx + 1};
-        md_array_push(items, item, temp_alloc);
-    }
-
-    const int64_t num_items = (int64_t)md_array_size(items);
-    if (num_items > 1) sb += "{";
-    for (int64_t i = 0; i < num_items; ++i) {
-        md_irange_t item = items[i];
-        if (item.beg == item.end) {
-            md_str_writer_fmt(&sb, "%i", item.beg);
-        }
-        else {
-            md_str_writer_fmt(&sb, "%i:%i", item.beg, item.end);
-        }
-        if (i < num_items - 1) {
-            sb += ',';
-        }
-    }
-    if (num_items > 1) sb += "}";
-    md_temp_end(temp);
-}
-
-static md_array(str_t) generate_script_selection_suggestions(str_t ident, md_bitset_t sel, const md_system_t* sys) {
-    const md_bitset_t* bf = &sel;
-    md_array(str_t) suggestions = 0;
-
-    bool within_same_comp = true;
-    bool within_same_inst = true;
-
-    md_instance_idx_t inst_idx = -1;
-    md_component_idx_t comp_idx = -1;
-
-    md_bitset_iter_t it = md_bitset_iter(*bf);
-    while (md_bitset_iter_next(&it)) {
-        uint64_t a_idx = it.idx;
-        int32_t  i_idx = md_system_instance_find_by_atom_idx(sys, a_idx);
-        int32_t  c_idx = md_system_component_find_by_atom_idx(sys, a_idx);
-
-        if (inst_idx == -1 && comp_idx != -1) {
-            inst_idx = i_idx;
-        } else if (c_idx != -1 && inst_idx != i_idx) {
-            within_same_inst = false;
-        }
-
-        if (comp_idx == -1 && c_idx != -1) {
-            comp_idx = c_idx;
-        } else if (c_idx != -1 && comp_idx != c_idx) {
-            within_same_comp = false;                        
-        }
-
-        if (!within_same_comp && !within_same_inst) {
-            break;
-        }
-    }
-    
-    const size_t popcount = md_bitset_count(*bf);
-    
-    md_str_writer_t sb = md_str_writer_create(frame_alloc);
-    defer { md_str_writer_free(&sb); };
-
-    auto write_atom_remainder = [](md_str_writer_t& sb, const md_bitset_t* bf, int ref_idx = 0) {
-        // Add any remainder
-        const uint64_t remainder = md_bitset_count(*bf);
-        if (remainder) {
-            int* indices = (int*)md_alloc(frame_alloc, remainder * sizeof(int));
-            defer { md_free(frame_alloc, indices, remainder * sizeof(int)); };
-
-            md_bitset_iter_extract_indices(indices, remainder, md_bitset_iter(*bf));
-            sb += "atom(";
-            write_script_range(sb, indices, remainder, ref_idx);
-            sb += ")";
-        }
-    };
-
-    if (comp_idx != -1 && within_same_comp) {
-        const md_urange_t range = md_component_atom_range(&sys->component, comp_idx);
-        if (popcount != range.end - range.beg) {
-            md_str_writer_reset(&sb);
-            sb += ident;
-            sb += " = ";
-
-            // Subset of residue is selected
-            write_atom_remainder(sb, bf, range.beg);
-            if (md_str_writer_len(&sb) < 512) {
-                str_t resname = md_component_name(&sys->component, comp_idx);
-                md_str_writer_fmt(&sb, " in resname(\"" STR_FMT "\");", STR_ARG(resname));
-                md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
-            }
-        }
-    }
-
-    else if (inst_idx != -1 && within_same_inst) {
-        const md_urange_t range = md_system_instance_atom_range(sys, inst_idx);
-        if (popcount != range.end - range.beg) {
-            md_str_writer_reset(&sb);
-            sb += ident;
-            sb += " = ";
-
-            // Subset of chain is selected
-            write_atom_remainder(sb, bf, range.beg);
-            if (md_str_writer_len(&sb) < 512) {
-				str_t inst_id = md_instance_id(&sys->instance, inst_idx);
-				md_str_writer_fmt(&sb, " in chain(\"" STR_FMT "\");", STR_ARG(inst_id));
-                md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
-            }
-        }
-    }
-
-    // What is left once complete chains and residues are taken out
-    md_bitmask_t remainder = md_bitmask_create(0, (uint32_t)sys->atom.count, frame_alloc);
-    md_bitmask_assign(&remainder, *bf);
-    auto remainder_has_all = [&remainder](md_urange_t range) {
-        return range.beg < range.end && md_bitmask_test_all_range(&remainder, range.beg, range.end);
-    };
-
-    md_array(int) complete_chains = 0;
-    md_array(int) complete_residues = 0;
-    
-    if (sys->instance.count) {
-        for (size_t i = 0; i < sys->instance.count; ++i) {    
-            const md_urange_t range = md_system_instance_atom_range(sys, i);
-            if (remainder_has_all(range)) {
-                md_array_push(complete_chains, (int)i, frame_alloc);
-                md_bitmask_clear_range(&remainder, range.beg, range.end);
-            }
-        }
-    }
-
-    if (sys->component.count) {
-        for (size_t i = 0; i < sys->component.count; ++i) {    
-            const md_urange_t range = md_component_atom_range(&sys->component, i);
-            if (remainder_has_all(range)) {
-                md_array_push(complete_residues, (int)i, frame_alloc);
-                md_bitmask_clear_range(&remainder, range.beg, range.end);
-            }
-        }
-    }
-
-    const uint64_t atom_remainder_count = md_bitmask_count(&remainder);
-    const md_bitset_t tmp_bf = md_bitmask_view(&remainder);
-    
-    if (complete_chains) {
-        md_str_writer_reset(&sb);
-        sb += ident;
-        sb += " = chain(";
-        write_script_range(sb, complete_chains, md_array_size(complete_chains));
-        sb += ")";
-
-        if (complete_residues) {
-            sb += " or residue(";
-            write_script_range(sb, complete_residues, md_array_size(complete_residues));
-            sb += ")";
-        }
-
-        if (atom_remainder_count) {
-            sb += " or ";
-            write_atom_remainder(sb, &tmp_bf);
-        }
-        
-        if (md_str_writer_len(&sb) < 512) {
-            md_str_writer_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
-        }
-        
-        md_str_writer_reset(&sb);
-        sb += ident;
-        sb += " = residue(";
-        for (size_t i = 0; i < md_array_size(complete_chains); ++i) {
-            md_urange_t range = md_instance_component_range(&sys->instance, complete_chains[i]);
-            md_str_writer_fmt(&sb, "%i:%i,", range.beg + 1, range.end);
-        }
-        if (complete_residues) {
-            write_script_range(sb, complete_residues, md_array_size(complete_residues));
-        } else {
-            md_str_writer_pop(&sb, 1);
-        }
-        sb += ")";
-
-        if (atom_remainder_count) {
-            sb += " or ";
-            write_atom_remainder(sb, &tmp_bf);
-        }
-        
-        if (md_str_writer_len(&sb) < 512) {
-            md_str_writer_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
-        }
-    }
-
-    if (complete_residues) {
-        md_str_writer_reset(&sb);
-        sb += ident;
-        sb += " = residue(";
-        write_script_range(sb, complete_residues, md_array_size(complete_residues));
-        sb += ")";
-
-        if (atom_remainder_count) {
-            sb += " or ";
-            write_atom_remainder(sb, &tmp_bf);
-        }
-
-        if (md_str_writer_len(&sb) < 512) {
-            md_str_writer_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
-        }
-    }
-
-    if (popcount) {
-        md_str_writer_reset(&sb);
-        sb += ident;
-        sb += " = ";
-        write_atom_remainder(sb, bf);
-        if (md_str_writer_len(&sb) < 512) {
-            md_str_writer_push_char(&sb, ';');
-            md_array_push(suggestions, str_copy(md_str_writer_to_str(&sb), frame_alloc), frame_alloc);
-        }
-    }
-    
-    return suggestions;
-}
-
-static int64_t find_identifier(const md_script_ir_t* ir, str_t ident) {
-    const int64_t num_ident = md_script_ir_num_identifiers(ir);
-    const str_t* idents = md_script_ir_identifiers(ir);
+static int64_t find_identifier(const script::Program* ir, md_str_t ident) {
+    const int64_t num_ident = script::num_identifiers(ir);
+    const md_str_t* idents = script::identifiers(ir);
     for (int64_t i = 0; i < num_ident; ++i) {
-        if (str_eq(ident, idents[i])) return i;
+        if (md_str_eq(ident, idents[i])) return i;
     }
     return -1;
 }
 
-static str_t create_unique_identifier(const md_script_ir_t* ir, str_t base, md_allocator_i* alloc) {
+static md_str_t create_unique_identifier(const script::Program* ir, md_str_t base, md_allocator_i* alloc) {
     char buf[128];
-    for (int64_t i = 1; i < 10; ++i) {
+    for (int64_t i = 1; i < 1000; ++i) {
         int res = snprintf(buf, sizeof(buf), "%.*s%i", (int)base.len, base.ptr, (int)i);
         if (res > 0) {
-            str_t ident = {buf, (size_t)res};
+            md_str_t ident = {buf, (size_t)res};
             if (find_identifier(ir, ident) == -1) {
-                return str_copy(ident, alloc);
+                return md_str_copy(ident, alloc);
             }
         }
     }
-    return str_t();
+    return md_str_t();
+}
+
+// The lines the Script menu offers (script_suggestions.h): the measurement of the atoms picked one by one, and the
+// selection. Every one of them is evaluated against the system before it is offered, which is not something to do
+// every frame the menu is open, so they are kept for as long as what they are of stays the same.
+// What the context menu of the viewport is about besides the selection, found as it opens (context_targets_update)
+static struct {
+    // What the New Representation entries are of: what was under the cursor (as a whole, and all of its name), and the
+    // selection
+    RepresentationTarget hovered;
+    RepresentationTarget all;
+    RepresentationTarget selection;
+
+    // What the Script menu is about while nothing is selected: what was under the cursor as it was highlighted (grown
+    // by the granularity), more than one atom, and the atoms of a bond under it
+    md_bitset_t hit_atoms = {};
+    int32_t hit_bond[2] = {-1, -1};
+} context_targets;
+
+static void context_targets_update(ApplicationState* state, const PickingHit& hit) {
+    representation_targets_from_hit(&context_targets.hovered, &context_targets.all, *state, hit);
+    representation_target_from_selection(&context_targets.selection, *state);
+    if (!md_bitset_empty(context_targets.hovered.atoms) && md_bitset_equal(context_targets.hovered.atoms, context_targets.selection.atoms)) {
+        representation_target_free(&context_targets.hovered);
+    }
+
+    md_allocator_i* alloc = md_get_heap_allocator();
+    md_bitset_free(&context_targets.hit_atoms, alloc);
+    context_targets.hit_bond[0] = context_targets.hit_bond[1] = -1;
+    const md_system_t& sys = state->mold.sys;
+    md_bitmask_t mask = md_bitmask_create(0, (uint32_t)sys.atom.count, alloc);
+    picking_hit_mask_set(&mask, *state, hit, state->selection.granularity);
+    // A single atom is no subject of its own
+    if (md_bitmask_count(&mask) > 1) {
+        context_targets.hit_atoms = md_bitmask_extract(&mask, alloc);
+    }
+    md_bitmask_free(&mask);
+    if (hit.domain == PickingDomain_Bond) {
+        md_atom_pair_t pair;
+        md_bond_flags_t flags;
+        bool formed;
+        if (picked_bond(*state, hit.local_idx, &pair, &flags, &formed)) {
+            context_targets.hit_bond[0] = pair.idx[0];
+            context_targets.hit_bond[1] = pair.idx[1];
+        }
+    }
+}
+
+struct ScriptSuggestions {
+    uint64_t key = 0;
+    md_allocator_i* arena = nullptr;
+    md_array(ScriptSuggestion) measure = 0;
+    md_array(ScriptSuggestion) select = 0;
+    md_str_t smiles = {};      // The canonical SMILES of the selection's heavy atoms
+};
+
+static const ScriptSuggestions& script_suggestions_get(ApplicationState* state, bool reset) {
+    static ScriptSuggestions cache;
+
+    const md_system_t& sys = state->mold.sys;
+    const SingleSelectionSequence& seq = state->selection.single_selection_sequence;
+
+    // The selection, or while there is none what was right-clicked, as it was highlighted
+    md_bitset_t sel = md_bitmask_view(&state->selection.selection_mask);
+    const bool from_hit = md_bitset_empty(sel);
+    if (from_hit) sel = context_targets.hit_atoms;
+
+    // The atoms of a measurement, in the order they were picked: the picks have to be what is selected, as the order
+    // is unknown for atoms selected otherwise. Two atoms need no order. Of what was right-clicked, the length of a bond.
+    int32_t atoms[4];
+    size_t num_atoms = 0;
+    const size_t num_selected = md_bitset_count(sel);
+    const size_t num_picked = single_selection_sequence_count(&seq);
+    if (from_hit) {
+        if (context_targets.hit_bond[0] >= 0) {
+            atoms[0] = context_targets.hit_bond[0];
+            atoms[1] = context_targets.hit_bond[1];
+            num_atoms = 2;
+        }
+    } else if (2 <= num_selected && num_selected <= 4) {
+        bool picks = num_picked == num_selected;
+        for (size_t i = 0; i < num_picked && picks; ++i) picks = md_bitset_test(sel, (uint32_t)seq.idx[i]);
+        if (picks) {
+            md_memcpy(atoms, seq.idx, num_picked * sizeof(int32_t));
+            num_atoms = num_picked;
+        } else if (num_selected == 2) {
+            md_bitset_iter_extract_indices(atoms, 2, md_bitset_iter(sel));
+            num_atoms = 2;
+        }
+    }
+
+    uint64_t key = md_bitset_hash64(sel, 0);
+    key = md_hash64(atoms, num_atoms * sizeof(int32_t), key);
+    const uint64_t counts[3] = {sys.atom.count, sys.residue.count, sys.part.count};
+    key = md_hash64(counts, sizeof(counts), key);
+    const uint32_t lang = (uint32_t)state->script.language;     // the lines are written in it
+    key = md_hash64(&lang, sizeof(lang), key);
+    // The names the lines assign to are the first ones the script does not have
+    key = md_hash64_combine(key, script::fingerprint(state->script.ir));
+
+    if (reset || key != cache.key || !cache.arena) {
+        if (!cache.arena) cache.arena = md_arena_allocator_create(md_get_heap_allocator(), MD_KILOBYTES(64));
+        md_arena_allocator_reset(cache.arena);
+        cache.measure = 0;
+        cache.select = 0;
+        cache.smiles = {};
+        cache.key = key;
+
+        if (num_atoms) {
+            static const md_str_t base[5] = {{}, {}, MD_STR_INIT("dist"), MD_STR_INIT("ang"), MD_STR_INIT("dih")};
+            const md_str_t ident = create_unique_identifier(state->script.ir, base[num_atoms], cache.arena);
+            cache.measure = script_suggest_measurement(state->script.language, ident, atoms, num_atoms, sys, cache.arena);
+        }
+        if (num_selected) {
+            const md_str_t ident = create_unique_identifier(state->script.ir, MD_STR_LIT("sel"), cache.arena);
+            cache.select = script_suggest_selection(state->script.language, ident, sel, sys, cache.arena);
+            if (sys.bond.count) cache.smiles = script_selection_smiles(sel, sys, cache.arena);
+        }
+    }
+    return cache;
+}
+
+static void draw_script_suggestion(ApplicationState* state, const ScriptSuggestion& s) {
+    // A long line is cut short in the menu, and shown whole when hovered
+    constexpr int max_label_len = 100;
+    char label[max_label_len + 8];
+    const bool cut = s.text.len > (size_t)max_label_len;
+    if (cut) snprintf(label, sizeof(label), "%.*s...", max_label_len - 3, s.text.ptr);
+    else snprintf(label, sizeof(label), MD_STR_FMT, MD_STR_ARG(s.text));
+
+    if (ImGui::MenuItem(label)) {
+        script_editor::append_line(state->editor, s.text);
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::IsItemHovered()) {
+        // What the line picks or measures is shown in the viewport
+        script_visualize_str(state, s.text, VIS_FLAGS);
+        if (cut || !md_str_empty(s.hint)) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40.0f);
+            if (cut) {
+                constexpr size_t max_tooltip_len = 1024;
+                const size_t len = MD_MIN(s.text.len, max_tooltip_len);
+                ImGui::TextUnformatted(s.text.ptr, s.text.ptr + len);
+                if (len < s.text.len) ImGui::TextDisabled("... (%zu characters)", s.text.len);
+            }
+            if (!md_str_empty(s.hint)) ImGui::TextDisabled(MD_STR_FMT, MD_STR_ARG(s.hint));
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
+}
+
+// A target, and the types it can be shown as in a menu: the suggested one first. Its atoms are highlighted while it is
+// hovered or open.
+static void draw_new_representation_menu(ApplicationState* state, const RepresentationTarget& target) {
+    if (md_bitset_empty(target.atoms)) return;
+    ImGui::PushID(&target);
+    const bool open = ImGui::BeginMenu(target.selection ? "Selected atoms" : target.label);
+    if (open || ImGui::IsItemHovered()) {
+        md_bitmask_assign(&state->selection.highlight_mask, target.atoms);
+    }
+    if (open) {
+        ImGui::TextDisabled("%llu atoms", (unsigned long long)md_bitset_count(target.atoms));
+        ImGui::Separator();
+        auto item = [&](RepresentationType type, bool suggested) {
+            if (ImGui::MenuItem(representation_type_str[(int)type], suggested ? "suggested" : nullptr)) {
+                create_representation_of_target(state, target, type);
+                ImGui::CloseCurrentPopup();
+            }
+        };
+        item(target.suggested_type, true);
+        ImGui::Separator();
+        const RepresentationType types[] = {
+            RepresentationType::SpaceFill, RepresentationType::Licorice, RepresentationType::BallAndStick,
+            RepresentationType::Ribbons, RepresentationType::Cartoon,
+        };
+        for (RepresentationType type : types) {
+            if (type != target.suggested_type && representation_target_can_show(*state, target, type)) item(type, false);
+        }
+        ImGui::EndMenu();
+    }
+    ImGui::PopID();
 }
 
 // # context_menu
 void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
-    // @Robin: Will hit ever be used here? (Possibly remove argument)
-    (void)hit;
-    ASSERT(state);
+    MD_ASSERT(state);
 
     if (!state->mold.sys.atom.count) return;
 
-    const size_t sss_count = single_selection_sequence_count(&state->selection.single_selection_sequence);
     const size_t num_atoms_selected = md_bitmask_count(&state->selection.selection_mask);
 
     if (ImGui::BeginPopup("Context Popup")) {
+        // What was under the cursor, found once, as the menu opens
+        if (ImGui::IsWindowAppearing()) {
+            context_targets_update(state, hit);
+        }
         if (num_atoms_selected == 2) {
             // A bond between the two, of a kind, or the removal of the one a user made
             int idx[2];
@@ -3212,8 +3273,9 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
                 char buf[256];
                 snprintf(buf, sizeof(buf), "Create Bond (%i, %i)", idx[0] + 1, idx[1] + 1);
                 if (ImGui::BeginMenu(buf)) {
-                    // Of the bond graph, or a non-covalent bond: those are drawn dashed, and are not followed by the
-                    // structures, the rings or the bonds tracked. A kind chosen is kept as given.
+                    // Of the bond graph, or a non-covalent bond: those are not followed by the structures, the rings or the
+                    // bonds tracked. Each kind but covalent is drawn dashed, in a style of its own. A kind chosen is kept
+                    // as given.
                     struct BondKind {
                         const char* label;
                         md_bond_flags_t flags;
@@ -3221,13 +3283,13 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
                     };
                     static const BondKind kinds[] = {
                         {"Bond",          MD_BOND_FLAG_NONE,
-                         "A bond of the bond graph: covalent, or coordinate between a metal and a non-metal.\nIt joins the molecules of its atoms."},
+                         "A bond of the bond graph: covalent, or coordinate between a metal and a non-metal\n(drawn dashed, thick with long dashes). It joins the molecules of its atoms."},
                         {"Hydrogen Bond", md_bond_flags_set_kind(MD_BOND_FLAG_KIND_GIVEN, MD_BOND_KIND_HYDROGEN),
-                         "Non-covalent, drawn dashed. bond(kind='hydrogen') in the script."},
+                         "Non-covalent, drawn with even dashes. bond(kind='hydrogen') in the script."},
                         {"Interaction",   md_bond_flags_set_kind(MD_BOND_FLAG_KIND_GIVEN, MD_BOND_KIND_INTERACTION),
-                         "Non-covalent, of no particular kind (a salt bridge, a halogen bond), drawn dashed.\nbond(kind='interaction') in the script."},
+                         "Non-covalent, of no particular kind (a salt bridge, a halogen bond), drawn with\nshort, sparse dashes. bond(kind='interaction') in the script."},
                     };
-                    for (size_t k = 0; k < ARRAY_SIZE(kinds); ++k) {
+                    for (size_t k = 0; k < MD_COUNTOF(kinds); ++k) {
                         if (ImGui::MenuItem(kinds[k].label)) {
                             const bool graph = !md_bond_is_noncovalent(kinds[k].flags);
                             system_bonds_edit_begin(state);
@@ -3290,24 +3352,24 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
         if (num_atoms_selected >= 1 && run_num_frames(state) > 0) {
             // The bond changes of the selection, written as the scope of the tracking: "x = <expression>;" of the
             // suggestions of the script. Written when it is asked for, it can take long for a large selection.
-            auto selection_scope = [state]() -> str_t {
+            auto selection_scope = [state]() -> md_str_t {
                 const md_bitset_t sel = md_bitmask_view(&state->selection.selection_mask);
-                const md_array(str_t) suggestions = generate_script_selection_suggestions(STR_LIT("x"), sel, &state->mold.sys);
+                const md_array(ScriptSuggestion) suggestions = script_suggest_selection(state->script.language, MD_STR_LIT("x"), sel, state->mold.sys, frame_alloc);
                 for (size_t i = 0; i < md_array_size(suggestions); ++i) {
-                    str_t expr = suggestions[i];
-                    if (!str_begins_with(expr, STR_LIT("x = "))) continue;
-                    expr = str_trim(str_substr(expr, 4));
-                    if (str_ends_with(expr, STR_LIT(";"))) expr = str_trim(str_substr(expr, 0, expr.len - 1));
-                    if (!str_empty(expr) && expr.len < sizeof(state->operations.bond_tracking.scope.text)) return expr;
+                    md_str_t expr = suggestions[i].text;
+                    if (!md_str_begins_with(expr, MD_STR_LIT("x = "))) continue;
+                    expr = md_str_trim(md_str_substr(expr, 4));
+                    if (md_str_ends_with(expr, MD_STR_LIT(";"))) expr = md_str_trim(md_str_substr(expr, 0, expr.len - 1));
+                    if (!md_str_empty(expr) && expr.len < sizeof(state->operations.bond_tracking.scope.text)) return expr;
                 }
                 return {};
             };
             if (ImGui::MenuItem("Track Bond Changes Here")) {
-                const str_t scope = selection_scope();
-                if (!str_empty(scope)) {
+                const md_str_t scope = selection_scope();
+                if (!md_str_empty(scope)) {
                     auto& tracking = state->operations.bond_tracking;
                     tracking.enabled = true;
-                    str_copy_to_char_buf(tracking.scope.text, sizeof(tracking.scope.text), scope);
+                    md_str_copy_to_char_buf(tracking.scope.text, sizeof(tracking.scope.text), scope);
                     tracking.scope_dirty = true;
                 } else {
                     VIAMD_LOG_INFO("The selection is too scattered to write as the scope of the bond changes tracked; write one in Operations");
@@ -3318,209 +3380,38 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
                                   "(Operations > Track bond changes, with the selection as its scope)");
         }
         if (ImGui::BeginMenu("Script")) {
-            bool any_suggestions = false;
-            if (num_atoms_selected <= 4 && sss_count > 1) {
-                int idx[4];
-                MEMCPY(idx, state->selection.single_selection_sequence.idx, sizeof(idx));
-                // Check if all selected atoms are within the same residue
-                md_component_idx_t res_idx = md_component_find_by_atom_idx(&state->mold.sys.component, idx[0]);
-                for (size_t i = 1; i < sss_count; ++i) {
-                    md_component_idx_t ri = md_component_find_by_atom_idx(&state->mold.sys.component, idx[i]);
-                    if (res_idx != ri) {
-                        res_idx = -1;
-                        break;
-                    }
+            const ScriptSuggestions& sug = script_suggestions_get(state, ImGui::IsWindowAppearing());
+            for (size_t i = 0; i < md_array_size(sug.measure); ++i) {
+                ImGui::PushID((int)i);
+                draw_script_suggestion(state, sug.measure[i]);
+                ImGui::PopID();
+            }
+            if (md_array_size(sug.measure) && md_array_size(sug.select)) {
+                ImGui::Separator();
+            }
+            for (size_t i = 0; i < md_array_size(sug.select); ++i) {
+                ImGui::PushID((int)(1000 + i));
+                draw_script_suggestion(state, sug.select[i]);
+                ImGui::PopID();
+            }
+            if (!md_str_empty(sug.smiles)) {
+                ImGui::Separator();
+                if (ImGui::MenuItem("Copy SMILES")) {
+                    ImGui::SetClipboardText(sug.smiles.ptr);    // zero terminated
+                    ImGui::CloseCurrentPopup();
                 }
-
-                any_suggestions = true;
-                char buf[256] = "";
-                if (sss_count == 2) {
-                    str_t ident = create_unique_identifier(state->script.ir, STR_LIT("dist"), frame_alloc);
-
-                    snprintf(buf, sizeof(buf), STR_FMT " = distance(%i, %i);", STR_ARG(ident), idx[0]+1, idx[1]+1);
-                    if (ImGui::MenuItem(buf)) {
-                        script_editor::append_line(state->editor, str_from_cstr(buf));
-                        ImGui::CloseCurrentPopup();
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        str_t str = str_from_cstr(buf);
-                        script_visualize_str(state, str, VIS_FLAGS);
-                    }
-
-                    if (res_idx != -1) {
-                        const md_urange_t range = md_component_atom_range(&state->mold.sys.component, res_idx);
-                        idx[0] -= range.beg;
-                        idx[1] -= range.beg;
-
-                        snprintf(buf, sizeof(buf), STR_FMT " = distance(%i, %i) in residue(%i);", STR_ARG(ident), idx[0]+1, idx[1]+1, res_idx+1);
-                        if (ImGui::MenuItem(buf)) {
-                            script_editor::append_line(state->editor, str_from_cstr(buf));
-                            ImGui::CloseCurrentPopup();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            str_t str = str_from_cstr(buf);
-                            script_visualize_str(state, str, VIS_FLAGS);
-                        }
-
-                        const int32_t resid = md_component_seq_id(&state->mold.sys.component, res_idx);
-                        snprintf(buf, sizeof(buf), STR_FMT " = distance(%i, %i) in resid(%i);", STR_ARG(ident), idx[0]+1, idx[1]+1, resid);
-                        if (ImGui::MenuItem(buf)) {
-                            script_editor::append_line(state->editor, str_from_cstr(buf));
-                            ImGui::CloseCurrentPopup();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            str_t str = str_from_cstr(buf);
-                            script_visualize_str(state, str, VIS_FLAGS);
-                        }
-
-                        str_t resname = md_component_name(&state->mold.sys.component, res_idx);
-                        if (resname) {
-                            snprintf(buf, sizeof(buf), STR_FMT " = distance(%i, %i) in resname(\"" STR_FMT "\");", STR_ARG(ident), idx[0]+1, idx[1]+1, STR_ARG(resname));
-                            if (ImGui::MenuItem(buf)) {
-                                script_editor::append_line(state->editor, str_from_cstr(buf));
-                                ImGui::CloseCurrentPopup();
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                str_t str = str_from_cstr(buf);
-                                script_visualize_str(state, str, VIS_FLAGS);
-                            }
-                        }
-                    }
-                }
-                else if(sss_count == 3) {
-                    str_t ident = create_unique_identifier(state->script.ir, STR_LIT("ang"), frame_alloc);
-
-                    snprintf(buf, sizeof(buf), STR_FMT " = angle(%i, %i, %i);", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1);
-                    if (ImGui::MenuItem(buf)) {
-                        script_editor::append_line(state->editor, str_from_cstr(buf));
-                        ImGui::CloseCurrentPopup();
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        str_t str = str_from_cstr(buf);
-                        script_visualize_str(state, str, VIS_FLAGS);
-                    }
-
-                    if (res_idx != -1) {
-                        const md_urange_t range = md_component_atom_range(&state->mold.sys.component, res_idx);
-                        idx[0] -= range.beg;
-                        idx[1] -= range.beg;
-                        idx[2] -= range.beg;
-
-                        snprintf(buf, sizeof(buf), STR_FMT " = angle(%i, %i, %i) in residue(%i);", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, res_idx+1);
-                        if (ImGui::MenuItem(buf)) {
-                            script_editor::append_line(state->editor, str_from_cstr(buf));
-                            ImGui::CloseCurrentPopup();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            str_t str = str_from_cstr(buf);
-                            script_visualize_str(state, str, VIS_FLAGS);
-                        }
-
-                        int32_t resid = md_component_seq_id(&state->mold.sys.component, res_idx);
-                        snprintf(buf, sizeof(buf), STR_FMT " = angle(%i, %i, %i) in resid(%i);", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, resid);
-                        if (ImGui::MenuItem(buf)) {
-                            script_editor::append_line(state->editor, str_from_cstr(buf));
-                            ImGui::CloseCurrentPopup();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            str_t str = str_from_cstr(buf);
-                            script_visualize_str(state, str, VIS_FLAGS);
-                        }
-
-                        str_t resname = md_component_name(&state->mold.sys.component, res_idx);
-                        if (resname) {
-                            snprintf(buf, sizeof(buf), STR_FMT " = angle(%i, %i, %i) in resname(\"" STR_FMT "\");", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, STR_ARG(resname));
-                            if (ImGui::MenuItem(buf)) {
-                                script_editor::append_line(state->editor, str_from_cstr(buf));
-                                ImGui::CloseCurrentPopup();
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                str_t str = str_from_cstr(buf);
-                                script_visualize_str(state, str, VIS_FLAGS);
-                            }
-                        }
-                    }
-                }
-                else if(sss_count == 4) {
-                    str_t ident = create_unique_identifier(state->script.ir, STR_LIT("dih"), frame_alloc);
-
-                    snprintf(buf, sizeof(buf), "%.*s = dihedral(%i, %i, %i, %i);", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, idx[3]+1);
-                    if (ImGui::MenuItem(buf)) {
-                        script_editor::append_line(state->editor, str_from_cstr(buf));
-                        ImGui::CloseCurrentPopup();
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        str_t str = str_from_cstr(buf);
-                        script_visualize_str(state, str, VIS_FLAGS);
-                    }
-
-                    if (res_idx != -1) {
-                        const md_urange_t range = md_component_atom_range(&state->mold.sys.component, res_idx);
-                        idx[0] -= range.beg;
-                        idx[1] -= range.beg;
-                        idx[2] -= range.beg;
-                        idx[3] -= range.beg;
-
-                        snprintf(buf, sizeof(buf), STR_FMT " = dihedral(%i, %i, %i, %i) in residue(%i);", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, idx[3]+1, res_idx+1);
-                        if (ImGui::MenuItem(buf)) {
-                            script_editor::append_line(state->editor, str_from_cstr(buf));
-                            ImGui::CloseCurrentPopup();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            str_t str = str_from_cstr(buf);
-                            script_visualize_str(state, str, VIS_FLAGS);
-                        }
-
-                        int32_t resid = md_component_seq_id(&state->mold.sys.component, res_idx);
-                        snprintf(buf, sizeof(buf), STR_FMT " = dihedral(%i, %i, %i, %i) in resid(%i);", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, idx[3]+1, resid);
-                        if (ImGui::MenuItem(buf)) {
-                            script_editor::append_line(state->editor, str_from_cstr(buf));
-                            ImGui::CloseCurrentPopup();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            str_t str = str_from_cstr(buf);
-                            script_visualize_str(state, str, VIS_FLAGS);
-                        }
-
-                        str_t resname = md_component_name(&state->mold.sys.component, res_idx);
-                        if (resname) {
-                            snprintf(buf, sizeof(buf), STR_FMT " = dihedral(%i, %i, %i, %i) in resname(\"" STR_FMT "\");", STR_ARG(ident), idx[0]+1, idx[1]+1, idx[2]+1, idx[3]+1, STR_ARG(resname));
-                            if (ImGui::MenuItem(buf)) {
-                                script_editor::append_line(state->editor, str_from_cstr(buf));
-                                ImGui::CloseCurrentPopup();
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                str_t str = str_from_cstr(buf);
-                                script_visualize_str(state, str, VIS_FLAGS);
-                            }
-                        }
-                    }
+                if (ImGui::BeginItemTooltip()) {
+                    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40.0f);
+                    ImGui::TextUnformatted(sug.smiles.ptr, sug.smiles.ptr + MD_MIN(sug.smiles.len, (size_t)2048));
+                    ImGui::TextDisabled("The canonical SMILES of the selection's heavy atoms, the same whatever their order in the file:\n"
+                                        "smiles('...') finds every place with this chemistry");
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndTooltip();
                 }
             }
-            if (num_atoms_selected >= 1) {
-                const md_bitset_t sel = md_bitmask_view(&state->selection.selection_mask);
-                str_t ident = create_unique_identifier(state->script.ir, STR_LIT("sel"), frame_alloc);
-                
-                md_array(str_t) suggestions = generate_script_selection_suggestions(ident, sel, &state->mold.sys);
-
-			    char buf[128]; // Buffer for limiting menu item size
-                for (size_t i = 0; i < md_array_size(suggestions); ++i) {
-					const char* ptr = suggestions[i].ptr;
-                    str_t s = suggestions[i];
-                    if (str_len(s) > 120) {
-						snprintf(buf, sizeof(buf), "%.*s...", 117, s.ptr);
-						ptr = buf;
-                    }
-                    if (ImGui::MenuItem(ptr)) {
-                        script_editor::append_line(state->editor, s);
-                        ImGui::CloseCurrentPopup();
-                    }
-                }
-
-                any_suggestions = any_suggestions || md_array_size(suggestions) > 0;
-            }
-            if (!any_suggestions) {
-                ImGui::Text("No suggestions for current selection");
+            if (!md_array_size(sug.measure) && !md_array_size(sug.select)) {
+                ImGui::TextDisabled(num_atoms_selected ? "No suggestions for the current selection" :
+                                    md_bitset_empty(context_targets.hit_atoms) ? "Nothing is selected" : "No suggestions for what was right-clicked");
             }
             ImGui::EndMenu();
         }
@@ -3530,23 +3421,23 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
             int idx = data->selection.atom_idx.right_click;
             if (0 <= idx && idx < (int)data->mold.sys.atom.count) {
                 char label[64] = "";
-                str_t type = data->mold.sys.atom.type[idx];
+                md_str_t type = data->mold.sys.atom.type[idx];
                 snprintf(label, sizeof(label), "Remap Element for '%.*s'", (int)type.len, type.ptr);
                 if (ImGui::BeginMenu(label)) {
                     static char input_buf[32] = "";
                     md_element_t elem = data->mold.sys.atom.element[idx];
-                    str_t name = md_util_element_name(elem);
-                    str_t sym  = md_util_element_symbol(elem);
+                    md_str_t name = md_util_element_name(elem);
+                    md_str_t sym  = md_util_element_symbol(elem);
 
                     ImGui::Text("Current Element: %.*s (%.*s)", (int)name.len, name.ptr, (int)sym.len, sym.ptr);
 
-                    str_t elem_str = {input_buf, strnlen(input_buf, sizeof(input_buf))};
+                    md_str_t elem_str = {input_buf, strnlen(input_buf, sizeof(input_buf))};
                     md_element_t new_elem = md_util_element_lookup(elem_str);
                     const bool is_valid = new_elem != 0;
 
                     ImGui::InputQuery("##Symbol", input_buf, sizeof(input_buf), is_valid, "Cannot recognize Element symbol");
-                    str_t new_name = md_util_element_name(new_elem);
-                    str_t new_sym  = md_util_element_symbol(new_elem);
+                    md_str_t new_name = md_util_element_name(new_elem);
+                    md_str_t new_sym  = md_util_element_symbol(new_elem);
                     ImGui::Text("New Element: %.*s (%.*s)", (int)new_name.len, new_name.ptr, (int)new_sym.len, new_sym.ptr);
                     if (!is_valid) ImGui::PushDisabled();
                     if (ImGui::Button("Apply") && is_valid) {
@@ -3599,6 +3490,26 @@ void draw_context_popup(ApplicationState* state, const PickingHit& hit) {
             }
         }
 
+        // A representation of what was under the cursor, or of the selection
+        const RepresentationTarget* targets[3] = { &context_targets.hovered, &context_targets.all, &context_targets.selection };
+        if (!md_bitset_empty(context_targets.selection.atoms) && !md_bitset_empty(context_targets.hovered.atoms)) {
+            // What was pointed at is part of the selection: the selection is what is meant first
+            md_temp_scope_t temp = md_temp_begin();
+            const md_bitset_t outside = md_bitset_andnot(context_targets.hovered.atoms, context_targets.selection.atoms, md_temp_allocator(temp));
+            if (md_bitset_empty(outside)) {
+                targets[0] = &context_targets.selection;
+                targets[1] = &context_targets.hovered;
+                targets[2] = &context_targets.all;
+            }
+            md_temp_end(temp);
+        }
+        bool any_target = false;
+        for (const RepresentationTarget* t : targets) any_target |= !md_bitset_empty(t->atoms);
+        if (any_target) {
+            ImGui::SeparatorText("New Representation");
+            for (const RepresentationTarget* t : targets) draw_new_representation_menu(state, *t);
+        }
+
         ImGui::EndPopup();
     }
 }
@@ -3637,7 +3548,7 @@ static void draw_selection_grow_window(ApplicationState* data) {
                 break;
             }
             default:
-                ASSERT(false);
+                MD_ASSERT(false);
             }
 
             grow_mask_by_selection_granularity(grow, data->selection.granularity, data->mold.sys);
@@ -3672,7 +3583,7 @@ static void draw_selection_query_window(ApplicationState* data) {
 
         ImGui::PushItemWidth(-1);
         bool apply = false;
-        if (filter_input("##query", &query.filter, filter_context(data), ImGuiInputTextFlags_AutoSelectAll, &apply)) {
+        if (filter_input("##query", &query.filter, data->script.language, filter_context(data), ImGuiInputTextFlags_AutoSelectAll, &apply)) {
             query.query_invalid = true;
         }
         ImGui::PopItemWidth();
@@ -3696,7 +3607,7 @@ static void draw_selection_query_window(ApplicationState* data) {
         if (query.query_invalid) {
             query.query_invalid = false;
             md_bitset_t result = md_bitset_empty_set();
-            filter_evaluate(&query.filter, &result, filter_context(data), frame_alloc);
+            filter_evaluate(&query.filter, &result, data->script.language, filter_context(data), frame_alloc);
             query_frame = data->animation.frame;
 
             md_bitmask_assign(&query.mask, query.filter.result.success ? result : md_bitset_empty_set());
@@ -3716,12 +3627,12 @@ static void draw_selection_query_window(ApplicationState* data) {
 }
 
 static void draw_animation_window(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
     size_t num_frames = run_num_frames(data);
     if (num_frames == 0) return;
 
-    ASSERT(data->timeline.x_values);
-    ASSERT(md_array_size(data->timeline.x_values) == num_frames);
+    MD_ASSERT(data->timeline.x_values);
+    MD_ASSERT(md_array_size(data->timeline.x_values) == num_frames);
 
     ImGui::SetNextWindowSize({300,200}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Animation", &data->animation.show_window, ImGuiWindowFlags_NoFocusOnAppearing)) {
@@ -3739,7 +3650,7 @@ static void draw_animation_window(ApplicationState* data) {
             snprintf(time_label, sizeof(time_label), "Time (%s)", unit_buf);
         }
         const float w = ImGui::CalcTextSize("Time (ps)").x;
-        const float item_width = MAX(ImGui::GetContentRegionAvail().x - w, 100.f);
+        const float item_width = MD_MAX(ImGui::GetContentRegionAvail().x - w, 100.f);
         ImGui::PushItemWidth(item_width);
         if (ImGui::BeginCombo("Interp.", interpolation_mode_str[(int)data->animation.interpolation])) {
             static const char* mode_tooltip[(int)InterpolationMode::Count] = {
@@ -3775,10 +3686,10 @@ static void draw_animation_window(ApplicationState* data) {
             // Not called keyframes: that name is kept for the keyframes of animations to come.
             // The slider covers up to 10 (or the last frame, beyond which a larger stride changes nothing), a larger one is
             // typed in (Ctrl+click): only the lower bound is enforced.
-            const int max_stride = (int)CLAMP((int64_t)num_frames - 1, (int64_t)2, (int64_t)10);
+            const int max_stride = (int)MD_CLAMP((int64_t)num_frames - 1, (int64_t)2, (int64_t)10);
             const char* fmt = data->animation.stride == 1 ? "every frame" : "every %d frames";
             ImGui::SliderInt("Stride", &data->animation.stride, 1, max_stride, fmt);
-            data->animation.stride = MAX(1, data->animation.stride);
+            data->animation.stride = MD_MAX(1, data->animation.stride);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("While playing, interpolate between every Nth frame only: smoother motion\n"
                                   "at the expense of the frames in between (and the usual interpolation artifacts).\n"
@@ -3804,7 +3715,7 @@ static void draw_animation_window(ApplicationState* data) {
                 }
                 break;
             default:
-                ASSERT(false);
+                MD_ASSERT(false);
         }
         ImGui::SameLine();
         if (ImGui::Button((const char*)ICON_FA_STOP)) {
@@ -3820,18 +3731,35 @@ static void draw_async_task_window(ApplicationState* data) {
     constexpr float WIDTH = 300.f;
     constexpr float MARGIN = 10.f;
 
-    task_system::ID tasks[256];
-    size_t num_tasks = task_system::pool_running_tasks(tasks, ARRAY_SIZE(tasks));
-    bool any_task_label_visible = false;
-    for (size_t i = 0; i < num_tasks; i++) {
-        str_t label = task_system::task_label(tasks[i]);
-        if (!label || label[0] == '\0' || (label[0] == '#' && label[1] == '#')) continue;
-        any_task_label_visible = true;
-    }
+    // The jobs with a label (task_system activities)
+    task_system::ActivityInfo activities[8];
+    const size_t num_activities = task_system::activity_list(activities, MD_COUNTOF(activities));
+    bool any_task_label_visible = num_activities > 0;
     // the isosurface meshes extracted on the GPU over frames (iso_meshes.h)
     float iso_fraction[8];
-    const size_t num_iso = iso_meshes_progress(iso_fraction, ARRAY_SIZE(iso_fraction));
+    const size_t num_iso = iso_meshes_progress(iso_fraction, MD_COUNTOF(iso_fraction));
     any_task_label_visible |= num_iso > 0;
+    // the density volumes evaluated on the GPU over frames
+    float vol_fraction[8];
+    const size_t num_vol = gpu_volume_jobs_progress(data, vol_fraction, MD_COUNTOF(vol_fraction));
+    any_task_label_visible |= num_vol > 0;
+    // the density matrix a volume waits for, made on a worker thread
+    double dmat_seconds = 0.0;
+    const bool dmat_preparing = density_dmat_preparing(data, &dmat_seconds) && dmat_seconds > 0.25;
+    any_task_label_visible |= dmat_preparing;
+    // the natural transition orbitals of an excited state, read on a worker thread (es_nto_ready)
+    double nto_seconds = 0.0;
+    const bool nto_warming = es_nto_warming(data, &nto_seconds) && nto_seconds > 0.25;
+    any_task_label_visible |= nto_warming;
+    // and the fields surfaces are coloured by, evaluated over frames (surface_field.h)
+    SurfaceFieldProgress field_progress[8];
+    const size_t num_field = surface_field_progress(field_progress, MD_COUNTOF(field_progress));
+    any_task_label_visible |= num_field > 0;
+    // and what the components have under way that the task system does not show, such as the analytic critical
+    // point search of the QM module: asked for through an event, as a component may not be built
+    TaskProgressRequest component_progress = {};
+    viamd::event_system_broadcast_event(viamd::EventType_ViamdTaskProgressRequest, viamd::EventPayloadType_TaskProgressRequest, &component_progress);
+    any_task_label_visible |= component_progress.count > 0;
     
     if (any_task_label_visible) {
         ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -3847,26 +3775,74 @@ static void draw_async_task_window(ApplicationState* data) {
         const float size = ImGui::GetFontSize() + pad * 2;
 
         char buf[64];
-        for (size_t i = 0; i < MIN(num_tasks, 8); i++) {
-            const auto id = tasks[i];
-            str_t label = task_system::task_label(id);
-            float fract = task_system::task_fraction_complete(id);
+        for (size_t i = 0; i < num_activities; i++) {
+            const task_system::ActivityInfo& a = activities[i];
+            const bool is_evaluate = a.id == data->tasks.evaluate.activity_id();
+            float fract = a.progress;
+            // One task over every frame (v2): the evaluation says how far it is
+            if (is_evaluate && data->script.eval && script::eval_whole(data->script.eval)) fract = script::eval_progress(data->script.eval);
 
-            if (!label || label[0] == '\0' || (label[0] == '#' && label[1] == '#')) continue;
-
-            snprintf(buf, sizeof(buf), "%.*s %.1f%%", (int)label.len, label.ptr, fract * 100.f);
-            ImGui::ProgressBar(fract, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad),0), buf);
-            ImGui::SameLine();
-            if (ImGui::DeleteButton((const char*)ICON_FA_XMARK, ImVec2(size, size))) {
-                task_system::task_interrupt(id);
-                if (id == data->tasks.evaluate) {
-                    md_script_eval_interrupt(data->script.eval);
+            if (fract < 0.0f) {
+                // no fraction to show: an indeterminate bar, to say it is not stuck
+                ImGui::ProgressBar(-0.5f * (float)ImGui::GetTime() - 1.0e-3f, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), a.label);
+            } else {
+                snprintf(buf, sizeof(buf), "%s %.1f%%", a.label, fract * 100.f);
+                ImGui::ProgressBar(fract, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+            }
+            if (a.cancellable) {
+                ImGui::SameLine();
+                ImGui::PushID((int)i);
+                if (ImGui::DeleteButton((const char*)ICON_FA_XMARK, ImVec2(size, size))) {
+                    task_system::activity_cancel(a.id);
+                    if (is_evaluate) {
+                        script::eval_interrupt(data->script.eval);
+                    }
                 }
+                ImGui::PopID();
             }
         }
         for (size_t i = 0; i < num_iso; i++) {
-            snprintf(buf, sizeof(buf), "Isosurface mesh %.0f%%", iso_fraction[i] * 100.f);
-            ImGui::ProgressBar(iso_fraction[i], ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+            if (iso_fraction[i] < 0.0f) {
+                // being prepared on a worker thread: an indeterminate bar
+                ImGui::ProgressBar(-0.5f * (float)ImGui::GetTime() - 1.0e-3f, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), "Isosurface mesh: preparing");
+            } else {
+                snprintf(buf, sizeof(buf), "Isosurface mesh %.0f%%", iso_fraction[i] * 100.f);
+                ImGui::ProgressBar(iso_fraction[i], ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+            }
+        }
+        if (dmat_preparing) {
+            ImGui::ProgressBar(-0.5f * (float)ImGui::GetTime() - 1.0e-3f, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), "Density matrix: preparing");
+        }
+        for (size_t i = 0; i < num_vol; i++) {
+            snprintf(buf, sizeof(buf), "Density volume %.0f%%", vol_fraction[i] * 100.f);
+            ImGui::ProgressBar(vol_fraction[i], ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+        }
+        if (nto_warming) {
+            ImGui::ProgressBar(-0.5f * (float)ImGui::GetTime() - 1.0e-3f, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), "Natural transition orbitals: computing");
+        }
+        for (size_t i = 0; i < num_field; i++) {
+            const SurfaceFieldProgress& p = field_progress[i];
+            if (p.preparing) {
+                snprintf(buf, sizeof(buf), "%s: preparing", p.label);
+                // no fraction to show: an indeterminate bar (a negative fraction moving with time), to say it is not stuck
+                ImGui::ProgressBar(-0.5f * (float)ImGui::GetTime() - 1.0e-3f, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+            } else {
+                snprintf(buf, sizeof(buf), "%s %.0f%%", p.label, p.fraction * 100.f);
+                ImGui::ProgressBar(p.fraction, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+            }
+        }
+        for (size_t i = 0; i < component_progress.count; i++) {
+            const TaskProgress& p = component_progress.items[i];
+            snprintf(buf, sizeof(buf), "%s %.0f%%", p.label, p.fraction * 100.f);
+            ImGui::ProgressBar(p.fraction, ImVec2(ImGui::GetContentRegionAvail().x - (size + pad), 0), buf);
+            if (p.cancel) {
+                ImGui::SameLine();
+                ImGui::PushID((int)i);
+                if (ImGui::DeleteButton((const char*)ICON_FA_XMARK "##component task", ImVec2(size, size))) {
+                    *p.cancel = 1;
+                }
+                ImGui::PopID();
+            }
         }
 
         ImGui::End();
@@ -3892,7 +3868,7 @@ struct TimelineArgs {
 
         float min_y;
         float max_y;
-        str_t unit;
+        md_str_t unit;
     } values;
 
     struct {
@@ -3947,7 +3923,7 @@ bool draw_property_timeline(const ApplicationState& data, const TimelineArgs& ar
     
     const float pad_x = ImPlot::GetStyle().PlotPadding.x;
     ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, ImVec2(pad_x, 0));
-    defer { ImPlot::PopStyleVar(1); };
+    MD_DEFER { ImPlot::PopStyleVar(1); };
 
     if (ImPlot::BeginPlot("##Timeline", ImVec2(-1,args.plot_height), flags)) {
         ImPlot::SetupAxisLinks(ImAxis_X1, args.view_range.beg, args.view_range.end);
@@ -3974,19 +3950,19 @@ bool draw_property_timeline(const ApplicationState& data, const TimelineArgs& ar
             if (!args.filter.enabled) ImGui::PushDisabled();
             ImPlot::DragRangeX("Time Filter", args.filter.beg, args.filter.end, args.filter.min, args.filter.max);
             if (!args.filter.enabled) ImGui::PopDisabled();
-            *args.filter.beg = CLAMP(*args.filter.beg, args.filter.min, args.filter.max);
-            *args.filter.end = CLAMP(*args.filter.end, args.filter.min, args.filter.max);
+            *args.filter.beg = MD_CLAMP(*args.filter.beg, args.filter.min, args.filter.max);
+            *args.filter.end = MD_CLAMP(*args.filter.end, args.filter.min, args.filter.max);
         }
 
         ImVec4 line_col = ImGui::ColorConvertU32ToFloat4(args.col);
         ImPlot::SetNextLineStyle(line_col);
 
         if (args.values.count > 0) {
-            ASSERT(args.values.x);
-            ASSERT(args.values.y);
+            MD_ASSERT(args.values.x);
+            MD_ASSERT(args.values.y);
             if (args.values.y_var) {
-                ASSERT(args.values.y_min);
-                ASSERT(args.values.y_max);
+                MD_ASSERT(args.values.y_min);
+                MD_ASSERT(args.values.y_max);
                 char lbl[32];
 
                 snprintf(lbl, sizeof(lbl), "%s", args.lbl);
@@ -4044,7 +4020,7 @@ bool draw_property_timeline(const ApplicationState& data, const TimelineArgs& ar
             *args.time = ImPlot::GetPlotMousePos().x;
         }
         else if (*args.input.is_selecting) {
-            *args.filter.end = MAX(ImPlot::GetPlotMousePos().x, *args.filter.beg);
+            *args.filter.end = MD_MAX(ImPlot::GetPlotMousePos().x, *args.filter.beg);
         }
         else if (ImPlot::IsPlotHovered()) {
             if (active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {           
@@ -4064,7 +4040,7 @@ bool draw_property_timeline(const ApplicationState& data, const TimelineArgs& ar
         }
         
         if (ImPlot::DragLineX(0, args.time, ImVec4(1,1,0,1))) {
-            *args.time = CLAMP(*args.time, args.filter.min, args.filter.max);
+            *args.time = MD_CLAMP(*args.time, args.filter.min, args.filter.max);
         }
         if (ImGui::IsItemHovered()) {
             print_timeline_tooltip = true;
@@ -4083,32 +4059,32 @@ bool draw_property_timeline(const ApplicationState& data, const TimelineArgs& ar
             int len = 0;
 
             double time = plot_pos.x;
-            int frame_idx = CLAMP((int)(time_to_frame(time, data.timeline.x_values) + 0.5), 0, (int)md_array_size(data.timeline.x_values)-1);
-            len += snprintf(buf + len, MAX(0, (int)sizeof(buf) - len), "time: %.2f", time);
+            int frame_idx = MD_CLAMP((int)(time_to_frame(time, data.timeline.x_values) + 0.5), 0, (int)md_array_size(data.timeline.x_values)-1);
+            len += snprintf(buf + len, MD_MAX(0, (int)sizeof(buf) - len), "time: %.2f", time);
 
             md_unit_t time_unit = data.timeline.time_unit;
             if (!md_unit_is_none(time_unit)) {
                 char unit_buf[32];
                 md_unit_print(unit_buf, sizeof(unit_buf), time_unit);
-                len += snprintf(buf + len, MAX(0, (int)sizeof(buf) - len), " (%s)", unit_buf);
+                len += snprintf(buf + len, MD_MAX(0, (int)sizeof(buf) - len), " (%s)", unit_buf);
             }
 
             if (0 <= frame_idx && frame_idx < args.values.count) {
                 const char* value_lbl = args.values.y_var ? "mean" : "value";
                 if (args.values.y) {
-                    len += snprintf(buf + len, MAX(0, (int)sizeof(buf) - len), ", %s: %.2f", value_lbl, args.values.y[frame_idx]);
+                    len += snprintf(buf + len, MD_MAX(0, (int)sizeof(buf) - len), ", %s: %.2f", value_lbl, args.values.y[frame_idx]);
                 }
                 if (args.values.y_var) {
-                    ASSERT(args.values.y_min);
-                    ASSERT(args.values.y_max);
-                    len += snprintf(buf + len, MAX(0, (int)sizeof(buf) - len), ", var: %.2f, min: %.2f, max: %.2f",
+                    MD_ASSERT(args.values.y_min);
+                    MD_ASSERT(args.values.y_max);
+                    len += snprintf(buf + len, MD_MAX(0, (int)sizeof(buf) - len), ", var: %.2f, min: %.2f, max: %.2f",
                         args.values.y_var[frame_idx],
                         args.values.y_min[frame_idx],
                         args.values.y_max[frame_idx]);
                 }
 
-                if (!str_empty(args.values.unit)) {
-                    len += snprintf(buf + len, MAX(0, (int)sizeof(buf) - len), " (%.*s)", (int)args.values.unit.len, args.values.unit.ptr);
+                if (!md_str_empty(args.values.unit)) {
+                    len += snprintf(buf + len, MD_MAX(0, (int)sizeof(buf) - len), " (%.*s)", (int)args.values.unit.len, args.values.unit.ptr);
                 }
             }
             ImGui::SetTooltip("%.*s", len, buf);
@@ -4180,7 +4156,7 @@ static ImVec4 plot_highlight(ImVec4 color) {
 
 // The part of a legend entry's popup both windows share: colour or colormap, and which members of
 // a population are drawn. A member hovered in the popup is written to hovered_pop_idx.
-static void plot_series_style_popup(ApplicationState* data, PlotSeries& s, int dim, const char* script_ident, md_script_vis_ref_t vis_ref, int* hovered_pop_idx) {
+static void plot_series_style_popup(ApplicationState* data, PlotSeries& s, int dim, const char* script_ident, script::Ref vis_ref, int* hovered_pop_idx) {
     if (dim > 1) {
         const char* color_type_labels[] = {"Solid", "Colormap"};
         int color_type = s.use_colormap ? 1 : 0;
@@ -4207,20 +4183,20 @@ static void plot_series_style_popup(ApplicationState* data, PlotSeries& s, int d
 
         const float sz = ImGui::GetFontSize() * 1.5f;
         ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.5f, 0.5f));
-        for (int k = 0; k < MIN(dim, PLOT_MAX_POPULATION); ++k) {
+        for (int k = 0; k < MD_MIN(dim, PLOT_MAX_POPULATION); ++k) {
             char lbl[32];
             snprintf(lbl, sizeof(lbl), "%d", k+1);
             if (ImGui::Selectable(lbl, s.population_mask.test(k), ImGuiSelectableFlags_DontClosePopups, ImVec2(sz, sz))) {
                 s.population_mask.flip(k);
             }
-            const str_t member = series_member_label(data, s.key, k);
-            if (!str_empty(member)) {
-                ImGui::SetItemTooltip(STR_FMT, STR_ARG(member));
+            const md_str_t member = series_member_label(data, s.key, k);
+            if (!md_str_empty(member)) {
+                ImGui::SetItemTooltip(MD_STR_FMT, MD_STR_ARG(member));
             }
             if (ImGui::IsItemHovered()) {
                 if (script_ident[0] != '\0') {
-                    script_visualize_ref(data, vis_ref, k, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
-                    script_set_hovered_property(data, str_from_cstr(script_ident), k);
+                    script_visualize_ref(data, vis_ref, k, script::DRAW_ATOMS | script::DRAW_GEOMETRY);
+                    script_set_hovered_property(data, md_str_from_cstr(script_ident), k);
                 }
                 *hovered_pop_idx = k;
             }
@@ -4251,9 +4227,9 @@ static void plot_series_list_item(ApplicationState* data, const char* dnd_type, 
         }
     }
     if (ImGui::IsItemHovered()) {
-        const str_t ident = series_script_ident(key);
-        if (!str_empty(ident)) {
-            script_visualize_ref(data, md_script_ir_property_vis_ref(data->script.eval_ir, ident), -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+        const md_str_t ident = series_script_ident(key);
+        if (!md_str_empty(ident)) {
+            script_visualize_ref(data, script::output_ref(data->script.eval_ir, ident), -1, script::DRAW_ATOMS | script::DRAW_GEOMETRY);
             script_set_hovered_property(data, ident);
         } else {
             ImGui::SetTooltip("%s\nClick to show in the first subplot, drag into any", key.path);
@@ -4269,13 +4245,13 @@ static void plot_series_list_item(ApplicationState* data, const char* dnd_type, 
 
 // The series loaded along the run, one submenu per file
 static void plot_system_series_menu(ApplicationState* data, const char* dnd_type, PlotSubplot& first) {
-    str_t groups[64];
-    const size_t num_groups = MIN(system_series_groups(groups, ARRAY_SIZE(groups), data), ARRAY_SIZE(groups));
+    md_str_t groups[64];
+    const size_t num_groups = MD_MIN(system_series_groups(groups, MD_COUNTOF(groups), data), MD_COUNTOF(groups));
     size_t num_listed = 0;
     for (size_t g = 0; g < num_groups; ++g) {
         md_temp_scope_t temp = md_temp_begin();
         const size_t num = system_series_members(nullptr, 0, data, groups[g]);
-        str_t* paths = md_temp_alloc_array(temp, str_t, num + 1);
+        md_str_t* paths = md_temp_alloc_array(temp, md_str_t, num + 1);
         system_series_members(paths, num, data, groups[g]);
         if (num > 0) {
             char group_label[256];
@@ -4297,37 +4273,141 @@ static void plot_system_series_menu(ApplicationState* data, const char* dnd_type
 
 // The members of a script property's population, if it has one: the extent of its value axis
 static size_t script_property_population(const ApplicationState* data, const SeriesKey& key) {
-    const md_attributes_t* table = series_table(data, key.source, str_from_cstr(key.path));
-    const md_attribute_t* attr = table ? md_attributes_find(table, str_from_cstr(key.path)) : nullptr;
+    const md_attributes_t* table = series_table(data, key.source, md_str_from_cstr(key.path));
+    const md_attribute_t* attr = table ? md_attributes_find(table, md_str_from_cstr(key.path)) : nullptr;
     if (!attr || attr->format.rank < 1 || attr->format.shape[0] == 0) return 0;
     return md_attribute_element_count(&attr->format) / attr->format.shape[0];
 }
 
 // #timeline
 
-// What a getter is handed: the resolved series, and which member of its population
+// What a getter is handed: the resolved series, and which member of its population. Periodic values (len > 0) are placed a
+// whole number of periods away from where they are: into the window [ref, ref + len[, or, for near, as near ref as they come
+// (what is measured against the mouse).
 struct TemporalGetterPayload {
     const SeriesTemporalView* view;
     int k;
+    double ref = 0.0;
+    double len = 0.0;
+    bool near = false;
 };
+
+static inline double temporal_place(const TemporalGetterPayload* p, double y) {
+    if (p->len <= 0.0) return y;
+    return p->near ? periodic_near(y, p->ref, p->len) : periodic_wrap(y, p->ref, p->len);
+}
 
 static ImPlotPoint temporal_getter_line(int i, void* payload) {
     const TemporalGetterPayload* p = (const TemporalGetterPayload*)payload;
-    return series_temporal_point(*p->view, i, p->k);
+    ImPlotPoint pt = series_temporal_point(*p->view, i, p->k);
+    pt.y = temporal_place(p, pt.y);
+    return pt;
 }
 
+// A band is placed by its centre, and keeps its width
 static ImPlotPoint temporal_getter_band_lo(int i, void* payload) {
     const TemporalGetterPayload* p = (const TemporalGetterPayload*)payload;
     double lo, hi;
     series_temporal_band(*p->view, i, &lo, &hi);
-    return ImPlotPoint(p->view->x[i], lo);
+    const double c = 0.5 * (lo + hi);
+    return ImPlotPoint(p->view->x[i], lo + (temporal_place(p, c) - c));
 }
 
 static ImPlotPoint temporal_getter_band_hi(int i, void* payload) {
     const TemporalGetterPayload* p = (const TemporalGetterPayload*)payload;
     double lo, hi;
     series_temporal_band(*p->view, i, &lo, &hi);
-    return ImPlotPoint(p->view->x[i], hi);
+    const double c = 0.5 * (lo + hi);
+    return ImPlotPoint(p->view->x[i], hi + (temporal_place(p, c) - c));
+}
+
+// Arrays of points moved by a whole number of periods (off), for drawing a run of a periodic band below and above itself
+struct PeriodicBandPayload {
+    const double* x;
+    const double* y;
+    double off;
+};
+
+static ImPlotPoint periodic_band_getter(int i, void* payload) {
+    const PeriodicBandPayload* p = (const PeriodicBandPayload*)payload;
+    return ImPlotPoint(p->x[i], p->y[i] + p->off);
+}
+
+// A periodic series over time, drawn into the window [base, base + len[ of its view (plot_periodic.h): as a polyline cut where it
+// crosses the edges of the window, as points in it, or as a band about its centre. copies is how many periods below and above
+// the band is drawn as well: on an axis of the period, where the window covers what is shown, 1; otherwise none, and the band
+// may stick out of the window.
+static void plot_periodic_temporal(const SeriesTemporalView& v, int k, PlotType plot_type, double base, double len, int copies) {
+    md_temp_scope_t temp = md_temp_begin();
+    const int n = v.num_samples;
+    if (v.band) {
+        double* x  = md_temp_alloc_array(temp, double, n);
+        double* lo = md_temp_alloc_array(temp, double, n);
+        double* hi = md_temp_alloc_array(temp, double, n);
+        for (int i = 0; i < n; ++i) {
+            x[i] = v.x[i];
+            series_temporal_band(v, i, &lo[i], &hi[i]);
+        }
+        double* rx  = md_temp_alloc_array(temp, double, 2 * n);
+        double* rlo = md_temp_alloc_array(temp, double, 2 * n);
+        double* rhi = md_temp_alloc_array(temp, double, 2 * n);
+        int* run_beg   = md_temp_alloc_array(temp, int, n);
+        int* run_count = md_temp_alloc_array(temp, int, n);
+        const int num_runs = periodic_band_runs(rx, rlo, rhi, run_beg, run_count, x, lo, hi, n, base, len, len * PERIODIC_MAX_STEP);
+        for (int r = 0; r < num_runs; ++r) {
+            if (run_count[r] < 1) continue;
+            for (int c = -copies; c <= copies; ++c) {
+                PeriodicBandPayload pl_lo = { rx + run_beg[r], rlo + run_beg[r], c * len };
+                PeriodicBandPayload pl_hi = { rx + run_beg[r], rhi + run_beg[r], c * len };
+                ImPlot::PlotShadedG(v.plot_id, periodic_band_getter, &pl_lo, periodic_band_getter, &pl_hi, run_count[r]);
+            }
+        }
+    } else if (plot_type == PlotType_Scatter) {
+        TemporalGetterPayload payload = { &v, k, base, len, false };
+        ImPlot::PlotScatterG(v.plot_id, temporal_getter_line, &payload, n);
+    } else {
+        const int cap = 4 * n + 1;
+        double* px = md_temp_alloc_array(temp, double, cap);
+        double* py = md_temp_alloc_array(temp, double, cap);
+        const int m = periodic_polyline(px, py, cap, v.x, v.y, n, v.stride, k, v.y_scale, base, len, len * PERIODIC_MAX_STEP);
+        ImPlot::PlotLine(v.plot_id, px, py, m);
+    }
+    md_temp_end(temp);
+}
+
+// Cuts the circle of view where the distributions in hist are least populated: the density of every member of every one of them
+// which is of the period of view, all counted alike, resampled to a common resolution
+static void periodic_cut_least_populated(PeriodicView* view, const SeriesHistogramView* hist, int count) {
+    const int nb = 360;
+    float density[nb] = {};
+    bool any = false;
+    for (int j = 0; j < count; ++j) {
+        const SeriesHistogramView& h = hist[j];
+        if (!h.bins || h.num_bins <= 0 || !series_periodic_valid(h.periodic)) continue;
+        if (!series_periodic_equal(h.periodic, view->period)) continue;
+        const int members = h.num_periods > 0 ? h.num_periods : h.dim;
+        for (int k = 0; k < members; ++k) {
+            if (h.num_periods > 0 && !h.periods[k].valid) continue;
+            for (int b = 0; b < nb; ++b) {
+                const int src = MD_MIN((int)((b + 0.5) * h.num_bins / nb), h.num_bins - 1);
+                density[b] += h.bins[(size_t)k * h.num_bins + src];
+            }
+            any = true;
+        }
+    }
+    if (any) periodic_view_cut_least_populated(view, density, nb);
+}
+
+// The same for the series of a timeline subplot: their values over every frame
+static void timeline_cut_least_populated(ApplicationState* data, const PlotSubplot& sp, PeriodicView* view) {
+    SeriesHistogramView hist[PLOT_MAX_SERIES_PER_SUBPLOT];
+    int count = 0;
+    for (int j = 0; j < sp.count; ++j) {
+        SeriesKey key = sp.series[j].key;
+        key.variant = SeriesVariant_Values;
+        if (series_resolve_histogram(&hist[count], data, key, 128)) count += 1;
+    }
+    periodic_cut_least_populated(view, hist, count);
 }
 
 static void draw_timeline_properties_menu(ApplicationState* data) {
@@ -4335,7 +4415,7 @@ static void draw_timeline_properties_menu(ApplicationState* data) {
 
     ImGui::SeparatorText("Script");
     int num_listed = 0;
-    series_for_each_script_property(data, SeriesSource_Script, MD_SCRIPT_PROPERTY_FLAG_TEMPORAL, [&](const SeriesKey& key) {
+    series_for_each_script_property(data, SeriesSource_Script, script::OUTPUT_TEMPORAL, [&](const SeriesKey& key) {
         plot_series_list_item(data, TIMELINE_SERIES_DND, first, key);
         num_listed += 1;
 
@@ -4343,7 +4423,7 @@ static void draw_timeline_properties_menu(ApplicationState* data) {
         char mean_path[SERIES_PATH_CAP + 8];
         const int len = snprintf(mean_path, sizeof(mean_path), "%s/mean", key.path);
         const md_attributes_t* table = series_table(data, key.source);
-        if (table && len > 0 && md_attributes_find(table, str_t{mean_path, (size_t)len})) {
+        if (table && len > 0 && md_attributes_find(table, md_str_t{mean_path, (size_t)len})) {
             ImGui::Indent();
             const SeriesVariant variants[] = { SeriesVariant_Mean, SeriesVariant_Sigma, SeriesVariant_Extent };
             for (SeriesVariant v : variants) {
@@ -4363,12 +4443,12 @@ static void draw_timeline_properties_menu(ApplicationState* data) {
 }
 
 static void draw_timeline_window(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
     ImGui::SetNextWindowSize(ImVec2(600, 300), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Timelines", &data->timeline.show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
         int& num_subplots = data->timeline.num_subplots;
-        num_subplots = CLAMP(num_subplots, 1, PLOT_MAX_SUBPLOTS);
+        num_subplots = MD_CLAMP(num_subplots, 1, PLOT_MAX_SUBPLOTS);
 
         const float* x_values   = data->timeline.x_values;
         const int num_x_values  = (int)md_array_size(data->timeline.x_values);
@@ -4376,7 +4456,7 @@ static void draw_timeline_window(ApplicationState* data) {
         const float max_x_value = num_x_values > 0 ? x_values[num_x_values - 1] : 1.0f;
 
         ImPlot::PushStyleVar(ImPlotStyleVar_PlotPadding, ImVec2(ImPlot::GetStyle().PlotPadding.x, 2));
-        defer { ImPlot::PopStyleVar(); };
+        MD_DEFER { ImPlot::PopStyleVar(); };
 
         if (ImGui::BeginMenuBar()) {
             if (ImGui::BeginMenu("Properties")) {
@@ -4390,7 +4470,7 @@ static void draw_timeline_window(ApplicationState* data) {
             if (ImGui::BeginMenu("Subplots")) {
                 ImGui::SliderInt("Num Subplots", &num_subplots, 1, PLOT_MAX_SUBPLOTS);
                 if (ImGui::Button("Add Subplot")) {
-                    num_subplots = CLAMP(num_subplots + 1, 1, PLOT_MAX_SUBPLOTS);
+                    num_subplots = MD_CLAMP(num_subplots + 1, 1, PLOT_MAX_SUBPLOTS);
                 }
                 if (ImGui::Button("Clear All")) {
                     plot_clear(data->timeline.subplots, PLOT_MAX_SUBPLOTS);
@@ -4445,7 +4525,8 @@ static void draw_timeline_window(ApplicationState* data) {
             ImPlot::BeginSubplots("##Temporal", num_subplots, 1, ImVec2(-1,-1));
 
             const ImPlotFlags plot_flags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoFrame;
-            const ImPlotAxisFlags axis_flags   = ImPlotAxisFlags_NoSideSwitch;
+            // The labels of the axes are drawn within the plots (DrawInsetAxes): the plots take all of the width and height
+            const ImPlotAxisFlags axis_flags   = ImPlotAxisFlags_NoSideSwitch | ImPlot::InsetAxisFlags;
             const ImPlotAxisFlags axis_flags_y = axis_flags | ImPlotAxisFlags_Opposite | ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit;
 
             for (int i = 0; i < num_subplots; ++i) {
@@ -4458,24 +4539,38 @@ static void draw_timeline_window(ApplicationState* data) {
                     resolved[j] = series_resolve_temporal(&views[j], data, sp.series[j].key);
                 }
 
+                // Periodic values are drawn into the window of their view, where it is cut (plot_periodic.h). When every series
+                // here is of one period, the y axis is an axis of it: at most a period, turned by panning it, and linked to
+                // every other axis of the period, in the Distributions as well.
+                PeriodicView* pviews[PLOT_MAX_SERIES_PER_SUBPLOT] = {};
+                PeriodicView* axis_view = nullptr;
+                {
+                    bool all_one = true;
+                    int num = 0;
+                    for (int j = 0; j < sp.count; ++j) {
+                        if (!resolved[j]) continue;
+                        num += 1;
+                        pviews[j] = periodic_view(views[j].periodic, views[j].unit_str);
+                        if (!pviews[j] || (axis_view && pviews[j] != axis_view)) all_one = false;
+                        if (!axis_view) axis_view = pviews[j];
+                    }
+                    if (!all_one || num == 0) axis_view = nullptr;
+                }
+
                 int remove_idx = -1;
 
                 if (ImPlot::BeginPlot("", ImVec2(), plot_flags)) {
                     ImPlot::SetupAxisLinks(ImAxis_X1, &data->timeline.view_range.beg_x, &data->timeline.view_range.end_x);
                     ImPlot::SetupAxisLimitsConstraints(ImAxis_X1, min_x_value, max_x_value);
 
-                    ImPlotAxisFlags axis_flags_x = axis_flags | ImPlotAxisFlags_NoLabel;
-                    if (i < num_subplots - 1) {
-                        // Only show label and ticklabels for the last plot, since they are all synced on x-axis
-                        axis_flags_x |= ImPlotAxisFlags_NoTickLabels;
-                    }
+                    const ImPlotAxisFlags axis_flags_x = axis_flags;
 
                     // When every series in the subplot is shown in the same unit, that unit labels the y axis
                     char y_unit_str[32] = "";
                     for (int j = 0; j < sp.count; ++j) {
                         if (!resolved[j]) continue;
                         if (y_unit_str[0] == '\0') {
-                            str_copy_to_char_buf(y_unit_str, sizeof(y_unit_str), str_from_cstr(views[j].unit_str));
+                            md_str_copy_to_char_buf(y_unit_str, sizeof(y_unit_str), md_str_from_cstr(views[j].unit_str));
                         } else if (strcmp(y_unit_str, views[j].unit_str) != 0) {
                             y_unit_str[0] = '\0';
                             break;
@@ -4487,8 +4582,18 @@ static void draw_timeline_window(ApplicationState* data) {
                         snprintf(y_label, sizeof(y_label), "(%s)", y_unit_str);
                     }
 
-                    ImPlot::SetupAxes(x_label, y_label, axis_flags_x, axis_flags_y);
+                    ImPlot::SetupAxis(ImAxis_X1, x_label, axis_flags_x);
+                    if (axis_view) {
+                        // Not fitted to the values: they fill the period, wherever it is cut
+                        periodic_axis_setup(ImAxis_Y1, y_label, axis_view, axis_flags | ImPlotAxisFlags_Opposite);
+                    } else {
+                        ImPlot::SetupAxis(ImAxis_Y1, y_label, axis_flags_y);
+                    }
                     ImPlot::SetupFinish();
+
+                    if (axis_view && periodic_axis_popup(ImAxis_Y1, axis_view)) {
+                        timeline_cut_least_populated(data, sp, axis_view);
+                    }
 
                     // The periods shaded below the series, and shift-press marking a new one
                     timeline_periods_plot(&data->timeline.periods, range_axis, data->animation.frame);
@@ -4502,7 +4607,7 @@ static void draw_timeline_window(ApplicationState* data) {
 
                     if (ImPlot::IsPlotHovered()) {
                         md_bitmask_clear(&data->selection.highlight_mask);
-                        script_set_hovered_property(data,  STR_LIT(""));
+                        script_set_hovered_property(data,  MD_STR_LIT(""));
 
                         print_timeline_tooltip = true;
                         const ImPlotPoint mouse_pos = ImPlot::GetPlotMousePos();
@@ -4525,20 +4630,21 @@ static void draw_timeline_window(ApplicationState* data) {
                             // Each series has an axis of its own, so the samples around the mouse are its own
                             const int n = v.num_samples;
                             const double fi = series_temporal_index_at(v, mouse_pos.x);
-                            const int fn = CLAMP((int)(fi + 0.5), 0, n - 1);  // Nearest index
+                            const int fn = MD_CLAMP((int)(fi + 0.5), 0, n - 1);  // Nearest index
                             const int f[4] = {
-                                CLAMP((int)fi - 1, 0, n - 1),
-                                CLAMP((int)fi,     0, n - 1),
-                                CLAMP((int)fi + 1, 0, n - 1),
-                                CLAMP((int)fi + 2, 0, n - 1),
+                                MD_CLAMP((int)fi - 1, 0, n - 1),
+                                MD_CLAMP((int)fi,     0, n - 1),
+                                MD_CLAMP((int)fi + 1, 0, n - 1),
+                                MD_CLAMP((int)fi + 2, 0, n - 1),
                             };
 
-                            const int dim = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
+                            const int dim = MD_CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             for (int k = 0; k < dim; ++k) {
                                 if (dim > 1 && !s.population_mask.test(k)) {
                                     continue;
                                 }
-                                TemporalGetterPayload payload = { &v, k };
+                                // Periodic values: the place of each sample nearest the mouse, of all a period apart
+                                TemporalGetterPayload payload = { &v, k, mouse_pos.y, pviews[j] ? periodic_view_length(*pviews[j]) : 0.0, true };
                                 double d = DBL_MAX;
 
                                 if (v.band) {
@@ -4557,18 +4663,18 @@ static void draw_timeline_window(ApplicationState* data) {
                                     // Each segment forms a trapezoid with its left and right sides parallel to the y axis:
                                     // clamp the mouse to it and measure the distance to the clamped point
                                     for (int l = 0; l < 2; ++l) {
-                                        const float x_min = MIN(p_min[l].x, p_min[l+1].x);
-                                        const float x_max = MAX(p_min[l].x, p_min[l+1].x);
-                                        const float t = (x_max > x_min) ? CLAMP((mouse_coord.x - x_min) / (x_max - x_min), 0.0f, 1.0f) : 0.0f;
+                                        const float x_min = MD_MIN(p_min[l].x, p_min[l+1].x);
+                                        const float x_max = MD_MAX(p_min[l].x, p_min[l+1].x);
+                                        const float t = (x_max > x_min) ? MD_CLAMP((mouse_coord.x - x_min) / (x_max - x_min), 0.0f, 1.0f) : 0.0f;
                                         const float y[2] = {
                                             lerp(p_min[l].y, p_min[l+1].y, t),
                                             lerp(p_max[l].y, p_max[l+1].y, t)
                                         };
                                         const ImVec2 p = {
-                                            CLAMP(mouse_coord.x, x_min, x_max),
-                                            CLAMP(mouse_coord.y, MIN(y[0], y[1]), MAX(y[0], y[1]))
+                                            MD_CLAMP(mouse_coord.x, x_min, x_max),
+                                            MD_CLAMP(mouse_coord.y, MD_MIN(y[0], y[1]), MD_MAX(y[0], y[1]))
                                         };
-                                        d = MIN(d, sqrt(ImLengthSqr(mouse_coord - p)));
+                                        d = MD_MIN(d, sqrt(ImLengthSqr(mouse_coord - p)));
                                     }
                                     d += area_dist;
                                 } else if (s.plot_type == PlotType_Scatter) {
@@ -4584,8 +4690,8 @@ static void draw_timeline_window(ApplicationState* data) {
                                         ImPlot::PlotToPixels(temporal_getter_line(f[3], &payload)),
                                     };
                                     d = distance_to_linesegment(p[0], p[1], mouse_coord);
-                                    d = MIN(distance_to_linesegment(p[1], p[2], mouse_coord), d);
-                                    d = MIN(distance_to_linesegment(p[2], p[3], mouse_coord), d);
+                                    d = MD_MIN(distance_to_linesegment(p[1], p[2], mouse_coord), d);
+                                    d = MD_MIN(distance_to_linesegment(p[2], p[3], mouse_coord), d);
                                 }
 
                                 if (d < min_dist) {
@@ -4595,9 +4701,9 @@ static void draw_timeline_window(ApplicationState* data) {
 
                                     hovered_idx = j;
                                     hovered_pop_idx = k;
-                                    const str_t member = v.dim > 1 ? series_member_label(data, s.key, k) : str_t{};
-                                    if (!str_empty(member)) {
-                                        snprintf(hovered_label, sizeof(hovered_label), "%s[%i] (" STR_FMT "): %s %s", v.label, k + 1, STR_ARG(member), value_buf, v.unit_str);
+                                    const md_str_t member = v.dim > 1 ? series_member_label(data, s.key, k) : md_str_t{};
+                                    if (!md_str_empty(member)) {
+                                        snprintf(hovered_label, sizeof(hovered_label), "%s[%i] (" MD_STR_FMT "): %s %s", v.label, k + 1, MD_STR_ARG(member), value_buf, v.unit_str);
                                     } else if (v.dim > 1) {
                                         snprintf(hovered_label, sizeof(hovered_label), "%s[%i]: %s %s", v.label, k + 1, value_buf, v.unit_str);
                                     } else {
@@ -4608,7 +4714,10 @@ static void draw_timeline_window(ApplicationState* data) {
                         }
 
                         if (hovered_idx != -1 && views[hovered_idx].script_ident[0] != '\0') {
-                            script_set_hovered_property(data, str_from_cstr(views[hovered_idx].script_ident), hovered_pop_idx);
+                            script_set_hovered_property(data, md_str_from_cstr(views[hovered_idx].script_ident), hovered_pop_idx);
+                        } else if (hovered_idx != -1 && sp.series[hovered_idx].key.source == SeriesSource_System) {
+                            // The curve of an energy term of groups: the groups
+                            highlight_energy_term_groups(data, md_attributes_find(&data->mold.sys.attributes, md_str_from_cstr(sp.series[hovered_idx].key.path)));
                         }
                     } else if (data->hovered_property_label[0] != '\0') {
                         // Hovered in another view of it (the other plot window, a list): light up its values here
@@ -4638,8 +4747,11 @@ static void draw_timeline_window(ApplicationState* data) {
 
                         if (ImPlot::IsLegendEntryHovered(v.plot_id)) {
                             if (v.script_ident[0] != '\0') {
-                                script_visualize_ref(data, v.vis_ref, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
-                                script_set_hovered_property(data, str_from_cstr(v.script_ident));
+                                script_visualize_ref(data, v.vis_ref, -1, script::DRAW_ATOMS | script::DRAW_GEOMETRY);
+                                script_set_hovered_property(data, md_str_from_cstr(v.script_ident));
+                            } else if (s.key.source == SeriesSource_System) {
+                                // An energy term of groups: the groups
+                                highlight_energy_term_groups(data, md_attributes_find(&data->mold.sys.attributes, md_str_from_cstr(s.key.path)));
                             }
                             if (!resolved[j]) {
                                 ImGui::SetTooltip("Nothing to plot at '%s' right now", s.key.path);
@@ -4691,7 +4803,7 @@ static void draw_timeline_window(ApplicationState* data) {
                             // Still in the legend, so it can be seen and removed
                             ImPlot::PlotDummy(v.plot_id);
                         } else {
-                            const int population_size = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
+                            const int population_size = MD_CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             auto plot = [&](int k) {
                                 ImVec4 color = plot_series_member_color(s, k, population_size);
                                 if (v.state.status >= SeriesStatus_Outdated) {
@@ -4715,15 +4827,29 @@ static void draw_timeline_window(ApplicationState* data) {
                                     }
                                 }
 
-                                TemporalGetterPayload payload = { &v, k };
                                 if (v.band) {
                                     ImPlot::SetNextFillStyle(color, fill_alpha);
-                                    ImPlot::PlotShadedG(v.plot_id, temporal_getter_band_lo, &payload, temporal_getter_band_hi, &payload, v.num_samples);
                                 } else if (s.plot_type == PlotType_Scatter) {
                                     ImPlot::SetNextMarkerStyle(s.marker, s.marker_size, color, marker_line_weight, marker_line_color);
-                                    ImPlot::PlotScatterG(v.plot_id, temporal_getter_line, &payload, v.num_samples);
                                 } else {
                                     ImPlot::SetNextLineStyle(color, weight);
+                                }
+
+                                if (pviews[j]) {
+                                    // On an axis of the period, into the window of its view, the band below and above it as
+                                    // well. Beside values of other kinds, on an axis which reads them as they are, into the
+                                    // period they are given in.
+                                    const double base = axis_view ? pviews[j]->min : pviews[j]->period.beg;
+                                    plot_periodic_temporal(v, k, s.plot_type, base, periodic_view_length(*pviews[j]), axis_view ? 1 : 0);
+                                    return;
+                                }
+
+                                TemporalGetterPayload payload = { &v, k };
+                                if (v.band) {
+                                    ImPlot::PlotShadedG(v.plot_id, temporal_getter_band_lo, &payload, temporal_getter_band_hi, &payload, v.num_samples);
+                                } else if (s.plot_type == PlotType_Scatter) {
+                                    ImPlot::PlotScatterG(v.plot_id, temporal_getter_line, &payload, v.num_samples);
+                                } else {
                                     ImPlot::PlotLineG(v.plot_id, temporal_getter_line, &payload, v.num_samples);
                                 }
                             };
@@ -4746,19 +4872,19 @@ static void draw_timeline_window(ApplicationState* data) {
                     }
 
                     if (ImPlot::DragLineX(0, &time, ImVec4(1,1,0,1), 1.0f, ImPlotDragToolFlags_NoFit)) {
-                        time = CLAMP(time, min_x_value, max_x_value);
+                        time = MD_CLAMP(time, min_x_value, max_x_value);
                     }
 
                     if (ImPlot::IsPlotHovered() && hovered_idx != -1 && views[hovered_idx].script_ident[0] != '\0') {
                         const SeriesTemporalView& v = views[hovered_idx];
                         const int pop_idx = v.dim > 1 ? hovered_pop_idx : -1;
-                        script_visualize_ref(data, v.vis_ref, pop_idx, ~MD_SCRIPT_VISUALIZE_SDF);
-                        script_set_hovered_property(data, str_from_cstr(v.script_ident), hovered_pop_idx);
+                        script_visualize_ref(data, v.vis_ref, pop_idx, ~script::DRAW_SDF);
+                        script_set_hovered_property(data, md_str_from_cstr(v.script_ident), hovered_pop_idx);
                     }
 
                     if (ImPlot::BeginDragDropTargetPlot()) {
                         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(TIMELINE_SERIES_DND)) {
-                            ASSERT(payload->DataSize == sizeof(SeriesDragPayload));
+                            MD_ASSERT(payload->DataSize == sizeof(SeriesDragPayload));
                             const SeriesDragPayload* dnd = (const SeriesDragPayload*)(payload->Data);
                             if (dnd->src_subplot >= 0 && dnd->src_subplot < PLOT_MAX_SUBPLOTS) {
                                 // Out of one plot and into another moves it, keeping its style
@@ -4782,12 +4908,15 @@ static void draw_timeline_window(ApplicationState* data) {
 
                         double t = plot_pos.x;
                         if (md_unit_is_none(x_unit)) {
-                            int32_t frame_idx = CLAMP((int)(time_to_frame(t, x_values) + 0.5), 0, num_x_values-1);
+                            int32_t frame_idx = MD_CLAMP((int)(time_to_frame(t, x_values) + 0.5), 0, num_x_values-1);
                             ImGui::SetTooltip("Frame: %i\n%s", frame_idx, hovered_label);
                         } else {
                             ImGui::SetTooltip("Time: %.2f (%s)\n%s", t, x_unit_str, hovered_label);
                         }
                     }
+
+                    // Over everything else. The x axis labelled only under the last plot: they all share it.
+                    ImPlot::DrawInsetAxes(i < num_subplots - 1 ? ImPlotInsetFlags_NoX : 0);
 
                     ImPlot::EndPlot();
                 }
@@ -4799,7 +4928,7 @@ static void draw_timeline_window(ApplicationState* data) {
 
             ImPlot::EndSubplots();
 
-            time = CLAMP(time, (double)min_x_value, (double)max_x_value);
+            time = MD_CLAMP(time, (double)min_x_value, (double)max_x_value);
             data->animation.frame = time_to_frame(time, data->timeline.x_values);
 
             ImPlot::GetInputMap() = old_map;
@@ -4823,19 +4952,43 @@ static void draw_timeline_window(ApplicationState* data) {
 
 // #distribution_window
 
+// What a getter is handed: the histogram, which member of it, and from which bin. Point i is bin u0 + i, which for periodic
+// values may lie outside [0, num_bins[: the bin a whole number of periods away, at its place there (series_histogram_point_at).
 struct HistogramGetterPayload {
     const SeriesHistogramView* view;
     int k;
+    long long u0 = 0;
 };
 
 static ImPlotPoint histogram_getter(int i, void* payload) {
     const HistogramGetterPayload* p = (const HistogramGetterPayload*)payload;
-    return series_histogram_point(*p->view, i, p->k);
+    return series_histogram_point_at(*p->view, p->k, p->u0 + i);
 }
 
 static ImPlotPoint histogram_getter_zero(int i, void* payload) {
     const HistogramGetterPayload* p = (const HistogramGetterPayload*)payload;
-    return ImPlotPoint(series_histogram_point(*p->view, i, p->k).x, 0.0);
+    return ImPlotPoint(series_histogram_point_at(*p->view, p->k, p->u0 + i).x, 0.0);
+}
+
+// The bins of a histogram to draw, as the first (u0) and how many. All of them, unless the values are periodic: then those
+// over [x_min, x_max] and one beyond each end, so that a curve runs on to the edges of the plot; or, for x_max <= x_min, the
+// bins around the period from where it is cut at x_min, and one more, which closes a curve onto its beginning.
+static void histogram_draw_range(long long* u0, int* count, const SeriesHistogramView& v, double x_min, double x_max) {
+    const double w = series_histogram_bin_width(v);
+    if (!series_periodic_valid(v.periodic) || w <= 0.0) {
+        *u0 = 0;
+        *count = v.num_bins;
+        return;
+    }
+    if (x_max > x_min) {
+        const long long a = (long long)floor((x_min - v.x_min) / w - 0.5) - 1;
+        const long long b = (long long)ceil ((x_max - v.x_min) / w - 0.5) + 1;
+        *u0 = a;
+        *count = (int)MD_MIN(b - a + 1, (long long)v.num_bins * 4);
+    } else {
+        *u0 = (long long)ceil((x_min - v.x_min) / w - 0.5);
+        *count = v.num_bins + 1;
+    }
 }
 
 // A polyline drawn dashed, carrying the dashes on across its corners and from one call to the next through phase
@@ -4850,9 +5003,9 @@ static void dashed_polyline(ImDrawList* dl, const ImVec2* pts, int count, ImU32 
         float t = 0.0f;
         while (t < len) {
             const float in_cycle = fmodf(*phase + t, dash + gap);
-            const float step = in_cycle < dash ? MIN(dash - in_cycle, len - t) : MIN(dash + gap - in_cycle, len - t);
+            const float step = in_cycle < dash ? MD_MIN(dash - in_cycle, len - t) : MD_MIN(dash + gap - in_cycle, len - t);
             if (in_cycle < dash) dl->AddLine(prev + u * t, prev + u * (t + step), col, 1.5f);
-            t += MAX(step, 0.01f);
+            t += MD_MAX(step, 0.01f);
         }
         *phase = fmodf(*phase + len, dash + gap);
     }
@@ -4860,8 +5013,8 @@ static void dashed_polyline(ImDrawList* dl, const ImVec2* pts, int count, ImU32 
 
 // A histogram member over the plot as a preview, not a curve of the plot's own: drawn as the series is (a line, an area
 // or bars), with a dashed outline and, for an area or bars, a faint fill
-static void plot_histogram_preview(const SeriesHistogramView& v, int k, ImVec4 color, const PlotSeries& s) {
-    if (v.num_bins <= 0) return;
+static void plot_histogram_preview(const SeriesHistogramView& v, int k, ImVec4 color, const PlotSeries& s, long long u0, int count) {
+    if (v.num_bins <= 0 || count <= 0) return;
     ImDrawList* dl = ImPlot::GetPlotDrawList();
     ImPlot::PushPlotClipRect();
     const ImU32 line_col = ImGui::ColorConvertFloat4ToU32(color);
@@ -4875,14 +5028,14 @@ static void plot_histogram_preview(const SeriesHistogramView& v, int k, ImVec4 c
         const bool joined = s.bar_width >= 0.999f;
         md_temp_scope_t temp = md_temp_begin();
         // Joined, the outline is one step along the tops of the bars; apart, each bar has its own
-        ImVec2* outline = md_temp_alloc_array(temp, ImVec2, (size_t)v.num_bins * 2 + 2);
+        ImVec2* outline = md_temp_alloc_array(temp, ImVec2, (size_t)count * 2 + 2);
         int n = 0;
         dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
-        for (int i = 0; i < v.num_bins; ++i) {
-            const ImPlotPoint p = series_histogram_point(v, i, k);
+        for (int i = 0; i < count; ++i) {
+            const ImPlotPoint p = series_histogram_point_at(v, k, u0 + i);
             const ImVec2 a = ImPlot::PlotToPixels(p.x - half, 0.0);
             const ImVec2 b = ImPlot::PlotToPixels(p.x + half, p.y);
-            dl->AddRectFilled(ImVec2(MIN(a.x, b.x), MIN(a.y, b.y)), ImVec2(MAX(a.x, b.x), MAX(a.y, b.y)), fill_col);
+            dl->AddRectFilled(ImVec2(MD_MIN(a.x, b.x), MD_MIN(a.y, b.y)), ImVec2(MD_MAX(a.x, b.x), MD_MAX(a.y, b.y)), fill_col);
             if (joined) {
                 if (n == 0) outline[n++] = a;
                 outline[n++] = ImVec2(a.x, b.y);
@@ -4900,21 +5053,21 @@ static void plot_histogram_preview(const SeriesHistogramView& v, int k, ImVec4 c
         md_temp_end(temp);
     } else {
         md_temp_scope_t temp = md_temp_begin();
-        ImVec2* pts = md_temp_alloc_array(temp, ImVec2, (size_t)v.num_bins);
-        for (int i = 0; i < v.num_bins; ++i) {
-            pts[i] = ImPlot::PlotToPixels(series_histogram_point(v, i, k));
+        ImVec2* pts = md_temp_alloc_array(temp, ImVec2, (size_t)count);
+        for (int i = 0; i < count; ++i) {
+            pts[i] = ImPlot::PlotToPixels(series_histogram_point_at(v, k, u0 + i));
         }
         if (s.plot_type == PlotType_Area) {
             // Down to zero, one quad per stretch between two bins
             dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
-            for (int i = 1; i < v.num_bins; ++i) {
-                const ImVec2 base0 = ImPlot::PlotToPixels(series_histogram_point(v, i - 1, k).x, 0.0);
-                const ImVec2 base1 = ImPlot::PlotToPixels(series_histogram_point(v, i, k).x, 0.0);
+            for (int i = 1; i < count; ++i) {
+                const ImVec2 base0 = ImPlot::PlotToPixels(series_histogram_point_at(v, k, u0 + i - 1).x, 0.0);
+                const ImVec2 base1 = ImPlot::PlotToPixels(series_histogram_point_at(v, k, u0 + i).x, 0.0);
                 dl->AddQuadFilled(pts[i - 1], pts[i], base1, base0, fill_col);
             }
             dl->Flags = flags;
         }
-        dashed_polyline(dl, pts, v.num_bins, line_col, &phase);
+        dashed_polyline(dl, pts, count, line_col, &phase);
         md_temp_end(temp);
     }
     ImPlot::PopPlotClipRect();
@@ -5009,7 +5162,7 @@ static void plot_periods_popup(ApplicationState* data, PlotSeries& s, bool* refi
 
 static void draw_distribution_properties_menu(ApplicationState* data) {
     PlotSubplot& first = data->distributions.subplots[0];
-    const uint32_t kinds = MD_SCRIPT_PROPERTY_FLAG_TEMPORAL | MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION;
+    const uint32_t kinds = script::OUTPUT_TEMPORAL | script::OUTPUT_DISTRIBUTION;
 
     // A temporal property is binned over its frames, a distribution is shown as evaluated. Over the
     // frames of a timeline period too: "r (Production)".
@@ -5020,7 +5173,7 @@ static void draw_distribution_properties_menu(ApplicationState* data) {
             key.period = period;
             plot_series_list_item(data, DISTRIBUTION_SERIES_DND, first, key);
             num_listed += 1;
-            const bool temporal = md_script_ir_property_flags(data->script.eval_ir, series_script_ident(key)) & MD_SCRIPT_PROPERTY_FLAG_TEMPORAL;
+            const bool temporal = script::output_flags(data->script.eval_ir, series_script_ident(key)) & script::OUTPUT_TEMPORAL;
             if (temporal && script_property_population(data, key) > 1) {
                 SeriesKey agg = key;
                 agg.variant = SeriesVariant_Aggregate;
@@ -5059,7 +5212,7 @@ static void draw_distribution_window(ApplicationState* data) {
     ImGui::SetNextWindowSize(ImVec2(200, 300), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Distributions", &data->distributions.show_window, ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_MenuBar)) {
         int& num_subplots = data->distributions.num_subplots;
-        num_subplots = CLAMP(num_subplots, 1, PLOT_MAX_SUBPLOTS);
+        num_subplots = MD_CLAMP(num_subplots, 1, PLOT_MAX_SUBPLOTS);
 
         // Refit a subplot's axes to what it holds, after it gained a series or its binning changed
         static bool fit_subplot[PLOT_MAX_SUBPLOTS] = {};
@@ -5072,7 +5225,7 @@ static void draw_distribution_window(ApplicationState* data) {
             if (ImGui::BeginMenu("Subplots")) {
                 ImGui::SliderInt("Num Subplots", &num_subplots, 1, PLOT_MAX_SUBPLOTS);
                 if (ImGui::Button("Add Subplot")) {
-                    num_subplots = CLAMP(num_subplots + 1, 1, PLOT_MAX_SUBPLOTS);
+                    num_subplots = MD_CLAMP(num_subplots + 1, 1, PLOT_MAX_SUBPLOTS);
                 }
                 if (ImGui::Button("Clear All")) {
                     plot_clear(data->distributions.subplots, PLOT_MAX_SUBPLOTS);
@@ -5082,7 +5235,8 @@ static void draw_distribution_window(ApplicationState* data) {
             ImGui::EndMenuBar();
         }
 
-        const ImPlotAxisFlags axis_flags   = ImPlotAxisFlags_NoSideSwitch | ImPlotAxisFlags_NoHighlight;
+        // The labels of the axes are drawn within the plots (DrawInsetAxes): the plots take all of the width and height
+        const ImPlotAxisFlags axis_flags   = ImPlotAxisFlags_NoSideSwitch | ImPlotAxisFlags_NoHighlight | ImPlot::InsetAxisFlags;
         const ImPlotAxisFlags axis_flags_x = axis_flags;
         const ImPlotAxisFlags axis_flags_y = axis_flags | ImPlotAxisFlags_AutoFit;
         const ImPlotFlags     plot_flags   = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoFrame;
@@ -5102,7 +5256,25 @@ static void draw_distribution_window(ApplicationState* data) {
                             else s.periods[0] = 0;
                         }
                     }
-                    resolved[j] = series_resolve_histogram_periods(&views[j], data, s.key, s.num_bins, s.periods, s.num_periods);
+                    resolved[j] = series_resolve_histogram_periods(&views[j], data, s.key, s.num_bins, s.periods, s.num_periods, s.smoothing);
+                }
+
+                // Periodic values are drawn around their period from where their view cuts it (plot_periodic.h). When every
+                // series here is of one period, the x axis is an axis of it: at most a period, turned by panning it, and linked
+                // to every other axis of the period, in the Timelines as well.
+                PeriodicView* pviews[PLOT_MAX_SERIES_PER_SUBPLOT] = {};
+                PeriodicView* axis_view = nullptr;
+                {
+                    bool all_one = true;
+                    int num = 0;
+                    for (int j = 0; j < sp.count; ++j) {
+                        if (!resolved[j] || views[j].num_bins <= 0) continue;
+                        num += 1;
+                        pviews[j] = periodic_view(views[j].periodic, views[j].x_unit_str);
+                        if (!pviews[j] || (axis_view && pviews[j] != axis_view)) all_one = false;
+                        if (!axis_view) axis_view = pviews[j];
+                    }
+                    if (!all_one || num == 0) axis_view = nullptr;
                 }
 
                 // More to show than before (a workspace loaded before anything was evaluated, an evaluation which
@@ -5120,7 +5292,9 @@ static void draw_distribution_window(ApplicationState* data) {
                 int remove_idx = -1;
 
                 if (fit_subplot[i]) {
-                    ImPlot::SetNextAxesToFit();
+                    // An axis of a period shows it as it is cut: only the densities are fitted
+                    if (axis_view) ImPlot::SetNextAxisToFit(ImAxis_Y1);
+                    else           ImPlot::SetNextAxesToFit();
                     fit_subplot[i] = false;
                 }
 
@@ -5132,8 +5306,8 @@ static void draw_distribution_window(ApplicationState* data) {
                     for (int j = 0; j < sp.count; ++j) {
                         if (!resolved[j]) continue;
                         if (first_label) {
-                            str_copy_to_char_buf(x_label, sizeof(x_label), str_from_cstr(views[j].x_unit_str));
-                            str_copy_to_char_buf(y_label, sizeof(y_label), str_from_cstr(views[j].y_unit_str));
+                            md_str_copy_to_char_buf(x_label, sizeof(x_label), md_str_from_cstr(views[j].x_unit_str));
+                            md_str_copy_to_char_buf(y_label, sizeof(y_label), md_str_from_cstr(views[j].y_unit_str));
                             first_label = false;
                         } else {
                             if (strcmp(x_label, views[j].x_unit_str) != 0) x_label[0] = '\0';
@@ -5141,8 +5315,31 @@ static void draw_distribution_window(ApplicationState* data) {
                         }
                     }
 
-                    ImPlot::SetupAxes(x_label, y_label, axis_flags_x, axis_flags_y);
+                    if (axis_view) {
+                        periodic_axis_setup(ImAxis_X1, x_label, axis_view, axis_flags_x);
+                    } else {
+                        ImPlot::SetupAxis(ImAxis_X1, x_label, axis_flags_x);
+                    }
+                    ImPlot::SetupAxis(ImAxis_Y1, y_label, axis_flags_y);
                     ImPlot::SetupFinish();
+
+                    if (axis_view && periodic_axis_popup(ImAxis_X1, axis_view)) {
+                        periodic_cut_least_populated(axis_view, views, sp.count);
+                    }
+
+                    // Which bins each series draws: of periodic values, around the period from where it is cut, and on an
+                    // axis of the period, over what it shows
+                    const ImPlotRect limits = ImPlot::GetPlotLimits();
+                    long long draw_u0[PLOT_MAX_SERIES_PER_SUBPLOT] = {};
+                    int draw_count[PLOT_MAX_SERIES_PER_SUBPLOT] = {};
+                    auto draw_range = [&](long long* u0, int* count, const SeriesHistogramView& hv, const PeriodicView* pv) {
+                        if (axis_view)  histogram_draw_range(u0, count, hv, limits.X.Min, limits.X.Max);
+                        else if (pv)    histogram_draw_range(u0, count, hv, pv->period.beg, pv->period.beg);
+                        else            histogram_draw_range(u0, count, hv, 0.0, 0.0);
+                    };
+                    for (int j = 0; j < sp.count; ++j) {
+                        if (resolved[j]) draw_range(&draw_u0[j], &draw_count[j], views[j], pviews[j]);
+                    }
 
                     int  hovered_idx       = -1;
                     int  hovered_pop_idx   = -1;
@@ -5150,7 +5347,7 @@ static void draw_distribution_window(ApplicationState* data) {
                     char hovered_label[192] = "";
 
                     if (ImPlot::IsPlotHovered()) {
-                        script_set_hovered_property(data, STR_LIT(""));
+                        script_set_hovered_property(data, MD_STR_LIT(""));
 
                         const ImPlotPoint mouse_pos = ImPlot::GetPlotMousePos();
                         const ImVec2 mouse_coord = ImPlot::PlotToPixels(mouse_pos);
@@ -5168,20 +5365,23 @@ static void draw_distribution_window(ApplicationState* data) {
                             ImPlotItem* item = ImPlot::GetItem(v.plot_id);
                             if (!item || !item->Show) continue;
 
-                            const int nb = v.num_bins;
-                            const double x = series_histogram_index_at(v, mouse_pos.x);
-                            const int xn = CLAMP((int)(x + 0.5), 0, nb - 1);
+                            // Among the points it draws: from bin draw_u0, which for periodic values may lie a period or more off
+                            const int nb = draw_count[j];
+                            if (nb <= 0) continue;
+                            const double x = (mouse_pos.x - v.x_min) / series_histogram_bin_width(v) - 0.5 - (double)draw_u0[j];
+                            const int xn = MD_CLAMP((int)floor(x + 0.5), 0, nb - 1);
+                            const int xf = (int)floor(x);
                             const int xi[4] = {
-                                CLAMP((int)x - 1, 0, nb - 1),
-                                CLAMP((int)x,     0, nb - 1),
-                                CLAMP((int)x + 1, 0, nb - 1),
-                                CLAMP((int)x + 2, 0, nb - 1),
+                                MD_CLAMP(xf - 1, 0, nb - 1),
+                                MD_CLAMP(xf,     0, nb - 1),
+                                MD_CLAMP(xf + 1, 0, nb - 1),
+                                MD_CLAMP(xf + 2, 0, nb - 1),
                             };
 
-                            const int dim = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
+                            const int dim = MD_CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             for (int k = 0; k < dim; ++k) {
                                 if (v.num_periods > 0 ? !v.periods[k].valid : (dim > 1 && !s.population_mask.test(k))) continue;
-                                HistogramGetterPayload payload = { &v, k };
+                                HistogramGetterPayload payload = { &v, k, draw_u0[j] };
                                 // Later entries lie on top: prefer them a little when two are equally near
                                 const double layer = j + k / (double)(PLOT_MAX_POPULATION - 1);
                                 const double layer_dist = ((sp.count - layer) / sp.count) * (max_rad * 0.1);
@@ -5195,7 +5395,7 @@ static void draw_distribution_window(ApplicationState* data) {
                                         const ImVec2 p1 = ImPlot::PlotToPixels(ImPlotPoint(top.x + half_width, top.y));
                                         const ImVec2 ll = ImMin(p0, p1);
                                         const ImVec2 ur = ImMax(p0, p1);
-                                        d = MIN(d, sqrt(ImLengthSqr(mouse_coord - ImClamp(mouse_coord, ll, ur))));
+                                        d = MD_MIN(d, sqrt(ImLengthSqr(mouse_coord - ImClamp(mouse_coord, ll, ur))));
                                     }
                                     d += area_dist + layer_dist;
                                 } else if (s.plot_type == PlotType_Area) {
@@ -5203,15 +5403,15 @@ static void draw_distribution_window(ApplicationState* data) {
                                         const ImVec2 a = ImPlot::PlotToPixels(histogram_getter(xi[l], &payload));
                                         const ImVec2 b = ImPlot::PlotToPixels(histogram_getter(xi[l + 1], &payload));
                                         const ImVec2 z = ImPlot::PlotToPixels(histogram_getter_zero(xi[l], &payload));
-                                        const float x_min = MIN(a.x, b.x);
-                                        const float x_max = MAX(a.x, b.x);
-                                        const float t = (x_max > x_min) ? CLAMP((mouse_coord.x - x_min) / (x_max - x_min), 0.0f, 1.0f) : 0.0f;
+                                        const float x_min = MD_MIN(a.x, b.x);
+                                        const float x_max = MD_MAX(a.x, b.x);
+                                        const float t = (x_max > x_min) ? MD_CLAMP((mouse_coord.x - x_min) / (x_max - x_min), 0.0f, 1.0f) : 0.0f;
                                         const float y_top = lerp(a.y, b.y, t);
                                         const ImVec2 p = {
-                                            CLAMP(mouse_coord.x, x_min, x_max),
-                                            CLAMP(mouse_coord.y, MIN(y_top, z.y), MAX(y_top, z.y))
+                                            MD_CLAMP(mouse_coord.x, x_min, x_max),
+                                            MD_CLAMP(mouse_coord.y, MD_MIN(y_top, z.y), MD_MAX(y_top, z.y))
                                         };
-                                        d = MIN(d, sqrt(ImLengthSqr(mouse_coord - p)));
+                                        d = MD_MIN(d, sqrt(ImLengthSqr(mouse_coord - p)));
                                     }
                                     d += area_dist + layer_dist;
                                 } else {
@@ -5222,23 +5422,27 @@ static void draw_distribution_window(ApplicationState* data) {
                                         ImPlot::PlotToPixels(histogram_getter(xi[3], &payload)),
                                     };
                                     d = distance_to_linesegment(p[0], p[1], mouse_coord);
-                                    d = MIN(distance_to_linesegment(p[1], p[2], mouse_coord), d);
-                                    d = MIN(distance_to_linesegment(p[2], p[3], mouse_coord), d);
+                                    d = MD_MIN(distance_to_linesegment(p[1], p[2], mouse_coord), d);
+                                    d = MD_MIN(distance_to_linesegment(p[2], p[3], mouse_coord), d);
                                     d += layer_dist;
                                 }
 
                                 if (d < min_dist) {
                                     min_dist = d;
-                                    const ImPlotPoint pt = histogram_getter(xn, &payload);
+                                    ImPlotPoint pt = histogram_getter(xn, &payload);
+                                    if (series_periodic_valid(v.periodic)) {
+                                        // As the values are given, wherever the period is cut
+                                        pt.x = periodic_wrap(pt.x, v.periodic.beg, series_periodic_length(v.periodic));
+                                    }
                                     hovered_idx = j;
                                     hovered_pop_idx = (dim > 1 || v.num_periods > 0) ? k : -1;
-                                    hovered_bin = xn;
+                                    hovered_bin = series_histogram_bin(v, draw_u0[j] + xn);
                                     if (v.num_periods > 0) {
                                         snprintf(hovered_label, sizeof(hovered_label), "%s, %s: %.4g at %.4g %s", v.label, v.periods[k].name, pt.y, pt.x, v.x_unit_str);
                                     } else if (dim > 1) {
-                                        const str_t member = series_member_label(data, s.key, k);
-                                        if (!str_empty(member)) {
-                                            snprintf(hovered_label, sizeof(hovered_label), "%s[%i] (" STR_FMT "): %.4g at %.4g %s", v.label, k + 1, STR_ARG(member), pt.y, pt.x, v.x_unit_str);
+                                        const md_str_t member = series_member_label(data, s.key, k);
+                                        if (!md_str_empty(member)) {
+                                            snprintf(hovered_label, sizeof(hovered_label), "%s[%i] (" MD_STR_FMT "): %.4g at %.4g %s", v.label, k + 1, MD_STR_ARG(member), pt.y, pt.x, v.x_unit_str);
                                         } else {
                                             snprintf(hovered_label, sizeof(hovered_label), "%s[%i]: %.4g at %.4g %s", v.label, k + 1, pt.y, pt.x, v.x_unit_str);
                                         }
@@ -5253,9 +5457,13 @@ static void draw_distribution_window(ApplicationState* data) {
                             const SeriesHistogramView& v = views[hovered_idx];
                             // A period is not a member of a population: the property as a whole is what is shown
                             const int member = v.num_periods > 0 ? -1 : hovered_pop_idx;
+                            if (v.script_ident[0] == '\0' && sp.series[hovered_idx].key.source == SeriesSource_System) {
+                                // The bars of an energy term of groups: the groups
+                                highlight_energy_term_groups(data, md_attributes_find(&data->mold.sys.attributes, md_str_from_cstr(sp.series[hovered_idx].key.path)));
+                            }
                             if (v.script_ident[0] != '\0') {
-                                script_set_hovered_property(data, str_from_cstr(v.script_ident), member);
-                                script_visualize_ref(data, v.vis_ref, member, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
+                                script_set_hovered_property(data, md_str_from_cstr(v.script_ident), member);
+                                script_visualize_ref(data, v.vis_ref, member, script::DRAW_ATOMS | script::DRAW_GEOMETRY);
                             }
                             if (v.num_periods > 0 && hovered_bin >= 0) {
                                 if (hovered_pop_idx >= 0 && v.periods[hovered_pop_idx].id != 0) {
@@ -5284,8 +5492,11 @@ static void draw_distribution_window(ApplicationState* data) {
 
                         if (ImPlot::IsLegendEntryHovered(v.plot_id)) {
                             if (v.script_ident[0] != '\0') {
-                                script_visualize_ref(data, v.vis_ref, -1, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_GEOMETRY);
-                                script_set_hovered_property(data, str_from_cstr(v.script_ident));
+                                script_visualize_ref(data, v.vis_ref, -1, script::DRAW_ATOMS | script::DRAW_GEOMETRY);
+                                script_set_hovered_property(data, md_str_from_cstr(v.script_ident));
+                            } else if (s.key.source == SeriesSource_System) {
+                                // An energy term of groups: the groups
+                                highlight_energy_term_groups(data, md_attributes_find(&data->mold.sys.attributes, md_str_from_cstr(s.key.path)));
                             }
                             if (!resolved[j]) {
                                 ImGui::SetTooltip("Nothing to show for '%s' right now", s.key.path);
@@ -5318,7 +5529,7 @@ static void draw_distribution_window(ApplicationState* data) {
                             }
 
                             // Powers of two: a script distribution only divides into those
-                            int bins_exp = (int)log2((double)MAX(s.num_bins, 2));
+                            int bins_exp = (int)log2((double)MD_MAX(s.num_bins, 2));
                             char bins_fmt[32];
                             snprintf(bins_fmt, sizeof(bins_fmt), "%d", 1 << bins_exp);
                             if (ImGui::SliderInt("Num Bins", &bins_exp, 5, 10, bins_fmt)) {
@@ -5327,6 +5538,25 @@ static void draw_distribution_window(ApplicationState* data) {
                             }
                             if (resolved[j] && v.num_bins != s.num_bins) {
                                 ImGui::TextDisabled("Evaluated at %d bins", v.num_bins);
+                            }
+
+                            // Values binned, rather than a distribution as the script evaluated it: they may be smoothed
+                            const bool binned = s.key.source != SeriesSource_Script ||
+                                (script::output_flags(data->script.eval_ir, series_script_ident(s.key)) & script::OUTPUT_TEMPORAL);
+                            if (binned) {
+                                bool smooth = s.smoothing > 0.0f;
+                                if (ImGui::Checkbox("Smooth", &smooth)) {
+                                    s.smoothing = smooth ? 1.0f : 0.0f;
+                                }
+                                ImGui::SetItemTooltip("A kernel density estimate rather than the histogram: a Gaussian about every value, as\n"
+                                                      "wide as Silverman's rule of thumb makes it%s",
+                                                      series_periodic_valid(v.periodic) ? ", wrapped around the period" : "");
+                                if (smooth) {
+                                    ImGui::SameLine();
+                                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+                                    ImGui::SliderFloat("Bandwidth", &s.smoothing, 0.25f, 4.0f, "%.2fx", ImGuiSliderFlags_Logarithmic);
+                                    ImGui::SetItemTooltip("Of Silverman's rule of thumb, which oversmooths what has several peaks:\nless than 1 to see them apart");
+                                }
                             }
 
                             int popup_hovered_pop = -1;
@@ -5344,7 +5574,7 @@ static void draw_distribution_window(ApplicationState* data) {
                         if (!resolved[j] || v.num_bins <= 0) {
                             ImPlot::PlotDummy(v.plot_id);
                         } else {
-                            const int population_size = CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
+                            const int population_size = MD_CLAMP(v.dim, 1, PLOT_MAX_POPULATION);
                             auto plot = [&](int k) {
                                 // A period in its own colour, so that it reads with the timeline
                                 ImVec4 color = v.num_periods > 0 && v.periods[k].own_color ? v.periods[k].color : plot_series_member_color(s, k, population_size);
@@ -5364,19 +5594,23 @@ static void draw_distribution_window(ApplicationState* data) {
                                     }
                                 }
 
-                                HistogramGetterPayload payload = { &v, k };
+                                HistogramGetterPayload payload = { &v, k, draw_u0[j] };
+                                // Around a period from where it is cut, bars without the one which closes a curve: it would
+                                // stand outside the period, beside the others
+                                const bool rotated = pviews[j] && !axis_view;
+                                const int count = draw_count[j] - (rotated && s.plot_type == PlotType_Bars ? 1 : 0);
                                 switch (s.plot_type) {
                                 case PlotType_Area:
                                     ImPlot::SetNextFillStyle(color, fill_alpha);
-                                    ImPlot::PlotShadedG(v.plot_id, histogram_getter_zero, &payload, histogram_getter, &payload, v.num_bins);
+                                    ImPlot::PlotShadedG(v.plot_id, histogram_getter_zero, &payload, histogram_getter, &payload, count);
                                     break;
                                 case PlotType_Bars:
                                     ImPlot::SetNextFillStyle(color, fill_alpha);
-                                    ImPlot::PlotBarsG(v.plot_id, histogram_getter, &payload, v.num_bins, series_histogram_bin_width(v) * s.bar_width);
+                                    ImPlot::PlotBarsG(v.plot_id, histogram_getter, &payload, count, series_histogram_bin_width(v) * s.bar_width);
                                     break;
                                 default:
                                     ImPlot::SetNextLineStyle(color, weight);
-                                    ImPlot::PlotLineG(v.plot_id, histogram_getter, &payload, v.num_bins);
+                                    ImPlot::PlotLineG(v.plot_id, histogram_getter, &payload, count);
                                     break;
                                 }
                             };
@@ -5395,9 +5629,13 @@ static void draw_distribution_window(ApplicationState* data) {
                         // shown over it already
                         if (preview_range && v.script_ident[0] != '\0' && !plot_series_has_period(s, preview_id)) {
                             SeriesHistogramView pv;
-                            if (series_resolve_histogram_periods(&pv, data, s.key, s.num_bins, &preview_id, 1) && pv.num_bins > 0 && pv.periods[0].valid) {
+                            if (series_resolve_histogram_periods(&pv, data, s.key, s.num_bins, &preview_id, 1, s.smoothing) && pv.num_bins > 0 && pv.periods[0].valid) {
                                 const vec4_t rc = preview_range->color;
-                                plot_histogram_preview(pv, 0, ImVec4(rc.x, rc.y, rc.z, 1.0f), s);
+                                long long pu0 = 0;
+                                int pcount = 0;
+                                draw_range(&pu0, &pcount, pv, pviews[j]);
+                                if (pviews[j] && !axis_view && s.plot_type == PlotType_Bars) pcount -= 1;
+                                plot_histogram_preview(pv, 0, ImVec4(rc.x, rc.y, rc.z, 1.0f), s, pu0, pcount);
                             }
                         }
 
@@ -5410,7 +5648,7 @@ static void draw_distribution_window(ApplicationState* data) {
                     // A period pulled out of the timeline, dropped on a legend entry: that series over it too
                     if (ImPlot::BeginDragDropTargetLegend()) {
                         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(TIMELINE_PERIOD_DND)) {
-                            ASSERT(payload->DataSize == sizeof(uint32_t));
+                            MD_ASSERT(payload->DataSize == sizeof(uint32_t));
                             const uint32_t id = *(const uint32_t*)payload->Data;
                             for (int j = 0; j < sp.count; ++j) {
                                 if (ImPlot::IsLegendEntryHovered(views[j].plot_id) && views[j].script_ident[0] != '\0') {
@@ -5423,7 +5661,7 @@ static void draw_distribution_window(ApplicationState* data) {
 
                     if (ImPlot::BeginDragDropTargetPlot()) {
                         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(DISTRIBUTION_SERIES_DND)) {
-                            ASSERT(payload->DataSize == sizeof(SeriesDragPayload));
+                            MD_ASSERT(payload->DataSize == sizeof(SeriesDragPayload));
                             const SeriesDragPayload* dnd = (const SeriesDragPayload*)(payload->Data);
                             if (dnd->src_subplot >= 0 && dnd->src_subplot < PLOT_MAX_SUBPLOTS) {
                                 plot_move_series(data, data->distributions.subplots[dnd->src_subplot], sp, dnd->key);
@@ -5433,7 +5671,7 @@ static void draw_distribution_window(ApplicationState* data) {
                             fit_subplot[i] = true;
                         } else if (const ImGuiPayload* range_payload = ImGui::AcceptDragDropPayload(TIMELINE_PERIOD_DND)) {
                             // A period pulled out of the timeline: every script series here over it too
-                            ASSERT(range_payload->DataSize == sizeof(uint32_t));
+                            MD_ASSERT(range_payload->DataSize == sizeof(uint32_t));
                             const uint32_t id = *(const uint32_t*)range_payload->Data;
                             for (int j = 0; j < sp.count; ++j) {
                                 if (views[j].script_ident[0] != '\0') {
@@ -5443,7 +5681,7 @@ static void draw_distribution_window(ApplicationState* data) {
                         } else if (const ImGuiPayload* tl_payload = ImGui::AcceptDragDropPayload(TIMELINE_SERIES_DND)) {
                             // Something plotted over time, dropped here: the distribution of its
                             // values, whichever view of them (a mean, a spread) was dragged
-                            ASSERT(tl_payload->DataSize == sizeof(SeriesDragPayload));
+                            MD_ASSERT(tl_payload->DataSize == sizeof(SeriesDragPayload));
                             SeriesKey key = ((const SeriesDragPayload*)tl_payload->Data)->key;
                             key.variant = SeriesVariant_Values;
                             plot_add_series(data, sp, key);
@@ -5461,6 +5699,9 @@ static void draw_distribution_window(ApplicationState* data) {
                         ImPlot::GetPlotDrawList()->AddLine(p0, p1, IM_COL32(255, 255, 255, 120));
                         ImPlot::PopPlotClipRect();
                     }
+
+                    // Over everything else
+                    ImPlot::DrawInsetAxes();
 
                     ImPlot::EndPlot();
                 }
@@ -5505,14 +5746,14 @@ static void profiler_export_info(md_str_writer_t* sw, const ApplicationState* st
 }
 
 // The profiler's times (profiler::write_csv) as a CSV file
-static void profiler_export_csv(const ApplicationState* state, str_t path) {
+static void profiler_export_csv(const ApplicationState* state, md_str_t path) {
     md_file_t file = {};
     if (!md_file_open(&file, path, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
-        VIAMD_LOG_ERROR("Failed to open '" STR_FMT "' to write the profiler's times", STR_ARG(path));
+        VIAMD_LOG_ERROR("Failed to open '" MD_STR_FMT "' to write the profiler's times", MD_STR_ARG(path));
         return;
     }
     md_temp_scope_t temp = md_temp_begin();
-    defer { md_temp_end(temp); };
+    MD_DEFER { md_temp_end(temp); };
     md_str_writer_t info = md_str_writer_create(md_temp_allocator(temp));
     profiler_export_info(&info, state);
 
@@ -5521,9 +5762,9 @@ static void profiler_export_csv(const ApplicationState* state, str_t path) {
     const bool ok = md_file_writer_close(&fw);
     md_file_close(&file);
     if (ok) {
-        VIAMD_LOG_INFO("Exported the profiler's times to '" STR_FMT "'", STR_ARG(path));
+        VIAMD_LOG_INFO("Exported the profiler's times to '" MD_STR_FMT "'", MD_STR_ARG(path));
     } else {
-        VIAMD_LOG_ERROR("Failed to write the profiler's times to '" STR_FMT "'", STR_ARG(path));
+        VIAMD_LOG_ERROR("Failed to write the profiler's times to '" MD_STR_FMT "'", MD_STR_ARG(path));
     }
 }
 
@@ -5534,7 +5775,7 @@ static void draw_profiler_window(ApplicationState* data) {
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled("Per frame, averaged over 30 frames. GPU: the work a section issued; CPU: from its start to its "
                             "end. The wait for vsync is outside the frame.");
-        const int made = (int)popcnt64(data->render.history);
+        const int made = (int)md_popcnt64(data->render.history);
         ImGui::TextDisabled("The scene was made in %d of the last 64 frames%s.", made,
                             data->settings.lazy_rendering ? "; shown again as it was in the others" : " (lazy rendering is off)");
         ImGui::PopTextWrapPos();
@@ -5543,8 +5784,8 @@ static void draw_profiler_window(ApplicationState* data) {
         ImGui::BeginDisabled(profiler::frame_cpu_ms() <= 0.0f);
         if (ImGui::Button("Export...")) {
             char path_buf[2048] = {};
-            if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, STR_LIT("csv"))) {
-                profiler_export_csv(data, str_from_cstr(path_buf));
+            if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) {
+                profiler_export_csv(data, md_str_from_cstr(path_buf));
             }
         }
         ImGui::SetItemTooltip("The times as CSV, with the renderer and the sizes they were measured at");
@@ -5571,17 +5812,16 @@ static void draw_profiler_window(ApplicationState* data) {
 }
 
 static void draw_debug_window(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
 
     ImGui::SetNextWindowSize(ImVec2(400, 400), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Debug", &data->show_debug_window)) {       
-        task_system::ID tasks[256]; 
-        size_t num_tasks = task_system::pool_running_tasks(tasks, ARRAY_SIZE(tasks));
-        if (num_tasks > 0) {
-            ImGui::Text("Running Pool Tasks:");
-            for (size_t i = 0; i < num_tasks; ++i) {
-                str_t lbl = task_system::task_label(tasks[i]);
-                ImGui::Text("[%i]: %.*s", (int)i, (int)lbl.len, lbl.ptr);
+        task_system::ActivityInfo activities[64];
+        const size_t num_activities = task_system::activity_list(activities, MD_COUNTOF(activities));
+        if (num_activities > 0) {
+            ImGui::Text("Running Jobs:");
+            for (size_t i = 0; i < num_activities; ++i) {
+                ImGui::Text("[%i]: %s", (int)i, activities[i].label);
             }
         }
 
@@ -5606,9 +5846,10 @@ static void draw_debug_window(ApplicationState* data) {
 // Opens the script reference at topic (a procedure name, alias or heading anchor). Anything else is searched for,
 // and an empty topic puts the focus in the search box (which always takes the focus). Without take_focus the keyboard
 // focus stays where it is, so lookups from the script editor keep its caret.
-static void open_script_reference(ApplicationState* state, str_t topic, bool take_focus) {
-    ASSERT(state);
-    if (str_empty(topic)) {
+static void open_script_reference(ApplicationState* state, md_str_t topic, bool take_focus) {
+    MD_ASSERT(state);
+    script_reference::set_language(state->script.language);     // the reference of what the script is written in
+    if (md_str_empty(topic)) {
         script_reference::focus_search();
         take_focus = true;
     } else if (!script_reference::show(topic)) {
@@ -5619,9 +5860,10 @@ static void open_script_reference(ApplicationState* state, str_t topic, bool tak
 }
 
 static void draw_script_reference_window(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
+    script_reference::set_language(state->script.language);
     const script_reference::Action action = script_reference::draw_window(&state->show_script_reference_window);
-    if (!str_empty(action.insert_code)) {
+    if (!md_str_empty(action.insert_code)) {
         // Examples go in as whole lines at the cursor of the script editor
         script_editor::insert_lines_at_cursor(state->editor, action.insert_code);
         state->show_script_window = true;
@@ -5632,9 +5874,9 @@ static void draw_script_reference_window(ApplicationState* state) {
 // of the system dragged as a series (from the Attributes or System window, a plot's legend, ...) goes in as the
 // expression that reads it, attr("edr/potential"), text for the script as it is.
 static bool script_drop_text(char* buf, size_t cap, const ApplicationState* state, const ImGuiPayload* payload) {
-    ASSERT(buf && cap > 0);
-    ASSERT(state);
-    ASSERT(payload);
+    MD_ASSERT(buf && cap > 0);
+    MD_ASSERT(state);
+    MD_ASSERT(payload);
     buf[0] = '\0';
 
     if (payload->IsDataType(SCRIPT_TEXT_DND)) {
@@ -5650,17 +5892,17 @@ static bool script_drop_text(char* buf, size_t cap, const ApplicationState* stat
         // The values themselves: a summary of them (mean, extent) is not what attr() reads
         const SeriesKey& key = ((const SeriesDragPayload*)payload->Data)->key;
         if (key.source != SeriesSource_System || key.variant != SeriesVariant_Values) return false;
-        const str_t path = str_from_cstr(key.path);
+        const md_str_t path = md_str_from_cstr(key.path);
         const md_attributes_t* table = series_table(state, SeriesSource_System, path);
         const md_attribute_t* attr = table ? md_attributes_find(table, path) : nullptr;
-        return attr && script_editor::attr_expression(buf, cap, table, attr);
+        return attr && script_editor::attr_expression(buf, cap, state->script.language, table, attr);
     }
 
     return false;
 }
 
 static void draw_script_editor_window(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 
     ImGui::SetNextWindowSize({300,200}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Script Editor", &state->show_script_window, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoFocusOnAppearing)) {
@@ -5670,16 +5912,16 @@ static void draw_script_editor_window(ApplicationState* state) {
             if (ImGui::BeginMenu("File")) {
                 char path_buf[1024] = "";
                 if (ImGui::MenuItem("Load")) {
-                    if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Open, STR_LIT("txt"))) {
-                        str_t txt = load_textfile(str_from_cstr(path_buf), frame_alloc);
+                    if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Open, MD_STR_LIT("txt"))) {
+                        md_str_t txt = md_load_textfile(md_str_from_cstr(path_buf), frame_alloc);
                         std::string str(txt.ptr, txt.len);
                         state->editor.SetText(str);
                     }
                 }
                 if (ImGui::MenuItem("Save")) {
                     auto textToSave = state->editor.GetText();
-                    if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, STR_LIT("txt"))) {
-                        str_t path = str_t{path_buf, strnlen(path_buf, sizeof(path_buf))};
+                    if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, MD_STR_LIT("txt"))) {
+                        md_str_t path = md_str_t{path_buf, strnlen(path_buf, sizeof(path_buf))};
                         md_file_t file = {0};
                         if (md_file_open(&file, path, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
                             md_file_write(file, textToSave.c_str(), textToSave.length());
@@ -5691,6 +5933,16 @@ static void draw_script_editor_window(ApplicationState* state) {
                 }
                 if (ImGui::MenuItem("Export")) {
                     state->show_property_export_window = true;
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Language")) {
+                // The script and every filter of the workspace are in one language; the text is kept as it is
+                if (ImGui::MenuItem("mdscript (v1)", nullptr, state->script.language == script::Language::V1)) {
+                    script_set_language(state, script::Language::V1);
+                }
+                if (ImGui::MenuItem("VIAL (v2)", nullptr, state->script.language == script::Language::V2)) {
+                    script_set_language(state, script::Language::V2);
                 }
                 ImGui::EndMenu();
             }
@@ -5784,7 +6036,7 @@ static void draw_script_editor_window(ApplicationState* state) {
             const uint32_t* line_offsets = state->editor_markers.line_offsets;
             const size_t num_lines = md_array_size(line_offsets);
             for (size_t i = 0; i < plan.num_props; ++i) {
-                const md_script_range_marker_t range = md_script_ir_property_range(state->script.ir, plan.names[i]);
+                const script::Range range = script::output_range(state->script.ir, plan.names[i]);
                 if (range.end <= range.beg || num_lines == 0) continue;
                 // The last line which begins at or before it
                 size_t lo = 0, hi = num_lines;
@@ -5792,10 +6044,10 @@ static void draw_script_editor_window(ApplicationState* state) {
                     const size_t mid = (lo + hi) / 2;
                     if (line_offsets[mid] <= (uint32_t)range.beg) lo = mid; else hi = mid;
                 }
-                const md_script_eval_plan_t& p = plan.props[i];
+                const script::Plan& p = plan.props[i];
                 ScriptGutterMark mark = { (int)lo, p.status, 0.0f, "", "", 0 };
-                str_copy_to_char_buf(mark.ident, sizeof(mark.ident), plan.names[i]);
-                mark.kinds = (uint32_t)md_script_ir_property_flags(state->script.ir, plan.names[i]);
+                md_str_copy_to_char_buf(mark.ident, sizeof(mark.ident), plan.names[i]);
+                mark.kinds = (uint32_t)script::output_flags(state->script.ir, plan.names[i]);
                 const uint32_t needed = p.num_frames + p.num_pending;
                 mark.done = p.num_pending == 0 ? 1.0f : needed ? (float)p.num_frames / (float)needed : 0.0f;
                 script_plan_describe(mark.text, sizeof(mark.text), plan, i);
@@ -5843,7 +6095,7 @@ static void draw_script_editor_window(ApplicationState* state) {
             const ImGuiPayload* payload = ImGui::GetDragDropPayload();
             char text[512];
             if (payload && script_drop_text(text, sizeof(text), state, payload)) {
-                script_editor::accept_drop(state->editor, payload->DataType, str_from_cstr(text));
+                script_editor::accept_drop(state->editor, payload->DataType, md_str_from_cstr(text));
             }
             ImGui::EndDragDropTarget();
         }
@@ -5881,13 +6133,13 @@ static void draw_script_editor_window(ApplicationState* state) {
             }
             // What is shown which the script no longer has
             if (state->script.eval_ir && !plan.same) {
-                const str_t* evaluated = md_script_ir_property_names(state->script.eval_ir);
-                for (size_t j = 0; j < md_script_ir_property_count(state->script.eval_ir); ++j) {
+                const md_str_t* evaluated = script::output_names(state->script.eval_ir);
+                for (size_t j = 0; j < script::num_outputs(state->script.eval_ir); ++j) {
                     bool kept = false;
                     for (size_t i = 0; i < plan.num_props && !kept; ++i) {
-                        kept = str_eq(plan.names[i], evaluated[j]) || (plan.props[i].status == MD_SCRIPT_EVAL_STATUS_HELD && str_eq(plan.props[i].from, evaluated[j]));
+                        kept = md_str_eq(plan.names[i], evaluated[j]) || (plan.props[i].status == script::Status::Held && md_str_eq(plan.props[i].from, evaluated[j]));
                     }
-                    if (!kept) ImGui::TextDisabled(STR_FMT ": no longer in the script", STR_ARG(evaluated[j]));
+                    if (!kept) ImGui::TextDisabled(MD_STR_FMT ": no longer in the script", MD_STR_ARG(evaluated[j]));
                 }
             }
             ImGui::EndTooltip();
@@ -5908,20 +6160,20 @@ static void draw_script_editor_window(ApplicationState* state) {
         }
 
         if (hovered_marker) {
-            if (hovered_marker->atoms || !md_script_vis_ref_empty(hovered_marker->vis_ref)) {
+            if (hovered_marker->atoms || !script::ref_empty(hovered_marker->vis_ref)) {
                 if (hovered_marker->atoms) {
                     // Errors and warnings: the atoms the message is about
                     md_bitmask_assign(&state->selection.highlight_mask, *hovered_marker->atoms);
                 }
                 else if (hovered_marker->type == script_editor::MarkerType_Visualization) {
                     // Clear hovered property
-                    script_set_hovered_property(state, STR_LIT(""));
+                    script_set_hovered_property(state, MD_STR_LIT(""));
                     // The markers come from the IR last compiled. One which did not compile is gone, and its
                     // markers resolve in nothing
-                    const md_script_vis_ref_t ref = hovered_marker->vis_ref;
-                    if (const md_script_ir_t* ir = script_ir_of(state, ref)) {
-                        str_t ref_ident = md_script_vis_ref_ident(ir, ref);
-                        int ref_dim  = md_script_vis_ref_dim(ir, ref);
+                    const script::Ref ref = hovered_marker->vis_ref;
+                    if (const script::Program* ir = script_ir_of(state, ref)) {
+                        md_str_t ref_ident = script::ref_name(ir, ref);
+                        int ref_dim  = script::ref_dim(ir, ref);
 
                         if (ref_dim > 1) {
                             int delta = (int)ImGui::GetIO().MouseWheel;
@@ -5929,7 +6181,7 @@ static void draw_script_editor_window(ApplicationState* state) {
                                 delta *= 10;
                             }
                             state->script.sub_idx += delta;
-                            state->script.sub_idx = CLAMP(state->script.sub_idx, -1, (int)ref_dim - 1);
+                            state->script.sub_idx = MD_CLAMP(state->script.sub_idx, -1, (int)ref_dim - 1);
                         }
 
                         script_visualize_ref(state, ref, state->script.sub_idx, 0);
@@ -5946,18 +6198,18 @@ static void draw_script_editor_window(ApplicationState* state) {
             }
 
             // After the visualization is set: the value is computed with it
-            if (!str_empty(hovered_marker->text)) {
+            if (!md_str_empty(hovered_marker->text)) {
                 ImGui::BeginTooltip();
-                ImGui::Text(STR_FMT, STR_ARG(hovered_marker->text));
+                ImGui::Text(MD_STR_FMT, MD_STR_ARG(hovered_marker->text));
                 if (hovered_marker->type == script_editor::MarkerType_Visualization) {
-                    const str_t value = script_vis_value_text(state);
+                    const md_str_t value = script_vis_value_text(state);
                     // A value known since the compilation is in the text already, unless it was too long to keep there
-                    const bool dynamic = str_find_str(NULL, hovered_marker->text, STR_LIT("[d]"));
-                    const bool has_value = str_find_char(NULL, hovered_marker->text, '\n');
-                    if (!str_empty(value) && (dynamic || !has_value || state->script.sub_idx != -1)) {
+                    const bool dynamic = md_str_find_str(NULL, hovered_marker->text, MD_STR_LIT("[d]"));
+                    const bool has_value = md_str_find_char(NULL, hovered_marker->text, '\n');
+                    if (!md_str_empty(value) && (dynamic || !has_value || state->script.sub_idx != -1)) {
                         ImGui::Separator();
                         if (dynamic) ImGui::TextDisabled("At the frame shown");
-                        ImGui::Text(STR_FMT, STR_ARG(value));
+                        ImGui::Text(MD_STR_FMT, MD_STR_ARG(value));
                     }
                 }
                 if (state->script.sub_idx != -1) {
@@ -5972,13 +6224,13 @@ static void draw_script_editor_window(ApplicationState* state) {
     ImGui::End();
 }
 
-static bool export_xvg(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, str_t filename) {
-    ASSERT(column_data);
-    ASSERT(column_labels);
+static bool export_xvg(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, md_str_t filename) {
+    MD_ASSERT(column_data);
+    MD_ASSERT(column_labels);
 
     md_file_t file = {0};
     if (!md_file_open(&file, filename, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
-        VIAMD_LOG_ERROR("Failed to open file '" STR_FMT "' to write data.", STR_ARG(filename));
+        VIAMD_LOG_ERROR("Failed to open file '" MD_STR_FMT "' to write data.", MD_STR_ARG(filename));
         return false;
     }    
 
@@ -6019,9 +6271,9 @@ static bool export_xvg(const float* column_data[], const char* column_labels[], 
     return true;
 }
 
-static bool export_csv(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, str_t filename) {
-    ASSERT(column_data);
-    ASSERT(column_labels);
+static bool export_csv(const float* column_data[], const char* column_labels[], size_t num_columns, size_t num_rows, md_str_t filename) {
+    MD_ASSERT(column_data);
+    MD_ASSERT(column_labels);
 
     md_file_t file = {0};
     if (!md_file_open(&file, filename, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
@@ -6046,43 +6298,49 @@ static bool export_csv(const float* column_data[], const char* column_labels[], 
     return true;
 }
 
-static bool export_cube(const ApplicationState& data, const SeriesVolumeView& volume, str_t filename) {
+static bool export_cube(const ApplicationState& data, const SeriesVolumeView& volume, md_str_t filename) {
     // @NOTE: First we need to extract some meta data for the cube format, we need the atom indices/bits for any SDF
     // And the origin + extent of the volume in spatial coordinates (Ångström)
 
     const float* volume_values = volume.data;
-    const md_script_vis_ref_t vis_ref = volume.vis_ref;
+    const script::Ref vis_ref = volume.vis_ref;
     if (!volume_values) {
         VIAMD_LOG_ERROR("Export Cube: The property to be exported did not exist");
         return false;
     }
 
-    if (md_script_vis_ref_empty(vis_ref)) {
+    if (script::ref_empty(vis_ref)) {
         VIAMD_LOG_ERROR("Export Cube: Missing input visualization data");
         return false;
     }
 
 	md_temp_scope_t temp = md_temp_begin_in(frame_alloc);
-	defer { md_temp_end(temp); };
+	MD_DEFER { md_temp_end(temp); };
 
     const md_system_t& sys = data.mold.sys;
+    // Frame 0, with room for its coordinates: an extract fills what has storage and allocates none
     md_system_state_t state = { .alloc = temp.arena };
+    md_system_state_init(&state, sys.atom.count);
     if (!extract_frame(&data, 0, &state)) {
         return false;
     }
 
     bool result = false;
-    md_script_vis_t vis = { 0 };
-    md_script_vis_init(&vis, temp.arena);
+    script::Drawing vis = {};
+    script::drawing_init(&vis, temp.arena);
         
-    if (md_script_ir_valid(data.script.eval_ir)) {
-        md_script_vis_ctx_t ctx = {
-            .ir = data.script.eval_ir,
+    if (script::valid(data.script.eval_ir)) {
+        // At frame 0, whose coordinates are written: the structure's pose and its atoms of one frame. (v1 places its
+        // reference by the frame shown, as it always has.)
+        script::DrawCtx ctx = {
+            .prog = data.script.eval_ir,
             .sys = &data.mold.sys,
-            .state = &data.mold.state,
+            .state = volume.placed ? &state : &data.mold.state,
+            .eval = data.script.eval,
+            .run = md_str_from_cstr(data.mold.run),
         };
         // The structures of the volume exported: of an array, those of its member
-        result = md_script_vis_eval_ref(&vis, vis_ref, (int)volume.member, &ctx, MD_SCRIPT_VISUALIZE_ATOMS | MD_SCRIPT_VISUALIZE_SDF);
+        result = script::draw_ref(&vis, vis_ref, (int)volume.member, ctx, script::DRAW_ATOMS | script::DRAW_SDF);
     }
 
     if (result == true) {
@@ -6092,11 +6350,47 @@ static bool export_cube(const ApplicationState& data, const SeriesVolumeView& vo
             return false;
         }
 
-        // Two comment lines
-        md_file_printf(file, "EXPORTED DENSITY VOLUME FROM VIAMD, UNITS IN BOHR\n");
+        // Two comment lines; the first says the bulk density when the script gives one, which comparing reads
+        if (volume.placed && volume.bulk > 0.0) {
+            md_file_printf(file, "EXPORTED DENSITY VOLUME FROM VIAMD, UNITS IN BOHR, BULK %.9g\n", volume.bulk);
+        } else {
+            md_file_printf(file, "EXPORTED DENSITY VOLUME FROM VIAMD, UNITS IN BOHR\n");
+        }
         md_file_printf(file, "OUTER LOOP: X, MIDDLE LOOP: Y, INNER LOOP: Z\n");
 
-        if (md_array_size(vis.sdf.structures) > 0) {
+        if (volume.placed) {
+            // v2: its voxels where the script placed them, its data x outermost and z innermost, as the cube format
+            // reads it; the first structure of an sdf in the volume's frame, a density in the run's frame has none
+            const double to_bohr = 1.0 / 0.529177210903;
+            const int vol_dim[3] = {(int)volume.dim[0], (int)volume.dim[1], (int)volume.dim[2]};
+            const md_bitset_t* bf = md_array_size(vis.sdf.structures) > 0 ? &vis.sdf.structures[0] : nullptr;
+            const int num_atoms = bf ? (int)md_bitset_count(*bf) : 0;
+            // A cube's origin is its first point, the centre of voxel [0][0][0]; the script's is that voxel's corner
+            vec3_t first = volume.origin;
+            for (int a = 0; a < 3; ++a) first = vec3_add(first, vec3_mul1(volume.basis[a], 0.5f));
+            md_file_printf(file, "%5i %12.6f %12.6f %12.6f\n", num_atoms, first.x * to_bohr, first.y * to_bohr, first.z * to_bohr);
+            for (int a = 0; a < 3; ++a) {
+                const vec3_t b = volume.basis[a];
+                md_file_printf(file, "%5i %12.6f %12.6f %12.6f\n", vol_dim[a], b.x * to_bohr, b.y * to_bohr, b.z * to_bohr);
+            }
+            if (bf) {
+                const float scl = (float)to_bohr;
+                const mat4_t M = mat4_mul(mat4_scale(scl, scl, scl), vis.sdf.matrices[0]);
+                md_bitset_iter_t it = md_bitset_iter(*bf);
+                while (md_bitset_iter_next(&it)) {
+                    const size_t i = it.idx;
+                    const vec3_t coord = mat4_mul_vec3(M, md_state_coord(&state, i), 1.0f);
+                    const int anum = md_atom_atomic_number(&sys.atom, i);
+                    md_file_printf(file, "%5i %12.6f %12.6f %12.6f %12.6f\n", anum, (float)anum, coord.x, coord.y, coord.z);
+                }
+            }
+            const size_t n = (size_t)vol_dim[0] * vol_dim[1] * vol_dim[2];
+            for (size_t i = 0; i < n; ++i) {
+                md_file_printf(file, " %12.6E", volume_values[i]);
+                const size_t k = i % (size_t)vol_dim[2];   // six to a line, each row of z on lines of its own
+                if ((k + 1) % 6 == 0 || k + 1 == (size_t)vol_dim[2]) md_file_printf(file, "\n");
+            }
+        } else if (md_array_size(vis.sdf.structures) > 0) {
             const float angstrom_to_bohr = (float)(1.0 / 0.529177210903);
 
             // transformation matrix from world to volume
@@ -6158,23 +6452,23 @@ static bool export_cube(const ApplicationState& data, const SeriesVolumeView& vo
     return true;
 }
 
-#define APPEND_BUF(buf, len, fmt, ...) (len += snprintf(buf + len, MAX(0, (int)sizeof(buf) - len), fmt, ##__VA_ARGS__) + 1)
+#define APPEND_BUF(buf, len, fmt, ...) (len += snprintf(buf + len, MD_MAX(0, (int)sizeof(buf) - len), fmt, ##__VA_ARGS__) + 1)
 
 static void draw_property_export_window(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
 
     struct ExportFormat {
-        str_t lbl;
-        str_t ext;
+        md_str_t lbl;
+        md_str_t ext;
     };
 
     ExportFormat table_formats[] {
-        {STR_INIT("XVG"), STR_INIT("xvg")},
-        {STR_INIT("CSV"), STR_INIT("csv")}
+        {MD_STR_INIT("XVG"), MD_STR_INIT("xvg")},
+        {MD_STR_INIT("CSV"), MD_STR_INIT("csv")}
     };
 
     ExportFormat volume_formats[] {
-        {STR_INIT("Gaussian Cube"), STR_INIT("cube")},
+        {MD_STR_INIT("Gaussian Cube"), MD_STR_INIT("cube")},
     };
 
     enum ExportKind {
@@ -6191,29 +6485,29 @@ static void draw_property_export_window(ApplicationState* data) {
         static int volume_member = 0;   // of an array of volumes; -1 for each of them, in a file of its own
         static int bins_exp      = 7;   // 128 bins
 
-        if (task_system::task_is_running(data->tasks.evaluate)) {
+        if (data->tasks.evaluate.running()) {
             ImGui::Text("The properties are currently being evaluated, please wait...");
             ImGui::End();
             return;
         }
 
         md_temp_scope_t temp = md_temp_begin_in(frame_alloc);
-        defer { md_temp_end(temp); };
+        MD_DEFER { md_temp_end(temp); };
         md_allocator_i* alloc = md_temp_allocator(temp);
 
         // What there is to export of the chosen kind: the same series the plots offer
         md_array(SeriesKey) candidates = 0;
         {
             const uint32_t script_kinds =
-                kind == ExportKind_Temporal     ? (uint32_t)MD_SCRIPT_PROPERTY_FLAG_TEMPORAL :
-                kind == ExportKind_Distribution ? (uint32_t)(MD_SCRIPT_PROPERTY_FLAG_TEMPORAL | MD_SCRIPT_PROPERTY_FLAG_DISTRIBUTION) :
-                                                  (uint32_t)MD_SCRIPT_PROPERTY_FLAG_VOLUME;
+                kind == ExportKind_Temporal     ? (uint32_t)script::OUTPUT_TEMPORAL :
+                kind == ExportKind_Distribution ? (uint32_t)(script::OUTPUT_TEMPORAL | script::OUTPUT_DISTRIBUTION) :
+                                                  (uint32_t)script::OUTPUT_VOLUME;
             auto push_script = [&](uint32_t period) {
                 series_for_each_script_property(data, SeriesSource_Script, script_kinds, [&](const SeriesKey& over_all) {
                     SeriesKey key = over_all;
                     key.period = period;
                     md_array_push(candidates, key, alloc);
-                    const bool temporal = md_script_ir_property_flags(data->script.eval_ir, series_script_ident(key)) & MD_SCRIPT_PROPERTY_FLAG_TEMPORAL;
+                    const bool temporal = script::output_flags(data->script.eval_ir, series_script_ident(key)) & script::OUTPUT_TEMPORAL;
                     if (kind == ExportKind_Distribution && temporal && script_property_population(data, key) > 1) {
                         SeriesKey agg = key;
                         agg.variant = SeriesVariant_Aggregate;
@@ -6229,11 +6523,11 @@ static void draw_property_export_window(ApplicationState* data) {
                 }
             }
             if (kind != ExportKind_Volume) {
-                str_t groups[64];
-                const size_t num_groups = MIN(system_series_groups(groups, ARRAY_SIZE(groups), data), ARRAY_SIZE(groups));
+                md_str_t groups[64];
+                const size_t num_groups = MD_MIN(system_series_groups(groups, MD_COUNTOF(groups), data), MD_COUNTOF(groups));
                 for (size_t g = 0; g < num_groups; ++g) {
                     const size_t num = system_series_members(nullptr, 0, data, groups[g]);
-                    str_t* paths = md_temp_alloc_array(temp, str_t, num + 1);
+                    md_str_t* paths = md_temp_alloc_array(temp, md_str_t, num + 1);
                     system_series_members(paths, num, data, groups[g]);
                     for (size_t i = 0; i < num; ++i) {
                         md_array_push(candidates, series_key(SeriesSource_System, paths[i]), alloc);
@@ -6284,10 +6578,10 @@ static void draw_property_export_window(ApplicationState* data) {
             ImGui::SliderInt("Num Bins", &bins_exp, 5, 10, bins_fmt);
         }
 
-        str_t file_extension = {};
+        md_str_t file_extension = {};
         if (kind == ExportKind_Volume) {
             if (ImGui::BeginCombo("File Format", volume_formats[volume_format].lbl.ptr)) {
-                for (int i = 0; i < (int)ARRAY_SIZE(volume_formats); ++i) {
+                for (int i = 0; i < (int)MD_COUNTOF(volume_formats); ++i) {
                     if (ImGui::Selectable(volume_formats[i].lbl.ptr, volume_format == i)) {
                         volume_format = i;
                     }
@@ -6300,13 +6594,13 @@ static void draw_property_export_window(ApplicationState* data) {
             // own: each volume is about its own reference structures, which go along in the file
             const uint32_t count = selected_valid ? series_volume_count(data, selected) : 0;
             if (count > 1) {
-                const str_t ident = series_script_ident(selected);
-                volume_member = CLAMP(volume_member, -1, (int)count - 1);
+                const md_str_t ident = series_script_ident(selected);
+                volume_member = MD_CLAMP(volume_member, -1, (int)count - 1);
                 char preview[96];
                 if (volume_member < 0) {
                     snprintf(preview, sizeof(preview), "All, one file each");
                 } else {
-                    snprintf(preview, sizeof(preview), STR_FMT "[%d]", STR_ARG(ident), volume_member + 1);
+                    snprintf(preview, sizeof(preview), MD_STR_FMT "[%d]", MD_STR_ARG(ident), volume_member + 1);
                 }
                 if (ImGui::BeginCombo("Volume", preview)) {
                     if (ImGui::Selectable("All, one file each", volume_member < 0)) {
@@ -6317,12 +6611,12 @@ static void draw_property_export_window(ApplicationState* data) {
                     }
                     for (uint32_t m = 0; m < count; ++m) {
                         char item[96];
-                        snprintf(item, sizeof(item), STR_FMT "[%u]", STR_ARG(ident), m + 1);
+                        snprintf(item, sizeof(item), MD_STR_FMT "[%u]", MD_STR_ARG(ident), m + 1);
                         if (ImGui::Selectable(item, volume_member == (int)m)) {
                             volume_member = (int)m;
                         }
                         if (ImGui::IsItemHovered()) {
-                            script_visualize_ref(data, md_script_ir_property_vis_ref(data->script.eval_ir, ident), (int)m, MD_SCRIPT_VISUALIZE_DEFAULT);
+                            script_visualize_ref(data, script::output_ref(data->script.eval_ir, ident), (int)m, script::DRAW_DEFAULT);
                         }
                     }
                     ImGui::EndCombo();
@@ -6330,7 +6624,7 @@ static void draw_property_export_window(ApplicationState* data) {
             }
         } else {
             if (ImGui::BeginCombo("File Format", table_formats[table_format].lbl.ptr)) {
-                for (int i = 0; i < (int)ARRAY_SIZE(table_formats); ++i) {
+                for (int i = 0; i < (int)MD_COUNTOF(table_formats); ++i) {
                     if (ImGui::Selectable(table_formats[i].lbl.ptr, table_format == i)) {
                         table_format = i;
                     }
@@ -6347,7 +6641,7 @@ static void draw_property_export_window(ApplicationState* data) {
 
         char path_buf[1024];
         if (export_clicked && application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, file_extension)) {
-            const str_t path = {path_buf, strnlen(path_buf, sizeof(path_buf))};
+            const md_str_t path = {path_buf, strnlen(path_buf, sizeof(path_buf))};
             char label[96];
             series_label(label, sizeof(label), data, selected);
 
@@ -6355,35 +6649,35 @@ static void draw_property_export_window(ApplicationState* data) {
                 // One volume, or of an array each to a file of its own: 'name.cube' as 'name_1.cube', 'name_2.cube', ...
                 const uint32_t count = series_volume_count(data, selected);
                 const bool each = count > 1 && volume_member < 0;
-                const uint32_t beg = each ? 0 : (uint32_t)MAX(volume_member, 0);
+                const uint32_t beg = each ? 0 : (uint32_t)MD_MAX(volume_member, 0);
                 const uint32_t end = each ? count : beg + 1;
-                str_t stem = path;
-                str_t ext  = file_extension;
+                md_str_t stem = path;
+                md_str_t ext  = file_extension;
                 size_t sep;
-                if (each && extract_ext(&ext, path) && !str_find_char(&sep, ext, '/') && !str_find_char(&sep, ext, '\\')) {
-                    extract_file_path_without_ext(&stem, path);
+                if (each && md_extract_ext(&ext, path) && !md_str_find_char(&sep, ext, '/') && !md_str_find_char(&sep, ext, '\\')) {
+                    md_extract_file_path_without_ext(&stem, path);
                 } else {
                     ext = file_extension;
                 }
                 for (uint32_t m = beg; m < end; ++m) {
                     SeriesVolumeView view;
-                    const str_t file = each ? str_printf(alloc, STR_FMT "_%u." STR_FMT, STR_ARG(stem), m + 1, STR_ARG(ext)) : path;
+                    const md_str_t file = each ? md_str_printf(alloc, MD_STR_FMT "_%u." MD_STR_FMT, MD_STR_ARG(stem), m + 1, MD_STR_ARG(ext)) : path;
                     if (!series_resolve_volume(&view, data, selected, m)) {
                         VIAMD_LOG_ERROR("'%s' has no volume to export", label);
                         break;
                     }
-                    if (!str_eq(file_extension, STR_LIT("cube")) || !export_cube(*data, view, file)) {
+                    if (!md_str_eq(file_extension, MD_STR_LIT("cube")) || !export_cube(*data, view, file)) {
                         break;
                     }
-                    VIAMD_LOG_SUCCESS("Successfully exported property '%s' to '" STR_FMT "'", view.label, STR_ARG(file));
+                    VIAMD_LOG_SUCCESS("Successfully exported property '%s' to '" MD_STR_FMT "'", view.label, MD_STR_ARG(file));
                 }
             } else {
                 // Columns in the units the plots show them in, so a column and its axis label agree
                 md_array(const float*) column_data   = 0;
-                md_array(str_t)        column_labels = 0;
-                md_array(str_t)        legends       = 0;
-                str_t x_label = {};
-                str_t y_label = str_from_cstr(label);
+                md_array(md_str_t)        column_labels = 0;
+                md_array(md_str_t)        legends       = 0;
+                md_str_t x_label = {};
+                md_str_t y_label = md_str_from_cstr(label);
                 size_t num_rows = 0;
                 bool ok = false;
 
@@ -6395,9 +6689,9 @@ static void draw_property_export_window(ApplicationState* data) {
                         }
                         md_array_push(column_data, col, alloc);
                         if (dim > 1) {
-                            const str_t member = series_member_label(data, selected, k);
-                            const str_t legend = str_empty(member) ? str_printf(alloc, "%s[%i]", label, k + 1)
-                                                                   : str_printf(alloc, "%s[%i] " STR_FMT, label, k + 1, STR_ARG(member));
+                            const md_str_t member = series_member_label(data, selected, k);
+                            const md_str_t legend = md_str_empty(member) ? md_str_printf(alloc, "%s[%i]", label, k + 1)
+                                                                   : md_str_printf(alloc, "%s[%i] " MD_STR_FMT, label, k + 1, MD_STR_ARG(member));
                             md_array_push(legends, legend, alloc);
                             md_array_push(column_labels, legend, alloc);
                         } else {
@@ -6412,11 +6706,11 @@ static void draw_property_export_window(ApplicationState* data) {
                         num_rows = (size_t)view.num_samples;
                         char time_unit_str[32] = "";
                         md_unit_print(time_unit_str, sizeof(time_unit_str), data->timeline.time_unit);
-                        x_label = md_unit_is_none(data->timeline.time_unit) ? STR_LIT("Frame") : str_printf(alloc, "Time (%s)", time_unit_str);
-                        if (view.unit_str[0]) y_label = str_printf(alloc, "%s (%s)", label, view.unit_str);
+                        x_label = md_unit_is_none(data->timeline.time_unit) ? MD_STR_LIT("Frame") : md_str_printf(alloc, "Time (%s)", time_unit_str);
+                        if (view.unit_str[0]) y_label = md_str_printf(alloc, "%s (%s)", label, view.unit_str);
 
                         float* x = md_temp_alloc_array(temp, float, num_rows);
-                        MEMCPY(x, view.x, num_rows * sizeof(float));
+                        md_memcpy(x, view.x, num_rows * sizeof(float));
                         md_array_push(column_data, x, alloc);
                         md_array_push(column_labels, x_label, alloc);
                         push_columns(view.dim, [&](size_t r, int k) { return (float)series_temporal_point(view, (int)r, k).y; });
@@ -6426,8 +6720,8 @@ static void draw_property_export_window(ApplicationState* data) {
                     SeriesHistogramView view;
                     if (series_resolve_histogram(&view, data, selected, 1 << bins_exp)) {
                         num_rows = (size_t)view.num_bins;
-                        x_label = str_copy(str_from_cstr(view.x_unit_str), alloc);
-                        if (view.y_unit_str[0]) y_label = str_printf(alloc, "%s (%s)", label, view.y_unit_str);
+                        x_label = md_str_copy(md_str_from_cstr(view.x_unit_str), alloc);
+                        if (view.y_unit_str[0]) y_label = md_str_printf(alloc, "%s (%s)", label, view.y_unit_str);
 
                         // The centre of each bin, where the plot draws it
                         float* x = md_temp_alloc_array(temp, float, num_rows);
@@ -6444,20 +6738,20 @@ static void draw_property_export_window(ApplicationState* data) {
                 if (!ok) {
                     VIAMD_LOG_ERROR("'%s' has nothing to export right now", label);
                 } else {
-                    str_t out_str = {};
-                    if (str_eq(file_extension, STR_LIT("xvg"))) {
-                        str_t header = md_xvg_format_header(str_from_cstr(label), x_label, y_label, md_array_size(legends), legends, alloc);
+                    md_str_t out_str = {};
+                    if (md_str_eq(file_extension, MD_STR_LIT("xvg"))) {
+                        md_str_t header = md_xvg_format_header(md_str_from_cstr(label), x_label, y_label, md_array_size(legends), legends, alloc);
                         out_str = md_xvg_format(header, md_array_size(column_data), num_rows, column_data, alloc);
-                    } else if (str_eq(file_extension, STR_LIT("csv"))) {
+                    } else if (md_str_eq(file_extension, MD_STR_LIT("csv"))) {
                         out_str = md_csv_write_to_str(column_data, column_labels, md_array_size(column_data), num_rows, alloc);
                     }
                     md_file_t file = {0};
-                    if (!str_empty(out_str) && md_file_open(&file, path, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+                    if (!md_str_empty(out_str) && md_file_open(&file, path, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
                         md_file_write(file, out_str.ptr, out_str.len);
                         md_file_close(&file);
-                        VIAMD_LOG_SUCCESS("Successfully exported property '%s' to '" STR_FMT "'", label, STR_ARG(path));
+                        VIAMD_LOG_SUCCESS("Successfully exported property '%s' to '" MD_STR_FMT "'", label, MD_STR_ARG(path));
                     } else {
-                        VIAMD_LOG_ERROR("Failed to write '" STR_FMT "'", STR_ARG(path));
+                        VIAMD_LOG_ERROR("Failed to write '" MD_STR_FMT "'", MD_STR_ARG(path));
                     }
                 }
             }
@@ -6483,11 +6777,11 @@ static void xyz_write_frame(md_file_t file, const int* atomic_nr, const md_syste
 }
 
 void draw_structure_export_window(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
 
     if (ImGui::Begin("Structure Export", &data->structure_export.show_window)) {
         md_temp_scope_t temp = md_temp_begin_in(frame_alloc);
-        defer { md_temp_end(temp); };
+        MD_DEFER { md_temp_end(temp); };
 
         const md_system_t* sys = &data->mold.sys;
         const md_system_state_t* state = &data->mold.state;
@@ -6513,16 +6807,16 @@ void draw_structure_export_window(ApplicationState* data) {
 
         //ImGui::PushItemWidth(200);
 
-        struct_exp.selected_atom_filter = CLAMP(struct_exp.selected_atom_filter, 0, (int)ARRAY_SIZE(atom_mask_options) - 1);
-        ImGui::Combo("Atoms to Export", &struct_exp.selected_atom_filter, atom_mask_options, (int)ARRAY_SIZE(atom_mask_options));
+        struct_exp.selected_atom_filter = MD_CLAMP(struct_exp.selected_atom_filter, 0, (int)MD_COUNTOF(atom_mask_options) - 1);
+        ImGui::Combo("Atoms to Export", &struct_exp.selected_atom_filter, atom_mask_options, (int)MD_COUNTOF(atom_mask_options));
 
         if (struct_exp.selected_atom_filter == 2) { // Query
             auto& query = struct_exp.query;
-            query.requires_evaluation |= filter_input("Query", &query.filter, filter_context(data));
+            query.requires_evaluation |= filter_input("Query", &query.filter, data->script.language, filter_context(data));
             bool preview = ImGui::IsItemFocused() || ImGui::IsItemHovered();
 
             if (query.requires_evaluation) {
-                filter_evaluate(&query.filter, &query.mask, filter_context(data), persistent_alloc);
+                filter_evaluate(&query.filter, &query.mask, data->script.language, filter_context(data), persistent_alloc);
                 query.requires_evaluation = false;
             }
 
@@ -6538,12 +6832,12 @@ void draw_structure_export_window(ApplicationState* data) {
 
         // Every frame, the current one, or those of a timeline period
         const TimelinePeriod* traj_period = timeline_periods_find(&data->timeline.periods, struct_exp.selected_traj_period);
-        struct_exp.selected_traj_filter = CLAMP(struct_exp.selected_traj_filter, 0, 2);
+        struct_exp.selected_traj_filter = MD_CLAMP(struct_exp.selected_traj_filter, 0, 2);
         if (struct_exp.selected_traj_filter == 2 && !traj_period) struct_exp.selected_traj_filter = 0;
         if (traj) {
             const char* preview = struct_exp.selected_traj_filter == 2 ? traj_period->name : frame_mask_options[struct_exp.selected_traj_filter];
             if (ImGui::BeginCombo("Frames to Export", preview)) {
-                for (int i = 0; i < (int)ARRAY_SIZE(frame_mask_options); ++i) {
+                for (int i = 0; i < (int)MD_COUNTOF(frame_mask_options); ++i) {
                     if (ImGui::Selectable(frame_mask_options[i], struct_exp.selected_traj_filter == i)) struct_exp.selected_traj_filter = i;
                 }
                 const TimelinePeriods& rs = data->timeline.periods;
@@ -6562,8 +6856,8 @@ void draw_structure_export_window(ApplicationState* data) {
             }
         }
 
-        struct_exp.selected_file_format = CLAMP(struct_exp.selected_file_format, 0, (int)ARRAY_SIZE(file_formats) - 1);
-        ImGui::Combo("File Format", &struct_exp.selected_file_format, file_formats, (int)ARRAY_SIZE(file_formats));
+        struct_exp.selected_file_format = MD_CLAMP(struct_exp.selected_file_format, 0, (int)MD_COUNTOF(file_formats) - 1);
+        ImGui::Combo("File Format", &struct_exp.selected_file_format, file_formats, (int)MD_COUNTOF(file_formats));
 
         //ImGui::PopItemWidth();
 
@@ -6578,11 +6872,11 @@ void draw_structure_export_window(ApplicationState* data) {
                 case 2: { // Query
                     auto& query = data->structure_export.query;
                     if (query.filter.result.is_dynamic) {
-                        // What it picks depends on the coordinates: picked again in each frame exported (md_filter
+                        // What it picks depends on the coordinates: picked again in each frame exported (script::filter
                         // replaces what the mask held, so nothing of the previous frame stays)
-                        md_filter_context_t ctx = filter_context(data);
+                        script::FilterCtx ctx = filter_context(data);
                         ctx.state = state;
-                        filter_evaluate(&query.filter, &query.mask, ctx, persistent_alloc);
+                        filter_evaluate(&query.filter, &query.mask, data->script.language, ctx, persistent_alloc);
                     }
                     if (!query.filter.result.success) {
                         VIAMD_LOG_ERROR("Cannot export structure, the query expression is invalid: %s", query.filter.result.error);
@@ -6635,9 +6929,9 @@ void draw_structure_export_window(ApplicationState* data) {
             }
 
             char path_buf[1024] = { 0 };
-            str_t ext = str_from_cstr(file_formats[struct_exp.selected_file_format]);
+            md_str_t ext = md_str_from_cstr(file_formats[struct_exp.selected_file_format]);
             if (application::file_dialog(path_buf, sizeof(path_buf), application::FileDialogFlag_Save, ext)) {
-                str_t path = str_from_cstrn(path_buf, sizeof(path_buf));
+                md_str_t path = md_str_from_cstrn(path_buf, sizeof(path_buf));
                 md_file_t file = {0};
                 if (md_file_open(&file, path, MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
                     // Write header for file format
@@ -6669,7 +6963,7 @@ void draw_structure_export_window(ApplicationState* data) {
                             }
                         } break;
                         default: {
-                            VIAMD_LOG_ERROR("Unsupported export format: '" STR_FMT "'", STR_ARG(ext));
+                            VIAMD_LOG_ERROR("Unsupported export format: '" MD_STR_FMT "'", MD_STR_ARG(ext));
                         } break;
                     }
 
@@ -6688,9 +6982,9 @@ void draw_structure_export_window(ApplicationState* data) {
                         md_system_state_init(&frame_state, sys->atom.count);
 
                         // Many frames: one context for all of them, so the run's files stay open.
-                        const str_t paths[] = { STR_INIT("atom/position"), STR_INIT("unitcell") };
-                        md_system_extract_t* ex = md_system_extract_begin(sys, str_from_cstr(data->mold.run), paths, ARRAY_SIZE(paths), md_get_heap_allocator());
-                        defer { md_system_extract_end(ex); };
+                        const md_str_t paths[] = { MD_STR_INIT("atom/position"), MD_STR_INIT("unitcell") };
+                        md_system_extract_t* ex = md_system_extract_begin(sys, md_str_from_cstr(data->mold.run), paths, MD_COUNTOF(paths), md_get_heap_allocator());
+                        MD_DEFER { md_system_extract_end(ex); };
 
                         for (size_t f = 0; f < num_frames; ++f) {
                             int frame_idx = frame_indices[f];
@@ -6720,10 +7014,10 @@ void draw_structure_export_window(ApplicationState* data) {
                         }
                     }
 
-                    VIAMD_LOG_INFO("Successfully exported structure to: '" STR_FMT "'", STR_ARG(path));
+                    VIAMD_LOG_INFO("Successfully exported structure to: '" MD_STR_FMT "'", MD_STR_ARG(path));
                     md_file_close(&file);
                 } else {
-                    VIAMD_LOG_ERROR("Failed to open file '" STR_FMT "' for writing.", STR_ARG(path));
+                    VIAMD_LOG_ERROR("Failed to open file '" MD_STR_FMT "' for writing.", MD_STR_ARG(path));
                 }
             }
         }
@@ -6734,7 +7028,7 @@ void draw_structure_export_window(ApplicationState* data) {
 static uint8_t* representation_atom_flags(ApplicationState* data) {
     const size_t count = data->mold.sys.atom.count;
     uint8_t* flags = (uint8_t*)md_vm_arena_push(frame_alloc, count);
-    MEMSET(flags, 0, count);
+    md_memset(flags, 0, count);
     md_bitset_iter_t it = md_bitmask_iter(&data->selection.highlight_mask);
     while (md_bitset_iter_next(&it)) flags[it.idx] |= AtomBit_Highlighted | AtomBit_Marked;
     const auto& groups = data->selection.highlight_groups;
@@ -6761,7 +7055,7 @@ static void representation_upload_flags(ApplicationState* data, const uint8_t* f
 }
 
 static void update_md_buffers(ApplicationState* data) {
-    ASSERT(data);
+    MD_ASSERT(data);
     const md_system_t& sys = data->mold.sys;
 	const md_system_state_t& state = data->mold.state;
 
@@ -6807,7 +7101,7 @@ static void update_md_buffers(ApplicationState* data) {
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyRadius) {
         md_temp_scope_t tmp = md_temp_begin_in(frame_alloc);
-        defer { md_temp_end(tmp); };
+        MD_DEFER { md_temp_end(tmp); };
 
         float* radii = (float*)md_vm_arena_push(frame_alloc, sys.atom.count * sizeof(float));
         md_atom_extract_radii(radii, 0, sys.atom.count, &sys.atom);
@@ -6820,7 +7114,7 @@ static void update_md_buffers(ApplicationState* data) {
 
     if (data->mold.dirty_gpu_buffers & MolBit_DirtyFlags) {
         md_temp_scope_t tmp = md_temp_begin_in(frame_alloc);
-        defer { md_temp_end(tmp); };
+        MD_DEFER { md_temp_end(tmp); };
 
         representation_upload_flags(data, representation_atom_flags(data));
     }
@@ -6832,12 +7126,12 @@ static void update_md_buffers(ApplicationState* data) {
         if (delta && (delta->num_formed > 0 || !md_bitset_empty(delta->broken))) {
             const size_t count = sys.bond.count + delta->num_formed;
             md_atom_pair_t* pairs = (md_atom_pair_t*)md_vm_arena_push(data->allocator.frame, sizeof(md_atom_pair_t) * count);
-            if (sys.bond.count) MEMCPY(pairs, sys.bond.pairs, sizeof(md_atom_pair_t) * sys.bond.count);
+            if (sys.bond.count) md_memcpy(pairs, sys.bond.pairs, sizeof(md_atom_pair_t) * sys.bond.count);
             md_bitset_iter_t it = md_bitset_iter(delta->broken);
             while (md_bitset_iter_next(&it)) {
                 if (it.idx < sys.bond.count) pairs[it.idx].idx[1] = pairs[it.idx].idx[0];
             }
-            if (delta->num_formed) MEMCPY(pairs + sys.bond.count, delta->formed_pair, sizeof(md_atom_pair_t) * delta->num_formed);
+            if (delta->num_formed) md_memcpy(pairs + sys.bond.count, delta->formed_pair, sizeof(md_atom_pair_t) * delta->num_formed);
             md_gl_mol_set_bonds(data->mold.gl_mol, 0, (uint32_t)count, pairs, sizeof(md_atom_pair_t));
         } else {
             md_gl_mol_set_bonds(data->mold.gl_mol, 0, (uint32_t)sys.bond.count, sys.bond.pairs, sizeof(md_atom_pair_t));
@@ -6868,9 +7162,9 @@ static void update_md_buffers(ApplicationState* data) {
     data->mold.dirty_gpu_buffers = 0;
 }
 
-void create_screenshot(str_t path) {
+void create_screenshot(md_str_t path) {
     md_temp_scope_t tmp = md_temp_begin_in(frame_alloc);
-    defer { md_temp_end(tmp); };
+    MD_DEFER { md_temp_end(tmp); };
 
     int viewport[4] = {};
     int fbo = 0;
@@ -6882,7 +7176,7 @@ void create_screenshot(str_t path) {
 
     size_t bytes = width * height * sizeof(uint32_t);
     uint32_t* rgba = (uint32_t*)md_vm_arena_push(frame_alloc, bytes);
-    defer { md_vm_arena_pop(frame_alloc, bytes); };
+    MD_DEFER { md_vm_arena_pop(frame_alloc, bytes); };
 
     GLenum read_buffer = fbo ? GL_COLOR_ATTACHMENT0 : GL_BACK;
 
@@ -6896,20 +7190,20 @@ void create_screenshot(str_t path) {
         // @NOTE: Swap Rows to flip image with respect to y-axis
         const uint32_t row_byte_size = width * sizeof(uint32_t);
         uint32_t* row_t = (uint32_t*)md_alloc(frame_alloc, row_byte_size);
-        defer { md_free(frame_alloc, row_t, row_byte_size); };
+        MD_DEFER { md_free(frame_alloc, row_t, row_byte_size); };
         for (uint32_t i = 0; i < (uint32_t)height / 2; ++i) {
             uint32_t* row_a = rgba + i * width;
             uint32_t* row_b = rgba + (height - 1 - i) * width;
             if (row_a != row_b) {
-                MEMCPY(row_t, row_a, row_byte_size);  // tmp = a;
-                MEMCPY(row_a, row_b, row_byte_size);  // a = b;
-                MEMCPY(row_b, row_t, row_byte_size);  // b = tmp;
+                md_memcpy(row_t, row_a, row_byte_size);  // tmp = a;
+                md_memcpy(row_a, row_b, row_byte_size);  // a = b;
+                md_memcpy(row_b, row_t, row_byte_size);  // b = tmp;
             }
         }
     }
 
-    str_t ext = {};
-    extract_ext(&ext, path);
+    md_str_t ext = {};
+    md_extract_ext(&ext, path);
 
     bool written = false;
     switch (image_format_from_ext(ext)) {
@@ -6925,16 +7219,16 @@ void create_screenshot(str_t path) {
         written = image_write_bmp(path, rgba, width, height);
         break;
     default:
-        VIAMD_LOG_ERROR("Non supported file-extension '" STR_FMT "' when saving screenshot", STR_ARG(ext));
+        VIAMD_LOG_ERROR("Non supported file-extension '" MD_STR_FMT "' when saving screenshot", MD_STR_ARG(ext));
         return;
     }
 
     if (!written) {
-        VIAMD_LOG_ERROR("Failed to save screenshot to: '" STR_FMT "'", STR_ARG(path));
+        VIAMD_LOG_ERROR("Failed to save screenshot to: '" MD_STR_FMT "'", MD_STR_ARG(path));
         return;
     }
 
-    VIAMD_LOG_SUCCESS("Screenshot saved to: '" STR_FMT "'", STR_ARG(path));
+    VIAMD_LOG_SUCCESS("Screenshot saved to: '" MD_STR_FMT "'", MD_STR_ARG(path));
 }
 
 static void draw_coordinate_system_widget_window(ViewTransform* target, const ViewTransform& current) {
@@ -6950,7 +7244,7 @@ static void draw_coordinate_system_widget_window(ViewTransform* target, const Vi
 
     // Scale down backround color to only show a faint outline
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg) * ImVec4(1.0f, 1.0f ,1.0f ,0.1f));
-    defer { ImGui::PopStyleColor(); };
+    MD_DEFER { ImGui::PopStyleColor(); };
 
     const bool editable = ImGui::IsKeyDown(ImGuiMod_Alt);
 
@@ -6993,14 +7287,14 @@ static bool input_activity() {
 static uint32_t settle_frames(const ApplicationState* state) {
     uint32_t n = 1;
     if (taa_active(state)) {
-        const double feedback = CLAMP((double)state->visuals.temporal_aa.feedback_max, 0.5, 0.99);
+        const double feedback = MD_CLAMP((double)state->visuals.temporal_aa.feedback_max, 0.5, 0.99);
         n = (uint32_t)ceil(log(0.01) / log(feedback));
-        n = MAX(n, 2 * jitter_count(state));
+        n = MD_MAX(n, 2 * jitter_count(state));
     }
     if (occlusion_temporal_active(state)) {
-        n = MAX(n, OCCLUSION_SETTLE_FRAMES);
+        n = MD_MAX(n, OCCLUSION_SETTLE_FRAMES);
     }
-    return CLAMP(n, 1u, 2u * JITTER_SEQUENCE_MAX);
+    return MD_CLAMP(n, 1u, 2u * JITTER_SEQUENCE_MAX);
 }
 
 // What the image of the scene is made from (render_scene), but for the marks, and for what input changes (input_activity):
@@ -7062,7 +7356,7 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
 
     // Enable all draw buffers
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, state->gbuffer.fbo);
-    glDrawBuffers((int)ARRAY_SIZE(draw_buffers_opaque), draw_buffers_opaque);
+    glDrawBuffers((int)MD_COUNTOF(draw_buffers_opaque), draw_buffers_opaque);
 
     PUSH_GPU_SECTION("G-Buffer fill")
 
@@ -7070,8 +7364,11 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
         immediate::Scope vis_scope(state->gfx.overlay, "visualization");
         immediate::Scope vis_scope_depth(state->gfx.world, "visualization with depth");
 
-        static const md_script_vis_t nothing = {};
-        const md_script_vis_t& vis = state->script.vis_shown ? *state->script.vis_shown : nothing;
+        static const script::Drawing nothing = {};
+        const script::Drawing& vis = state->script.vis_shown ? *state->script.vis_shown : nothing;
+
+        // The script's vertices are drawn as they are
+        static_assert(sizeof(script::Vertex) == sizeof(immediate::Vertex), "script::Vertex mirrors immediate::Vertex");
 
         const auto line_style = measurement_line_style(*state);
         immediate::script_geometry(vis_scope, vis, state->script.point_color, state->script.line_color,
@@ -7079,7 +7376,7 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
 
         const size_t num_matrices = md_array_size(vis.sdf.matrices);
         const size_t num_structures = md_array_size(vis.sdf.structures);
-        const size_t num_sdf_items = MIN(MIN(num_matrices, num_structures), 100);
+        const size_t num_sdf_items = MD_MIN(MD_MIN(num_matrices, num_structures), 100);
 
         if (num_matrices != num_structures) {
             VIAMD_LOG_DEBUG("SDF visualization returned mismatched matrix and structure counts (%zu, %zu)", num_matrices, num_structures);
@@ -7112,7 +7409,7 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
 
     // DRAW REPRESENTATIONS
     PUSH_GPU_SECTION("Draw Opaque")
-    glDrawBuffers((int)ARRAY_SIZE(draw_buffers_opaque), draw_buffers_opaque);
+    glDrawBuffers((int)MD_COUNTOF(draw_buffers_opaque), draw_buffers_opaque);
     draw_representations_opaque(state);
     viamd::event_system_broadcast_event(viamd::EventType_ViamdRenderOpaque, viamd::EventPayloadType_ApplicationState, state);
     POP_GPU_SECTION()
@@ -7141,7 +7438,7 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
     viamd::event_system_broadcast_event(viamd::EventType_ViamdRenderTransparent, viamd::EventPayloadType_ApplicationState, state);
 
     const GLenum draw_buffers_transparent[] = { GL_COLOR_ATTACHMENT_TRANSPARENCY, 0, GL_COLOR_ATTACHMENT_VELOCITY, GL_COLOR_ATTACHMENT_PICKING };
-	glDrawBuffers(ARRAY_SIZE(draw_buffers_transparent), draw_buffers_transparent);
+	glDrawBuffers(MD_COUNTOF(draw_buffers_transparent), draw_buffers_transparent);
 
     glDisable(GL_CULL_FACE);
 
@@ -7169,14 +7466,14 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
     glDepthFunc(GL_GREATER);
     immediate::render(state->gfx.occluded_overlay, params);
     glDepthFunc(GL_LESS);
-    glDrawBuffers(ARRAY_SIZE(draw_buffers_transparent), draw_buffers_transparent);
+    glDrawBuffers(MD_COUNTOF(draw_buffers_transparent), draw_buffers_transparent);
     POP_GPU_SECTION()
 
     PUSH_GPU_SECTION("Immediate overlay")
     glDisable(GL_DEPTH_TEST);
     glDrawBuffer(GL_COLOR_ATTACHMENT_TRANSPARENCY);
     immediate::render(state->gfx.color_overlay, params);
-    glDrawBuffers(ARRAY_SIZE(draw_buffers_transparent), draw_buffers_transparent);
+    glDrawBuffers(MD_COUNTOF(draw_buffers_transparent), draw_buffers_transparent);
     immediate::render(state->gfx.overlay, params);
     POP_GPU_SECTION()
 
@@ -7264,7 +7561,7 @@ static void render_scene(ApplicationState* state, bool do_screenshot) {
 // Saves the screenshot from the framebuffer bound (create_screenshot), and it is no longer pending
 static void screenshot_save(ApplicationState* state) {
     create_screenshot(state->screenshot.path_to_file);
-    str_free(state->screenshot.path_to_file, state->allocator.persistent);
+    md_str_free(state->screenshot.path_to_file, state->allocator.persistent);
     state->screenshot.path_to_file = {};
 }
 
@@ -7334,13 +7631,13 @@ static void render(ApplicationState* state) {
             PUSH_GPU_SECTION("Representation contours")
             gbuffer_marks_init(&target, state->gbuffer.out_width, state->gbuffer.out_height);
             md_temp_scope_t tmp = md_temp_begin_in(frame_alloc);
-            defer { md_temp_end(tmp); };
+            MD_DEFER { md_temp_end(tmp); };
             const size_t count = contour_request.num_atoms;
             const uint8_t* original = representation_atom_flags(state);
             uint8_t* flags = md_temp_alloc_array(tmp, uint8_t, count);
             for (size_t i = 0; i < count; ++i) {
                 const uint8_t group = contour_request.atom_groups[i];
-                ASSERT(group <= HIGHLIGHT_GROUP_COLORS);
+                MD_ASSERT(group <= HIGHLIGHT_GROUP_COLORS);
                 flags[i] = original[i] & AtomBit_Visible;
                 if (group) flags[i] |= AtomBit_Marked | AtomBit_Highlighted |
                     (uint8_t)((group-1) << AtomBit_GroupShift);
@@ -7383,12 +7680,12 @@ static void render(ApplicationState* state) {
     auto present = [&]() {
         PUSH_GPU_SECTION("Present")
         postprocess_pipeline::Settings settings = {};
-        settings.marks.outline_step = MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x));
+        settings.marks.outline_step = MD_MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x));
         if (draw_marks) {
             // The highlight fades in, the outline is as wide on a display of more pixels per point
             constexpr double HIGHLIGHT_FADE_IN_S = 0.12;
-            const float t = (float)CLAMP((ImGui::GetTime() - state->selection.highlight_time) / HIGHLIGHT_FADE_IN_S, 0.0, 1.0);
-            const int outline_step = MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x));
+            const float t = (float)MD_CLAMP((ImGui::GetTime() - state->selection.highlight_time) / HIGHLIGHT_FADE_IN_S, 0.0, 1.0);
+            const int outline_step = MD_MAX(1, (int)roundf(ImGui::GetIO().DisplayFramebufferScale.x));
             marks_settings(&settings, *state, t * t * (3.0f - 2.0f * t), outline_step);
         }
         postprocess_pipeline::Contours contours = {};
@@ -7397,7 +7694,7 @@ static void render(ApplicationState* state) {
             contours.group = state->gbuffer.contours.group;
             contours.outline_step = contour_request.thickness * settings.marks.outline_step;
             static_assert(sizeof(contours.colors) == sizeof(contour_request.colors));
-            MEMCPY(contours.colors, contour_request.colors, sizeof(contours.colors));
+            md_memcpy(contours.colors, contour_request.colors, sizeof(contours.colors));
         }
         postprocess_pipeline::present(state->gbuffer.tex.image, draw_marks ? state->gbuffer.marks.texture : 0,
             draw_marks ? state->gbuffer.marks.group : 0, settings, draw_contours ? &contours : nullptr);
@@ -7420,15 +7717,18 @@ static void render(ApplicationState* state) {
     glClear(GL_COLOR_BUFFER_BIT);
     if (!offscreen) {
         present();
+        // The planes' outlines over it, behind what of the scene is in front of them (es_planes.h)
+        es_planes_draw_outlines(state->gbuffer.tex.depth, state->gbuffer.width, state->gbuffer.height,
+                                state->app.framebuffer.width, state->app.framebuffer.height, ImGui::GetIO().DisplayFramebufferScale.x);
     } else {
-        const uint32_t total = MAX(settle_frames(state), 1u);
+        const uint32_t total = MD_MAX(settle_frames(state), 1u);
         float fraction = screenshot_pending(state) ? 1.0f - (float)lazy.settle_frames / (float)total : 1.0f;
-        if (!meshes_settled) fraction = MIN(fraction, (float)iso_mesh_target.frame / (float)isomesh::MAX_FRAMES);
+        if (!meshes_settled) fraction = MD_MIN(fraction, (float)iso_mesh_target.frame / (float)isomesh::MAX_FRAMES);
         if (screenshot_pending(state)) ImGui::OpenPopup("Capturing Frame");
         ImVec2 size = ImGui::CalcTextSize("Capturing Frame");
         ImGui::SetNextWindowSize(size * ImVec2(2, 5), ImGuiCond_Always);
         if (ImGui::BeginPopupModal("Capturing Frame", 0, ImGuiWindowFlags_NoResize)) {
-            ImGui::ProgressBar(CLAMP(fraction, 0.0f, 1.0f));
+            ImGui::ProgressBar(MD_CLAMP(fraction, 0.0f, 1.0f));
             if (!screenshot_pending(state)) ImGui::CloseCurrentPopup();     // saved this frame
             ImGui::EndPopup();
         }
@@ -7461,7 +7761,7 @@ static float bond_length_limit(ApplicationState* state) {
     if (md_unitcell_flags(&cell) != 0) {
         vec3_t ext = {0};
         md_unitcell_diag_extract_float(ext.elem, &cell);
-        return MAX(3.0f, vec3_reduce_min(ext) * 0.5f);
+        return MD_MAX(3.0f, vec3_reduce_min(ext) * 0.5f);
     }
 
     const md_system_t& sys = state->mold.sys;
@@ -7472,11 +7772,11 @@ static float bond_length_limit(ApplicationState* state) {
             for (size_t i = 0; i < sys.bond.count; ++i) {
                 const md_atom_pair_t pair = sys.bond.pairs[i];
                 if ((size_t)pair.idx[0] < frame.num_atoms && (size_t)pair.idx[1] < frame.num_atoms) {
-                    max_d2 = MAX(max_d2, vec3_distance_squared(frame.xyz[pair.idx[0]], frame.xyz[pair.idx[1]]));
+                    max_d2 = MD_MAX(max_d2, vec3_distance_squared(frame.xyz[pair.idx[0]], frame.xyz[pair.idx[1]]));
                 }
             }
         }
-        state->mold.bond_length_limit = MAX(BOND_LENGTH_MIN, BOND_LENGTH_MARGIN * sqrtf(max_d2));
+        state->mold.bond_length_limit = MD_MAX(BOND_LENGTH_MIN, BOND_LENGTH_MARGIN * sqrtf(max_d2));
         state->mold.bond_length_limit_version = sys.topology_version;
     }
     return state->mold.bond_length_limit;
@@ -7527,8 +7827,8 @@ static void place_ops(md_array(md_gl_draw_op_t)* ops, size_t beg, const Applicat
     const size_t end = md_array_size(*ops);
     const md_assembly_data_t& a = state.mold.sys.assembly;
     const bool shown = state.view.assembly >= 0 && (size_t)state.view.assembly < a.count;
-    const size_t part_beg = shown ? a.part_offset[state.view.assembly] : 0;
-    const size_t part_end = shown ? a.part_offset[state.view.assembly + 1] : 0;
+    const size_t part_beg = shown ? a.group_offset[state.view.assembly] : 0;
+    const size_t part_end = shown ? a.group_offset[state.view.assembly + 1] : 0;
     const size_t num_parts = md_array_size(state.view.assembly_copy_offset) > 0 ? md_array_size(state.view.assembly_copy_offset) - 1 : 0;
     const md_gl_subset_t* subsets = glyphs ? state.view.assembly_glyph_subsets : state.view.assembly_subsets;
     // Without an assembly, or its copies or subsets not of it (yet)
@@ -7554,10 +7854,9 @@ static void place_ops(md_array(md_gl_draw_op_t)* ops, size_t beg, const Applicat
 }
 
 // The edges of the unit cell of the frame shown (a SimulationBox representation), through the turn the coordinates
-// carry if the orientation is kept (the cell itself cannot hold one). Capsules of the thickness, shaded as the rest of
-// the scene (the world queue writes the G-buffer), never thinner than a pixel where they are, so a box seen from afar
-// does not break up; or lines of a pixel. With axes, the edges along a, b and c from the origin red, green and blue.
-// The cells out of view are left out.
+// carry if the orientation is kept (the cell itself cannot hold one). Tubes of the thickness in points on the screen,
+// shaded as the rest of the scene (the world queue writes the G-buffer), never thinner than a pixel; or lines of a
+// pixel. With axes, the edges along a, b and c from the origin red, green and blue. The cells out of view are left out.
 static void draw_simulation_box(ApplicationState* state, const Representation& rep) {
     const md_unitcell_t& cell = state->mold.state.unitcell;
     if (md_unitcell_flags(&cell) == 0) return;
@@ -7570,21 +7869,33 @@ static void draw_simulation_box(ApplicationState* state, const Representation& r
 
     immediate::Scope scope(state->gfx.world, "simulation box");
 
-    // The corners: bit k of i is the coordinate along cell vector k
+    // The corners: bit b of i is the coordinate along cell vector b
     vec3_t corner[8];
     for (int i = 0; i < 8; ++i) {
         corner[i] = vec3_from_vec4(mat4_mul_vec4(M, vec4_set((float)(i & 1), (float)((i >> 1) & 1), (float)((i >> 2) & 1), 1.0f)));
     }
 
-    // A pixel at the depth d of view space: 2 d / (P11 h) in a perspective, 2 / (P11 h) in an orthographic projection
+    // A pixel at the depth d of view space: 2 d / (P11 h) in a perspective, 2 / (P11 h) in an orthographic projection.
+    // A point likewise, with h the view's height in points: the view is the whole window, DisplaySize in points, and a
+    // screenshot at another resolution is the same view, its points as much larger as the image is.
     const mat4_t& V = state->view.param.matrix.curr.view;
     const mat4_t& P = state->view.param.matrix.curr.proj;
-    const float   h = (float)MAX(state->gbuffer.out_height, 1U);    // the pixels shown, whatever the render scale
+    const float   h_px = (float)MD_MAX(state->gbuffer.out_height, 1U);    // the pixels shown, whatever the render scale
+    const float   h_pt = ImGui::GetIO().DisplaySize.y > 0.0f ? ImGui::GetIO().DisplaySize.y : h_px;
     const bool    ortho = P.elem[3][3] == 1.0f;
-    const float   px_per_depth = 2.0f / (P.elem[1][1] * h);
+
+    // The radius of a tube in the world is k times the depth (k itself in an orthographic projection): its diameter the
+    // thickness in points, and at least about a pixel. As the radius is linear in the depth, an edge drawn as a
+    // truncated cone from the radius at one end to that at the other is of the same width on screen all along it.
+    const float k = MD_MAX(0.5f * rep.box.thickness * 2.0f / (P.elem[1][1] * h_pt), 0.6f * 2.0f / (P.elem[1][1] * h_px));
+    // Where the depth is less than this, the tube is clipped to it: in front of the camera, and its radius still k d
+    const float min_depth = 1.0e-3f;
+    auto depth_of = [&](vec3_t p) {
+        return ortho ? 1.0f : -vec3_from_vec4(mat4_mul_vec4(V, vec4_from_vec3(p, 1.0f))).z;
+    };
 
     // The planes of the view volume, inward, and the sphere of a cell about its center: a cell wholly outside of one is
-    // out of view. The capsules are at most a few pixels thick, a margin of a hundredth of the cell covers them.
+    // out of view, the tubes' radius at the far side of the cell taken as the margin.
     const mat4_t PV = P * V;
     vec4_t plane[6];
     for (int p = 0; p < 6; ++p) {
@@ -7598,43 +7909,61 @@ static void draw_simulation_box(ApplicationState* state, const Representation& r
     }
     const vec3_t cell_center = (corner[0] + corner[7]) * 0.5f;
     float cell_radius = 0.0f;
-    for (int i = 0; i < 8; ++i) cell_radius = MAX(cell_radius, vec3_length(corner[i] - cell_center));
-    cell_radius = cell_radius * 1.01f + 0.5f * rep.box.thickness;
+    for (int i = 0; i < 8; ++i) cell_radius = MD_MAX(cell_radius, vec3_length(corner[i] - cell_center));
+    cell_radius *= 1.01f;
 
     // Its own cell, then those of the periodic images (whose shared edges are drawn twice); the axes in its own only
     const md_array(mat4_t) transforms = state->view.periodic_transforms;
-    const size_t num_cells = rep.periodic_images ? MAX(md_array_size(transforms), (size_t)1) : 1;
+    const size_t num_cells = rep.periodic_images ? MD_MAX(md_array_size(transforms), (size_t)1) : 1;
     for (size_t c = 0; c < num_cells; ++c) {
         const vec3_t t = c == 0 ? vec3_t{0, 0, 0} : vec3_from_vec4(transforms[c].col[3]);
+        const float margin = rep.box.thickness > 0.0f ? k * MD_MAX(depth_of(cell_center + t) + cell_radius, 0.0f) : 0.0f;
         const vec4_t center = vec4_from_vec3(cell_center + t, 1.0f);
         bool out_of_view = false;
         for (int p = 0; p < 6 && !out_of_view; ++p) {
-            out_of_view = vec4_dot(plane[p], center) < -cell_radius;
+            out_of_view = vec4_dot(plane[p], center) < -(cell_radius + margin);
         }
         if (out_of_view) continue;
-        for (int i = 0; i < 8; ++i) {
-            for (int k = 0; k < 3; ++k) {
-                const int bit = 1 << k;
-                if (i & bit) continue;
-                const int j = i | bit;
-                const uint32_t col = (rep.box.axes && c == 0 && i == 0) ? axis_color[k] : color;
-                const vec3_t p0 = corner[i] + t;
-                const vec3_t p1 = corner[j] + t;
-                if (rep.box.thickness > 0.0f) {
-                    const vec3_t mid  = (p0 + p1) * 0.5f;
-                    const float depth = ortho ? 1.0f : MAX(-vec3_from_vec4(mat4_mul_vec4(V, vec4_from_vec3(mid, 1.0f))).z, 0.0f);
-                    const float radius = MAX(0.5f * rep.box.thickness, 0.6f * px_per_depth * depth);
-                    immediate::capsule(scope, p0, p1, radius, col);
-                } else {
-                    immediate::line(scope, p0, p1, col);
+
+        if (rep.box.thickness <= 0.0f) {
+            for (int i = 0; i < 8; ++i) {
+                for (int b = 0; b < 3; ++b) {
+                    if (i & (1 << b)) continue;
+                    const uint32_t col = (rep.box.axes && c == 0 && i == 0) ? axis_color[b] : color;
+                    immediate::line(scope, corner[i] + t, corner[i | (1 << b)] + t, col);
                 }
+            }
+            continue;
+        }
+
+        // The corners as spheres, one each, of the tubes' radius there: it closes the three tubes that meet in it. The
+        // origin's is of the box's colour too with axes, where the three axes start.
+        float depth[8];
+        for (int i = 0; i < 8; ++i) {
+            depth[i] = depth_of(corner[i] + t);
+            if (depth[i] >= min_depth) {
+                immediate::sphere(scope, corner[i] + t, k * depth[i], color, 0xFFFFFFFF, 16, 32);
+            }
+        }
+        for (int i = 0; i < 8; ++i) {
+            for (int b = 0; b < 3; ++b) {
+                if (i & (1 << b)) continue;
+                const int j = i | (1 << b);
+                const uint32_t col = (rep.box.axes && c == 0 && i == 0) ? axis_color[b] : color;
+                vec3_t p0 = corner[i] + t, p1 = corner[j] + t;
+                float  d0 = depth[i],      d1 = depth[j];
+                if (d0 < min_depth && d1 < min_depth) continue;
+                // Clipped to min_depth where it passes behind the camera, so that the radius stays k times the depth
+                if (d0 < min_depth) { p0 = vec3_lerp(p0, p1, (min_depth - d0) / (d1 - d0)); d0 = min_depth; }
+                if (d1 < min_depth) { p1 = vec3_lerp(p1, p0, (min_depth - d1) / (d0 - d1)); d1 = min_depth; }
+                immediate::frustum(scope, p0, p1, k * d0, k * d1, col);
             }
         }
     }
 }
 
 static void draw_representations_opaque(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
 
     if (state->mold.sys.atom.count == 0) {
         return;
@@ -7651,7 +7980,7 @@ static void draw_representations_opaque(ApplicationState* state) {
             };
             for (uint32_t i = 0; i < instance_count; ++i) {
                 vec3_t axis = {rnd(), rnd(), rnd()};
-                quat_t ori = quat_angle_axis(rnd() * TWO_PI, vec3_normalize(axis));
+                quat_t ori = quat_angle_axis(rnd() * MD_TWO_PI, vec3_normalize(axis));
                 mat4_t R = mat4_from_quat(ori);
                 mat4_t T = mat4_translate(rnd() * 4000, rnd() * 4000, rnd() * 4000);
                 mat4_t M = T * R;
@@ -7694,7 +8023,7 @@ static void draw_representations_opaque(ApplicationState* state) {
         for (size_t i = 0; i < num_representations; ++i) {
             const Representation& rep = state->representation.reps[i];
 
-            if (rep.type == RepresentationType::Cartoon && representation_shown(*state, rep) && rep.type_is_valid) {
+            if (rep.type == RepresentationType::Cartoon && representation_shown(*state, rep) && rep.type_is_valid && !rep.sphere_fallback) {
                 const size_t beg = md_array_size(glyph_ops);
                 representation_glyph_draw_ops(&glyph_ops, *state, rep, frame_alloc);
                 place_ops(&glyph_ops, beg, *state, rep, true, frame_alloc);
@@ -7734,25 +8063,31 @@ static void draw_representations_opaque(ApplicationState* state) {
                         immediate::Scope scope(state->gfx.world, "debug_dipole_moment");
                         immediate::set_picking_base_idx(scope, range ? range->beg : 0);
 
-                        const vec3_t org = dipole_org;
+                        const vec3_t beg = rep.dipole.offset + dipole_org;
                         const vec3_t vec = dipole_vec * (float)rep.dipole.scale;
+                        const float  len = vec3_length(vec);
 
-                        // cylinder body
-                        const float body_scale = 0.8f;
+                        // The head is a fixed shape in units of the shaft radius, never a share of the
+                        // length: a longer dipole is a longer shaft under the same head. Below the length
+                        // where the head would take more than its share of the arrow, the arrow is that
+                        // shortest one compressed along its length only: the radii stay, so a small dipole
+                        // flattens toward a disc that is still as easy to see and hover as a large one.
+                        const float HEAD_RADIUS   = 2.0f;   // x shaft radius
+                        const float HEAD_LENGTH   = 5.0f;   // x shaft radius
+                        const float HEAD_FRACTION = 0.4f;   // at most this share of the length is head
 
-                        const float body_radius = rep.dipole.radius;
-                        const float head_radius = body_radius * 1.5f;
+                        const float shaft_radius = rep.dipole.radius;
+                        const float head_radius  = shaft_radius * HEAD_RADIUS;
+                        float       head_length  = shaft_radius * HEAD_LENGTH;
+                        const float min_len = head_length / HEAD_FRACTION;
+                        if (len < min_len) {
+                            head_length *= len / min_len;   // the shaft, the rest of the length, follows
+                        }
 
-                        vec3_t cyl_beg = rep.dipole.offset + org;
-                        vec3_t cyl_end = rep.dipole.offset + org + vec * body_scale;
-                        vec3_t arrow_end = rep.dipole.offset + org + vec;
+                        const uint32_t color_u32   = convert_color(rep.dipole.color);
+                        const uint32_t picking_idx = range ? rep.dipole.dipole_index : INVALID_PICKING_IDX;
 
-                        uint32_t color_u32 = convert_color(rep.dipole.color);
-
-                        uint32_t picking_idx = range ? rep.dipole.dipole_index : INVALID_PICKING_IDX;
-
-                        immediate::cylinder(scope, cyl_beg, cyl_end, body_radius, color_u32, picking_idx);
-                        immediate::cone(scope, cyl_end, arrow_end, head_radius, color_u32, picking_idx);
+                        immediate::arrow(scope, beg, beg + vec, shaft_radius, head_radius, head_length, color_u32, picking_idx);
                     }
                 }
             } else if (rep.type == RepresentationType::SimulationBox) {
@@ -7806,14 +8141,16 @@ static uint64_t opaque_scene_hash(const ApplicationState* state) {
         h = md_hash64(&shown, sizeof(shown), h);
         if (!shown) continue;
         h = md_hash64(&rep.type, sizeof(rep.type), h);
+        h = md_hash64(&rep.sphere_fallback, sizeof(rep.sphere_fallback), h);
         h = md_hash64(&rep.md_rep, sizeof(rep.md_rep), h);
         h = md_hash64(&rep.scale, sizeof(rep.scale), h);
         h = md_hash64(&rep.bond_orders, sizeof(rep.bond_orders), h);
         h = md_hash64(&rep.chain_gaps, sizeof(rep.chain_gaps), h);
         h = md_hash64(&rep.elastic_bonds, sizeof(rep.elastic_bonds), h);
         h = md_hash64(&rep.noncovalent_bonds, sizeof(rep.noncovalent_bonds), h);
+        h = md_hash64(&rep.coordinate_bonds_dashed, sizeof(rep.coordinate_bonds_dashed), h);
         if (rep.type == RepresentationType::Bonds) {
-            h = md_hash64(&rep.bonds_dashed, sizeof(rep.bonds_dashed), h);
+            h = md_hash64(&rep.bond_dashes, sizeof(rep.bond_dashes), h);
         }
         h = md_hash64(&rep.periodic_images, sizeof(rep.periodic_images), h);
         if (rep.type == RepresentationType::Cartoon) {
@@ -7824,6 +8161,24 @@ static uint64_t opaque_scene_hash(const ApplicationState* state) {
         if (rep.type == RepresentationType::SimulationBox) {
             h = md_hash64(&rep.box.thickness, sizeof(rep.box.thickness), h);
             h = md_hash64(&rep.box.axes, sizeof(rep.box.axes), h);
+        }
+        if (rep.type == RepresentationType::ElectronicStructure) {
+            // how it is drawn as a volume or on a plane (its isosurfaces are in what draws them)
+            const ElectronicStructureRepresentation& es = rep.electronic_structure;
+            h = md_hash64(&es.display, sizeof(es.display), h);
+            h = md_hash64(&es.cuts, sizeof(es.cuts), h);
+            h = md_hash64(&es.slices, sizeof(es.slices), h);
+            // the slices' edges: which is picked (its edge is drawn over the view instead), and whether they are drawn
+            for (int k = 0; k < es.slices.count; ++k) {
+                const vec4_t e = es_slice_edge_color(state, rep.node.id, k, es.slices.items[k].enabled);
+                h = md_hash64(&e, sizeof(e), h);
+            }
+            for (const ElectronicStructurePlaneImage& im : es.plane_images) {
+                h = md_hash64(&im.key[im.front], sizeof(uint64_t), h);
+                h = md_hash64(&im.serial, sizeof(im.serial), h);
+                h = md_hash64(&im.current, sizeof(im.current), h);
+            }
+            h = md_hash64_combine(h, transfer_function_hash(es.volume.tf));
         }
         if (rep.type == RepresentationType::DipoleMoment) {
             h = md_hash64(&rep.dipole.dipole_key, sizeof(rep.dipole.dipole_key), h);
@@ -7854,6 +8209,7 @@ static bool draw_representations_transparent_mesh(ApplicationState* state) {
         Representation& rep = state->representation.reps[i];
         if (rep.type != RepresentationType::ElectronicStructure || !representation_shown(*state, rep) || !rep.type_is_valid) continue;
         ElectronicStructureRepresentation& es = rep.electronic_structure;
+        if (es.display != ElectronicStructureDisplay::Isosurface) continue;
 
         IsoDesc iso;
         electronic_structure_iso_desc_init(&iso, es);
@@ -7921,8 +8277,79 @@ static bool draw_representations_transparent_mesh(ApplicationState* state) {
     return isomesh::render(&iso_mesh_target, desc, &iso_mesh_converged);
 }
 
+// The electronic structure representations drawn from their volumes, over what the isosurfaces drew into the same
+// (HDR) target: a volume display by direct volume rendering of the field through the colour map and alpha ramp of
+// each, cut by its planes; a planes display as the field on its planes through the colour map, each of its opacity. True when anything was
+// drawn.
+static bool draw_representations_volumes(ApplicationState* state, bool target_written) {
+    bool written = false;
+    for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
+        Representation& rep = state->representation.reps[i];
+        if (rep.type != RepresentationType::ElectronicStructure || !representation_shown(*state, rep) || !rep.type_is_valid) continue;
+        ElectronicStructureRepresentation& es = rep.electronic_structure;
+        const bool slice = es.display == ElectronicStructureDisplay::Planes;
+        // the planes evaluated on themselves: each from its image where it is of the plane as it is, else the volume
+        const bool on_planes = slice && es_plane_images_supported(state, es);
+        if (!(es.display == ElectronicStructureDisplay::Volume || slice) || !es.has_box || (!on_planes && !es.density_vol.tex_id)) continue;
+        vec4_t planes[ES_MAX_PLANES];
+        float  slice_opacity[ES_MAX_PLANES];
+        uint32_t images[ES_MAX_PLANES];
+        mat4_t rect_from_model[ES_MAX_PLANES];
+        vec4_t edges[ES_MAX_PLANES];
+        int num_planes = 0;
+        if (slice) {
+            es_slices_conform(&es);
+            const uint32_t rep_id = rep.node.id;
+            num_planes = es_volume_slices(planes, slice_opacity, rect_from_model, es);
+            bool any = false;
+            for (int k = 0; k < num_planes; ++k) {
+                images[k] = 0;
+                if (on_planes) {
+                    const ElectronicStructurePlaneImage& im = es.plane_images[k];
+                    const Volume& v = im.img[im.front];
+                    if (im.current && v.tex_id) images[k] = v.tex_id;
+                }
+                // nothing to draw it from yet: its edges only
+                if (!images[k] && !es.density_vol.tex_id) slice_opacity[k] = 0.0f;
+                edges[k] = es_slice_edge_color(state, rep_id, k, es.slices.items[k].enabled);
+                any |= slice_opacity[k] > 0.0f || edges[k].w > 0.0f;
+            }
+            if (!any) continue;
+        } else {
+            num_planes = es_volume_clip_planes(planes, es);
+        }
+        volume::DvrRenderDesc desc = {};
+        desc.render_target.depth = state->gbuffer.tex.depth;
+        desc.render_target.color = state->gbuffer.tex.transparency_hdr;
+        desc.render_target.width = state->gbuffer.width;
+        desc.render_target.height = state->gbuffer.height;
+        desc.render_target.clear_color = !(target_written || written);
+        desc.texture.density_volume = es.density_vol.tex_id;
+        desc.texture.transfer_function = es_volume_transfer_function(&es);
+        desc.matrix.model = es.box_to_world;
+        desc.matrix.view = state->view.param.matrix.curr.view;
+        desc.matrix.proj = state->view.param.matrix.curr.proj;
+        desc.matrix.inv_proj = state->view.param.matrix.inv.proj;
+        desc.tf.min_value = es.volume.tf.range_beg;
+        desc.tf.max_value = es.volume.tf.range_end;
+        desc.planes.count = num_planes;
+        desc.planes.equations = planes;
+        desc.linear_output = true;
+        desc.slice = slice;
+        desc.slice_opacity = slice ? slice_opacity : nullptr;
+        desc.slice_images = slice && on_planes ? images : nullptr;
+        desc.slice_rect_from_model = slice ? rect_from_model : nullptr;
+        desc.slice_edge = slice ? edges : nullptr;
+        // the edges' width: a line of 1.5 points (as the outlines drawn over the view), in the target's pixels
+        desc.slice_edge_px = 0.75f * ImGui::GetIO().DisplayFramebufferScale.x * (float)state->gbuffer.width / (float)MD_MAX(state->app.framebuffer.width, 1);
+        volume::render_dvr(desc);
+        written = true;
+    }
+    return written;
+}
+
 static bool draw_representations_transparent(ApplicationState* state) {
-    ASSERT(state);
+    MD_ASSERT(state);
     if (state->mold.sys.atom.count == 0) return false;
 
     const size_t num_representations = md_array_size(state->representation.reps);
@@ -7930,7 +8357,8 @@ static bool draw_representations_transparent(ApplicationState* state) {
 
     iso_mesh_converged = true;
     if (state->settings.isosurface_rendering == IsosurfaceRendering_Mesh) {
-        return draw_representations_transparent_mesh(state);
+        const bool meshes = draw_representations_transparent_mesh(state);
+        return draw_representations_volumes(state, meshes) || meshes;
     }
     isomesh::target_free(&iso_mesh_target);
 
@@ -7939,7 +8367,7 @@ static bool draw_representations_transparent(ApplicationState* state) {
     for (size_t i = 0; i < num_representations; ++i) {
         Representation& rep = state->representation.reps[i];
         if (!representation_shown(*state, rep)) continue;
-        if (rep.type == RepresentationType::ElectronicStructure) {
+        if (rep.type == RepresentationType::ElectronicStructure && rep.electronic_structure.display == ElectronicStructureDisplay::Isosurface) {
             const bool use_field = rep.electronic_structure.coloring == SurfaceColoring::Field && rep.electronic_structure.field_vol.tex_id;
             IsoDesc iso;
             electronic_structure_iso_desc_init(&iso, rep.electronic_structure);
@@ -8002,7 +8430,7 @@ static bool draw_representations_transparent(ApplicationState* state) {
                 written = true;
             }
 
-#if DEBUG
+#if MD_DEBUG
             {
 				immediate::Scope scope(state->gfx.world, "debug_electronic_structure");
                 immediate::box_wireframe(scope, { 0,0,0 }, { 1,1,1 }, rep.electronic_structure.density_vol.texture_to_world, immediate::COLOR_BLACK);
@@ -8010,7 +8438,7 @@ static bool draw_representations_transparent(ApplicationState* state) {
 #endif
         }
     }
-    return written;
+    return draw_representations_volumes(state, written) || written;
 }
 
 static void draw_representations_marks(ApplicationState* data) {
@@ -8022,7 +8450,7 @@ static void draw_representations_marks(ApplicationState* data) {
         const Representation& rep = data->representation.reps[i];
 
         if (rep.type > RepresentationType::Cartoon && rep.type != RepresentationType::Bonds) continue;
-        if (rep.type == RepresentationType::Cartoon && representation_shown(*data, rep) && rep.type_is_valid) {
+        if (rep.type == RepresentationType::Cartoon && representation_shown(*data, rep) && rep.type_is_valid && !rep.sphere_fallback) {
             const size_t beg = md_array_size(glyph_ops);
             representation_glyph_draw_ops(&glyph_ops, *data, rep, frame_alloc);
             place_ops(&glyph_ops, beg, *data, rep, true, frame_alloc);

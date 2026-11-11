@@ -46,18 +46,18 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     const char* xtc = std::getenv("VIAMD_LAVERY_VALIDATION_XTC");
     if (!gro && !xtc) UTEST_SKIP("Set VIAMD_LAVERY_VALIDATION_GRO and VIAMD_LAVERY_VALIDATION_XTC to check local data");
     ASSERT_TRUE(gro && xtc);
-    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(32));
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(32));
     md_system_t sys = {.alloc = alloc};
     md_system_state_t state = {.alloc = alloc};
-    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, str_from_cstr(gro)));
-    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
-    ASSERT_TRUE(md_xtc_system_publish_run(&sys, str_from_cstr(xtc), STR_LIT("run/check"), MD_RUN_FLAG_DISABLE_CACHE_WRITE));
-    const auto* times = md_attributes_find(&sys.attributes, STR_LIT("run/check/time"));
+    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, md_str_from_cstr(gro), nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
+    ASSERT_TRUE(md_xtc_system_publish_run(&sys, md_str_from_cstr(xtc), MD_STR_LIT("run/check"), MD_RUN_FLAG_DISABLE_CACHE_WRITE));
+    const auto* times = md_attributes_find(&sys.attributes, MD_STR_LIT("run/check/time"));
     ASSERT_TRUE(times && times->data);
     const size_t frames = times->format.shape[0];
     ASSERT_GT(frames, (size_t)0);
-    const str_t paths[] = {STR_LIT("atom/position"), STR_LIT("unitcell")};
-    auto* extract = md_system_extract_begin(&sys, STR_LIT("run/check"), paths, 2, alloc);
+    const md_str_t paths[] = {MD_STR_LIT("atom/position"), MD_STR_LIT("unitcell")};
+    auto* extract = md_system_extract_begin(&sys, MD_STR_LIT("run/check"), paths, 2, alloc);
     ASSERT_TRUE(extract);
     ASSERT_TRUE(md_system_extract_frame(extract, 0, &state));
     const auto bases = gather_bases(sys);
@@ -173,9 +173,9 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     const std::array<size_t, Class_Count> members = {pairs.size(), steps.size(), 2*pairs.size()};
     auto base_label=[&](size_t b) {
         const auto& base=bases[b];
-        const str_t name=md_component_name(&sys.component,base.component);
+        const md_str_t name=md_system_residue_name(&sys,base.component);
         return "S"+std::to_string(base.strand+1)+":"+std::string(name.ptr,name.len)+
-            std::to_string(md_system_component_seq_id(&sys,base.component));
+            std::to_string(md_system_residue_seq_id(&sys,base.component));
     };
     auto pair_label=[&](size_t p) {
         return std::to_string(p+1)+": "+base_label(pairs[p].a)+" / "+base_label(pairs[p].b);
@@ -293,7 +293,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             md_util_min_image_vec3(&nearest, 1, &state.unitcell);
             const vec3_t shift = vec3_sub(nearest, separation);
             for (const auto& base : bases) if (base.strand == b.strand) {
-                const auto range = md_component_atom_range(&sys.component, base.component);
+                const auto range = md_system_residue_atom_range(&sys, base.component);
                 for (uint32_t atom = range.beg; atom < range.end; ++atom) whole.xyz[atom] = vec3_add(whole.xyz[atom], shift);
             }
             whole.unitcell = {};
@@ -315,7 +315,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             }
             const auto path = (std::filesystem::path(snapshot_dir)/("frame_"+std::to_string(f)+".pdb")).string();
             md_file_t file = {};
-            ASSERT_TRUE(md_file_open(&file, str_from_cstr(path.c_str()), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE));
+            ASSERT_TRUE(md_file_open(&file, md_str_from_cstr(path.c_str()), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE));
             ASSERT_TRUE(md_pdb_system_write_state_to_file(file, &sys, &whole, nullptr, whole.num_atoms, 0));
             ASSERT_TRUE(md_file_close(&file));
         }
@@ -332,7 +332,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             char expression[128];
             snprintf(expression, sizeof(expression), "dihedral(%d,%d,%d,%d);", atoms[0]+1, atoms[1]+1, atoms[2]+1, atoms[3]+1);
             ASSERT_TRUE(md_script_vis_clear(&vis));
-            ASSERT_TRUE(md_script_vis_eval_string(&vis, str_from_cstr(expression), &ctx,
+            ASSERT_TRUE(md_script_vis_eval_string(&vis, md_str_from_cstr(expression), &ctx,
                 MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT));
             ASSERT_EQ(md_array_size(vis.text), (size_t)1);
             const double degrees = vis.text[0].value * md_unit_scale(vis.text[0].unit) / md_unit_scale(md_unit_degree());
@@ -366,7 +366,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                         char expression[96];
                         snprintf(expression, sizeof(expression), "distance(%d,%d);", a+1, b+1);
                         ASSERT_TRUE(md_script_vis_clear(&vis));
-                        ASSERT_TRUE(md_script_vis_eval_string(&vis, str_from_cstr(expression), &ctx,
+                        ASSERT_TRUE(md_script_vis_eval_string(&vis, md_str_from_cstr(expression), &ctx,
                             MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT));
                         ASSERT_EQ(md_array_size(vis.text), (size_t)1);
                         const double distance = vis.text[0].value * md_unit_scale(vis.text[0].unit) / md_unit_scale(md_unit_angstrom());
@@ -496,14 +496,14 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             md_system_state_t restored_state={.alloc=alloc};
             auto gro_path=std::filesystem::path(output);
             gro_path.replace_extension(".gro");
-            ASSERT_TRUE(md_gro_system_init_from_file(&restored,&restored_state,str_from_cstr(gro_path.string().c_str())));
+            ASSERT_TRUE(md_gro_system_init_from_file(&restored,&restored_state,md_str_from_cstr(gro_path.string().c_str()), nullptr));
             ASSERT_EQ(restored.atom.count,sys.atom.count);
-            ASSERT_TRUE(md_xtc_system_publish_run(&restored,str_from_cstr(output),STR_LIT("run/restored"),MD_RUN_FLAG_DISABLE_CACHE_WRITE));
-            const auto* restored_times=md_attributes_find(&restored.attributes,STR_LIT("run/restored/time"));
+            ASSERT_TRUE(md_xtc_system_publish_run(&restored,md_str_from_cstr(output),MD_STR_LIT("run/restored"),MD_RUN_FLAG_DISABLE_CACHE_WRITE));
+            const auto* restored_times=md_attributes_find(&restored.attributes,MD_STR_LIT("run/restored/time"));
             ASSERT_TRUE(restored_times && restored_times->data);
             ASSERT_EQ(restored_times->format.shape[0],candidates.size());
-            const str_t export_paths[]={STR_LIT("atom/position"),STR_LIT("unitcell")};
-            auto* restored_extract=md_system_extract_begin(&restored,STR_LIT("run/restored"),export_paths,2,alloc);
+            const md_str_t export_paths[]={MD_STR_LIT("atom/position"),MD_STR_LIT("unitcell")};
+            auto* restored_extract=md_system_extract_begin(&restored,MD_STR_LIT("run/restored"),export_paths,2,alloc);
             ASSERT_TRUE(restored_extract!=nullptr);
             std::sort(candidates.begin(),candidates.end(),[](const auto& a,const auto& b) { return a.frame<b.frame; });
             for (size_t n=0; n<candidates.size(); ++n) {
@@ -828,11 +828,11 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
 }
 
 UTEST(lavery_core, native_dihedral_visual_values_agree_with_nucleotide_torsions) {
-    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(16));
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(16));
     md_system_t sys = {.alloc = alloc};
     md_system_state_t state = {.alloc = alloc};
-    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro")));
-    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
+    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, MD_STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro"), nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
     const auto bases = gather_bases(sys);
     ASSERT_GT(bases.size(), (size_t)50);
     const auto& base = bases[50];
@@ -852,7 +852,7 @@ UTEST(lavery_core, native_dihedral_visual_values_agree_with_nucleotide_torsions)
         snprintf(expression, sizeof(expression), "dihedral(%d,%d,%d,%d);",
             atoms[0]+1, atoms[1]+1, atoms[2]+1, atoms[3]+1);
         ASSERT_TRUE(md_script_vis_clear(&vis));
-        ASSERT_TRUE(md_script_vis_eval_string(&vis, str_from_cstr(expression), &ctx,
+        ASSERT_TRUE(md_script_vis_eval_string(&vis, md_str_from_cstr(expression), &ctx,
             MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT));
         ASSERT_EQ(md_array_size(vis.text), (size_t)1);
         const double degrees = vis.text[0].value * md_unit_scale(vis.text[0].unit) / md_unit_scale(md_unit_degree());
@@ -991,11 +991,11 @@ UTEST(lavery_core, distribution_comparisons_share_bins_and_normalize_each_member
 }
 
 UTEST(lavery_core, production_frame_analysis_checks_chemistry_and_recovers_after_complete_pair_loss) {
-    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(16));
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(16));
     md_system_t sys = {.alloc = alloc};
     md_system_state_t state = {.alloc = alloc};
-    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro")));
-    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
+    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, MD_STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro"), nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
     const auto bases = gather_bases(sys);
     std::vector<BaseFrame> frames;
     ASSERT_TRUE(extract_base_frames(frames, sys, state, bases));
@@ -1022,7 +1022,7 @@ UTEST(lavery_core, production_frame_analysis_checks_chemistry_and_recovers_after
     const size_t p = 50;
     EXPECT_EQ(result.pairing_states[p], Pairing_WatsonCrick);
     const auto original = result.pair_values[p];
-    const auto range = md_component_atom_range(&sys.component, bases[pairs[p].b].component);
+    const auto range = md_system_residue_atom_range(&sys, bases[pairs[p].b].component);
     std::vector<vec3_t> saved(state.xyz + range.beg, state.xyz + range.end);
     for (size_t i = range.beg; i < range.end; ++i) state.xyz[i] = vec3_add(state.xyz[i], {12, 0, 0});
     ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
@@ -1052,12 +1052,12 @@ UTEST(lavery_core, production_frame_analysis_checks_chemistry_and_recovers_after
 }
 
 UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_for_all_12_parameters) {
-    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(4));
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(4));
     md_system_t sys = {.alloc = alloc};
     md_system_state_t state = {.alloc = alloc};
     const auto path = (std::filesystem::path(__FILE__).parent_path() / "data/lavery_1rna.pdb").string();
-    ASSERT_TRUE(md_pdb_system_init_from_file(&sys, &state, str_from_cstr(path.c_str()), {}));
-    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
+    ASSERT_TRUE(md_pdb_system_init_from_file(&sys, &state, md_str_from_cstr(path.c_str()), {}, nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
     const auto bases = gather_bases(sys);
     ASSERT_EQ(bases.size(), (size_t)28);
     std::vector<BaseFrame> frames;
@@ -1105,15 +1105,15 @@ UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_f
 }
 
 UTEST(lavery_core, published_series_copy_values_support_run_relative_scripts_and_clean_up_on_reset) {
-    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(4));
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(4));
     md_system_t sys = {.alloc = alloc};
     md_system_state_t state = {.alloc = alloc};
     const auto path = (std::filesystem::path(__FILE__).parent_path() / "data/lavery_1rna.pdb").string();
-    ASSERT_TRUE(md_pdb_system_init_from_file(&sys, &state, str_from_cstr(path.c_str()), {}));
-    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
+    ASSERT_TRUE(md_pdb_system_init_from_file(&sys, &state, md_str_from_cstr(path.c_str()), {}, nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
     const double times[] = {0, 10, 20};
     const md_attribute_desc_t time = {
-        .path = STR_INIT("run/test/time"),
+        .path = MD_STR_INIT("run/test/time"),
         .format = {.type = MD_ATTRIBUTE_TYPE_F64, .components = 1, .rank = 1, .shape = {3}},
         .flags = MD_ATTRIBUTE_FLAG_TEMPORAL, .unit = md_unit_picosecond(),
         .data = times, .byte_size = sizeof(times),
@@ -1123,13 +1123,13 @@ UTEST(lavery_core, published_series_copy_values_support_run_relative_scripts_and
     for (int f = 0; f < 3; ++f) coordinates.insert(coordinates.end(), state.xyz, state.xyz + state.num_atoms);
     const float cells[27] = {};
     const md_attribute_desc_t position = {
-        .path = STR_INIT("run/test/atom/position"),
+        .path = MD_STR_INIT("run/test/atom/position"),
         .format = {.type = MD_ATTRIBUTE_TYPE_F32, .components = 3, .rank = 2, .shape = {3, (uint32_t)state.num_atoms}},
         .flags = MD_ATTRIBUTE_FLAG_TEMPORAL, .unit = md_unit_angstrom(),
         .data = coordinates.data(), .byte_size = coordinates.size() * sizeof(vec3_t),
     };
     const md_attribute_desc_t cell = {
-        .path = STR_INIT("run/test/unitcell"),
+        .path = MD_STR_INIT("run/test/unitcell"),
         .format = {.type = MD_ATTRIBUTE_TYPE_F32, .components = 1, .rank = 3, .shape = {3, 3, 3}},
         .flags = MD_ATTRIBUTE_FLAG_TEMPORAL, .unit = md_unit_angstrom(),
         .data = cells, .byte_size = sizeof(cells),
@@ -1140,7 +1140,7 @@ UTEST(lavery_core, published_series_copy_values_support_run_relative_scripts_and
     ASSERT_TRUE(publish_series(&sys.attributes, "run/test", "step/twist", "Twist", MD_ATTRIBUTE_TYPE_F32,
         3, 2, values.data(), values.size() * sizeof(float), md_unit_degree()));
     values[0] = 99;
-    const auto* attr = md_attributes_find(&sys.attributes, STR_LIT("run/test/lavery/step/twist"));
+    const auto* attr = md_attributes_find(&sys.attributes, MD_STR_LIT("run/test/lavery/step/twist"));
     ASSERT_TRUE(attr != nullptr);
     EXPECT_EQ(attr->format.rank, 2u);
     EXPECT_EQ(attr->format.shape[0], 3u);
@@ -1152,14 +1152,14 @@ UTEST(lavery_core, published_series_copy_values_support_run_relative_scripts_and
         3, 2, quality, sizeof(quality), md_unit_none()));
     auto* ir = md_script_ir_create(sys.alloc);
     const bool compiled = md_script_ir_compile_from_source(ir,
-        STR_LIT("twist = attr(\"lavery/step/twist\"); quality = attr(\"lavery/step/quality\");"), &sys, nullptr);
+        MD_STR_LIT("twist = attr(\"lavery/step/twist\"); quality = attr(\"lavery/step/quality\");"), &sys, nullptr);
     if (!compiled) md_script_ir_write_diagnostics(md_writer_stderr(), ir);
     ASSERT_TRUE(compiled);
     EXPECT_EQ(md_script_ir_property_count(ir), (size_t)2);
     auto* eval = md_script_eval_create(3, ir, sys.alloc);
     ASSERT_TRUE(eval != nullptr);
-    ASSERT_TRUE(md_script_eval_frame_range(eval, ir, &sys, STR_LIT("run/test"), 0, 3));
-    const auto* twist = md_attributes_find(md_script_eval_attributes(eval), STR_LIT("script/twist"));
+    ASSERT_TRUE(md_script_eval_frame_range(eval, ir, &sys, MD_STR_LIT("run/test"), 0, 3));
+    const auto* twist = md_attributes_find(md_script_eval_attributes(eval), MD_STR_LIT("script/twist"));
     ASSERT_TRUE(twist != nullptr);
     EXPECT_EQ(md_attribute_element_count(&twist->format), (size_t)6);
     EXPECT_EQ(((const float*)twist->data)[0], 1);
@@ -1168,17 +1168,17 @@ UTEST(lavery_core, published_series_copy_values_support_run_relative_scripts_and
     md_script_ir_free(ir);
     ASSERT_TRUE(publish_series(&sys.attributes, "run/test", "step/twist", "Twist", MD_ATTRIBUTE_TYPE_F32,
         3, 2, values.data(), values.size() * sizeof(float), md_unit_degree()));
-    attr = md_attributes_find(&sys.attributes, STR_LIT("run/test/lavery/step/twist"));
+    attr = md_attributes_find(&sys.attributes, MD_STR_LIT("run/test/lavery/step/twist"));
     ASSERT_TRUE(attr != nullptr);
     EXPECT_EQ(((const float*)attr->data)[0], 99);
-    EXPECT_EQ(md_attributes_remove_prefix(&sys.attributes, STR_LIT("run/test/lavery")), (size_t)2);
-    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("lavery/step/twist")) == nullptr);
-    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("lavery/step/quality")) == nullptr);
-    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("run/test/lavery/step/twist")) == nullptr);
-    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("run/test/time")) != nullptr);
+    EXPECT_EQ(md_attributes_remove_prefix(&sys.attributes, MD_STR_LIT("run/test/lavery")), (size_t)2);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, MD_STR_LIT("lavery/step/twist")) == nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, MD_STR_LIT("lavery/step/quality")) == nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, MD_STR_LIT("run/test/lavery/step/twist")) == nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, MD_STR_LIT("run/test/time")) != nullptr);
     EXPECT_FALSE(publish_series(&sys.attributes, "run/test", "step/twist", "Twist", MD_ATTRIBUTE_TYPE_F32,
         3, 2, values.data(), sizeof(float), md_unit_degree()));
-    EXPECT_TRUE(md_attributes_find(&sys.attributes, STR_LIT("lavery/step/twist")) == nullptr);
+    EXPECT_TRUE(md_attributes_find(&sys.attributes, MD_STR_LIT("lavery/step/twist")) == nullptr);
     md_arena_allocator_destroy(alloc);
 }
 

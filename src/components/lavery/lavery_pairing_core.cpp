@@ -223,9 +223,9 @@ bool PairingValidator::initialize(const md_system_t& sys, const std::vector<Base
     md_bitmask_init(&donors, 0, sys.atom.count, md_get_heap_allocator());
     md_bitmask_init(&acceptors, 0, sys.atom.count, md_get_heap_allocator());
     auto atom = [&](const BaseTopology& base, const char* name) -> int32_t {
-        const auto range = md_component_atom_range(&sys.component, base.component);
+        const auto range = md_system_residue_atom_range(&sys, base.component);
         for (uint32_t i = range.beg; i < range.end; ++i) {
-            if (str_eq_cstr(md_atom_name(&sys.atom, i), name)) return (int32_t)i;
+            if (md_str_eq_cstr(md_atom_name(&sys.atom, i), name)) return (int32_t)i;
         }
         return -1;
     };

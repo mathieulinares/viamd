@@ -2346,11 +2346,11 @@ UTEST(lavery_core, detects_geometric_pairs_once_and_in_component_order) {
 }
 
 UTEST(lavery_core, nucleosome_uses_all_backbone_bases_and_consecutive_pairs) {
-    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MEGABYTES(16));
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(16));
     md_system_t sys = {.alloc = alloc};
     md_system_state_t state = {.alloc = alloc};
-    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro")));
-    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL));
+    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, MD_STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro"), nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
     for (size_t i = 0; i < sys.atom.count; ++i) sys.atom.flags[i] &= ~MD_ATOM_FLAG_NUCLEOBASE;
     auto bases = gather_bases(sys);
     ASSERT_EQ(bases.size(), (size_t)294);

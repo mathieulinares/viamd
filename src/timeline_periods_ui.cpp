@@ -93,16 +93,16 @@ bool is_hot(const State& ui, uint32_t id) {
 
 double frame_time(const TimelinePeriodAxis& a, double frame) {
     const int last = a.num_frames - 1;
-    const double f = CLAMP(frame, 0.0, (double)last);
+    const double f = MD_CLAMP(frame, 0.0, (double)last);
     const int f0 = (int)f;
-    const int f1 = MIN(f0 + 1, last);
+    const int f1 = MD_MIN(f0 + 1, last);
     const double t = f - f0;
     return a.frame_times ? a.frame_times[f0] * (1.0 - t) + a.frame_times[f1] * t : f;
 }
 
 int nearest_frame(const TimelinePeriodAxis& a, double time) {
     const float* ft = a.frame_times;
-    if (!ft) return (int)CLAMP(round(time), 0.0, (double)a.num_frames - 1);
+    if (!ft) return (int)MD_CLAMP(round(time), 0.0, (double)a.num_frames - 1);
     int lo = 0;
     int hi = a.num_frames - 1;
     if (hi <= 0 || time <= ft[0]) return 0;
@@ -115,7 +115,7 @@ int nearest_frame(const TimelinePeriodAxis& a, double time) {
     return (time - ft[lo] <= ft[hi] - time) ? lo : hi;
 }
 
-float plot_width(const State& ui) { return MAX(ui.plot_x1 - ui.plot_x0, 1.0f); }
+float plot_width(const State& ui) { return MD_MAX(ui.plot_x1 - ui.plot_x0, 1.0f); }
 
 double x_to_time(const State& ui, const TimelinePeriodAxis& a, float x) {
     return *a.view_beg + (double)(x - ui.plot_x0) / plot_width(ui) * (*a.view_end - *a.view_beg);
@@ -137,7 +137,7 @@ void add_dashed_rect(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
         if (len <= 0.0f) return;
         const ImVec2 u = d / len;
         for (float t = 0.0f; t < len; t += dash + gap) {
-            dl->AddLine(p + u * t, p + u * MIN(t + dash, len), col);
+            dl->AddLine(p + u * t, p + u * MD_MIN(t + dash, len), col);
         }
     };
     line(a, ImVec2(b.x, a.y));
@@ -174,7 +174,7 @@ void period_tooltip(const TimelinePeriod& r, const TimelinePeriodAxis& a, double
     ImGui::TextUnformatted(r.name);
     tooltip_frames(a, timeline_period_is_marker(r), beg, end);
     if (r.follow) {
-        ImGui::TextDisabled("Follows the current frame, %+d to %+d", MIN(r.beg, r.end), MAX(r.beg, r.end));
+        ImGui::TextDisabled("Follows the current frame, %+d to %+d", MD_MIN(r.beg, r.end), MD_MAX(r.beg, r.end));
     }
     if (r.note[0]) {
         ImGui::Separator();
@@ -188,7 +188,7 @@ void period_tooltip(const TimelinePeriod& r, const TimelinePeriodAxis& a, double
 void request_rename(State& ui, const TimelinePeriod& r) {
     ui.rename_id = r.id;
     ui.rename_request = true;
-    str_copy_to_char_buf(ui.rename_prev, sizeof(ui.rename_prev), str_from_cstr(r.name));
+    md_str_copy_to_char_buf(ui.rename_prev, sizeof(ui.rename_prev), md_str_from_cstr(r.name));
 }
 
 void end_drag(State& ui, TimelinePeriods* rs, const TimelinePeriodAxis& axis, bool commit) {
@@ -200,8 +200,8 @@ void end_drag(State& ui, TimelinePeriods* rs, const TimelinePeriodAxis& axis, bo
             // A click marks the frame, a drag the frames it went over
             const ImGuiIO& io = ImGui::GetIO();
             const bool click = fabsf(io.MousePos.x - d.press_x) < io.MouseDragThreshold;
-            const int beg = click ? d.anchor : MIN(d.anchor, d.current);
-            const int end = click ? d.anchor : MAX(d.anchor, d.current);
+            const int beg = click ? d.anchor : MD_MIN(d.anchor, d.current);
+            const int end = click ? d.anchor : MD_MAX(d.anchor, d.current);
             if (TimelinePeriod* r = timeline_periods_add(rs, nullptr, beg, end, false)) {
                 request_rename(ui,*r);
             } else {
@@ -261,9 +261,9 @@ void update_drag(State& ui, TimelinePeriods* rs, const TimelinePeriodAxis& axis,
             int delta = f - d.anchor;
             if (!r->follow) {
                 // A fixed period stops at the ends of the trajectory, as a whole
-                const int lo = MIN(d.orig_beg, d.orig_end);
-                const int hi = MAX(d.orig_beg, d.orig_end);
-                delta = CLAMP(delta, MIN(-lo, 0), MAX(last - hi, 0));
+                const int lo = MD_MIN(d.orig_beg, d.orig_end);
+                const int hi = MD_MAX(d.orig_beg, d.orig_end);
+                delta = MD_CLAMP(delta, MD_MIN(-lo, 0), MD_MAX(last - hi, 0));
             }
             r->beg = d.orig_beg + delta;
             r->end = d.orig_end + delta;
@@ -340,11 +340,11 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
     const bool  one_lane = rs->layout != TimelinePeriodLayout_LanePerPeriod;
     const float row_h    = ImGui::GetTextLineHeight() + 4.0f;
     const float row_gap  = 2.0f;
-    const int   rows     = one_lane ? 1 : MAX(rs->count, 1);
+    const int   rows     = one_lane ? 1 : MD_MAX(rs->count, 1);
     const float height   = one_lane ? ImGui::GetFrameHeight() : rows * row_h + (rows - 1) * row_gap;
 
     const ImVec2 pos   = ImGui::GetCursorScreenPos();
-    const float  width = MAX(ImGui::GetContentRegionAvail().x, 1.0f);
+    const float  width = MD_MAX(ImGui::GetContentRegionAvail().x, 1.0f);
     if (ui.plot_x1 <= ui.plot_x0) {
         // Before the plots have been drawn once
         ui.plot_x0 = pos.x;
@@ -401,7 +401,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
         }
         if (one_lane) {
             // Nested periods are drawn a little thinner than the ones they lie on, so that both can be seen
-            const float inset = b.marker ? 0.0f : MIN(depth[k], 2) * 3.0f;
+            const float inset = b.marker ? 0.0f : MD_MIN(depth[k], 2) * 3.0f;
             b.y0 = y0 + inset;
             b.y1 = y1 - inset;
         } else {
@@ -513,7 +513,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
             for (int j = 0; j < rs->count; ++j) {
                 const TimelinePeriodBar& o = bars[j];
                 if (j == i || !o.visible || !o.marker || o.y0 != b.y0 || o.x0 <= b.x0) continue;
-                limit = MIN(limit, o.x0 - h - 2.0f);
+                limit = MD_MIN(limit, o.x0 - h - 2.0f);
             }
             const float tx = b.x0 + h + 3.0f;
             if (limit - tx > font) {
@@ -533,14 +533,14 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
 
             if (b.x1 - b.x0 > 10.0f) {
                 const TimelinePeriodPart lit = lit_part(ui,r);
-                const float gh = MAX(b.y1 - b.y0 - 8.0f, 4.0f);
+                const float gh = MD_MAX(b.y1 - b.y0 - 8.0f, 4.0f);
                 const float gy = b.y0 + (b.y1 - b.y0 - gh) * 0.5f;
                 dl->AddRectFilled(ImVec2(b.x0 + 2.0f, gy), ImVec2(b.x0 + 4.0f, gy + gh), lit == TimelinePeriodPart_Beg ? text_col : period_color(r, 0.95f));
                 dl->AddRectFilled(ImVec2(b.x1 - 4.0f, gy), ImVec2(b.x1 - 2.0f, gy + gh), lit == TimelinePeriodPart_End ? text_col : period_color(r, 0.95f));
             }
 
-            float lx0 = MAX(b.x0, x0) + 7.0f;
-            float lx1 = MIN(b.x1, x1) - 7.0f;
+            float lx0 = MD_MAX(b.x0, x0) + 7.0f;
+            float lx1 = MD_MIN(b.x1, x1) - 7.0f;
             if (one_lane) {
                 // The stretches the periods drawn on top of it leave free: its name goes in the first wide enough for
                 // all of it, or else the widest
@@ -565,7 +565,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
                 float best0 = lx0, best1 = lx0, from = lx0;
                 bool fits = false;
                 for (int c = 0; c <= num_cover && !fits; ++c) {
-                    const float to = c < num_cover ? MIN(cover[c][0], lx1) : lx1;
+                    const float to = c < num_cover ? MD_MIN(cover[c][0], lx1) : lx1;
                     if (to - from > best1 - best0) {
                         best0 = from;
                         best1 = to;
@@ -575,7 +575,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
                         best0 = from;
                         best1 = to;
                     }
-                    if (c < num_cover) from = MAX(from, cover[c][1]);
+                    if (c < num_cover) from = MD_MAX(from, cover[c][1]);
                 }
                 lx0 = best0;
                 lx1 = best1;
@@ -589,8 +589,8 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
     }
 
     if (ui.drag.kind == Drag_Create) {
-        const float px0 = frame_x(ui,axis, MIN(ui.drag.anchor, ui.drag.current));
-        const float px1 = MAX(frame_x(ui,axis, MAX(ui.drag.anchor, ui.drag.current)), px0 + 2.0f);
+        const float px0 = frame_x(ui,axis, MD_MIN(ui.drag.anchor, ui.drag.current));
+        const float px1 = MD_MAX(frame_x(ui,axis, MD_MAX(ui.drag.anchor, ui.drag.current)), px0 + 2.0f);
         dl->AddRectFilled(ImVec2(px0, y0), ImVec2(px1, y1), ImGui::GetColorU32(ImGuiCol_Text, 0.1f));
         add_dashed_rect(dl, ImVec2(px0 + 0.5f, y0 + 0.5f), ImVec2(px1 - 0.5f, y1 - 0.5f), ImGui::GetColorU32(ImGuiCol_Text, 0.8f));
     }
@@ -611,8 +611,8 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
     // Tooltips: what is under the pointer, or what is being dragged
     const bool editing = ui.edit_id != 0 || ui.rename_id != 0;
     if (ui.drag.kind == Drag_Create) {
-        const int beg = MIN(ui.drag.anchor, ui.drag.current);
-        const int end = MAX(ui.drag.anchor, ui.drag.current);
+        const int beg = MD_MIN(ui.drag.anchor, ui.drag.current);
+        const int end = MD_MAX(ui.drag.anchor, ui.drag.current);
         ImGui::BeginTooltip();
         ImGui::TextUnformatted(beg == end ? "New marker" : "New period");
         tooltip_frames(axis, beg == end, beg, end);
@@ -629,7 +629,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
         if (const TimelinePeriod* r = timeline_periods_find(rs, ui.rename_id)) {
             int beg = 0, end = 0;
             float x = x0;
-            if (timeline_period_frames(&beg, &end, *r, cur, nf)) x = CLAMP(frame_x(ui,axis, beg), x0, MAX(x0, x1 - font * 16.0f));
+            if (timeline_period_frames(&beg, &end, *r, cur, nf)) x = MD_CLAMP(frame_x(ui,axis, beg), x0, MD_MAX(x0, x1 - font * 16.0f));
             ImGui::SetNextWindowPos(ImVec2(x, y1 + 2.0f));
             ImGui::OpenPopup("##timeline_period_name");
             ui.rename_focus = true;
@@ -651,7 +651,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
                 ImGui::CloseCurrentPopup();
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                str_copy_to_char_buf(r->name, sizeof(r->name), str_from_cstr(ui.rename_prev));
+                md_str_copy_to_char_buf(r->name, sizeof(r->name), md_str_from_cstr(ui.rename_prev));
                 ImGui::CloseCurrentPopup();
             }
             ImGui::TextDisabled("Enter keeps the name");
@@ -660,7 +660,7 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
     } else if (ui.rename_id) {
         // Closed, by Enter or a click elsewhere: a name is never left empty
         if (TimelinePeriod* r = timeline_periods_find(rs, ui.rename_id)) {
-            if (!r->name[0]) str_copy_to_char_buf(r->name, sizeof(r->name), str_from_cstr(ui.rename_prev));
+            if (!r->name[0]) md_str_copy_to_char_buf(r->name, sizeof(r->name), md_str_from_cstr(ui.rename_prev));
         }
         ui.rename_id = 0;
     }
@@ -683,11 +683,11 @@ void timeline_periods_lane(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
             mode_changed |= ImGui::RadioButton("Follows the current frame", &follow, 1);
             if (mode_changed) timeline_period_set_follow(r, follow == 1, cur, nf);
 
-            int ends[2] = { MIN(r->beg, r->end), MAX(r->beg, r->end) };
+            int ends[2] = { MD_MIN(r->beg, r->end), MD_MAX(r->beg, r->end) };
             if (ImGui::InputInt2(r->follow ? "Offsets" : "Frames", ends)) {
                 if (!r->follow) {
-                    ends[0] = CLAMP(ends[0], 0, nf - 1);
-                    ends[1] = CLAMP(ends[1], 0, nf - 1);
+                    ends[0] = MD_CLAMP(ends[0], 0, nf - 1);
+                    ends[1] = MD_CLAMP(ends[1], 0, nf - 1);
                 }
                 r->beg = ends[0];
                 r->end = ends[1];
@@ -753,7 +753,7 @@ void timeline_periods_plot(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
             dl->AddLine(ImVec2(x, y0), ImVec2(x, y1), period_color(r, hot ? 1.0f : 0.6f), hot ? 2.0f : 1.0f);
         } else {
             const float xa = px(beg);
-            const float xb = MAX(px(end), xa + 1.0f);
+            const float xb = MD_MAX(px(end), xa + 1.0f);
             dl->AddRectFilled(ImVec2(xa, y0), ImVec2(xb, y1), period_color(r, hot ? 0.16f : 0.07f));
             const ImU32 edge = period_color(r, hot ? 0.9f : 0.5f);
             dl->AddLine(ImVec2(xa, y0), ImVec2(xa, y1), edge);
@@ -761,8 +761,8 @@ void timeline_periods_plot(TimelinePeriods* rs, const TimelinePeriodAxis& axis, 
         }
     }
     if (ui.drag.kind == Drag_Create) {
-        const float xa = px(MIN(ui.drag.anchor, ui.drag.current));
-        const float xb = MAX(px(MAX(ui.drag.anchor, ui.drag.current)), xa + 1.0f);
+        const float xa = px(MD_MIN(ui.drag.anchor, ui.drag.current));
+        const float xb = MD_MAX(px(MD_MAX(ui.drag.anchor, ui.drag.current)), xa + 1.0f);
         dl->AddRectFilled(ImVec2(xa, y0), ImVec2(xb, y1), ImGui::GetColorU32(ImGuiCol_Text, 0.07f));
         dl->AddLine(ImVec2(xa, y0), ImVec2(xa, y1), ImGui::GetColorU32(ImGuiCol_Text, 0.5f));
         dl->AddLine(ImVec2(xb, y0), ImVec2(xb, y1), ImGui::GetColorU32(ImGuiCol_Text, 0.5f));
