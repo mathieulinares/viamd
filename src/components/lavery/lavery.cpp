@@ -178,6 +178,11 @@ struct Lavery : viamd::EventHandler {
     // Parameters used for event detection, independent of the viewed class: bit k is Metric k
     // (bits 0-5 intra-base pair, 6-13 inter-base pair incl. grooves, 14-23 nucleotide).
     uint32_t event_parameters = DEFAULT_EVENT_PARAMETERS;
+    bool curves_geometry_event_detection = true;
+    bool curves_geometry_event_external_reference = false;
+    uint32_t curves_geometry_event_parameters = (1u << CurvesGeometryQuantity_Count) - 1u;
+    std::vector<CurvesGeometryEvent> curves_geometry_events;
+    std::string curves_geometry_event_error;
     int event_min_frames = 3;
     float event_min_time_ps = 200, event_gap_time_ps = -1;
     bool event_range_enabled = false;
@@ -330,8 +335,18 @@ struct Lavery : viamd::EventHandler {
     uint32_t profile_period = 0;
     uint64_t profile_key = 0;
     std::vector<MemberStatistics> profile_statistics, profile_reference_statistics;
-    enum ProfileView { Profile_Parameters, Profile_Bending, Profile_Twist, Profile_Stacking, Profile_Grooves, Profile_Occupancy, Profile_Helical, Profile_Count };
+    uint64_t curves_profile_key = 0;
+    std::vector<std::vector<MemberStatistics>> curves_profile_statistics;
+    std::string curves_profile_reference_path, curves_profile_reference_error;
+    ExternalCurvesGeometryReference curves_profile_reference;
+    uint64_t curves_profile_reference_key = 0;
+    std::vector<std::vector<MemberStatistics>> curves_profile_reference_statistics;
+    bool curves_profile_reference_pending = false, curves_profile_reference_fit_pending = false;
+    bool curves_profile_reference_visible = true;
+    enum ProfileView { Profile_Parameters, Profile_Bending, Profile_Twist, Profile_Stacking, Profile_Grooves,
+                       Profile_Occupancy, Profile_Helical, Profile_CurvesGeometry, Profile_Count };
     int profile_view = Profile_Parameters, profile_occupancy_kind = 0;
+    int curves_profile_quantity = 0;
     float profile_bend_threshold = 20;
     bool profile_fixed_occupancy_scale = false;
     struct StructuralPanel {
@@ -403,9 +418,13 @@ struct Lavery : viamd::EventHandler {
     bool aggregate_outliers = false;
     uint32_t selected_parameters = CLASS_LOCAL_ALL; // class-local bits, masked by the viewed class
     int metric_layout = METRIC_LAYOUT; // of the workspace being restored
+    int legacy_convention = -1;
+    int pair_orientation_version = 1;
     std::vector<uint16_t> pair_quality_flags;
     std::vector<uint16_t> step_quality_flags;
+    std::vector<uint16_t> helical_quality_flags;
     std::array<std::vector<uint16_t>, 10> nucleotide_quality_flags;
+    AnalysisConvention analysis_convention = AnalysisConvention::LegacyMixed;
     std::vector<OutlierEvent> outlier_events;
     std::vector<StateSwitch> state_switches;
     size_t inspected_switch = SIZE_MAX;
@@ -430,6 +449,7 @@ struct Lavery : viamd::EventHandler {
     std::array<std::vector<float>, Metric_Count> values;
     std::array<MetricStatistics, Metric_Count> statistics;
     std::array<size_t, Metric_Count> columns = {};
+    CurvesTrajectoryAnalysis curves_trajectory;
     std::atomic<bool> calculation_ready = false;
     std::atomic<bool> calculation_ok = false;
     std::atomic<bool> cancel_requested = false;
@@ -441,6 +461,26 @@ struct Lavery : viamd::EventHandler {
     std::string analysis_error;
 
     Lavery() { viamd::event_system_register_handler(*this); }
+
+    std::string export_run() const {
+        switch (analysis_convention) {
+        case AnalysisConvention::Curves:
+            return run + "; convention=Curves+";
+        case AnalysisConvention::ThreeDna:
+            return run + "; convention=3DNA";
+        case AnalysisConvention::LegacyMixed:
+            return run + "; pair_step=Curves+; pair_orientation=per-frame; helical_groove=3DNA-style";
+        }
+        return run + "; convention=unknown";
+    }
+
+    bool reference_convention_warning(const ExternalReference& reference) const {
+        if (!reference.records) return false;
+        const std::string provenance = export_run();
+        const size_t separator = provenance.find("; ");
+        const std::string tag = separator == std::string::npos ? std::string{} : provenance.substr(separator);
+        return tag.empty() || reference.run.find(tag) == std::string::npos;
+    }
 
     void wait_for_attribute_readers() {
         if (app->script.eval) script::eval_interrupt(app->script.eval);
@@ -490,6 +530,7 @@ struct Lavery : viamd::EventHandler {
         bases.clear();
         pairs.clear();
         steps.clear();
+        curves_trajectory = {};
         for (auto& v : values) v.clear();
         for (auto& s : statistics) s = {};
         pair_labels.clear();
@@ -535,6 +576,8 @@ struct Lavery : viamd::EventHandler {
         period_summary_key = 0;
         comparison_key = 0;
         profile_key = 0;
+        curves_profile_key = 0;
+        curves_profile_statistics.clear();
         data_export_error.clear();
         profile_statistics.clear();
         profile_reference_statistics.clear();
@@ -581,8 +624,11 @@ struct Lavery : viamd::EventHandler {
         landmark_step_frames.clear();
         for (auto& grooves : display_grooves) grooves.clear();
         step_quality_flags.clear();
+        helical_quality_flags.clear();
         for (auto& flags : nucleotide_quality_flags) flags.clear();
         outlier_events.clear();
+        curves_geometry_events.clear();
+        curves_geometry_event_error.clear();
         event_expanded.clear();
         footprint_key = 0;
         footprint_event = SIZE_MAX;
@@ -797,6 +843,8 @@ struct Lavery : viamd::EventHandler {
                 auto& state = *(viamd::serialization_state_t*)e.payload;
                 viamd::write_section_header(state, MD_STR_LIT("Lavery"));
                 viamd::write_int(state, MD_STR_LIT("MetricLayout"), METRIC_LAYOUT);
+                viamd::write_int(state, MD_STR_LIT("AnalysisConvention"), (int)analysis_convention);
+                viamd::write_int(state, MD_STR_LIT("PairOrientationVersion"), 1);
                 viamd::write_bool(state, MD_STR_LIT("ShowWindow"), show_window);
                 viamd::write_bool(state, MD_STR_LIT("ShowHeatmap"), show_heatmap);
                 viamd::write_bool(state, MD_STR_LIT("SyncViewport"), sync_viewport);
@@ -831,6 +879,9 @@ struct Lavery : viamd::EventHandler {
                 viamd::write_str(state, MD_STR_LIT("ExternalReferenceFingerprint"), md_str_from_cstr(fingerprint.c_str()));
                 const std::string mapping_text=external_mapping_text();
                 viamd::write_str(state, MD_STR_LIT("ExternalReferenceMapping"),md_str_from_cstr(mapping_text.c_str()));
+                viamd::write_str(state, MD_STR_LIT("CurvesGeometryReferencePath"),
+                    md_str_from_cstr(curves_profile_reference_path.c_str()));
+                viamd::write_bool(state, MD_STR_LIT("CurvesGeometryReferenceVisible"),curves_profile_reference_visible);
                 viamd::write_bool(state, MD_STR_LIT("BaselineRangeEnabled"), baseline_range_enabled);
                 viamd::write_bool(state, MD_STR_LIT("BaselineRangePeriod"), baseline_range_period);
                 viamd::write_int(state, MD_STR_LIT("BaselinePeriodId"), baseline_period_id);
@@ -840,6 +891,11 @@ struct Lavery : viamd::EventHandler {
                 viamd::write_int(state, MD_STR_LIT("BaselineRangeLast"), baseline_range_last);
                 viamd::write_int(state, MD_STR_LIT("EventParameters"), (int)event_parameters);
                 viamd::write_int(state, MD_STR_LIT("EventParametersVersion"), 1);
+                viamd::write_bool(state, MD_STR_LIT("CurvesGeometryEventDetection"),curves_geometry_event_detection);
+                viamd::write_bool(state, MD_STR_LIT("CurvesGeometryEventExternalReference"),
+                    curves_geometry_event_external_reference);
+                viamd::write_int(state, MD_STR_LIT("CurvesGeometryEventParameters"),
+                    (int)curves_geometry_event_parameters);
                 viamd::write_int(state, MD_STR_LIT("EventMinFrames"), event_min_frames);
                 viamd::write_flt(state, MD_STR_LIT("EventMinTimePs"), event_min_time_ps);
                 viamd::write_flt(state, MD_STR_LIT("EventGapTimePs"), event_gap_time_ps);
@@ -933,6 +989,11 @@ struct Lavery : viamd::EventHandler {
                 baseline_range_begin_ps = baseline_range_end_ps = 0;
                 baseline_range_first = baseline_range_last = 0;
                 event_parameters = DEFAULT_EVENT_PARAMETERS;
+                curves_geometry_event_detection = true;
+                curves_geometry_event_external_reference = false;
+                curves_geometry_event_parameters = (1u << CurvesGeometryQuantity_Count) - 1u;
+                curves_geometry_events.clear();
+                curves_geometry_event_error.clear();
                 event_min_frames = 3;
                 event_min_time_ps = 200;
                 event_gap_time_ps = -1;
@@ -963,10 +1024,33 @@ struct Lavery : viamd::EventHandler {
                 auto& state = *(viamd::deserialization_state_t*)e.payload;
                 if (deserialize_workflows(state)) break;
                 if (!md_str_eq(viamd::section_header(state), MD_STR_LIT("Lavery"))) break;
+                const AnalysisConvention previous_analysis_convention = analysis_convention;
+                legacy_convention = -1;
+                pair_orientation_version = 0;
                 int event_parameters_version = 0;
                 md_str_t key, arg;
                 while (viamd::next_entry(key, arg, state)) {
                     if (md_str_eq(key, MD_STR_LIT("MetricLayout"))) viamd::extract_enum(metric_layout, arg, METRIC_LAYOUT + 1);
+                    else if (md_str_eq(key, MD_STR_LIT("AnalysisConvention"))) {
+                        int value = (int)AnalysisConvention::LegacyMixed;
+                        if (!viamd::extract_enum(value, arg, 3))
+                            MD_LOG_ERROR("Lavery: invalid analysis convention");
+                        else
+                            analysis_convention = (AnalysisConvention)value;
+                    }
+                    else if (md_str_eq(key, MD_STR_LIT("PairOrientationVersion"))) {
+                        if (!viamd::extract_enum(pair_orientation_version, arg, 2))
+                            MD_LOG_ERROR("Lavery: invalid pair orientation version");
+                    }
+                    else if (md_str_eq(key, MD_STR_LIT("FrameConvention"))) {
+                        int previous_convention = 0;
+                        if (!viamd::extract_enum(previous_convention, arg, 2))
+                            MD_LOG_ERROR("Lavery: invalid frame convention");
+                        else {
+                            legacy_convention = previous_convention;
+                            MD_LOG_INFO("Lavery: legacy frame convention replaced by Curves+ pair/step and 3DNA-style helical parameters");
+                        }
+                    }
                     else if (md_str_eq(key, MD_STR_LIT("ShowWindow"))) viamd::extract_bool(show_window, arg);
                     else if (md_str_eq(key, MD_STR_LIT("ShowHeatmap"))) viamd::extract_bool(show_heatmap, arg);
                     else if (md_str_eq(key, MD_STR_LIT("SyncViewport"))) viamd::extract_bool(sync_viewport, arg);
@@ -1058,6 +1142,13 @@ struct Lavery : viamd::EventHandler {
                         if (viamd::extract_str(text,arg)) external_path.assign(text.ptr,text.len);
                         external_load_pending = !external_path.empty();
                     }
+                    else if (md_str_eq(key, MD_STR_LIT("CurvesGeometryReferencePath"))) {
+                        md_str_t text;
+                        if (viamd::extract_str(text,arg)) curves_profile_reference_path.assign(text.ptr,text.len);
+                        curves_profile_reference_pending = !curves_profile_reference_path.empty();
+                    }
+                    else if (md_str_eq(key, MD_STR_LIT("CurvesGeometryReferenceVisible")))
+                        viamd::extract_bool(curves_profile_reference_visible,arg);
                     else if (md_str_eq(key, MD_STR_LIT("ExternalReferenceMapping"))) {
                         md_str_t text;
                         if (viamd::extract_str(text,arg)) saved_external_mapping.assign(text.ptr,text.len);
@@ -1077,6 +1168,16 @@ struct Lavery : viamd::EventHandler {
                         int mask = (int)DEFAULT_EVENT_PARAMETERS;
                         viamd::extract_int(mask, arg);
                         event_parameters = (uint32_t)mask & kEventAllParameters;
+                    }
+                    else if (md_str_eq(key, MD_STR_LIT("CurvesGeometryEventDetection")))
+                        viamd::extract_bool(curves_geometry_event_detection,arg);
+                    else if (md_str_eq(key, MD_STR_LIT("CurvesGeometryEventExternalReference")))
+                        viamd::extract_bool(curves_geometry_event_external_reference,arg);
+                    else if (md_str_eq(key, MD_STR_LIT("CurvesGeometryEventParameters"))) {
+                        int mask=(1u << CurvesGeometryQuantity_Count)-1u;
+                        viamd::extract_int(mask,arg);
+                        curves_geometry_event_parameters=(uint32_t)mask &
+                            ((1u << CurvesGeometryQuantity_Count)-1u);
                     }
                     else if (md_str_eq(key, MD_STR_LIT("EventParametersVersion")))
                         viamd::extract_enum(event_parameters_version, arg, 2);
@@ -1167,6 +1268,7 @@ struct Lavery : viamd::EventHandler {
                 }
                 event_parameters = restore_event_parameters(event_parameters, event_parameters_version == 0);
                 sanitize_layout();
+                if (analysis_convention != previous_analysis_convention) reset();
                 break;
             }
             default:
@@ -1227,6 +1329,7 @@ struct Lavery : viamd::EventHandler {
         viamd::write_bool(state, MD_STR_LIT("ProfilePrimaryVisible"), profile_primary_visible);
         viamd::write_int(state, MD_STR_LIT("ProfileView"), profile_view);
         viamd::write_int(state, MD_STR_LIT("ProfileOccupancyKind"), profile_occupancy_kind);
+        viamd::write_int(state, MD_STR_LIT("CurvesProfileQuantity"), curves_profile_quantity);
         viamd::write_flt(state, MD_STR_LIT("ProfileBendThreshold"), profile_bend_threshold);
         viamd::write_bool(state, MD_STR_LIT("ProfileFixedOccupancyScale"), profile_fixed_occupancy_scale);
         viamd::write_flt(state, MD_STR_LIT("LandmarkMinOccupancy"), landmark_min_occupancy);
@@ -1296,6 +1399,7 @@ struct Lavery : viamd::EventHandler {
         else if (md_str_eq(key, MD_STR_LIT("ProfilePrimaryVisible"))) viamd::extract_bool(profile_primary_visible, arg);
         else if (md_str_eq(key, MD_STR_LIT("ProfileView"))) viamd::extract_enum(profile_view, arg, Profile_Count);
         else if (md_str_eq(key, MD_STR_LIT("ProfileOccupancyKind"))) viamd::extract_enum(profile_occupancy_kind, arg, 6);
+        else if (md_str_eq(key, MD_STR_LIT("CurvesProfileQuantity"))) viamd::extract_enum(curves_profile_quantity, arg, 11);
         else if (md_str_eq(key, MD_STR_LIT("ProfileBendThreshold"))) finite(profile_bend_threshold, 0, 180);
         else if (md_str_eq(key, MD_STR_LIT("ProfileFixedOccupancyScale"))) viamd::extract_bool(profile_fixed_occupancy_scale, arg);
         else if (md_str_eq(key, MD_STR_LIT("LandmarkMinOccupancy"))) finite(landmark_min_occupancy, 0, 100);
@@ -1621,10 +1725,13 @@ struct Lavery : viamd::EventHandler {
         profile_period = 0;
         profile_view = Profile_Parameters;
         profile_occupancy_kind = 0;
+        curves_profile_quantity = 0;
         profile_bend_threshold = 20;
         profile_fixed_occupancy_scale = false;
         profile_series.clear();
         ++profile_series_revision;
+        curves_profile_key = 0;
+        curves_profile_statistics.clear();
         landmark_min_occupancy = 50;
         sequence_landmarks.clear();
         pending_landmarks.clear();
@@ -1642,6 +1749,14 @@ struct Lavery : viamd::EventHandler {
         timeline_plot_height = 220;
         distribution_plot_height = 180;
         outliers_list_height = 160;
+    }
+
+    void set_analysis_convention(AnalysisConvention convention) {
+        if (analysis_convention == convention) return;
+        analysis_convention = convention;
+        if (metric<0 || metric>=(int)Metric_Count ||
+            !(convention_available_metric_mask(convention)&(1u<<metric))) metric=Roll;
+        reset();
     }
 
     void sanitize_layout() {
@@ -1822,6 +1937,7 @@ struct Lavery : viamd::EventHandler {
         pair_contacts.assign(frame_count * bp_count, 0);
         pairing_states.assign(frame_count * bp_count, Pairing_Unavailable);
         step_quality_flags.assign(frame_count * step_count, Quality_AdjacentPair);
+        helical_quality_flags.assign(frame_count * step_count, Quality_AdjacentPair);
         for (auto& flags : nucleotide_quality_flags) flags.assign(frame_count * 2 * bp_count, Quality_MissingAtoms);
         columns.fill(0);
         for (int m = 0; m < (int)Metric_Count; ++m) {
@@ -1833,11 +1949,13 @@ struct Lavery : viamd::EventHandler {
         calculation_ok = false;
         cancel_requested = false;
         frames_done = 0;
+        curves_trajectory = {};
         analysis_error.clear();
         calculating = true;
         calculation_baseline = baseline;
         const Baseline method = (Baseline)baseline;
-        calculation.start(MD_STR_LIT("Lavery trajectory analysis"), [this, sys, frame_count, method]() {
+        const AnalysisConvention convention = analysis_convention;
+        calculation.start(MD_STR_LIT("Lavery trajectory analysis"), [this, sys, frame_count, method, convention]() {
             md_temp_scope_t temp_scope = md_temp_begin();
             md_allocator_i* alloc = md_temp_allocator(temp_scope);
             md_system_state_t state = {};
@@ -1866,12 +1984,32 @@ struct Lavery : viamd::EventHandler {
                     ok = false;
                     break;
                 }
-                if (!analyze_frame(&result, *sys, state, bases, pairs, steps, validator)) {
+                ConventionFrameAnalysis convention_result;
+                if (!analyze_convention_frame(&convention_result, convention, *sys, state, bases, pairs, steps, validator)) {
                     ok = false;
                     break;
                 }
+                if (convention == AnalysisConvention::Curves) {
+                    auto& curves_result = std::get<CurvesFrameAnalysis>(convention_result);
+                    if ((frame == 0 && !initialize_curves_trajectory(&curves_trajectory, frame_count, pairs.size(),
+                                                                      steps, curves_result)) ||
+                        !store_curves_trajectory_frame(&curves_trajectory, frame, curves_result)) {
+                        ok = false;
+                        break;
+                    }
+                    if (frame == 0) {
+                        for (auto& helix : curves_trajectory.helices) {
+                            for (uint32_t pair : helix.pairs) helix.pair_labels.push_back(pair_labels[pair]);
+                            for (size_t step : helix.steps) helix.step_labels.push_back(step_labels[step]);
+                        }
+                    }
+                    result = std::move(curves_result.frame);
+                } else {
+                    result = std::move(std::get<FrameAnalysis>(convention_result));
+                }
                 std::copy(result.pair_quality.begin(), result.pair_quality.end(), pair_quality_flags.begin() + frame * pairs.size());
                 std::copy(result.step_quality.begin(), result.step_quality.end(), step_quality_flags.begin() + frame * steps.size());
+                std::copy(result.helical_quality.begin(), result.helical_quality.end(), helical_quality_flags.begin() + frame * steps.size());
                 std::copy(result.contacts.begin(), result.contacts.end(), pair_contacts.begin() + frame * pairs.size());
                 std::copy(result.pairing_states.begin(), result.pairing_states.end(), pairing_states.begin() + frame * pairs.size());
                 for (int m = 0; m < (int)Metric_Count; ++m) {
@@ -1947,7 +2085,13 @@ struct Lavery : viamd::EventHandler {
             const Metric metric_id = (Metric)m;
             const size_t n = columns[m];
             if (n == 0) continue;
-            if (!publish_series(table, run, metric_path(metric_id), metric_name(metric_id),
+            if (analysis_convention == AnalysisConvention::Curves &&
+                ((HELICAL_PARAMETERS & (1u << m)) || metric_id == MinorGroove || metric_id == MajorGroove))
+                continue;
+            const std::string label = std::string(metric_name(metric_id)) +
+                ((HELICAL_PARAMETERS & (1u << m)) && analysis_convention != AnalysisConvention::Curves
+                    ? " (3DNA-style)" : "");
+            if (!publish_series(table, run, metric_path(metric_id), label.c_str(),
                 MD_ATTRIBUTE_TYPE_F32, run_num_frames(app), n, values[m].data(), values[m].size() * sizeof(float),
                 metric_uses_degrees(metric_id) ? md_unit_degree() : md_unit_angstrom())) {
                 md_attributes_remove_prefix(table, prefix);
@@ -1972,9 +2116,84 @@ struct Lavery : viamd::EventHandler {
             !publish_series(table, run, "bp/pairing_state", "Pairing state: 0 unavailable, 1 WC, 2 AT/U Hoogsteen, 3 other, 4 unpaired", MD_ATTRIBUTE_TYPE_U8,
                 frames, pairs.size(), pairing_states.data(), pairing_states.size(), md_unit_none()) ||
             (!steps.empty() && !publish_series(table, run, "step/quality", "Step quality flags", MD_ATTRIBUTE_TYPE_U16,
-                frames, steps.size(), step_quality_flags.data(), step_quality_flags.size() * sizeof(uint16_t), md_unit_none()))) {
+                frames, steps.size(), step_quality_flags.data(), step_quality_flags.size() * sizeof(uint16_t), md_unit_none())) ||
+            (analysis_convention != AnalysisConvention::Curves && !steps.empty() &&
+                !publish_series(table, run, "step/helical_quality", "Helical quality flags", MD_ATTRIBUTE_TYPE_U16,
+                frames, steps.size(), helical_quality_flags.data(), helical_quality_flags.size() * sizeof(uint16_t), md_unit_none()))) {
             md_attributes_remove_prefix(table, prefix);
             return false;
+        }
+        if (analysis_convention == AnalysisConvention::Curves) {
+            const size_t groove_members = frames ? curves_trajectory.grooves.size() / frames : 0;
+            if (curves_trajectory.frames != frames || curves_trajectory.pairs != pairs.size() ||
+                curves_trajectory.steps != steps.size() ||
+                curves_trajectory.pair_axis.size() != frames * pairs.size() ||
+                curves_trajectory.step_axis.size() != frames * steps.size() ||
+                (groove_members * frames != curves_trajectory.grooves.size())) {
+                MD_LOG_ERROR("Lavery: Curves+ trajectory output dimensions are inconsistent");
+                md_attributes_remove_prefix(table, prefix);
+                return false;
+            }
+            auto publish_pair_axis = [&](const char* path, const char* label, auto value, md_unit_t unit) {
+                std::vector<float> data(curves_trajectory.pair_axis.size());
+                for (size_t i = 0; i < data.size(); ++i) data[i] = value(curves_trajectory.pair_axis[i]);
+                return data.empty() || publish_series(table, run, path, label, MD_ATTRIBUTE_TYPE_F32,
+                    frames, pairs.size(), data.data(), data.size() * sizeof(float), unit);
+            };
+            auto publish_step_axis = [&](const char* path, const char* label, auto value, md_unit_t unit) {
+                std::vector<float> data(curves_trajectory.step_axis.size());
+                for (size_t i = 0; i < data.size(); ++i) data[i] = value(curves_trajectory.step_axis[i]);
+                return data.empty() || publish_series(table, run, path, label, MD_ATTRIBUTE_TYPE_F32,
+                    frames, steps.size(), data.data(), data.size() * sizeof(float), unit);
+            };
+            auto publish_groove = [&](const char* path, const char* label, auto value) {
+                std::vector<float> data(curves_trajectory.grooves.size());
+                for (size_t i = 0; i < data.size(); ++i) data[i] = value(curves_trajectory.grooves[i]);
+                return data.empty() || publish_series(table, run, path, label, MD_ATTRIBUTE_TYPE_F32,
+                    frames, groove_members, data.data(), data.size() * sizeof(float), md_unit_angstrom());
+            };
+            auto publish_groove_level = [&]() {
+                std::vector<float> data(curves_trajectory.grooves.size());
+                for (size_t i = 0; i < data.size(); ++i) data[i] = curves_trajectory.grooves[i].level;
+                return data.empty() || publish_series(table, run, "groove/curves_level", "Curves+ groove level",
+                    MD_ATTRIBUTE_TYPE_F32, frames, groove_members, data.data(), data.size() * sizeof(float), md_unit_none());
+            };
+            if (!publish_pair_axis("bp/curves_x_displacement", "Curves+ axis X displacement",
+                    [](const auto& v) { return v.x_displacement; }, md_unit_angstrom()) ||
+                !publish_pair_axis("bp/curves_y_displacement", "Curves+ axis Y displacement",
+                    [](const auto& v) { return v.y_displacement; }, md_unit_angstrom()) ||
+                !publish_pair_axis("bp/curves_inclination", "Curves+ axis inclination",
+                    [](const auto& v) { return v.inclination; }, md_unit_degree()) ||
+                !publish_pair_axis("bp/curves_tip", "Curves+ axis tip",
+                    [](const auto& v) { return v.tip; }, md_unit_degree()) ||
+                !publish_pair_axis("bp/curves_axis_bend", "Curves+ axis bend",
+                    [](const auto& v) { return v.axis_bend; }, md_unit_degree()) ||
+                !publish_step_axis("step/curves_inter_axis_rise", "Curves+ inter-axis rise",
+                    [](const auto& v) { return v.rise; }, md_unit_angstrom()) ||
+                !publish_step_axis("step/curves_inter_axis_twist", "Curves+ inter-axis twist",
+                    [](const auto& v) { return v.twist; }, md_unit_degree()) ||
+                !publish_groove_level() ||
+                !publish_groove("groove/curves_width12", "Curves+ W12",
+                    [](const auto& v) { return v.width12; }) ||
+                !publish_groove("groove/curves_depth12", "Curves+ D12",
+                    [](const auto& v) { return v.depth12; }) ||
+                !publish_groove("groove/curves_width21", "Curves+ W21",
+                    [](const auto& v) { return v.width21; }) ||
+                !publish_groove("groove/curves_depth21", "Curves+ D21",
+                    [](const auto& v) { return v.depth21; })) {
+                md_attributes_remove_prefix(table, prefix);
+                return false;
+            }
+            if (!curves_trajectory.helices.empty() &&
+                (!publish_series(table, run, "helix/curves_axis_quality", "Curves+ axis quality flags",
+                    MD_ATTRIBUTE_TYPE_U16, frames, curves_trajectory.helices.size(),
+                    curves_trajectory.axis_quality.data(), curves_trajectory.axis_quality.size() * sizeof(uint16_t), md_unit_none()) ||
+                 !publish_series(table, run, "helix/curves_groove_quality", "Curves+ groove quality flags",
+                    MD_ATTRIBUTE_TYPE_U16, frames, curves_trajectory.helices.size(),
+                    curves_trajectory.groove_quality.data(), curves_trajectory.groove_quality.size() * sizeof(uint16_t), md_unit_none()))) {
+                md_attributes_remove_prefix(table, prefix);
+                return false;
+            }
         }
         std::vector<uint8_t> evidence(pair_contacts.size());
         for (size_t f = 0; f < frames; ++f) std::copy(pair_uses_hydrogens.begin(), pair_uses_hydrogens.end(), evidence.begin() + f * pairs.size());
@@ -2081,12 +2300,34 @@ struct Lavery : viamd::EventHandler {
         else clear_highlight();
     }
 
+    bool metric_available(Metric id) const {
+        return (convention_available_metric_mask(analysis_convention) & (1u << id)) != 0;
+    }
+
+    uint32_t available_metric_mask() const {
+        return convention_available_metric_mask(analysis_convention);
+    }
+
+    uint32_t active_event_parameters() const { return event_parameters & available_metric_mask(); }
+
+    int first_available_parameter(int cls) const {
+        const int first = class_first_metric(cls);
+        const int end = first + class_parameter_count(cls);
+        for (int id = first; id < end; ++id)
+            if (metric_available((Metric)id)) return id - first;
+        return 0;
+    }
+
     bool draw_parameter_combo(const char* label, int cls, int& local) {
         const int offset=class_first_metric(cls);
+        const int count=class_parameter_count(cls);
+        if (local < 0 || local >= count || !metric_available((Metric)(offset + local)))
+            local = first_available_parameter(cls);
         bool changed=false;
-        if (ImGui::BeginCombo(label,metric_name((Metric)(offset+local)))) {
+        if (ImGui::BeginCombo(label,count ? metric_name((Metric)(offset+local)) : "Unavailable")) {
             const auto items=[&](int first, int last) {
                 for (int id=first;id<=last;++id) {
+                    if (!metric_available((Metric)id)) continue;
                     if (ImGui::Selectable(metric_name((Metric)id),local==id-offset)) {
                         local=id-offset;
                         changed=true;
@@ -2096,6 +2337,10 @@ struct Lavery : viamd::EventHandler {
             };
             if (cls==Class_Step) {
                 for (const auto& group : STEP_PARAMETER_GROUPS) {
+                    bool available = false;
+                    for (int id = (int)group.first; id <= (int)group.last; ++id)
+                        available |= metric_available((Metric)id);
+                    if (!available) continue;
                     ImGui::SeparatorText(group.name);
                     items(group.first,group.last);
                 }
@@ -2105,23 +2350,29 @@ struct Lavery : viamd::EventHandler {
         return changed;
     }
 
+    void draw_parameter_items(int first, int last, uint32_t& parameters, int offset) {
+        for (int id=first;id<=last;++id) {
+            if (!metric_available((Metric)id)) continue;
+            const uint32_t bit=1u<<(id-offset);
+            bool selected=(parameters&bit)!=0;
+            if (ImGui::Checkbox(metric_name((Metric)id),&selected))
+                parameters=selected ? parameters|bit : parameters&~bit;
+            if (HELICAL_PARAMETERS&(1u<<id))
+                ImGui::SetItemTooltip("Local helical-axis parameter using 3DNA-style frames.\n"
+                    "Off by default in events to reduce redundant detections with step parameters.");
+        }
+    }
+
     void draw_parameter_checkboxes(int cls, uint32_t& parameters, bool local_mask=false) {
         const int offset=local_mask ? class_first_metric(cls) : 0;
-        const auto items=[&](int first, int last) {
-            for (int id=first;id<=last;++id) {
-                const uint32_t bit=1u<<(id-offset);
-                bool selected=(parameters&bit)!=0;
-                if (ImGui::Checkbox(metric_name((Metric)id),&selected))
-                    parameters=selected ? parameters|bit : parameters&~bit;
-                if (HELICAL_PARAMETERS&(1u<<id))
-                    ImGui::SetItemTooltip("Local helical-axis parameter; re-expresses the step deformation.\n"
-                        "Off by default in events to avoid counting the same deformation twice.");
-            }
-        };
         if (cls==Class_Step) {
             for (const auto& group : STEP_PARAMETER_GROUPS) {
+                uint32_t available_mask = 0;
+                for (int id = (int)group.first; id <= (int)group.last; ++id)
+                    if (metric_available((Metric)id)) available_mask |= 1u << (id-offset);
+                if (!available_mask) continue;
                 ImGui::Separator();
-                const uint32_t mask=group.mask()>>offset;
+                const uint32_t mask=available_mask;
                 const uint32_t chosen=parameters&mask;
                 bool all=chosen==mask;
                 if (chosen && !all) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue,true);
@@ -2129,9 +2380,9 @@ struct Lavery : viamd::EventHandler {
                     parameters=all ? parameters|mask : parameters&~mask;
                 if (chosen && chosen!=mask) ImGui::PopItemFlag();
                 ImGui::SetItemTooltip("Select or clear all %s parameters.",group.name);
-                items(group.first,group.last);
+                draw_parameter_items(group.first,group.last,parameters,offset);
             }
-        } else items(class_first_metric(cls),class_first_metric(cls)+class_parameter_count(cls)-1);
+        } else draw_parameter_items(class_first_metric(cls),class_first_metric(cls)+class_parameter_count(cls)-1,parameters,offset);
     }
 
     void draw_parameter_selection(bool choose_member) {
@@ -2183,7 +2434,8 @@ struct Lavery : viamd::EventHandler {
             const size_t frame = nearest_frame(app->animation.frame, nullptr, run_num_frames(app));
             size_t valid_pairs = 0, valid_steps = 0;
             for (size_t p = 0; p < pairs.size(); ++p) if (!pair_quality_flags[frame * pairs.size() + p]) ++valid_pairs;
-            for (size_t st = 0; st < steps.size(); ++st) if (!step_quality_flags[frame * steps.size() + st]) ++valid_steps;
+            const auto& quality = (HELICAL_PARAMETERS & (1u << metric)) ? helical_quality_flags : step_quality_flags;
+            for (size_t st = 0; st < steps.size(); ++st) if (!quality[frame * steps.size() + st]) ++valid_steps;
             ImGui::SetItemTooltip("Frame %zu: %zu/%zu pairs and %zu/%zu steps valid.\n"
                 "A missing internal pair invalidates both neighbouring steps; gaps are never bridged.",
                 frame, valid_pairs, pairs.size(), valid_steps, steps.size());
@@ -2193,8 +2445,28 @@ struct Lavery : viamd::EventHandler {
 
     void draw_shared_controls() {
         ImGui::PushItemWidth(-ImGui::GetFontSize() * 7.5f);
+        int convention=(int)analysis_convention;
+        if (ImGui::Combo("Analysis convention",&convention,
+                "Legacy mixed (Curves+ pair/step; 3DNA helical/grooves)\0Curves+\0""3DNA\0")) {
+            if (convention<0 || convention>(int)AnalysisConvention::ThreeDna) {
+                MD_LOG_ERROR("Lavery: invalid analysis convention selection");
+            } else {
+                set_analysis_convention((AnalysisConvention)convention);
+                ImGui::PopItemWidth();
+                return;
+            }
+        }
+        ImGui::SetItemTooltip("Legacy mixed preserves the original paired analysis. Curves+ selects Curves+-style pair/step parameters and native Curves+ axis/groove outputs; 3DNA selects the 3DNA calculation path. Switching recomputes the trajectory and clears convention-specific results. Some non-linear/circular topologies are not supported by the native axis/groove calculation.");
         const int group=metric_cls();
         const int offset=class_first_metric(group);
+        bool reference_warning = reference_convention_warning(external_reference);
+        for (const auto* setup : {&sequence_reference_setup, &export_reference_setup, &ranking_reference_setup, &heatmap_reference_setup})
+            reference_warning |= reference_convention_warning(setup->external);
+        for (const auto& csv : comparison_csvs) reference_warning |= reference_convention_warning(csv.data);
+        if (legacy_convention == 1) ImGui::TextWrapped("This workspace previously used 3DNA-style pair and step parameters. They now use Curves+-style; helical parameters use 3DNA-style frames.");
+        else if (legacy_convention == 0) ImGui::TextWrapped("This workspace previously used Curves+-style frames for helical parameters. They now use 3DNA-style frames; pair and step parameters remain Curves+-style.");
+        if (pair_orientation_version == 0) ImGui::TextWrapped("Pair and step parameters now use Curves+-style per-frame orientation; signs can differ from older results.");
+        if (reference_warning) ImGui::TextWrapped("Imported CSV convention differs or is unmarked; parameter values are not converted.");
         if (columns[metric] && run_num_frames(app)) draw_evidence((int)columns[metric]);
         if (ImGui::CollapsingHeader("Detection",ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::Checkbox("Enable outlier detection",&detection_enabled)) {
@@ -2243,11 +2515,42 @@ struct Lavery : viamd::EventHandler {
 
         const std::string parameters = event_parameters_label();
         char header[128];
-        const int chosen = (int)std::bitset<Metric_Count>(event_parameters).count();
+        const uint32_t available = active_event_parameters();
+        const int chosen = (int)std::bitset<Metric_Count>(available).count();
         if (parameters.size() <= 18) snprintf(header, sizeof(header), "Event parameters: %s###event_parameters", parameters.c_str());
-        else snprintf(header, sizeof(header), "Event parameters: %d of %d###event_parameters", chosen, (int)Metric_Count);
+        else snprintf(header, sizeof(header), "Event parameters: %d of %d###event_parameters", chosen,
+                      (int)std::bitset<Metric_Count>(available_metric_mask()).count());
         if (ImGui::CollapsingHeader(header)) draw_event_parameters();
         else if (ImGui::IsItemHovered()) ImGui::SetTooltip("Events use: %s", parameters.c_str());
+        if (analysis_convention==AnalysisConvention::Curves && ImGui::CollapsingHeader("Curves+ geometry events")) {
+            ImGui::Checkbox("Detect native axis / groove events",&curves_geometry_event_detection);
+            ImGui::SetItemTooltip("Uses Curves+ pair-axis, inter-axis step and half-level groove measurements directly. These events are kept separate from 3DNA-style metric events.");
+            ImGui::BeginDisabled(!curves_geometry_event_detection);
+            ImGui::BeginDisabled(!curves_profile_reference.records);
+            ImGui::Checkbox("Use imported geometry reference for event baseline",
+                &curves_geometry_event_external_reference);
+            ImGui::EndDisabled();
+            if (!curves_profile_reference.records && curves_geometry_event_external_reference)
+                ImGui::TextDisabled("Import a Curves+ geometry CSV to enable this baseline.");
+            if (ImGui::Button("All geometry quantities"))
+                curves_geometry_event_parameters=(1u<<CurvesGeometryQuantity_Count)-1u;
+            ImGui::SameLine();
+            if (ImGui::Button("No geometry quantities")) curves_geometry_event_parameters=0;
+            static const char* geometry_names[]={"Axis X displacement","Axis Y displacement","Axis inclination",
+                "Axis tip","Axis bend","Inter-axis rise","Inter-axis twist","Groove W12","Groove D12",
+                "Groove W21","Groove D21"};
+            for (int q=0;q<CurvesGeometryQuantity_Count;++q) {
+                bool selected=(curves_geometry_event_parameters&(1u<<q))!=0;
+                if (ImGui::Checkbox(geometry_names[q],&selected)) {
+                    if (selected) curves_geometry_event_parameters|=1u<<q;
+                    else curves_geometry_event_parameters&=~(1u<<q);
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::TextWrapped(curves_geometry_event_external_reference
+                ? "Geometry events compare quality-valid samples with the imported geometry reference using the Detection tolerance/hysteresis and time range. Unmatched reference features are ignored; missing-quality samples break events. Feature events are not spatially merged with metric events."
+                : "Geometry events use the current trajectory's selected baseline interval (the whole trajectory if the generic baseline is external), quality-valid samples, and the Detection thresholds/range. Missing-quality samples break events. Multiple-testing uses a conservative Bonferroni threshold across selected geometry members. Feature events are not spatially merged with metric events.");
+        }
 
         if (ImGui::CollapsingHeader("Advanced detection")) {
             ImGui::Combo("Baseline", &baseline, "Mean / SD\0Median / MAD\0");
@@ -2271,7 +2574,7 @@ struct Lavery : viamd::EventHandler {
                     }
                     ImGui::EndTable();
                 }
-                if (!(selected_parameters & class_all_parameters(group))) ImGui::TextDisabled("Select at least one parameter.");
+                if (!outlier_parameter_mask()) ImGui::TextDisabled("Select at least one available parameter.");
             }
             ImGui::EndDisabled();
         }
@@ -2331,12 +2634,22 @@ struct Lavery : viamd::EventHandler {
             ImGui::BeginDisabled(!show_axis);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-            ImGui::Combo("##axis_kind", &axis_kind, "Smoothed midpoint\0Local helical (3DNA)\0");
-            ImGui::SetItemTooltip("Smoothed midpoint: spline through base-pair midpoints.\n"
-                "Local helical (3DNA): polyline through the local screw axis of each step (helical mid-step origins).");
+            if (analysis_convention == AnalysisConvention::Curves) {
+                ImGui::TextDisabled("Curves+ duplex axis");
+                ImGui::SetItemTooltip("Curves+ smoothed duplex axis reconstructed from both ordered strands.");
+            } else {
+                ImGui::Combo("##axis_kind", &axis_kind, "Smoothed midpoint\0Local helical (3DNA)\0");
+                ImGui::SetItemTooltip("Smoothed midpoint: spline through base-pair midpoints.\n"
+                    "Local helical (3DNA): polyline through the local screw axis of each step (helical mid-step origins).");
+            }
             if (ImGui::Button("Export centreline coordinates...")) export_axis();
             ImGui::EndDisabled();
             ImGui::SetItemTooltip("Advanced geometry: CSV coordinates of the displayed 3D helix axis at the displayed pose. Not a sequence plot axis.");
+            if (analysis_convention == AnalysisConvention::Curves) {
+                ImGui::BeginDisabled(curves_trajectory.helices.empty());
+                if (ImGui::Button("Export Curves+ measurements CSV...")) export_curves_geometry();
+                ImGui::EndDisabled();
+            }
             if (ImGui::Button("Reset visual defaults")) {
                 event_visual_style = EventVisual_Glow;
                 contour_thickness = 1.5f;
@@ -2459,7 +2772,7 @@ struct Lavery : viamd::EventHandler {
                 std::string provenance=has_reference ? workflow_member_provenance(export_reference_setup,cls,m,frames) : "";
                 if (has_reference && panel.derived && !panel.occupancy)
                     provenance+="; reference fields are raw Twist; plotted difference centre=0 deg";
-                output+=csv_quote(view)+","+csv_sequence_profile_row(run,panel.metric,m,class_labels(cls)[m],
+                output+=csv_quote(view)+","+csv_sequence_profile_row(export_run(),panel.metric,m,class_labels(cls)[m],
                     profile_position(cls,m),note,interval.first,interval.end,panel.summary[m],SIZE_MAX,NAN,
                     provenance,has_reference ? &panel.reference[m] : nullptr,panel.name,panel.unit,included[m]!=0);
             }
@@ -2469,7 +2782,8 @@ struct Lavery : viamd::EventHandler {
                 size_t first=0,end=0;
                 if (!workflow_range(dataset.interval,frames,first,end,data_export_error)) break;
                 const ExportInterval interval={first,end,dataset.recipe.name};
-                for (int id=0;id<(int)Metric_Count && data_export_error.empty();++id) if (data_export.parameters&(1u<<id)) {
+                for (int id=0;id<(int)Metric_Count && data_export_error.empty();++id)
+                    if ((data_export.parameters&(1u<<id)) && metric_available((Metric)id)) {
                     StructuralPanel panel;
                     panel.metric=(Metric)id;
                     if (!sequence_statistics(&panel.summary,values[id],columns[id],metric_is_angular(panel.metric),interval.first,interval.end) ||
@@ -2498,7 +2812,8 @@ struct Lavery : viamd::EventHandler {
         } else {
             {
                 ComparisonMemberFilter filter;
-                for (int id=0;id<(int)Metric_Count && data_export_error.empty();++id) if (data_export.parameters&(1u<<id)) {
+                for (int id=0;id<(int)Metric_Count && data_export_error.empty();++id)
+                    if ((data_export.parameters&(1u<<id)) && metric_available((Metric)id)) {
                     std::vector<std::vector<float>> samples;
                     std::vector<std::string> names,notes;
                     std::vector<bool> known;
@@ -2546,7 +2861,7 @@ struct Lavery : viamd::EventHandler {
                         break;
                     }
                     for (size_t g=0;g<samples.size();++g)
-                        output+=csv_comparison_group(run,(Metric)id,names[g],notes[g],comparison,g,known[g]);
+                        output+=csv_comparison_group(export_run(),(Metric)id,names[g],notes[g],comparison,g,known[g]);
                 }
             }
         }
@@ -2726,15 +3041,18 @@ struct Lavery : viamd::EventHandler {
             "Helical: X-displacement / Inclination / Helical Rise"};
         if (setup.kind<3) {
             std::string chosen;
-            for (int id=0;id<(int)Metric_Count;++id) if (setup.parameters&(1u<<id)) {
+            for (int id=0;id<(int)Metric_Count;++id)
+                if ((setup.parameters&(1u<<id)) && metric_available((Metric)id)) {
                 if (!chosen.empty()) chosen+=", ";
                 chosen+=metric_name((Metric)id);
             }
-            const size_t parameter_count=std::bitset<Metric_Count>(setup.parameters).count();
+            const uint32_t available_parameters = setup.parameters & available_metric_mask();
+            const size_t parameter_count=std::bitset<Metric_Count>(available_parameters).count();
             const bool show_parameters=ImGui::TreeNode("Choose parameters","Parameters (%zu selected)",parameter_count);
             ImGui::SetItemTooltip("%s",chosen.empty() ? "None selected" : chosen.c_str());
             if (show_parameters) {
-                if (ImGui::Button("Select all")) setup.parameters=kEventAllParameters;
+                if (ImGui::Button("Select all"))
+                    setup.parameters=(setup.parameters & ~available_metric_mask()) | available_metric_mask();
                 ImGui::SameLine();
                 if (ImGui::Button("Clear")) setup.parameters=0;
                 if (ImGui::BeginTable("Export measurements",3)) {
@@ -2774,7 +3092,7 @@ struct Lavery : viamd::EventHandler {
                 }
             }
         }
-        bool valid=setup.kind==3 || setup.parameters || (setup.kind==1 && setup.profiles);
+        bool valid=setup.kind==3 || (setup.parameters & available_metric_mask()) || (setup.kind==1 && setup.profiles);
         if (setup.kind==0) {
             const std::string position_summary=setup.all_positions ? "All" :
                 "BP "+std::to_string(setup.bp_first)+"-"+std::to_string(setup.bp_last);
@@ -2821,58 +3139,113 @@ struct Lavery : viamd::EventHandler {
     }
 
     std::string event_parameters_label() const {
-        if (event_parameters == kEventAllParameters) return "all";
-        if (event_parameters == DEFAULT_EVENT_PARAMETERS) return "all except helical";
+        const uint32_t active = active_event_parameters();
+        if (active == available_metric_mask()) return "all";
+        if (analysis_convention != AnalysisConvention::Curves && active == DEFAULT_EVENT_PARAMETERS)
+            return "all except helical";
         std::string label;
         bool whole = true;
         for (int cls = 0; cls < Class_Count; ++cls) {
-            const uint32_t mask = class_all_parameters(cls) << class_first_metric(cls);
-            if ((event_parameters & mask) == 0) continue;
-            if ((event_parameters & mask) != mask) { whole = false; break; }
+            uint32_t mask = class_all_parameters(cls) << class_first_metric(cls);
+            mask &= available_metric_mask();
+            if ((active & mask) == 0) continue;
+            if ((active & mask) != mask) { whole = false; break; }
             if (!label.empty()) label += "+";
             label += cls == Class_Pair ? "intra" : cls == Class_Step ? "inter" : "nucleotide";
         }
         if (whole && !label.empty()) return label;
         label.clear();
         for (int k = 0; k < (int)Metric_Count; ++k) {
-            if (!(event_parameters & (1u << k))) continue;
+            if (!(active & (1u << k))) continue;
             if (!label.empty()) label += "+";
             label += metric_name((Metric)k);
         }
         return label.empty() ? "none" : label;
     }
 
+    const char* event_group_convention(Metric first) const {
+        if (first == Alpha) return "Atom-defined";
+        if (first == XDisplacement || first == MinorGroove) return "3DNA";
+        return analysis_convention == AnalysisConvention::ThreeDna ? "3DNA" : "Curves+";
+    }
+
     void draw_event_parameters() {
-        if (ImGui::BeginTable("##event_parameters", Class_Count, ImGuiTableFlags_SizingStretchSame)) {
-            static const char* titles[] = {"Intra##ev", "Inter##ev", "Nucl.##ev"};
-            for (int group = 0; group < Class_Count; ++group) {
+        struct EventGroup {
+            const char* name;
+            Metric first, last;
+            constexpr uint32_t mask() const { return ((1u << (last + 1)) - 1u) & ~((1u << first) - 1u); }
+        };
+        static constexpr EventGroup groups[] = {
+            {"Pair", Buckle, Stagger},
+            {"Step", Tilt, Rise},
+            {"Nucleotide", Alpha, EpsilonZeta},
+            {"Helical", XDisplacement, HelicalTwist},
+            {"Grooves", MinorGroove, MajorGroove},
+        };
+        static_assert((groups[0].mask() | groups[1].mask() | groups[2].mask() | groups[3].mask() | groups[4].mask()) == ALL_METRIC_PARAMETERS);
+        static_assert(groups[0].mask() + groups[1].mask() + groups[2].mask() + groups[3].mask() + groups[4].mask() == ALL_METRIC_PARAMETERS);
+        const auto& style = ImGui::GetStyle();
+        float label_width = 0.0f;
+        for (const auto& group : groups) {
+            uint32_t group_mask = group.mask() & available_metric_mask();
+            if (!group_mask) continue;
+            float width = ImGui::CalcTextSize(group.name).x;
+            if (const char* convention = event_group_convention(group.first)) {
+                width += style.ItemSpacing.x + ImGui::CalcTextSize(convention).x;
+            }
+            label_width = std::max(label_width, width);
+        }
+        label_width += ImGui::GetFrameHeight() + style.ItemInnerSpacing.x;
+        if (ImGui::BeginTable("##event_parameters", 2, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Group", ImGuiTableColumnFlags_WidthFixed, label_width);
+            ImGui::TableSetupColumn("Selection", ImGuiTableColumnFlags_WidthStretch);
+            for (const auto& group : groups) {
+                const uint32_t group_mask = group.mask() & available_metric_mask();
+                if (!group_mask) continue;
+                ImGui::PushID(group.name);
+                ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                const uint32_t group_mask = class_all_parameters(group) << class_first_metric(group);
-                const uint32_t chosen = event_parameters & group_mask;
+                const uint32_t chosen = active_event_parameters() & group_mask;
                 bool all = chosen == group_mask;
                 const bool mixed=chosen && !all;
                 if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
-                if (ImGui::Checkbox(titles[group], &all)) {
+                if (ImGui::Checkbox(group.name, &all)) {
                     event_parameters = all ? (event_parameters | group_mask) : (event_parameters & ~group_mask);
                 }
                 if (mixed) ImGui::PopItemFlag();
-                ImGui::SetItemTooltip("Toggle all %s parameters. Events use these, independently of the plotted class.",
-                    class_name(group));
-                draw_parameter_checkboxes(group,event_parameters);
-                if (group == Class_Pair) {
-                    ImGui::Checkbox("Pairing disruption", &event_pair_loss);
-                    ImGui::SetItemTooltip("Original pairing geometry or canonical contacts are disrupted; this does not necessarily mean the bases are unpaired.\n"
-                        "Independent of the six intra-base-pair parameter checkboxes.\n"
-                        "Each disrupted frame scores the tolerance. Chemistry history remains a separate raw classification.");
+                ImGui::SetItemTooltip("Toggle all %s parameters. Events use these, independently of the plotted class.", group.name);
+                if (const char* convention = event_group_convention(group.first)) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", convention);
+                    ImGui::SetItemTooltip("Uses the definitions from the active analysis convention.");
                 }
+                ImGui::TableNextColumn();
+                char preview[32];
+                const int count = (int)std::bitset<Metric_Count>(chosen).count();
+                const int total = (int)std::bitset<Metric_Count>(group_mask).count();
+                if (!count) snprintf(preview, sizeof(preview), "None");
+                else if (count == total) snprintf(preview, sizeof(preview), "All");
+                else snprintf(preview, sizeof(preview), "%d of %d", count, total);
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                if (ImGui::BeginCombo("##parameters", preview)) {
+                    draw_parameter_items(group.first, group.last, event_parameters, 0);
+                    ImGui::EndCombo();
+                }
+                ImGui::PopID();
             }
             ImGui::EndTable();
         }
+        if (analysis_convention == AnalysisConvention::Curves)
+            ImGui::TextDisabled("Curves+ axis and four-channel groove outputs are available in the profile, attributes and dedicated CSV, not event detection.");
+        ImGui::Checkbox("Pairing disruption", &event_pair_loss);
+        ImGui::SetItemTooltip("Original pairing geometry or canonical contacts are disrupted; this does not necessarily mean the bases are unpaired.\n"
+            "Independent of the six intra-base-pair parameter checkboxes.\n"
+            "Each disrupted frame scores the tolerance. Chemistry history remains a separate raw classification.");
         if (ImGui::Button("Use plotted parameters", ImVec2(-FLT_MIN, 0))) {
-            event_parameters = outlier_parameter_mask() << class_first_metric(metric_cls());
+            event_parameters = (outlier_parameter_mask() << class_first_metric(metric_cls())) & available_metric_mask();
         }
         ImGui::SetItemTooltip("Copy the class and parameter(s) of the outlier-count plot.");
-        if (!event_parameters) {
+        if (!active_event_parameters()) {
             ImGui::TextDisabled(event_pair_loss ? "No parameter: only pairing disruptions form events." : "No parameter: no events.");
         }
     }
@@ -3369,7 +3742,12 @@ struct Lavery : viamd::EventHandler {
 
     uint32_t outlier_parameter_mask() const {
         const int cls = metric_cls();
-        return aggregate_outliers ? selected_parameters & class_all_parameters(cls) : 1u << (metric - class_first_metric(cls));
+        uint32_t mask = aggregate_outliers ? selected_parameters & class_all_parameters(cls) :
+            1u << (metric - class_first_metric(cls));
+        const int first = class_first_metric(cls);
+        for (int local = 0; local < class_parameter_count(cls); ++local)
+            if (!metric_available((Metric)(first + local))) mask &= ~(1u << local);
+        return mask;
     }
 
     // sigma < 0 uses the tolerance. 'strong' receives the mask bits that also reach the tolerance.
@@ -3688,17 +4066,22 @@ struct Lavery : viamd::EventHandler {
         // Counts and events.
         uint64_t counts_key = 0, event_key = 0;
         bool rebuild_events = false, detection_enabled = false, pair_loss = false, valid_options = false, period_missing = false;
+        bool geometry_events_enabled = false;
         int count = 0, view_cls = Class_Pair;
         size_t frame_count = 0;
-        uint32_t mask = 0, event_parameters = 0;
+        uint32_t mask = 0, event_parameters = 0, geometry_event_parameters = 0;
         float sigma = 0, hysteresis = 0, nominal = NAN;
         int correction = MultipleTesting_None;
         double alpha = 0.05;
         std::vector<float> frame_sigma;
         EventOptions options, state_options;
+        CurvesGeometryEventOptions geometry_event_options;
+        ExternalCurvesGeometryReference geometry_reference;
         std::vector<FrameOutliers> outlier_counts;
         std::vector<float> expected_counts;
         std::vector<OutlierEvent> events;
+        std::vector<CurvesGeometryEvent> geometry_events;
+        std::string geometry_event_error;
         std::vector<StateSwitch> switches;
     };
     std::unique_ptr<RecomputeJob> recompute_job;
@@ -3847,6 +4230,7 @@ struct Lavery : viamd::EventHandler {
     uint16_t parameter_quality(size_t frame, size_t index, int id) const {
         const int cls = metric_class((Metric)id);
         if (cls == Class_Nucleotide) return nucleotide_quality_flags[id-Alpha][frame * columns[id] + index];
+        if (HELICAL_PARAMETERS & (1u << id)) return helical_quality_flags[frame * steps.size() + index];
         return cls == Class_Step ? step_quality_flags[frame * steps.size() + index]
             : pair_quality_flags[frame * pairs.size() + index];
     }
@@ -3870,13 +4254,13 @@ struct Lavery : viamd::EventHandler {
             if (ImGui::IsItemHovered()) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(quality_status(flags,available));
-                for (uint16_t bit=1; bit<=Quality_Last; bit<<=1)
+                for (uint16_t bit=1; bit && bit<=Quality_Last; bit<<=1)
                     if (flags & bit) ImGui::TextUnformatted(quality_description(bit));
                 ImGui::EndTooltip();
             }
             return;
         }
-        for (uint16_t bit = 1; bit <= Quality_Last; bit <<= 1) {
+        for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
             if (flags & bit) ImGui::TextWrapped("%s", quality_description(bit));
         }
     }
@@ -3989,13 +4373,20 @@ struct Lavery : viamd::EventHandler {
     // Fills the count/event inputs of 'job'. Returns false when the published results already match. Main thread only.
     bool prepare_counts(int count, size_t frame_count, RecomputeJob* job) {
         initialize_event_times(timeline_times(frame_count), frame_count);
+        load_curves_geometry_reference_if_pending();
         const uint32_t mask = outlier_parameter_mask();
         const int job_baseline = job->statistics ? job->baseline : statistics_baseline;
         uint64_t key = md_hash64(&outlier_sigma, sizeof(outlier_sigma), 0x1A7E);
         key = md_hash64(&detection_enabled, sizeof(detection_enabled), key);
         key = md_hash64(&job->statistics_key, sizeof(job->statistics_key), key);
         key = md_hash64(&job_baseline, sizeof(job_baseline), key);
-        key = md_hash64(&event_parameters, sizeof(event_parameters), key);
+        const uint32_t active_parameters = active_event_parameters();
+        key = md_hash64(&active_parameters, sizeof(active_parameters), key);
+        key = md_hash64(&analysis_convention,sizeof(analysis_convention),key);
+        key = md_hash64(&curves_geometry_event_detection,sizeof(curves_geometry_event_detection),key);
+        key = md_hash64(&curves_geometry_event_external_reference,sizeof(curves_geometry_event_external_reference),key);
+        key = md_hash64(&curves_geometry_event_parameters,sizeof(curves_geometry_event_parameters),key);
+        key = md_hash64(curves_profile_reference.fingerprint.data(),curves_profile_reference.fingerprint.size(),key);
         key = md_hash64(&event_min_frames, sizeof(event_min_frames), key);
         key = md_hash64(&event_max_gap, sizeof(event_max_gap), key);
         key = md_hash64(&event_min_time_ps, sizeof(event_min_time_ps), key);
@@ -4045,7 +4436,10 @@ struct Lavery : viamd::EventHandler {
         job->view_cls = metric_cls();
         job->frame_count = frame_count;
         job->mask = mask;
-        job->event_parameters = event_parameters;
+        job->event_parameters = active_parameters;
+        job->geometry_event_parameters=curves_geometry_event_parameters;
+        job->geometry_events_enabled=detection_enabled && analysis_convention==AnalysisConvention::Curves &&
+            curves_geometry_event_detection && curves_geometry_event_parameters;
         job->sigma = outlier_sigma;
         job->hysteresis = std::max(0.0f, event_hysteresis);
         job->correction = multiple_testing;
@@ -4054,7 +4448,7 @@ struct Lavery : viamd::EventHandler {
         if (multiple_testing) {
             size_t tests = 0;
             for (int cls = 0; cls < Class_Count; ++cls)
-                tests += class_members(cls) * std::bitset<32>((event_parameters >> class_first_metric(cls)) & class_all_parameters(cls)).count();
+                tests += class_members(cls) * std::bitset<32>((active_parameters >> class_first_metric(cls)) & class_all_parameters(cls)).count();
             job->nominal = gaussian_sigma_for_probability(family_alpha / (double)std::max<size_t>(1, tests));
             if (std::isfinite(job->nominal)) base = job->nominal;
         }
@@ -4102,6 +4496,57 @@ struct Lavery : viamd::EventHandler {
         job->state_options = options;
         job->state_options.min_duration = options.times.empty() ? 0 : state_min_time_ps < 0 ? event_min_time_ps : state_min_time_ps;
         job->state_options.min_frames = (size_t)state_min_frames;
+        auto& geometry_options=job->geometry_event_options;
+        geometry_options.quantities=job->geometry_event_parameters;
+        geometry_options.sigma=base;
+        if (multiple_testing && job->geometry_events_enabled) {
+            size_t tests=0;
+            for (const auto& helix : curves_trajectory.helices) {
+                for (int quantity=0;quantity<CurvesGeometryQuantity_Count;++quantity) {
+                    if (!(geometry_options.quantities&(1u<<quantity))) continue;
+                    tests+=quantity>=CurvesGrooveW12 ? helix.groove_count :
+                        quantity>=CurvesInterAxisRise ? helix.steps.size() : helix.pairs.size();
+                }
+            }
+            geometry_options.sigma=gaussian_sigma_for_probability(family_alpha/(double)std::max<size_t>(1,tests));
+        }
+        geometry_options.hysteresis=job->hysteresis;
+        geometry_options.baseline_first=0;
+        geometry_options.baseline_end=frame_count;
+        geometry_options.first_frame=options.first_frame;
+        geometry_options.last_frame=options.last_frame;
+        geometry_options.min_frames=options.min_frames;
+        geometry_options.max_gap=options.max_gap;
+        geometry_options.min_duration=options.min_duration;
+        geometry_options.max_gap_duration=options.max_gap_duration;
+        geometry_options.times=options.times;
+        if (job->geometry_events_enabled && curves_geometry_event_external_reference) {
+            if (curves_profile_reference.records) {
+                job->geometry_reference=curves_profile_reference;
+                geometry_options.reference=&job->geometry_reference;
+            } else {
+                job->geometry_events_enabled=false;
+                job->geometry_event_error="Import a Curves+ geometry CSV to use it as an event baseline.";
+            }
+        } else if (job->geometry_events_enabled) {
+            if (job->statistics && reference_source==0) {
+                if (job->first_frame<job->end_frame) {
+                    geometry_options.baseline_first=job->first_frame;
+                    geometry_options.baseline_end=job->end_frame;
+                } else if (baseline_range_enabled) {
+                    job->geometry_events_enabled=false;
+                    job->geometry_event_error="The selected trajectory baseline range has no samples; Curves+ geometry events were not calculated.";
+                }
+            } else if (!job->statistics && reference_source==0 && statistics_end_frame>statistics_first_frame &&
+                statistics_end_frame<=frame_count) {
+                geometry_options.baseline_first=statistics_first_frame;
+                geometry_options.baseline_end=statistics_end_frame;
+            } else if (!job->statistics && reference_source==0 && baseline_range_enabled &&
+                statistics_end_frame<=statistics_first_frame) {
+                job->geometry_events_enabled=false;
+                job->geometry_event_error="The selected trajectory baseline range has no samples; Curves+ geometry events were not calculated.";
+            }
+        }
         return true;
     }
 
@@ -4200,6 +4645,11 @@ struct Lavery : viamd::EventHandler {
             };
         }
         if (job.detection_enabled) job.events = detect_events(frame_outliers, pairs.size(), steps, job.options);
+        if (job.geometry_events_enabled && !detect_curves_geometry_events(&job.geometry_events,curves_trajectory,
+                job.geometry_event_options,&job.cancel)) {
+            job.geometry_event_error="Curves+ geometry event calculation failed; see the log for details.";
+            MD_LOG_ERROR("Lavery: %s",job.geometry_event_error.c_str());
+        }
         job.options.member_z = nullptr;
         for (int id = (int)Alpha; id <= (int)EpsilonZeta && !recompute_cancelled(job); ++id) {
             if (!(job.event_parameters & (1u << id)) || !metric_state_count((Metric)id)) continue;
@@ -4254,14 +4704,17 @@ struct Lavery : viamd::EventHandler {
         inspected_event = SIZE_MAX;
         inspected_switch = SIZE_MAX;
         event_data_key = job.event_key;
+        curves_geometry_event_error=std::move(job.geometry_event_error);
         if (job.valid_options) {
             detection_first_frame = job.options.first_frame;
             detection_last_frame = std::min(job.frame_count - 1, job.options.last_frame);
             outlier_events = std::move(job.events);
+            curves_geometry_events=std::move(job.geometry_events);
             state_switches = std::move(job.switches);
             event_detection_error.clear();
         } else {
             outlier_events.clear();
+            curves_geometry_events.clear();
             state_switches.clear();
             event_detection_error = job.period_missing
                 ? "Detection period is missing or covers no samples. Select an existing period; detection is unavailable."
@@ -4582,7 +5035,7 @@ struct Lavery : viamd::EventHandler {
         ImGui::TextDisabled("%zu shown / %zu detected",shown.size(),state_switches.size());
         ImGui::SetItemTooltip("Time and residence use the trajectory's time unit, or frames without physical timestamps.\n"
             "Angular change, clipping and source/destination spans appear below the table on selection.");
-        if (transition_family && !(event_parameters & (1u<<families[transition_family])))
+        if (transition_family && !(active_event_parameters() & (1u<<families[transition_family])))
             ImGui::TextDisabled("This conformation is disabled in Event parameters; the filter does not enable it.");
         if (ImGui::BeginTable("##state_switches", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
             ImGuiTableFlags_Sortable | ImGuiTableFlags_SortMulti,
@@ -4684,7 +5137,7 @@ struct Lavery : viamd::EventHandler {
         std::string output = csv_state_switch_header();
         for (const auto& change : state_switches) {
             if (shown_only && !nucleotide_switch_shown(change)) continue;
-            output += csv_state_switch_row(run, nucleotide_labels[change.member],
+            output += csv_state_switch_row(export_run(), nucleotide_labels[change.member],
             change, times ? times[change.begin] : (double)change.begin, times ? times[change.end] : (double)change.end, unit, minimum,
             times ? times[change.source_begin] : (double)change.source_begin, times ? times[change.source_end] : (double)change.source_end);
         }
@@ -4876,6 +5329,7 @@ struct Lavery : viamd::EventHandler {
                     "; method="+baseline_name((Baseline)ranking_reference_setup.method)+
                     "; score=RMS(z); separation="+std::to_string(representative_separation)+(times ? " ps" : " frames")+
                     "; required_feature_coverage="+std::to_string(representative_coverage)+"%; missing_features=omitted_not_zero"+
+                    "; pair_step=Curves+; pair_orientation=per-frame; helical_groove=3DNA-style"+
                     "; search_frames="+std::to_string(first)+".."+std::to_string(end-1);
                 if (times) {
                     char unit[32]={}; md_unit_print(unit,sizeof(unit),app->timeline.time_unit);
@@ -5137,7 +5591,7 @@ struct Lavery : viamd::EventHandler {
         for (const auto& span : pairing_history) {
             const double begin = times ? times[span.begin] : (double)span.begin;
             const double end = times ? times[span.end] : (double)span.end;
-            output += csv_pairing_run(run, pair_labels[pair], pair, span, begin, end, unit, minimum, times != nullptr);
+            output += csv_pairing_run(export_run(), pair_labels[pair], pair, span, begin, end, unit, minimum, times != nullptr);
         }
         bool ok = md_file_write(file, output.data(), output.size()) == output.size();
         if (!md_file_close(&file)) ok = false;
@@ -6278,6 +6732,340 @@ struct Lavery : viamd::EventHandler {
         }
     }
 
+    void load_curves_geometry_reference_if_pending() {
+        if (!curves_profile_reference_pending) return;
+        curves_profile_reference_pending=false;
+        ExternalCurvesGeometryReference loaded;
+        if (load_curves_geometry_reference(&loaded,curves_profile_reference_path,&curves_profile_reference_error)) {
+            curves_profile_reference=std::move(loaded);
+            curves_profile_reference_error.clear();
+            curves_profile_reference_key=0;
+            curves_profile_reference_fit_pending=true;
+        } else {
+            curves_profile_reference={};
+            curves_profile_reference_key=0;
+            MD_LOG_ERROR("Lavery: %s",curves_profile_reference_error.c_str());
+        }
+    }
+
+    void draw_curves_geometry_profile() {
+        static const char* quantities[] = {
+            "Axis X displacement (Å)", "Axis Y displacement (Å)", "Axis inclination (deg)",
+            "Axis tip (deg)", "Axis bend (deg)", "Inter-axis rise (Å)", "Inter-axis twist (deg)",
+            "W12 (Å)", "D12 (Å)", "W21 (Å)", "D21 (Å)",
+        };
+        curves_profile_quantity = std::clamp(curves_profile_quantity, 0, (int)MD_COUNTOF(quantities) - 1);
+        bool fit = false;
+        if (curves_profile_reference_fit_pending) {
+            fit=true;
+            curves_profile_reference_fit_pending=false;
+        }
+        if (ImGui::Button("Import geometry reference...")) {
+            char path[4096] = {};
+            if (application::file_dialog(path,sizeof(path),application::FileDialogFlag_Open,MD_STR_LIT("csv"))) {
+                curves_profile_reference_path=path;
+                curves_profile_reference_pending=true;
+            }
+        }
+        if (!curves_profile_reference_path.empty()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear reference")) {
+                curves_profile_reference_path.clear();
+                curves_profile_reference={};
+                curves_profile_reference_error.clear();
+                curves_profile_reference_pending=false;
+                curves_profile_reference_key=0;
+                curves_profile_reference_fit_pending=true;
+                fit=true;
+            }
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Show imported reference",&curves_profile_reference_visible);
+        load_curves_geometry_reference_if_pending();
+        if (!curves_profile_reference_error.empty())
+            ImGui::TextWrapped("Geometry reference error: %s",curves_profile_reference_error.c_str());
+        else if (curves_profile_reference.records)
+            ImGui::TextDisabled("Reference: %s (%zu frames; exact helix/member labels)",curves_profile_reference_path.c_str(),
+                curves_profile_reference.frames);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+        fit |= ImGui::Combo("Quantity", &curves_profile_quantity, quantities, (int)MD_COUNTOF(quantities));
+        const auto& trajectory = curves_trajectory;
+        const size_t frame_count = trajectory.frames;
+        std::string interval_name;
+        const auto interval = sequence_interval(frame_count, &interval_name, &fit, true);
+        fit |= ImGui::Checkbox("Mean +/- SD", &profile_spread);
+        ImGui::SameLine();
+        fit |= ImGui::Checkbox("Current frame", &profile_current);
+        ImGui::SameLine();
+        fit |= ImGui::Button("Fit view");
+        if (analysis_convention != AnalysisConvention::Curves) {
+            ImGui::TextDisabled("Curves+ geometry is unavailable in the active Legacy mixed analysis.");
+            return;
+        }
+        if (interval.first < 0 || interval.second < interval.first) {
+            ImGui::TextWrapped("Choose an existing period containing trajectory samples. Whole trajectory is not substituted.");
+            return;
+        }
+        const size_t first_frame = (size_t)interval.first;
+        const size_t end_frame = (size_t)interval.second + 1;
+        ImGui::TextDisabled("%s", interval_name.c_str());
+        const size_t frame = current_frame();
+        if (frame >= trajectory.frames || trajectory.helices.empty()) {
+            ImGui::TextDisabled("No Curves+ helix geometry is available.");
+            return;
+        }
+        const bool groove = curves_profile_quantity >= 7;
+        const bool angular = curves_profile_quantity == 2 || curves_profile_quantity == 3 ||
+            curves_profile_quantity == 4 || curves_profile_quantity == 6;
+        const char* x_label = groove ? "Curves+ level" :
+            curves_profile_quantity >= 5 ? "Inter-axis step" : "Base-pair index";
+        const char* y_label = angular ? "Degrees" : "Å";
+        auto reference_member_label=[&](const CurvesTrajectoryAnalysis::Helix& helix,size_t index) {
+            if (groove) return "sample_"+std::to_string(index+1);
+            if (curves_profile_quantity>=5)
+                return helix.step_labels.size()==helix.steps.size() ? helix.step_labels[index] :
+                    "step_"+std::to_string(helix.pairs[index]+1)+"_"+std::to_string(helix.pairs[index+1]+1);
+            const size_t pair=helix.pairs[index];
+            return helix.pair_labels.size()==helix.pairs.size() ? helix.pair_labels[index] : "bp_"+std::to_string(pair+1);
+        };
+        const size_t profile_groove_members=trajectory.grooves.size()/trajectory.frames;
+        for (const auto& helix : trajectory.helices) {
+            if (groove && (helix.groove_offset>profile_groove_members ||
+                helix.groove_count>profile_groove_members-helix.groove_offset)) {
+                MD_LOG_ERROR("Lavery: invalid Curves+ groove profile layout");
+                return;
+            }
+            if (curves_profile_quantity>=5 && (helix.pairs.empty() ||
+                helix.steps.size()+1!=helix.pairs.size())) {
+                MD_LOG_ERROR("Lavery: invalid Curves+ inter-axis profile layout");
+                return;
+            }
+            if (curves_profile_quantity<5 && helix.pairs.empty()) {
+                MD_LOG_ERROR("Lavery: invalid Curves+ pair-axis profile layout");
+                return;
+            }
+        }
+        uint64_t reference_key=md_hash64(&curves_profile_quantity,sizeof(curves_profile_quantity),0xC0A7E5);
+        reference_key=md_hash64(curves_profile_reference.fingerprint.data(),curves_profile_reference.fingerprint.size(),reference_key);
+        for (size_t h=0;h<trajectory.helices.size();++h) {
+            const auto& helix=trajectory.helices[h];
+            reference_key=md_hash64(&h,sizeof(h),reference_key);
+            const size_t count=groove ? helix.groove_count :
+                curves_profile_quantity>=5 ? helix.steps.size() : helix.pairs.size();
+            reference_key=md_hash64(&count,sizeof(count),reference_key);
+            for (size_t i=0;i<count;++i) {
+                const std::string label=reference_member_label(helix,i);
+                reference_key=md_hash64(label.data(),label.size(),reference_key);
+                if (groove) {
+                    const float level=trajectory.grooves[helix.groove_offset+i].level;
+                    reference_key=md_hash64(&level,sizeof(level),reference_key);
+                }
+            }
+        }
+        const bool update_reference=curves_profile_reference_key!=reference_key ||
+            curves_profile_reference_statistics.size()!=trajectory.helices.size();
+        if (update_reference) {
+            curves_profile_reference_statistics.assign(trajectory.helices.size(),{});
+            if (curves_profile_reference.records) {
+                for (size_t h=0;h<trajectory.helices.size();++h) {
+                    const auto& helix=trajectory.helices[h];
+                    const size_t count=groove ? helix.groove_count :
+                        curves_profile_quantity>=5 ? helix.steps.size() : helix.pairs.size();
+                    auto& summaries=curves_profile_reference_statistics[h];
+                    summaries.resize(count);
+                    for (size_t i=0;i<count;++i) {
+                        const float level=groove ? trajectory.grooves[helix.groove_offset+i].level :
+                            std::numeric_limits<float>::quiet_NaN();
+                        if (!curves_geometry_reference_statistics(&summaries[i],curves_profile_reference,h+1,
+                                reference_member_label(helix,i),curves_profile_quantity,level)) {
+                            curves_profile_reference_error="Could not calculate Curves+ geometry reference statistics.";
+                            MD_LOG_ERROR("Lavery: %s",curves_profile_reference_error.c_str());
+                            curves_profile_reference_statistics.clear();
+                            break;
+                        }
+                    }
+                    if (curves_profile_reference_statistics.empty()) break;
+                }
+            }
+            curves_profile_reference_key=reference_key;
+        }
+        if (!ImPlot::BeginPlot("Curves+ geometry", ImVec2(-1, -1), ImPlotFlags_NoTitle)) return;
+        ImPlot::SetupAxes(x_label, y_label);
+        ImPlot::SetupLegend(ImPlotLocation_NorthEast, ImPlotLegendFlags_None);
+        size_t max_count = 0;
+        for (const auto& helix : trajectory.helices) {
+            const size_t count = groove ? helix.groove_count :
+                curves_profile_quantity >= 5 ? helix.steps.size() : helix.pairs.size();
+            max_count = std::max(max_count, count);
+        }
+        if (fit) ImPlot::SetNextAxisToFit(ImAxis_Y1);
+        if (max_count) ImPlot::SetupAxisLimits(ImAxis_X1, groove ? 1.0 : 0.5,
+                                               groove ? (double)max_count * 0.5 + 2.0 : (double)max_count + 0.5,
+                                               fit ? ImPlotCond_Always : ImPlotCond_Once);
+        const size_t groove_members = trajectory.grooves.size() / trajectory.frames;
+        uint64_t statistics_key = md_hash64(&curves_profile_quantity, sizeof(curves_profile_quantity), 0xC0A7E5);
+        statistics_key = md_hash64(&first_frame, sizeof(first_frame), statistics_key);
+        statistics_key = md_hash64(&end_frame, sizeof(end_frame), statistics_key);
+        statistics_key = md_hash64(&trajectory.frames, sizeof(trajectory.frames), statistics_key);
+        const bool update_statistics = curves_profile_key != statistics_key ||
+            curves_profile_statistics.size() != trajectory.helices.size();
+        if (update_statistics) curves_profile_statistics.assign(trajectory.helices.size(), {});
+        size_t reference_match_count=0, reference_member_count=0;
+        for (size_t h = 0; h < trajectory.helices.size(); ++h) {
+            const auto& helix = trajectory.helices[h];
+            const size_t count = groove ? helix.groove_count :
+                curves_profile_quantity >= 5 ? helix.steps.size() : helix.pairs.size();
+            reference_member_count+=count;
+            if (!count) continue;
+            std::vector<double> x(count), current_values(count, NAN);
+            std::vector<float> samples;
+            const size_t sample_frames = end_frame - first_frame;
+            if (update_statistics) samples.assign(sample_frames * count, NAN);
+            const size_t current_quality = frame * trajectory.helices.size() + h;
+            auto current_value = [&](size_t i) {
+                if (groove) {
+                    if (trajectory.groove_quality[current_quality] != Quality_Good) return NAN;
+                    const auto& value = trajectory.grooves[frame * groove_members + helix.groove_offset + i];
+                    const float quantities[] = {value.width12, value.depth12, value.width21, value.depth21};
+                    return quantities[curves_profile_quantity - 7];
+                }
+                if (trajectory.axis_quality[current_quality] != Quality_Good) return NAN;
+                if (curves_profile_quantity >= 5) {
+                    const auto& value = trajectory.step_axis[frame * trajectory.steps + helix.steps[i]];
+                    return curves_profile_quantity == 5 ? value.rise : value.twist;
+                }
+                const auto& value = trajectory.pair_axis[frame * trajectory.pairs + helix.pairs[i]];
+                const float quantities[] = {value.x_displacement, value.y_displacement,
+                    value.inclination, value.tip, value.axis_bend};
+                return quantities[curves_profile_quantity];
+            };
+            if (groove) {
+                if (helix.groove_offset > groove_members || helix.groove_count > groove_members - helix.groove_offset) {
+                    MD_LOG_ERROR("Lavery: invalid Curves+ groove profile layout");
+                    ImPlot::EndPlot();
+                    return;
+                }
+                for (size_t i = 0; i < count; ++i)
+                    x[i] = trajectory.grooves[frame * groove_members + helix.groove_offset + i].level;
+                if (update_statistics) {
+                    for (size_t f = first_frame; f < end_frame; ++f) {
+                        const size_t q = f * trajectory.helices.size() + h;
+                        if (trajectory.groove_quality[q] != Quality_Good) continue;
+                        for (size_t i = 0; i < count; ++i) {
+                            const auto& sample = trajectory.grooves[f * groove_members + helix.groove_offset + i];
+                            const float values[] = {sample.width12, sample.depth12, sample.width21, sample.depth21};
+                            samples[(f - first_frame) * count + i] = values[curves_profile_quantity - 7];
+                        }
+                    }
+                }
+            } else if (curves_profile_quantity >= 5) {
+                if (helix.steps.size() != count) {
+                    MD_LOG_ERROR("Lavery: invalid Curves+ inter-axis profile layout");
+                    ImPlot::EndPlot();
+                    return;
+                }
+                for (size_t i = 0; i < count; ++i) {
+                    const size_t step = helix.steps[i];
+                    if (step >= trajectory.steps) {
+                        MD_LOG_ERROR("Lavery: invalid Curves+ step in profile layout");
+                        ImPlot::EndPlot();
+                        return;
+                    }
+                }
+                if (update_statistics) {
+                    for (size_t f = first_frame; f < end_frame; ++f) {
+                        const size_t q = f * trajectory.helices.size() + h;
+                        if (trajectory.axis_quality[q] != Quality_Good) continue;
+                        for (size_t i = 0; i < count; ++i) {
+                            const size_t step = helix.steps[i];
+                            const auto& value = trajectory.step_axis[f * trajectory.steps + step];
+                            samples[(f - first_frame) * count + i] = curves_profile_quantity == 5 ? value.rise : value.twist;
+                        }
+                    }
+                }
+            } else {
+                if (helix.pairs.size() != count) {
+                    MD_LOG_ERROR("Lavery: invalid Curves+ pair-axis profile layout");
+                    ImPlot::EndPlot();
+                    return;
+                }
+                for (size_t i = 0; i < count; ++i) {
+                    const size_t pair = helix.pairs[i];
+                    if (pair >= trajectory.pairs) {
+                        MD_LOG_ERROR("Lavery: invalid Curves+ pair in profile layout");
+                        ImPlot::EndPlot();
+                        return;
+                    }
+                }
+                if (update_statistics) {
+                    for (size_t f = first_frame; f < end_frame; ++f) {
+                        const size_t q = f * trajectory.helices.size() + h;
+                        if (trajectory.axis_quality[q] != Quality_Good) continue;
+                        for (size_t i = 0; i < count; ++i) {
+                            const size_t pair = helix.pairs[i];
+                            const auto& value = trajectory.pair_axis[f * trajectory.pairs + pair];
+                            const float parameters[] = {value.x_displacement, value.y_displacement,
+                                value.inclination, value.tip, value.axis_bend};
+                            samples[(f - first_frame) * count + i] = parameters[curves_profile_quantity];
+                        }
+                    }
+                }
+            }
+            if (update_statistics) {
+                auto& summary = curves_profile_statistics[h];
+                if (!sequence_statistics(&summary, samples, count, angular, 0, sample_frames)) {
+                    MD_LOG_ERROR("Lavery: could not calculate Curves+ geometry profile statistics");
+                    ImPlot::EndPlot();
+                    return;
+                }
+            }
+            const auto& summary = curves_profile_statistics[h];
+            std::vector<double> mean(count, NAN), lower(count, NAN), upper(count, NAN);
+            std::vector<double> reference_mean(count,NAN);
+            size_t reference_matches=0;
+            for (size_t i = 0; i < count; ++i) {
+                const auto& stats = summary[i];
+                if (stats.count) {
+                    mean[i] = angular ? wrap_degrees(stats.mean) : stats.mean;
+                    lower[i] = mean[i] - stats.sd;
+                    upper[i] = mean[i] + stats.sd;
+                }
+                if (curves_profile_reference_visible && h<curves_profile_reference_statistics.size() &&
+                    i<curves_profile_reference_statistics[h].size()) {
+                    const auto& reference=curves_profile_reference_statistics[h][i];
+                    if (reference.count) {
+                        reference_mean[i]=angular && stats.count
+                            ? mean[i]+wrap_degrees(reference.mean-mean[i])
+                            : angular ? wrap_degrees(reference.mean) : reference.mean;
+                        ++reference_matches;
+                    }
+                }
+                current_values[i] = current_value(i);
+                if (angular && stats.count && std::isfinite(current_values[i]))
+                    current_values[i] = mean[i] + wrap_degrees(current_values[i] - mean[i]);
+            }
+            const std::string label = "Helix " + std::to_string(h + 1);
+            plot_sequence_trace(label.c_str(), x, mean, profile_spread ? &lower : nullptr,
+                profile_spread ? &upper : nullptr, ImPlot::GetColormapColor((int)h));
+            if (reference_matches) {
+                reference_match_count+=reference_matches;
+                const std::string reference_label=label+" imported reference";
+                plot_sequence_trace(reference_label.c_str(),x,reference_mean,nullptr,nullptr,
+                    ImVec4(.65f,.85f,.55f,1),ImPlotMarker_Square,true);
+            }
+            if (profile_current) {
+                const std::string current_label = label + " current";
+                plot_sequence_trace(current_label.c_str(), x, current_values, nullptr, nullptr,
+                    ImPlot::GetColormapColor((int)h), ImPlotMarker_Diamond, true);
+            }
+        }
+        curves_profile_key = statistics_key;
+        ImPlot::EndPlot();
+        if (curves_profile_reference.records && curves_profile_reference_visible)
+            ImGui::TextDisabled("Matched %zu of %zu helix members by exact label and quantity.",
+                reference_match_count,reference_member_count);
+    }
+
     std::pair<int,int> sequence_interval(size_t frame_count, std::string* name, bool* fit, bool edit=false) {
         int source=profile_use_period ? 1 : 0;
         ImGui::SetNextItemWidth(ImGui::GetFontSize()*16);
@@ -6714,7 +7502,16 @@ struct Lavery : viamd::EventHandler {
         ImGui::SeparatorText("Profile");
         ImGui::SetNextItemWidth(ImGui::GetFontSize()*20);
         const bool view_changed=ImGui::Combo("View",&profile_view,
-            "Parameters\0Bending / Kinks\0Twist / Unwinding\0Stacking geometry\0Groove geometry\0State occupancy\0Helical geometry\0");
+            "Parameters\0Bending / Kinks\0Twist / Unwinding\0Stacking geometry\0Groove geometry\0State occupancy\0Helical geometry\0Curves+ axis / grooves\0");
+        if (profile_view == Profile_CurvesGeometry) {
+            draw_curves_geometry_profile();
+            return;
+        }
+        if (analysis_convention == AnalysisConvention::Curves &&
+            (profile_view == Profile_Grooves || profile_view == Profile_Helical)) {
+            ImGui::TextDisabled("This view uses 3DNA step fields; Curves+ axis and four-channel groove measurements use the separate Curves+ geometry view.");
+            return;
+        }
         if (profile_view!=Profile_Parameters) {
             draw_structural_profiles(frame_count,view_changed || reference_changed);
             return;
@@ -7154,6 +7951,44 @@ struct Lavery : viamd::EventHandler {
             ImGui::SetItemTooltip("In table order, respecting filters; VIAMD holds up to %d periods.", TIMELINE_MAX_PERIODS);
             if (ImGui::MenuItem("Remove added events", nullptr, false, !timeline_period_ids.empty())) remove_event_periods();
             ImGui::EndPopup();
+        }
+        if (analysis_convention==AnalysisConvention::Curves && ImGui::CollapsingHeader(
+                "Curves+ axis / groove events",ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!curves_geometry_event_detection) {
+                ImGui::TextDisabled("Native geometry event detection is disabled in Detection settings.");
+            } else {
+                if (!curves_geometry_event_error.empty())
+                    ImGui::TextWrapped("Geometry event status: %s",curves_geometry_event_error.c_str());
+                ImGui::Text("%zu feature events",curves_geometry_events.size());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Export geometry events...")) export_curves_geometry_events_csv();
+                if (ImGui::BeginTable("Curves+ geometry events",5,
+                        ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_ScrollY|
+                        ImGuiTableFlags_Resizable)) {
+                    ImGui::TableSetupColumn("Quantity",ImGuiTableColumnFlags_WidthStretch,1.3f);
+                    ImGui::TableSetupColumn("Helix / member",ImGuiTableColumnFlags_WidthStretch,2.1f);
+                    ImGui::TableSetupColumn("Frames",ImGuiTableColumnFlags_WidthStretch,1.0f);
+                    ImGui::TableSetupColumn("Peak",ImGuiTableColumnFlags_WidthStretch,.7f);
+                    ImGui::TableSetupColumn("Peak signed z",ImGuiTableColumnFlags_WidthStretch,.9f);
+                    ImGui::TableHeadersRow();
+                    static const char* quantity_names[]={"Axis X displacement","Axis Y displacement","Axis inclination",
+                        "Axis tip","Axis bend","Inter-axis rise","Inter-axis twist","Groove W12","Groove D12",
+                        "Groove W21","Groove D21"};
+                    for (size_t i=0;i<curves_geometry_events.size();++i) {
+                        const auto& event=curves_geometry_events[i];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn(); ImGui::TextUnformatted(quantity_names[event.quantity]);
+                        ImGui::TableNextColumn();
+                        if (std::isfinite(event.level))
+                            ImGui::Text("Helix %zu / %s (%.1f)",event.helix,event.member.c_str(),event.level);
+                        else ImGui::Text("Helix %zu / %s",event.helix,event.member.c_str());
+                        ImGui::TableNextColumn(); ImGui::Text("%zu-%zu (%zu samples)",event.begin,event.end,event.outlier_frames);
+                        ImGui::TableNextColumn(); ImGui::Text("%zu",event.peak);
+                        ImGui::TableNextColumn(); ImGui::Text("%.2f",event.peak_z);
+                    }
+                    ImGui::EndTable();
+                }
+            }
         }
         const bool duration_filtered=times ? events_max_shown_time_ps>0 : events_max_shown_frames>0;
         if (ImGui::TreeNode("Duration filter","Duration filter%s",duration_filtered ? " (active)" : "")) {
@@ -7713,6 +8548,34 @@ struct Lavery : viamd::EventHandler {
         ImGui::PopID();
     }
 
+    void export_curves_geometry_events_csv() {
+        if (analysis_convention!=AnalysisConvention::Curves || curves_geometry_events.empty()) {
+            MD_LOG_ERROR("Lavery: no Curves+ geometry events are available to export");
+            return;
+        }
+        char path[4096]={};
+        if (!application::file_dialog(path,sizeof(path),application::FileDialogFlag_Save,MD_STR_LIT("csv"))) return;
+        md_file_t file={};
+        if (!md_file_open(&file,md_str_from_cstr(path),MD_FILE_WRITE|MD_FILE_CREATE|MD_FILE_TRUNCATE)) {
+            MD_LOG_ERROR("Lavery: could not open Curves+ geometry events CSV '%s'",path);
+            return;
+        }
+        std::string output=csv_curves_geometry_event_header();
+        bool ok=md_file_write(file,output.data(),output.size())==output.size();
+        const size_t frames=run_num_frames(app);
+        const float* times=timeline_times(frames);
+        char unit[64]="frame";
+        if (times) md_unit_print(unit,sizeof(unit),app->timeline.time_unit);
+        for (const auto& event : curves_geometry_events) {
+            if (!ok) break;
+            output=csv_curves_geometry_event_row(export_run(),event,times,unit,frames);
+            if (output.empty() || md_file_write(file,output.data(),output.size())!=output.size()) ok=false;
+        }
+        if (!md_file_close(&file)) ok=false;
+        if (ok) MD_LOG_INFO("Lavery: exported Curves+ geometry events to '%s'",path);
+        else MD_LOG_ERROR("Lavery: Curves+ geometry events CSV write failed; '%s' may be incomplete",path);
+    }
+
     void export_events_csv(size_t frames, bool shown_only = false) {
         if (!detection_enabled) {
             MD_LOG_ERROR("Lavery: enable outlier detection before exporting events");
@@ -7739,8 +8602,9 @@ struct Lavery : viamd::EventHandler {
                 const auto& labels = class_labels(m.cls);
                 for (int k = 0; k < class_parameter_count(m.cls); ++k) {
                     const int id = offset + k;
+                    if (!(available_metric_mask() & (1u << id))) continue;
                     CsvEventRow row;
-                    row.run = run;
+                    row.run = export_run();
                     row.event = e + 1;
                     row.begin = event.begin;
                     row.end = event.end;
@@ -7829,7 +8693,9 @@ struct Lavery : viamd::EventHandler {
         }
         bool any_member=false;
         for (int cls=0;cls<Class_Count;++cls) {
-            if (!(data_export.parameters&(class_all_parameters(cls)<<class_first_metric(cls)))) continue;
+            const uint32_t mask = (data_export.parameters & available_metric_mask()) >>
+                class_first_metric(cls) & class_all_parameters(cls);
+            if (!mask) continue;
             for (size_t m=0;m<class_members(cls);++m) any_member|=export_member(cls,m);
         }
         if (!any_member) {
@@ -7843,7 +8709,8 @@ struct Lavery : viamd::EventHandler {
             MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str()); return;
         }
         for (int id=0;id<(int)Metric_Count;++id) {
-            if (!include_reference || !columns[id] || !(data_export.parameters&(1u<<id))) continue;
+            if (!include_reference || !columns[id] || !(available_metric_mask() & (1u<<id)) ||
+                !(data_export.parameters&(1u<<id))) continue;
             if (!workflow_statistics(export_reference_setup,(Metric)id,&export_statistics[id],false)) {
                 data_export_error=export_reference_setup.error;
                 MD_LOG_ERROR("Lavery export: %s",data_export_error.c_str()); return;
@@ -7870,7 +8737,8 @@ struct Lavery : viamd::EventHandler {
         for (const auto& interval : intervals) {
             const size_t first_frame=interval.first,end_frame=interval.end;
             for (int cls=0; cls<Class_Count; ++cls) {
-                const uint32_t mask=(data_export.parameters>>class_first_metric(cls))&class_all_parameters(cls);
+                const uint32_t mask=((data_export.parameters & available_metric_mask())>>
+                    class_first_metric(cls))&class_all_parameters(cls);
                 if (!mask) continue;
                 const bool step=cls==Class_Step;
                 const auto& labels=class_labels(cls);
@@ -7888,7 +8756,7 @@ struct Lavery : viamd::EventHandler {
                                 outlier=true;
                         CsvSample sample;
                         sample.include_reference=include_reference;
-                        sample.run = run+(data_export.interval.kind ? "; interval="+interval.name : "");
+                        sample.run = export_run()+(data_export.interval.kind ? "; interval="+interval.name : "");
                         sample.frame = f;
                         sample.time = times ? (double)times[f] : (double)f;
                         sample.time_unit = unit;
@@ -8462,7 +9330,7 @@ struct Lavery : viamd::EventHandler {
             const uint16_t parameter_flags = parameter_quality(frame, index, id);
             if (parameter_flags || !std::isfinite(v)) tooltip_row(req, key, "%s", quality_status(parameter_flags, std::isfinite(v)));
             if (cls == Class_Nucleotide) {
-                for (uint16_t bit = 1; bit <= Quality_Last; bit <<= 1) {
+                for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
                     if (parameter_flags & bit) tooltip_row(req, key, "%s", quality_description(bit));
                 }
             }
@@ -8495,6 +9363,12 @@ struct Lavery : viamd::EventHandler {
             cls == Class_Pair ? pair_quality_flags[frame * pairs.size() + index] : 0;
         for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
             if (flags & bit) tooltip_row(req, MD_STR_LIT("quality"), "%s", quality_description(bit));
+        }
+        if (cls == Class_Step) {
+            const uint16_t helical_flags = helical_quality_flags[frame * steps.size() + index];
+            for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
+                if (helical_flags & bit) tooltip_row(req, MD_STR_LIT("helical quality"), "%s", quality_description(bit));
+            }
         }
     }
 
@@ -8623,6 +9497,7 @@ struct Lavery : viamd::EventHandler {
         key = md_hash64(&frame, sizeof(frame), key);
         key = md_hash64(&show_axis, sizeof(show_axis), key);
         key = md_hash64(&axis_kind, sizeof(axis_kind), key);
+        key = md_hash64(&analysis_convention, sizeof(analysis_convention), key);
         key = md_hash64(&landmarks, sizeof(landmarks), key);
         if (display_geometry_valid && key == display_geometry_key) {
             update_display_detail();
@@ -8650,11 +9525,21 @@ struct Lavery : viamd::EventHandler {
         for (size_t i = 0; i < state.num_atoms; ++i) coordinates[i] = mat4_mul_vec3(inverse, md_state_coord(&state, i), 1);
         state.xyz = coordinates.data();
         auto& current = display_analysis;
-        if (!analyze_frame(&current, app->mold.sys, state, bases, pairs, steps, *display_validator) ||
+        std::vector<CurvesHelixGeometry> curves_display_helices;
+        ConventionFrameAnalysis convention_result;
+        if (!analyze_convention_frame(&convention_result, analysis_convention, app->mold.sys, state,
+                                      bases, pairs, steps, *display_validator) ||
             !extract_base_frames(display_bases, app->mold.sys, state, bases)) {
             MD_LOG_ERROR("Lavery: could not prepare displayed-frame geometry");
             display_bases.clear();
             return;
+        }
+        if (analysis_convention == AnalysisConvention::Curves) {
+            auto& curves_result = std::get<CurvesFrameAnalysis>(convention_result);
+            current = std::move(curves_result.frame);
+            curves_display_helices = std::move(curves_result.helices);
+        } else {
+            current = std::move(std::get<FrameAnalysis>(convention_result));
         }
         display_coordinates = coordinates;
         display_cell = state.unitcell;
@@ -8680,15 +9565,25 @@ struct Lavery : viamd::EventHandler {
         update_display_detail();
         std::vector<int64_t> step_from(pairs.size(), -1);
         for (size_t s = 0; s < steps.size(); ++s) step_from[steps[s].a] = (int64_t)s;
-        for (const auto& chain : helix_chains(pairs.size(), steps)) {
+        if (analysis_convention != AnalysisConvention::Curves) for (const auto& chain : helix_chains(pairs.size(), steps)) {
             const auto strand = bases[pairs[chain[0]].a].strand;
-            auto phosphate = [&](uint32_t pair, bool second) {
+            auto backbone_atom = [&](uint32_t pair, bool second, int backbone) {
                 const auto& p = pairs[pair];
                 const auto& a = bases[p.a];
                 const auto& b = bases[p.b];
                 if ((a.strand == strand) == (b.strand == strand)) return int32_t(-1);
-                return ((a.strand == strand) != second ? a : b).backbone[BB_P];
+                return ((a.strand == strand) != second ? a : b).backbone[backbone];
             };
+            const vec3_t missing = {NAN, NAN, NAN};
+            std::vector<vec3_t> p1(chain.size()), p2(chain.size()), c1(chain.size()), c2(chain.size());
+            for (size_t i = 0; i < chain.size(); ++i) {
+                auto coord = [&](bool second, int backbone) {
+                    const int32_t atom = backbone_atom(chain[i], second, backbone);
+                    return atom < 0 ? missing : coordinates[atom];
+                };
+                p1[i] = coord(false, BB_P); p2[i] = coord(true, BB_P);
+                c1[i] = coord(false, BB_C1); c2[i] = coord(true, BB_C1);
+            }
             for (size_t k = 0; k + 1 < chain.size(); ++k) {
                 const int64_t s = step_from[chain[k]];
                 if (s < 0 || steps[s].b != chain[k + 1]) continue;
@@ -8697,10 +9592,14 @@ struct Lavery : viamd::EventHandler {
                     auto& spans = display_grooves[id - MinorGroove][s];
                     for (size_t i = 0; i < indices.count; ++i) {
                         const auto& index = indices.indices[i];
-                        const int32_t a = phosphate(chain[index[0]], false), b = phosphate(chain[index[1]], true);
+                        const int32_t a = backbone_atom(chain[index[0]], false, BB_P);
+                        const int32_t b = backbone_atom(chain[index[1]], true, BB_P);
                         if (a < 0 || b < 0) break;
+                        vec3_t delta;
+                        if (!groove_span(&delta, p1.data(), p2.data(), c1.data(), c2.data(), chain.size(),
+                                         index[0], index[1], &state.unitcell)) break;
                         const vec3_t from = coordinates[a];
-                        const vec3_t to = vec3_add(from, min_image(vec3_sub(coordinates[b], from), state.unitcell));
+                        const vec3_t to = vec3_add(from, delta);
                         spans.push_back({{a, b}, {mat4_mul_vec3(app->operations.state_rotation, from, 1),
                             mat4_mul_vec3(app->operations.state_rotation, to, 1)}});
                     }
@@ -8710,9 +9609,13 @@ struct Lavery : viamd::EventHandler {
         }
         display_pair_quality = current.pair_quality;
         auto pair_frames = current.pair_frames;
+        auto helical_pair_frames = current.helical_pair_frames;
         for (size_t p = 0; p < pairs.size(); ++p) {
             display_pair_quality[p] |= pair_quality_flags[frame * pairs.size() + p];
-            if (display_pair_quality[p]) pair_frames[p] = {};
+            if (display_pair_quality[p]) {
+                pair_frames[p] = {};
+                if (p < helical_pair_frames.size()) helical_pair_frames[p] = {};
+            }
         }
         // Steps are drawn between pair midpoints, joined through the nearest periodic image.
         display_step_from.resize(steps.size());
@@ -8726,9 +9629,17 @@ struct Lavery : viamd::EventHandler {
             BasePairFrame next = pair_frames[b], midpoint;
             next.origin = to;
             Values unused;
-            if (compute_step(&unused, pair_frames[a], next, &midpoint)) display_step_frames[s] = rotate_frame(midpoint);
-            BasePairFrame helical;
-            if (compute_helical_step(&unused, pair_frames[a], next, &helical)) display_helical_frames[s] = rotate_frame(helical);
+            if (compute_step(&unused, pair_frames[a], next, &midpoint))
+                display_step_frames[s] = rotate_frame(midpoint);
+            if (a < helical_pair_frames.size() && b < helical_pair_frames.size() &&
+                s < current.helical_quality.size() && !current.helical_quality[s]) {
+                BasePairFrame helical;
+                BasePairFrame helical_next = helical_pair_frames[b];
+                helical_next.origin = vec3_add(helical_pair_frames[a].origin,
+                    min_image(vec3_sub(helical_next.origin, helical_pair_frames[a].origin), state.unitcell));
+                if (compute_helical_step(&unused, helical_pair_frames[a], helical_next, &helical))
+                    display_helical_frames[s] = rotate_frame(helical);
+            }
             display_step_from[s] = mat4_mul_vec3(app->operations.state_rotation, from, 1);
             display_step_to[s] = mat4_mul_vec3(app->operations.state_rotation, to, 1);
             display_step_valid[s] = 1;
@@ -8756,8 +9667,23 @@ struct Lavery : viamd::EventHandler {
             }
         }
         if (show_axis) {
-            display_axis = axis_kind == 1 ? compute_helical_axis(pair_frames, steps, &state.unitcell)
-                                          : compute_axis(pair_frames, steps, &state.unitcell);
+            if (analysis_convention == AnalysisConvention::Curves) {
+                display_axis.offsets.push_back(0);
+                for (const auto& helix : curves_display_helices) {
+                    if (helix.axis_quality != Quality_Good || helix.axis.empty()) continue;
+                    for (const auto& point : helix.axis) {
+                        display_axis.points.push_back(point.origin);
+                        display_axis.tangents.push_back(point.direction);
+                    }
+                    display_axis.offsets.push_back(display_axis.points.size());
+                }
+            } else if (axis_kind == 1) {
+                std::vector<StepIndex> valid_steps;
+                for (size_t s = 0; s < steps.size(); ++s)
+                    if (!current.helical_quality[s] && !helical_quality_flags[frame * steps.size() + s])
+                        valid_steps.push_back(steps[s]);
+                display_axis = compute_helical_axis(helical_pair_frames, valid_steps, &state.unitcell);
+            } else display_axis = compute_axis(pair_frames, steps, &state.unitcell);
             for (auto& point : display_axis.points) point = mat4_mul_vec3(app->operations.state_rotation, point, 1);
             for (auto& tangent : display_axis.tangents) tangent = mat4_mul_vec3(app->operations.state_rotation, tangent, 0);
         }
@@ -8910,13 +9836,14 @@ struct Lavery : viamd::EventHandler {
         immediate::capsule(queue, a, b, radius, color, pick, 10);
     }
 
-    void draw_native_measurement(const int32_t* atoms, size_t count, uint32_t color, uint32_t pick, const char* name) {
+    void draw_native_measurement(const int32_t* atoms, size_t count, uint32_t color, uint32_t pick, const char* name,
+                                 const vec3_t* positions = nullptr) {
         for (size_t i = 0; i < count; ++i) if (atoms[i] < 0 || (size_t)atoms[i] >= display_coordinates.size()) return;
         auto xyz = display_coordinates;
         vec3_t previous = xyz[atoms[0]];
         for (size_t i = 0; i < count; ++i) {
             const vec3_t next = vec3_add(previous, min_image(vec3_sub(display_coordinates[atoms[i]], previous), display_cell));
-            xyz[atoms[i]] = mat4_mul_vec3(app->operations.state_rotation, next, 1);
+            xyz[atoms[i]] = positions ? positions[i] : mat4_mul_vec3(app->operations.state_rotation, next, 1);
             previous = next;
         }
         md_system_state_t state = {.num_atoms = xyz.size(), .xyz = xyz.data()};
@@ -8974,7 +9901,7 @@ struct Lavery : viamd::EventHandler {
             if (target.cls == Class_Step) anchor = display_bases[pairs[steps[target.index].a].a].center;
             else if (target.cls == Class_Pair) anchor = display_bases[pairs[target.index].a].center;
             snprintf(label, sizeof(label), "%s: unavailable (%s)", metric_name(id),
-                id == MinorGroove || id == MajorGroove ? "missing flanking phosphates" : "missing or invalid geometry");
+                id == MinorGroove || id == MajorGroove ? "missing or unreconstructable phosphate geometry" : "missing or invalid geometry");
             if (std::isfinite(anchor.x)) measurement_label(anchor, label);
             return;
         }
@@ -8982,7 +9909,7 @@ struct Lavery : viamd::EventHandler {
             const auto& spans = display_grooves[id - MinorGroove][target.index];
             if (spans.empty()) return;
             anchor = vec3_mul1(vec3_add(spans[0].points[0], spans[0].points[1]), 0.5f);
-            for (const auto& span : spans) draw_native_measurement(span.atoms.data(), 2, color, pick, "P-P (raw)");
+            for (const auto& span : spans) draw_native_measurement(span.atoms.data(), 2, color, pick, "P-P (raw)", span.points.data());
             snprintf(label, sizeof(label), "%s: %.2f %s (refined P-P%s - 5.8)", metric_name(id), detail_value, metric_unit(id),
                 id == MinorGroove ? " mean" : "");
         } else if (target.cls == Class_Nucleotide) {
@@ -9021,14 +9948,18 @@ struct Lavery : viamd::EventHandler {
             const auto& frame = target.cls == Class_Pair ? display_pair_frames[target.index] :
                 helical ? display_helical_frames[target.index] : display_step_frames[target.index];
             anchor = frame.origin;
-            const vec3_t axes[] = {frame.x, frame.y, frame.z};
+            vec3_t axes[] = {frame.x, frame.y, frame.z};
             // Shift..Rise and X-displacement..Helical Twist each map to x, y, z translations then rotations.
             const int k = (id - (helical ? (int)XDisplacement : class_first_metric(target.cls))) % 3;
+            const size_t pair = target.cls == Class_Pair ? target.index :
+                target.cls == Class_Step ? steps[target.index].a : SIZE_MAX;
+            const bool inverted = pair < display_analysis.pair_inversions.size() && display_analysis.pair_inversions[pair] > 0;
+            const bool inverted_component = inverted && (id == Shear || id == Buckle || id == Rise || id == Twist);
             for (int a = 0; a < 3; ++a) measurement_segment(world, anchor, vec3_add(anchor, vec3_mul1(axes[a], 2.0f)),
                 IM_COL32(185,185,185,100), pick, 0.04f);
             if (metric_is_angular(id)) {
                 const vec3_t u = axes[(k+1)%3], v = axes[(k+2)%3];
-                const float angle = detail_value * (3.14159265359f / 180.0f);
+                const float angle = detail_value * (inverted_component ? -1.0f : 1.0f) * (3.14159265359f / 180.0f);
                 vec3_t previous = vec3_add(anchor, vec3_mul1(u, 2.5f));
                 measurement_segment(world, anchor, previous, color, pick, 0.06f);
                 const int segments = std::clamp((int)std::ceil(std::fabs(angle)*2.5f/0.25f), 1, 64);
@@ -9041,7 +9972,7 @@ struct Lavery : viamd::EventHandler {
                 }
                 measurement_segment(world, anchor, previous, color, pick, 0.06f);
             } else {
-                const vec3_t end = vec3_add(anchor, vec3_mul1(axes[k], detail_value));
+                const vec3_t end = vec3_add(anchor, vec3_mul1(axes[k], detail_value * (inverted_component ? -1.0f : 1.0f)));
                 measurement_segment(world, anchor, end, color, pick, 0.16f);
                 if (vec3_distance(anchor, end) > 0.1f) {
                     const vec3_t direction = vec3_normalize(vec3_sub(end, anchor));
@@ -9165,6 +10096,31 @@ struct Lavery : viamd::EventHandler {
             for (size_t i = labelled; i < measurement_labels.size(); ++i) measurement_labels[i].text += " (outside event)";
     }
 
+    void export_curves_geometry() {
+        if (analysis_convention != AnalysisConvention::Curves || curves_trajectory.helices.empty()) {
+            MD_LOG_ERROR("Lavery: Curves+ trajectory measurements are unavailable");
+            return;
+        }
+        char path[4096] = {};
+        if (!application::file_dialog(path, sizeof(path), application::FileDialogFlag_Save, MD_STR_LIT("csv"))) return;
+        md_file_t file = {};
+        if (!md_file_open(&file, md_str_from_cstr(path), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE)) {
+            MD_LOG_ERROR("Lavery: could not open Curves+ measurements CSV '%s'", path);
+            return;
+        }
+        bool ok = true;
+        for (size_t frame = 0; frame < curves_trajectory.frames; ++frame) {
+            const std::string output = csv_curves_trajectory_frame(export_run(), curves_trajectory, frame, frame == 0);
+            if (output.empty() || md_file_write(file, output.data(), output.size()) != output.size()) {
+                ok = false;
+                break;
+            }
+        }
+        if (!md_file_close(&file)) ok = false;
+        if (ok) MD_LOG_INFO("Lavery: exported Curves+ measurements to '%s'", path);
+        else MD_LOG_ERROR("Lavery: Curves+ measurements CSV write failed; '%s' may be incomplete", path);
+    }
+
     void export_axis() {
         prepare_display_geometry();
         if (display_axis.points.empty()) {
@@ -9178,10 +10134,12 @@ struct Lavery : viamd::EventHandler {
             MD_LOG_ERROR("Lavery: could not open displayed-axis CSV '%s'", path);
             return;
         }
-        const std::string output = csv_axis(run, app->animation.frame, display_axis);
+        const std::string output = csv_axis(export_run(), app->animation.frame, display_axis);
         bool ok = !output.empty() && md_file_write(file, output.data(), output.size()) == output.size();
         if (!md_file_close(&file)) ok = false;
-        if (ok) MD_LOG_INFO("Lavery: exported displayed %s axis to '%s'", axis_kind == 1 ? "local helical" : "midpoint", path);
+        const char* axis_name = analysis_convention == AnalysisConvention::Curves ? "Curves+ duplex" :
+            axis_kind == 1 ? "local helical" : "midpoint";
+        if (ok) MD_LOG_INFO("Lavery: exported displayed %s axis to '%s'", axis_name, path);
         else MD_LOG_ERROR("Lavery: displayed-axis CSV write failed; '%s' may be incomplete", path);
     }
 };

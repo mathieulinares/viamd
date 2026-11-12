@@ -1,475 +1,452 @@
-# Lavery scientific validation record
+# Lavery scientific validation
 
-Historical measurements, sensitivity checks and independent comparisons.
-These results describe the recorded datasets and settings, not universal
-event significance or a current GUI acceptance checklist.
+This record summarizes independent comparisons and trajectory checks. Results
+apply to the tested structures and settings, not all conformations or the
+physical significance of detected events. See the [Lavery reference](lavery.md)
+for definitions, [tests](lavery.md#9-testing) and
+[future improvements](lavery.md#future-improvements).
 
-See the [current reference](./lavery.md#9-testing) for test commands and
-[future improvements](./lavery.md#future-improvements) for remaining work.
+## Current conventions
 
-### Local trajectory smoke check (2026-10-25)
+The default Legacy mixed mode uses Curves+-style pair and step parameters and
+3DNA-style helical parameters and refined groove widths. The Lavery sidebar
+offers Legacy mixed, Curves+ and 3DNA modes. Nucleotide torsions are
+atom-defined; sugar pucker uses Altona-Sundaralingam pseudorotation.
+Groove widths subtract 5.8 Å for phosphate diameter. Where the required
+flanking phosphate for refinement is missing, VIAMD falls back to a direct
+phosphate distance; this is not compared with a missing refined reference.
 
-The user-supplied `dna.gro` and `box-nvt.xtc` were checked locally without
-modifying them: 758 atoms, 191 frames from 0 to 1000 ps, 24 nucleotides,
-12 fixed base pairs and 11 steps. Sampling intervals vary from 5 to 10 ps
-(median 5 ps).
+Pair identities and pairing types are fixed at the start of the trajectory.
+Curves+-style pair and step signs follow the per-frame direction of the next
+pair; 3DNA-style helical frames align base normals per frame. External tools
+can detect or orient pairs differently, especially in
+distorted or noncanonical structures. Comparisons below use matched pair order and
+exclude missing or quality-rejected values; they do not count as agreement.
+Temporary snapshots are made whole across periodic boundaries before external
+analysis, and the exported geometry is checked against the periodic calculation.
+That check exposed a periodic groove-width bug during the full 1BNA run,
+which was subsequently fixed as described below.
 
-- All frames passed production frame analysis, statistics and distribution
-  construction for all 24 parameters. Every nonempty member histogram
-  integrated to one; full-span and detected-event sample/missing counts
-  matched their inclusive frame spans.
-- Gamma, Delta, Chi, pucker phase and amplitude were finite for all 4584
-  nucleotide samples. Alpha, Beta, Epsilon, Zeta and Epsilon − Zeta each had
-  4202 finite samples; the missing values correspond to the strand ends.
-  Both grooves had seven valid steps per frame; the remaining steps lack
-  the required flanking phosphates.
-- Mean Twist was 33.06° and mean Rise 3.35 Å. Mean phosphate-corrected
-  Minor/Major groove widths were 6.02/13.68 Å. These are descriptive averages,
-  not independent accuracy checks.
-- Forty of 2292 pair samples were quality-flagged. Pair-dependent values were
-  missing there, while nucleotide geometry remained available.
-- Before the within-state baseline correction, with all parameters,
-  start/continue thresholds 2.5/2.0 sigma, a 10 ps
-  minimum duration and no gap bridging, Stronger hierarchy (3.5 sigma)
-  returned one full-run parent and 17 children. Background mode returned
-  only the parent. Restricting Stronger detection to 250–750 ps returned
-  one parent and five children, all within the requested range.
+The application defaults to Legacy mixed; users can switch to Curves+ or 3DNA
+using the Analysis convention selector. The worker dispatches each mode
+separately. The Curves+ path stores pair-level axis, inter-axis step
+and half-level groove series separately instead of coercing their different
+shapes into 3DNA step fields. Event controls and jobs omit metrics unavailable
+in the active internal convention while preserving saved selections for other
+modes. Generic measurement exports also ignore unavailable metric bits in
+selection counts, reference statistics and CSV rows. Curves+ axis and groove
+outputs are available in the profile, attributes and dedicated CSV. The profile
+supports per-helix means and population SD over the whole trajectory or a
+selected period, alongside the current-frame series. It can import the dedicated Curves+
+geometry CSV, validate its schema and records, and overlay reference means
+matched by helix, exact member label, quantity and groove half-level. Angular
+means are circular; absent or unmatched values remain missing. This is separate
+from the generic parameter-reference system. Curves+ geometry also has native
+per-feature event detection, a dedicated table and CSV export. It uses
+quality-valid series, mean/SD baselines, the Detection thresholds/range and
+missing-sample breaks. The baseline can use the selected current-trajectory
+interval or the imported Curves+ geometry reference; exact unmatched features
+are ignored. Geometry events remain separate from metric events. The selector makes these
+separate output shapes and their topology limitations explicit.
 
-This exercises the numerical pipeline, event contributions and event
-distributions, **not the GUI or an independent 3DNA/Curves+ comparison**.
-Event type labels are heuristic; the full-run parent also illustrates how
-testing every nucleotide parameter can join otherwise separate activity.
+The classic 3DNA standard base geometry data used by VIAMD is distributed with
+its [license](../src/components/lavery/3dna-license.txt).
 
-After the within-state correction, the local test separately found 172
-residence-qualified switches at a 10 ps minimum (Alpha 4, Gamma 0, Chi 81,
-Pucker phase 59, Epsilon − Zeta 28). Within-state outlier samples at 2.5 sigma
-were 58, 72, 64, 60 and 75 respectively. These switches do not enter the
-sigma-event score. Counts depend strongly on state boundaries and residence;
-they are not independently validated molecular transition assignments.
+## Current combined-pipeline results
 
-The visual-feedback regression run on the same trajectory additionally checked
-**1275 native dihedral values**, **4011 native phosphate distances**, and **2674
-groove widths** against their Lavery calculations and displayed phosphate-index
-definitions across all 191 frames. It can be repeated without copying the data
-into the repository:
+The production calculation was compared with Curves+ v3.0nc and classic 3DNA
+v2.4 on 328 sampled frame instances from eight trajectory sets, rerun after
+the periodic groove and Curves+ orientation fixes. These include
+319 regularly spaced samples and nine targeted Seq174 base-flip snapshots;
+some overlap, so they are not 328 independent frames. The optional exporter
+applies the application's first-frame pair typing and orientation rules.
 
-```
-VIAMD_LAVERY_VALIDATION_GRO=/path/to/dna.gro \
-VIAMD_LAVERY_VALIDATION_XTC=/path/to/box-nvt.xtc \
+| Sample set | Frame instances |
+|---|---:|
+| 1BNA annealing | 41 |
+| Seq152 | 42 |
+| Seq174 overview / targeted base flip | 40 / 9 |
+| Nucleosome | 41 |
+| Minor-groove complex | 11 |
+| IRF11-DNA, two helices | 51 |
+| Proflavine MD / pulling | 51 / 42 |
+
+| Quantity | Comparable | Outside tolerance | Tolerance |
+|---|---:|---:|---|
+| Curves+ pair and step | 120,882 | 41 | 0.061° / 0.0061 Å |
+| Curves+ nucleotide torsions, including Epsilon − Zeta | 166,747 | 0 | 0.061°, or 0.11° for Epsilon − Zeta |
+| 3DNA helical | 58,998 | 1 | 0.0052° / Å |
+| 3DNA refined grooves | 15,992 | 0 | 0.051 Å |
+| 3DNA nucleotide torsions, including Epsilon − Zeta | 167,359 | 0 | 0.061°, or 0.11° for Epsilon − Zeta |
+| 3DNA pucker phase and amplitude | 42,596 | 0 | 0.061° |
+
+Reference rounding contributes to these tolerances. The single 3DNA helical
+exception is a nucleosome Tip difference of 0.005263° against two-decimal
+output. On the same exported snapshot, a diagnostic build printing eight
+decimals gives −13.87509390°, versus VIAMD's −13.8747368° (difference 0.000357°).
+A precision problem at small
+helical inclination/tip angles was found during the audit and fixed with a
+small-angle regression test. The table reports the corrected calculation.
+
+Among the Curves+ pair/step comparisons, the nucleosome contributed 38
+exceptions: 17 around one near-singular fit,
+18 around a second fit and three small residuals. A diagnostic Curves+ build
+with a lower fit cutoff eliminated the large discrepancies at both sites;
+it is not the official reference. The minor-groove complex contributed two
+small residuals and IRF11 one. Previously 74 sign differences across the
+sampled Seq174, minor-groove and IRF11 comparisons arose from Curves+'s
+per-frame inversion rule. Applying that rule eliminates those exceptions in
+these comparisons; the remaining exceptions are retained, not normalized away.
+
+Coverage is important: for Curves+ pair/step, 4,632 values had a reference
+but no VIAMD value. For 3DNA helical, 2,622 did. In both cases these are
+quality-rejected VIAMD geometries. For 3DNA grooves, 1,669 values were
+present in VIAMD but missing in the refined reference, and 2,879 were
+missing in both. The 15,992 finite groove comparisons include 408 values
+whose associated step had a quality flag: groove calculation uses phosphates
+independently of pair-frame quality. For the eight torsion metrics, 3,025
+values were missing in both tools; Curves+ also omitted 612 finite VIAMD
+values. Missing counts are per metric, not per frame.
+
+VIAMD and Curves+ use different pucker formulas. Across 21,298 finite sugars,
+their direct phase/amplitude differences were 0.769°/0.994° RMS, respectively;
+these are convention differences, not failures of an identical definition.
+The samples do not establish universal agreement.
+
+An internal Curves+ nucleotide calculation uses Fourier pucker, restricts
+neighbouring atoms to the selected strand and omits torsions when a defining
+bond exceeds 2.5 Å. The convention-dispatched worker uses it in Curves+ mode;
+the default mixed pipeline and 3DNA mode retain the Altona-Sundaralingam
+pucker and keep unusual finite torsions as warnings. Curves+ reports zero
+phase for exactly zero pucker amplitude; the other paths mark near-zero phase
+unavailable. Fourier pucker matches the independent 1RNA
+fixture for all 28 sugars within 0.06° for phase (modulo 360°) and amplitude.
+
+On the 328 sampled frame instances above, including the two-helix IRF11
+sample, the internal calculation was compared with the Curves+ nucleotide
+output using matching selected helix members:
+
+| Sample | Comparable values | Outside tolerance | Missing in both |
+|---|---:|---:|---:|
+| 1BNA | 9,430 | 0 | 410 |
+| Seq152 | 16,380 | 0 | 420 |
+| Seq174 | 15,600 | 0 | 400 |
+| Seq174 targeted base flips | 3,339 | 0 | 81 |
+| Nucleosome | 120,130 | 0 | 410 |
+| Minor-groove complex | 2,530 | 0 | 110 |
+| IRF11, two helices | 19,482 | 0 | 918 |
+| Proflavine MD | 12,750 | 0 | 510 |
+| Proflavine pulling | 9,702 | 0 | 378 |
+| **Total** | **209,343** | **0** | **3,637** |
+
+These counts cover all ten nucleotide values, including phase, amplitude
+and epsilon minus zeta, with 0.061° tolerance or 0.11° for epsilon minus
+zeta. There were no one-sided missing values. The maximum difference was
+0.0992° for epsilon minus zeta. These comparisons use topology-inferred
+backbone connections and do not establish equivalence for all broken,
+circular, missing-atom or unusual structures.
+
+### Internal 3DNA pair/step path
+
+The new internal pair/step path fits 3DNA base frames independently of the
+Curves+ frame-quality result. It retains VIAMD's fixed pairs and contact and
+geometry quality checks. It is wired to the production worker and selectable
+as the 3DNA mode.
+All 1RNA fixture pair and step values agree with classic 3DNA to 0.0055° or Å.
+One-base periodic wrapping and disrupted or degenerate pairs are also tested.
+An internal frame path now combines these pair/step values with helical
+parameters derived from the same 3DNA pair frames, strict refined grooves
+and the existing nucleotide calculation. It rejects parallel, circular and
+branching step topology rather than presenting it as validated 3DNA geometry.
+
+On the stratified DNA samples below, the internal path was compared with
+classic 3DNA v2.4 using the matching fixed pair order and previously exported
+whole-molecule PDB snapshots. The reference reports two decimal places. Counts
+are per parameter value; 0.0052° or Å is the rounding-aware tolerance.
+
+| Sample | Frames | Comparable | Outside tolerance | Reference finite, VIAMD missing |
+|---|---:|---:|---:|---:|
+| 1BNA | 41 | 5,250 | 0 | 408 |
+| Seq152 | 42 | 9,732 | 0 | 96 |
+| Seq174 | 40 | 8,952 | 0 | 408 |
+| Nucleosome | 41 | 70,932 | 0 | 1,146 |
+| Seq174 targeted base flips | 9 | 1,872 | 0 | 126 |
+| IRF11, two helices | 51 | 10,854 | 0 | 774 |
+| **Total** | **224** | **107,592** | **0** | **2,958** |
+
+The maximum difference was 0.005189° or Å. VIAMD's missing values are
+quality-rejected pairs and adjacent steps; they are not counted as matches.
+Some targeted and stratified frames may overlap. These checks do not establish
+complete mode equivalence or validate every possible pair assignment.
+The combined internal frame instead retains finite reference-style values
+when contact or geometry checks flag a pair, while preserving the quality
+flags. It still reports missing values for failed fits or transforms. Across
+the same 224 frame instances, it produced **110,550** comparable pair/step
+values with no missing values; two measurements exceeded 0.0052° or Å. Both
+are the same Seq174 snapshot appearing in the overview and targeted sets:
+Twist was 142.515457° versus the printed 142.51°. All **54,450** helical
+values were available; one exceeded tolerance, the nucleosome rounding case
+described above. Strict-groove counts below were unchanged. A test verifies
+that a failed Curves+ fit does not suppress valid 3DNA measurements, and
+that retained flagged values remain flagged. This policy is internal and
+does not change the current application's quality-gated results.
+
+The combined frame's nucleotide values had **184,805** comparable values,
+all within 0.061° or 0.11° for epsilon minus zeta, and **2,195** missing in
+both; there were no one-sided missing nucleotide values on these sets.
+
+### Internal strict 3DNA groove widths
+
+An internal refined-width policy now returns missing values at the 3DNA
+terminal boundaries or when the required phosphate flanks are unavailable,
+instead of substituting direct distances. The current application still uses
+the direct-distance fallback described above. The strict policy currently
+assumes antiparallel strands; parallel strands and reference-reported helix
+breaks need separate validation before use in a complete mode.
+
+For the same six sample sets above, all **14,850** comparable strict groove
+values matched classic 3DNA within 0.051 Å. Both tools reported **3,300**
+values missing, with no one-sided missing values. These counts cover only the
+tested snapshots and fixed pair order, not all missing-atom or broken-helix
+cases. Periodic wrapping, unavailable flanks and degenerate geometry are
+covered by focused tests.
+
+### Internal Curves+ duplex axis
+
+The selectable Curves+ mode uses an internal non-circular duplex axis
+calculation from whole, ordered base frames and pair midpoints. It rejects the
+entire axis when an input frame or a strand screw transform is invalid or singular; periodic unwrapping,
+quality-rejected and missing bases, circular and single-stranded structures
+still need an explicit end-to-end policy.
+An internal per-helix wrapper now reconstructs each strand with local
+minimum-image links, checks that the two strand images are consistent, and
+reports unavailable axis and groove geometry separately. It rejects unsupported
+parallel, circular and branching step topology. The five sampled trajectory
+sets below were rerun through this periodic wrapper and against the same whole
+snapshots; their reported axis, parameter and groove counts remain unchanged.
+This does not validate all possible periodic or missing-atom cases.
+As a focused missing-phosphate check, removing any one of seven internal or
+required endpoint phosphates from the 1RNA input caused Curves+ v3.0nc to
+report no groove analysis for that helix; the wrapper likewise marks its
+grooves unavailable without discarding its axis. This does not establish
+behavior for every missing-atom pattern.
+An internal Curves+ frame groups these axis and groove results separately
+from the pair/step and Fourier nucleotide values; it clears the incompatible
+3DNA helical and groove fields rather than mixing definitions. It retains
+finite pair/step results even when VIAMD's pairing checks flag them, while
+preserving those flags. Across the 328 sampled frame instances, **125,514**
+pair/step values were comparable, with no one-sided missing values and the
+same **41** exceptions described above. The nucleotide
+sample counts above and the five axis/groove sample sets below were rerun
+through this combined path. The worker stores the Curves+ axis and groove
+series separately from shared metrics and publishes them as separate
+attributes; the Curves+ profile, dedicated full-trajectory CSV export and
+viewport axis preserve each quantity's native level. Event selection and
+automated external-reference comparison for these additional quantities
+remain unfinished.
+
+The axis agrees with the independent 1RNA Curves+ v3.0nc fixture at all 14
+positions within 0.0052 for each direction component and 0.0052 Å for each
+coordinate (the reference prints two decimals). Rigid transformations and
+singular input are also tested.
+
+For 173 sampled frame instances, each axis was evaluated from the unwrapped
+duplex and compared with Curves+ `test=.t.` on the corresponding exported
+whole snapshot. The table counts axis direction and coordinate components.
+
+| Sample | Frames | Comparable components | Outside 0.0052 |
+|---|---:|---:|---:|
+| 1BNA | 41 | 2,952 | 0 |
+| Seq152 | 42 | 5,040 | 0 |
+| Seq174 | 40 | 4,800 | 0 |
+| Seq174 targeted base flips | 9 | 1,026 | 0 |
+| Nucleosome | 41 | 36,162 | 66 |
+| **Total** | **173** | **49,980** | **66** |
+
+All nucleosome exceptions occurred in two frames; the largest component
+difference was 0.1044 Å. The diagnostic Curves+ build with the lower base-fit
+cutoff described above produced no exceptions in that dataset. This diagnostic
+is not the official reference, and those 66 differences are not excluded from
+the table. Some sampled frames overlap; the checks do not establish universal
+agreement.
+
+Internal pair-to-axis displacement, inclination, tip and axis-bend calculations
+and inter-axis rise and twist also agree with Curves+ on the 1RNA fixture:
+displacements and rise within 0.0052 Å, angles within 0.051°. The first
+axis-bend is missing in both. Displacement and orientation are per-pair
+quantities, unlike 3DNA's per-step local helical parameters.
+
+The same five trajectory sample sets were compared for these seven values:
+
+| Sample | Comparable values | Outside tolerance | Missing in both |
+|---|---:|---:|---:|
+| 1BNA | 3,321 | 0 | 123 |
+| Seq152 | 5,754 | 0 | 126 |
+| Seq174 | 5,480 | 0 | 120 |
+| Seq174 targeted base flips | 1,170 | 0 | 27 |
+| Nucleosome | 42,066 | 98 | 123 |
+| **Total** | **57,791** | **98** | **519** |
+
+There were no one-sided missing values. The 98 nucleosome exceptions include
+95 in the two frames affected by the reference base-fit cutoff and three
+small residuals in two other frames. A lower-cutoff diagnostic reference
+reduces the nucleosome exceptions to four, including one small residual in a
+previously affected frame. These calculations are not yet exposed in the app.
+
+### Internal Curves+ groove geometry
+
+The internal non-circular groove calculation samples the two phosphate
+backbones and measures W12/D12 and W21/D21 at pair and half-step levels.
+Eighteen sampled backbone positions across both strands of the independent
+1RNA Curves+ output match within 0.0007 Å per coordinate. All 25 groove
+levels, including missing values, match that fixture within 0.051 Å.
+
+The same five trajectory sample sets used for the axis were compared against
+Curves+ v3.0nc on whole snapshots, including all four fields at every level:
+
+| Sample | Frames | Comparable values | Outside 0.051 Å | Missing in both |
+|---|---:|---:|---:|---:|
+| 1BNA | 41 | 1,842 | 0 | 1,602 |
+| Seq152 | 42 | 4,606 | 0 | 1,610 |
+| Seq174 | 40 | 4,404 | 0 | 1,516 |
+| Seq174 targeted base flips | 9 | 918 | 0 | 342 |
+| Nucleosome | 41 | 45,476 | 1 | 2,248 |
+| **Total** | **173** | **57,246** | **1** | **7,318** |
+
+There were no one-sided missing values. The one exception is a nucleosome
+depth of 9.048 Å versus the reference's printed 9.1 Å, a difference of
+0.052 Å. These samples do not establish universal agreement. Rigid
+transformation, missing inputs, ambiguous minima and output preservation are
+also tested. The convention-dispatched worker now stores these calculations
+per frame and supports multiple helices, but only antiparallel non-circular
+topologies are accepted. Reference comparison and failure behavior for every
+trajectory-level missing-input pattern remain unvalidated.
+
+### Full-trajectory checks
+
+The same comparisons were extended to all 2,001 1BNA annealing frames and
+501 Seq152 frames. These runs include frames from the sampled table above.
+Tolerances and exclusions are as above; counts are per value.
+
+| Quantity | 1BNA comparable / outside | Seq152 comparable / outside |
+|---|---:|---:|
+| Curves+ pair and step | 259,968 / 0 | 116,268 / 17 |
+| Curves+ nucleotide torsions | 364,182 / 0 | 155,310 / 0 |
+| 3DNA helical | 123,672 / 0 | 56,562 / 1 |
+| 3DNA refined grooves | 20,010 / 0 | 13,026 / 0 |
+| 3DNA nucleotide torsions | 364,182 / 0 | 155,310 / 0 |
+| 3DNA pucker phase and amplitude | 96,048 / 0 | 40,080 / 0 |
+
+The 17 Seq152 Curves+ exceptions occur around one pair in frame 164. A
+diagnostic build with a lower fit cutoff agrees within the stated tolerances
+for those values; it is not the official reference. The Seq152 helical
+exception is a Tip difference of 0.005262° against two-decimal output; the
+diagnostic eight-decimal output differs from VIAMD by 0.000339°.
+
+Before the fix, five 1BNA major widths in frames 722, 867, 868, 1191 and
+1787 disagreed with the whole-duplex snapshots: the minimum-image P–P vector
+selected a different periodic image. In frame 722, for example, one component
+of the whole-duplex vector is 26.08 Å in a 50 Å box, but minimum image changes
+it to −23.92 Å. The corrected calculation reconstructs each span using local
+backbone and paired C1′ links, and rejects inconsistent or missing paths.
+Both full-trajectory periodic-versus-whole checks now pass, and the five
+1BNA widths agree with 3DNA within the stated tolerance. This assumes local
+links themselves are shorter than the relevant periodic-image separation.
+
+The 1BNA / Seq152 runs respectively excluded 16,170 / 966 Curves+ pair/step
+and 8,394 / 552 helical values with a reference but no VIAMD value. For
+grooves, 8,004 / 2,004 VIAMD values lacked a refined reference, and
+16,008 / 4,008 were missing in both. The finite groove comparisons include
+270 / 74 values with an associated step quality flag.
+
+The public 1RNA fixture tests the same combined path: 14 pairs and 13 steps
+against independent Curves+ pair/step references and classic 3DNA helical
+references, plus seven steps with both refined groove widths. The test also
+checks that failure of a 3DNA-style fit does not invalidate an otherwise
+valid Curves+ step.
+
+## Historical independent checks
+
+These earlier measurements used the then-current implementation, not the
+current combined pipeline:
+
+- **Curves+ NVT:** 191 whole-duplex snapshots from a 12-pair DNA trajectory
+  were compared using fixed pairing. Pair/step rotations differed by at most
+  0.0501°, translations by at most 0.0058 Å, and the seven nucleotide torsions
+  by at most 0.0501°. Epsilon minus Zeta differed by at most 0.098° because
+  it uses two rounded torsions. Quality-rejected pairs and adjacent steps were
+  excluded. The initial raw periodic-coordinate export was invalid; these
+  results use the corrected whole-duplex snapshots.
+- **Pucker:** on 4,584 sugars, VIAMD's Altona-Sundaralingam phase and amplitude
+  differed from Curves+'s Fourier convention by 0.857° and 0.961° RMS,
+  respectively. Applying the Fourier definition to the same ring torsions
+  reproduced Curves+ within 0.051°; this is a convention difference.
+- **Classic 3DNA:** on 1RNA, the helical transformation using 3DNA's rounded
+  pair frames matched 78 reference values within 0.03° or Å. Fourteen refined
+  groove values matched within 0.051 Å after the phosphate correction. On
+  15 localized 1BNA snapshots, 140 comparable refined groove values matched
+  within 0.050 Å.
+- **Experimental full 3DNA-style pipeline:** on eight DNA datasets plus
+  targeted Seq174 base-flip snapshots, 47,526 finite, quality-accepted pair,
+  step and helical values matched classic 3DNA within 0.0052° or Å. This
+  experiment is not the current pair/step convention and is not equivalent to
+  validating the current combined pipeline across those datasets.
+
+Curves+ curvilinear grooves differ in definition from VIAMD's refined
+phosphate widths and are not expected to match.
+
+## Trajectory and event checks
+
+The historical 191-frame NVT smoke test exercised numerical analysis,
+histograms, quality flags and event detection; native dihedrals and phosphate
+distances were also checked against the corresponding measurements. These are
+consistency checks, not independent proof of accuracy. Terminal atoms and
+invalid geometry accounted for missing values.
+
+Event counts changed substantially with parameter scope, thresholds, baseline
+and minimum duration. State-switch candidates were also sensitive to
+residence time and state boundaries. A switch may compare
+residence-qualified states separated by short excursions; it is not
+necessarily a direct transition at the reported destination frame.
+Event labels, false-positive rates and physical assignments require further
+validation and inspection.
+
+## Reproducing checks
+
+The bundled tests require no external reference installation:
+
+```sh
+cmake --build build --target viamd_test -j 4
 ./build/bin/viamd_test --filter='lavery*'
 ```
 
-The optional local-data test is skipped unless both variables are supplied.
-It disables trajectory cache writes. These checks establish consistency between
-geometry and values; they do not establish independent scientific accuracy or
-replace visual inspection of the cartoon.
+An optional local trajectory test can be run with user-supplied topology and
+trajectory files; it is skipped when they are not supplied:
 
-The nucleotide-quality run found 382 missing samples each for Alpha, Beta,
-Epsilon, Zeta and Epsilon - Zeta (strand-end geometry), and none for the other
-five metrics. No nonfinite coordinates, degenerate geometry or distortion
-warnings were found on this NVT trajectory at the documented thresholds.
-All finite values, Curves+ comparisons and state-switch counts remain
-unchanged. Synthetic regressions cover missing/nonfinite/degenerate geometry,
-zero-amplitude phase, distorted rings, minimum-image flag invariance, CSV
-warning provenance and retention of warning-bearing samples in statistics
-and state detection.
-
-### NVT sensitivity check (2026-10-25)
-
-The optional local-data test now retains all 24 time series and repeats:
-
-- Mean/SD and Median/MAD baselines, with state-conditioned references;
-- pair + step, nucleotide-only, and all-parameter detection scopes;
-- start/continue thresholds 2.5/2.0 and 3.5/3.0 sigma;
-- 10 and 50 ps minimum event durations;
-- Stronger (+1 sigma) and background (1 sigma residual) children;
-- 10, 25, 50 and 100 ps minimum state residence.
-
-There are 48 event configurations. They use a two-base-pair neighbourhood,
-no gap bridging and pair-loss detection in every scope, as in the GUI.
-Histogram normalization and full-span sample/missing counts are checked for
-every member and metric under both baselines. Each detected event member's
-peak-parameter distribution is also checked against its inclusive span.
-Event bounds, child containment and elapsed minimum durations are asserted.
-Counts are diagnostic output, not fixed regression expectations for arbitrary
-user-supplied trajectories.
-
-Selected **Mean/SD, Stronger** results:
-
-| Scope | Start / continue sigma | Minimum (ps) | Parents | Children | Frames covered by parent spans |
-|---|---|---:|---:|---:|---:|
-| Pair + step | 2.5 / 2.0 | 10 | 8 | 7 | 190 / 191 |
-| Pair + step | 3.5 / 3.0 | 10 | 7 | 1 | 23 / 191 |
-| Pair + step | 3.5 / 3.0 | 50 | 0 | 0 | 0 / 191 |
-| Nucleotide | 3.5 / 3.0 | 10 | 16 | 3 | 60 / 191 |
-| All | 2.5 / 2.0 | 10 | 1 | 21 | 191 / 191 |
-| All | 2.5 / 2.0 | 50 | 1 | 2 | 191 / 191 |
-| All | 3.5 / 3.0 | 10 | 21 | 4 | 81 / 191 |
-| All | 3.5 / 3.0 | 50 | 2 | 0 | 15 / 191 |
-
-Increasing duration alone does not split the whole-run parent at 2.5 sigma.
-Increasing the start/continue thresholds makes this dataset more selective,
-but is not a statistically calibrated significance test. Median/MAD is not
-automatically quieter: all parameters at 3.5/3.0 sigma and 10 ps produce 30
-parents and seven Stronger children, covering 159/191 frames.
-Background mode finds five children for all parameters at 3.5/3.0 sigma and
-10 ps under either baseline; at 2.5/2.0 sigma it finds none. This does not
-establish sensitivity to a known physical local event.
-
-| Parameter | Switches at 10 ps | 25 ps | 50 ps | 100 ps |
-|---|---:|---:|---:|---:|
-| Alpha | 4 | 0 | 0 | 0 |
-| Gamma | 0 | 0 | 0 | 0 |
-| Chi | 81 | 22 | 8 | 4 |
-| Pucker phase | 59 | 14 | 5 | 0 |
-| Epsilon - Zeta | 28 | 21 | 8 | 4 |
-| **Total** | **172** | **57** | **21** | **8** |
-
-Across all valid samples, broad state occupancies are Chi 3911 anti / 673
-syn, pucker 402 North / 4182 South, and Epsilon - Zeta 3387 BI / 815 BII.
-These are pooled sampled-frame counts, not time-weighted equilibrium
-populations; sampling is irregular and state boundaries are heuristic.
-
-At 50 ps residence, seven of the eight Chi candidates involve terminal pairs
-1 or 12. Examples to inspect in the GUI (labels use the fixed pair order):
-
-| Parameter / member | Destination run (ps) | Classified change | Signed angular change |
-|---|---|---|---:|
-| Chi / 12b | 155-335 | anti to syn | +65.30 degrees |
-| Chi / 1a | 265-430 | anti to syn | +80.32 degrees |
-| Pucker phase / 3a | 625-685 | South to North | -67.67 degrees |
-| Pucker phase / 3a | 705-760 | North to South | +53.49 degrees |
-| Epsilon - Zeta / 4a | 420-585 | BI to BII | -138.22 degrees |
-
-The angular change is the shortest circular difference of qualified run means,
-not the displacement at a single frame. Destination runs may reach the
-trajectory end; their eventual lifetime is then unknown. These candidates
-need coordinate inspection and independent state assignment before being
-called base flips, pucker transitions or BI/BII transitions.
-
-The sensitivity audit uses Mean/SD, 3.5 sigma and 10 ps for brief outlier-event
-screening, with separate pair/step and nucleotide passes, and 25-50 ps
-for state-switch inspection. For a less flickery exploratory starting point,
-use 25 ps minimum event duration and 50 ps minimum state residence, then compare
-50 ps events and 100 ps residence. With 5-10 ps saved-frame spacing, a 10 ps
-span can contain only two or three samples. These are sampling-dependent filters,
-not universal DNA timescales: state residence, transition duration and waiting
-time are distinct. A grouped event can combine different contributors and does
-not establish continuous base-pair opening throughout its span. Use the same
-thresholds when comparing temperature phases of an annealing trajectory.
-**No detection defaults were changed:** one short
-trajectory without labelled true/false events cannot establish sensitivity,
-specificity or universal thresholds.
-
-Informational local timings were about 0.2-0.3 ms per production frame analysis
-(excludes trajectory I/O and native measurement cross-checks), 0.5-2.3 ms to
-prepare event samples, and 0.04-5 ms per detection configuration. The
-statistics/histogram/z-score phase also executes validation assertions and is
-not a clean GUI benchmark. These small-system results do not validate
-long-trajectory playback, rendering or memory scaling.
-
-At the time of the initial sensitivity sweep, no independent analysis executable
-was available on PATH. The follow-up Curves+ comparison below supersedes that
-limitation. No original trajectory was modified or uploaded.
-
-### NVT candidate interpretation audit (2026-10-25)
-
-This analysis uses the existing 191-frame exported measurements and exact XTC
-timestamps. Production code, state boundaries, detection defaults and the
-running annealing simulation were not changed.
-
-All 21 state-switch candidates at 50 ps residence were compared with 25, 75
-and 100 ps residence, and with state sectors rotated by -10, -5, +5 and
-+10 degrees at 50 ps residence. Rotation shifts all boundaries of a parameter
-together on the circle, including the BI/BII boundary at the angular wrap;
-it is an exploratory classification stress test, not a calibrated uncertainty
-or a proposed new physical state definition.
-
-A candidate matches another detection when metric, member, source and
-destination labels agree, and their destination runs overlap for at least
-half the original candidate's elapsed duration. Thus an altered start/end can
-match; a different source state or a short overlap does not. The exact match
-criterion matters when comparing counts or reproducing this audit.
-
-| Metric | Candidates at 50 ps | Match all four shifted-boundary tests | Original candidates matched at 75 ps | Original candidates matched at 100 ps |
-|---|---:|---:|---:|---:|
-| Chi | 8 | 2 | 4 | 2 |
-| Sugar phase | 5 | 0 | 0 | 0 |
-| Epsilon - Zeta | 8 | 8 | 4 | 4 |
-| **Total** | **21** | **10** | **8** | **6** |
-
-These last two columns count matches to the original 21 candidates, not all
-detections at that residence. There are nine total detections at 75 ps and
-eight at 100 ps: changing residence changes which source run qualifies,
-so candidate identities are not necessarily nested. Similarly, some 50 ps
-candidates do not match the 25 ps list even though their destination run still
-qualifies, because an intervening qualified state changes the remembered source.
-
-At 50 ps, shifting the boundaries by -10/-5/+5/+10 degrees gives respectively
-18/20/17/20 total detections, matching 13/16/15/15 of the original candidates.
-This sensitivity is a reason to review traces, not a reason to tune boundaries
-until a preferred candidate count is obtained.
-
-**Critical timing interpretation:** thirteen original candidates have sampled
-short excursions between the qualified source and destination runs. The longest
-source-end to destination-start separation is 480 ps. The detector deliberately
-remembers a qualified source across short finite excursions; missing values
-reset it. Its output describes a *change between residence-qualified states*,
-not necessarily a direct transition at the destination's first frame.
-For example:
-
-- Chi `9b`, 550-600 ps, compares with a source ending at 125 ps; its circular
-  mean change is only +30.8 degrees and it is boundary-sensitive. Do not call
-  this a base flip at 550 ps.
-- Sugar phase `3a`, 625-685 ps, compares with a source ending at 145 ps.
-  A more direct local comparison is its 705-760 ps South run against the
-  625-685 ps North run, although this return is also boundary-sensitive.
-- Epsilon - Zeta `4a`, 420-585 ps, compares with a source ending at 360 ps,
-  with intervening excursions. The 870-1000 ps return compares with a source
-  ending at 850 ps.
-
-Three destination runs reach the trajectory end (`4a` Epsilon - Zeta,
-`3b` Epsilon - Zeta, `3a` sugar phase); their observed residence is a lower
-bound, not a completed lifetime.
-
-**Inspection priority, not confirmed molecular assignments:**
-
-1. Epsilon - Zeta `9b` at 115-275 ps: source ends at 110 ps, all boundary
-   shifts match, and it survives 100 ps residence. `4a` at 420-585 ps and
-   its 870-1000 ps return are also boundary-robust and survive 100 ps;
-   inspect the intervening excursions and end censoring.
-2. Chi `1a` at 265-430 ps: boundary-robust and survives 100 ps, but terminal.
-   Its source/destination circular means are approximately -135.6/-55.3
-   degrees. The current broad anti/syn classification is not independent
-   evidence of a complete base flip or canonical syn geometry. Chi `12b`
-   returning to anti at 340-430 ps is the other boundary-robust Chi candidate.
-3. All five sugar-phase candidates and the remaining Chi candidates merit
-   trace inspection but are boundary-sensitive under this test. None of the
-   original five phase candidates matches the 75 ps list.
-
-Source/destination means of associated pair Opening/Stretch and adjacent
-step Roll were also compared, excluding invalid pair/step samples. These are
-descriptive differences, not significance tests or proof of coupling.
-For example, sugar phase `3a` at 625-685 ps accompanies about +5.16 degrees
-mean Opening and at most 6.77 degrees adjacent mean Roll difference, but its
-source run is far earlier; this cannot establish synchronous causation.
-Chi `1a` at 265-430 ps accompanies only about +0.87 degrees mean Opening.
-Pair validity can change independently: Epsilon - Zeta `1a` at 885-935 ps
-has pair values available in only 7/11 destination samples, despite finite
-nucleotide geometry throughout.
-
-The local `validation-nvt/candidate-audit.csv` preserves all 21 candidates,
-source/destination bounds and circular means, angular boundary margins,
-fractions within 10 degrees of a boundary, intervening sample counts,
-residence/boundary matches, pair coverage, associated parameter differences
-and end censoring. Fractions are sampled-frame fractions, not time-weighted
-occupancies. A candidate marked boundary-robust is still unconfirmed:
-coordinate-based inspection and physical state assignment remain outstanding.
-
-### Protocol prepared for the annealing trajectory
-
-No annealing files were analysed while the simulation was running. Once it is
-finished, verify the *effective* run input, thermostat groups, target schedule,
-time origin, restart history and available coordinate/energy timestamps before
-assigning temperature phases. The planned periodic cycle, relative to its
-verified schedule origin, is:
-
-| Cycle-relative time (ps) | Target-temperature phase |
-|---|---|
-| 0-500 | 300 K plateau |
-| 500-1000 | Linear heating, 300 to 350 K |
-| 1000-1500 | 350 K plateau |
-| 1500-2000 | Linear cooling, 350 to 300 K |
-| 2000-2500 | 300 K recovery plateau |
-
-Use half-open windows so boundary samples belong to exactly one phase; the
-final available sample is retained in its applicable window. Keep cycles
-separate initially, including incomplete final cycles. Recovery and the next
-cycle's initial plateau share the same target but should retain their labels
-for the first-pass comparison.
-
-1. Verify topology, fixed pair/member mapping, sampling intervals and quality
-   coverage. Keep invalid measurements distinct from finite warnings and from
-   pairing loss. Flag sparse windows and missing intervals.
-2. Report state occupancies per member and phase using elapsed-time weighting
-   for irregular sampling, with an explicit interpolation convention (e.g.
-   nearest-sample midpoint cells clipped to each window). Do not extend weights
-   outside the observed time range or bridge long missing intervals. Report
-   coverage and both episode and contributing-sample counts alongside durations.
-3. Start with one whole-run baseline so a common z scale can show
-   temperature-associated broadening. Compare raw angular/linear values and
-   state occupancies as well: sigma alone cannot distinguish heating from a
-   local conformational change.
-4. Repeat with plateau-specific references using **Baseline range**, and
-   restrict each search using the independent **Detection range**. A common
-   reference and per-plateau references answer different questions; report both.
-   Heating/cooling ramps
-   are nonstationary and should not be pooled with equilibrium plateaus.
-   Neither a 500 ps plateau nor several cycles automatically guarantees
-   equilibrium or independent observations.
-5. Compare 25/50/100 ps residence, modest boundary perturbations, terminal
-   versus internal members, and direct versus excursion-separated qualifying
-   runs. Mark trajectory/window-edge censoring; do not infer a switch source
-   across a window boundary from within-window detection alone.
-6. Test recovery in raw values, occupancy and pair quality against the initial
-   300 K segment and the NVT reference, without assuming that recovery must
-   occur. Keep cycle-to-cycle variability visible rather than treating every
-   frame as an independent replicate.
-7. Distinguish scheduled target temperature from measured kinetic temperature.
-   If an energy trajectory can be read locally, align actual temperature with
-   coordinates; otherwise label all phase comparisons as target-schedule-based.
-
-This protocol does not add temperature-aware statistics to the application,
-change detection defaults, or certify any NVT/annealing event as a transition.
-
-### Independent Curves+ audit (2026-10-25)
-
-Official Curves+ v3.0nc (09/2016) was downloaded from the
-[Curves+ distribution site](https://curvesplus.bsc.es/misc) and compiled locally
-with gfortran, outside the repository at `$HOME/.local/opt/curvesplus/Cur+`.
-The source archive is
-`https://curvesplus.bsc.es/static/app/curves%2B_v3.0nc.tar.gz`.
-Analysis used `fit=.t.`, `refo=.f.`, the supplied `standard` library, and explicit
-fixed pairing (strand 1 residues 1:12, strand 2 residues 24:13).
-3DNA was not installed, per the user's decision to use Curves+ only.
-
-**Correction to the first comparison:** raw XTC coordinates were initially
-exported directly to PDB. Curves+ does not reconstruct their periodic images:
-some bases/sugars were split across the box, and inter-base translations could
-span an entire box length. Those outputs were not a valid comparison and must
-not be interpreted as errors in VIAMD's pair/step calculations.
-
-The corrected exporter makes each bonded strand whole, then translates the
-entire second strand into the first pair's nearest image. Only the temporary
-snapshot copy is changed. Each frame is reanalysed without a unit cell, asserting
-the same finite/missing values and agreement within 0.003 in the metric's units
-with the original periodic calculation for all 24 metrics. The 191 whole-duplex
-PDB snapshots are then analysed independently by Curves+.
-
-| Compared quantity | Valid comparisons | RMS difference | Maximum absolute difference |
-|---|---:|---|---|
-| Pair rotations (each of three metrics) | 2252 each | 0.0287-0.0289 degrees | 0.0501 degrees |
-| Pair translations (each of three metrics) | 2252 each | 0.0029-0.0030 Angstrom | 0.0058 Angstrom |
-| Step rotations (each of three metrics) | 2053 each | 0.0288-0.0291 degrees | 0.0501 degrees |
-| Step translations (each of three metrics) | 2053 each | 0.0029 Angstrom | 0.0051 Angstrom |
-| Alpha, Beta, Epsilon, Zeta | 4202 each | 0.0287-0.0293 degrees | 0.0501 degrees |
-| Gamma, Delta, Chi | 4584 each | 0.0290-0.0292 degrees | 0.0501 degrees |
-| Epsilon - Zeta (derived from printed torsions) | 4202 | 0.0403 degrees | 0.0980 degrees |
-
-Curves+ prints angles to 0.1 degree and translations to 0.01 Angstrom. These
-differences are consistent with that precision and small numerical differences.
-VIAMD's quality-rejected fixed pairs/adjacent steps are excluded rather than
-forcing a comparison with a Curves+ value. Angular differences are wrapped,
-so equivalent values near -180/180 are not counted as large errors.
-
-**Pucker is a convention comparison, not a discovered calculation bug.**
-VIAMD uses the Altona-Sundaralingam formula; Curves+ uses the first Fourier
-component of the five ring torsions:
-
-```
-a = (2/5) sum_j nu_j cos(144 degrees * j)
-b = -(2/5) sum_j nu_j sin(144 degrees * j)
-phase = atan2(b, a)
-amplitude = hypot(a, b)
-```
-
-Here `nu_0` is C1'-C2'-C3'-C4', followed cyclically around
-C1'-C2'-C3'-C4'-O4'. Curves+ prints signed phase; comparison wraps it.
-On 4584 sugars, the existing Altona-Sundaralingam phase differs from Curves+
-by 0.857 degrees RMS (3.631 maximum), amplitude by 0.961 degrees RMS
-(3.680 maximum). Evaluating the Fourier formula on the same minimum-image
-ring torsions reproduces both Curves+ quantities within 0.051 degrees.
-The production formula and detection defaults remain unchanged.
-
-**Regression checks.** The optional local test accepts
-`VIAMD_LAVERY_VALIDATION_CURVES=/path/to/reference-directory`, containing
-`curves.csv` with the header `frame,class,member,metric,value`, zero-based
-VIAMD frame/class/member/metric IDs and one row per non-groove metric/sample.
-Missing values are `nan`. It validates dimensions, duplicate rows and schema,
-then checks every finite production value against its reference (Fourier
-convention for pucker). Tolerances are 0.061 degrees, 0.0061 Angstrom and
-0.11 degrees for the difference of the two rounded Epsilon/Zeta torsions.
-It reports comparison counts and maximum errors and fails on disagreement.
-
-```
+```sh
 VIAMD_LAVERY_VALIDATION_GRO=/path/to/dna.gro \
-VIAMD_LAVERY_VALIDATION_XTC=/path/to/box-nvt.xtc \
-VIAMD_LAVERY_VALIDATION_CURVES=/path/to/reference-directory \
-./build/bin/viamd_test --filter='lavery*'
+VIAMD_LAVERY_VALIDATION_XTC=/path/to/trajectory.xtc \
+./build/bin/viamd_test --filter=lavery_core.optional_local_trajectory_measurement_validation
 ```
 
-Set `VIAMD_LAVERY_VALIDATION_EXPORT` to an existing directory to regenerate the
-whole-duplex `frame_N.pdb` snapshots, `pairing.txt` and `viamd.csv` for this
-single-duplex workflow. Curves+ input for snapshot N is:
+Set `VIAMD_LAVERY_VALIDATION_EXPORT` to an existing scratch directory to
+export snapshots, pair mappings and per-value VIAMD quality flags for
+independent comparison. With `VIAMD_LAVERY_VALIDATION_CURVES` set to a
+directory containing `curves.csv`, the optional test also compares Curves+
+pair, step and nucleotide values (using the Fourier pucker convention for
+that comparison). Helical and groove values are not compared to Curves+.
+The historical sampled inputs, comparator and raw outputs are local research
+artifacts, not repository fixtures; the complete external audits cannot be
+reproduced from this repository alone.
 
-```
-&inp file=frame_N.pdb, lis=whole_N, fit=.t., refo=.f.,
-lib=/path/to/curvesplus/standard, &end
-2 1 -1 0 0
-1:12
-24:13
-```
+The 1RNA reference fixture is included in the repository. To regenerate
+classic 3DNA output independently in a scratch directory, set `X3DNA`, put
+its `bin` directory on `PATH`, and run:
 
-The local reference directory is
-`$HOME/.local/opt/curvesplus/validation-nvt`; its `whole_N.lis` files preserve
-the raw independent outputs, `curves.csv` their mapped values, and
-`comparison.txt` the per-metric error summary. No user coordinates are stored
-in the repository. The public 1RNA fixture also has a permanent 28-sugar
-Fourier reference, generated by the same executable and tested without local
-DNA files or Curves+ being installed.
-
-Curves+ curvilinear grooves are **not** the direct phosphate-distance quantity
-implemented here, so equality is neither asserted nor claimed. Agreement of
-the other metrics does not validate event labels, residence thresholds or
-false-positive rates.
-
-For the rendering changes, a local surfaceless OpenGL check using the actual
-immediate renderer verified that hidden hints are suppressed in front of an
-opaque depth plane, drawn behind it, and not replayed after queue submission,
-with no GL errors. This is a historical renderer check, not a current GUI
-acceptance checklist.
-
-```
-cd build
-make -j16 viamd_test
-./bin/viamd_test --filter='lavery*'
+```sh
+find_pair /path/to/lavery_1rna.pdb pairs.inp
+analyze pairs.inp
 ```
 
-The core tests cover:
-
-- gap bridging and the minimum-frames filter;
-- neighbourhood splitting, separate duplexes and Whole structure;
-- hysteresis (weak samples extend but never start an event);
-- lost pairs, the score and event types;
-- the Gaussian chance probability;
-- event members and parameter peaks;
-- exact per-frame event contributions for playback, including parameter changes,
-  pair loss, bridged gaps and isolation from overlapping events;
-- automatic contributions from all active events, all three classes and merged
-  parameters for overlapping members;
-- stable Viridis event colour slots, chronological cycling, inclusive overlaps, safe reuse, unsorted input,
-  more than eight simultaneous events and score priority;
-- background sub-events: local activity inside an equally strong broad event,
-  uniform shifts, too few members, invalid thresholds;
-- a 100k-frame synthetic benchmark (prints timings, asserts results);
-- hierarchical local bursts inside broad events, flat-mode equivalence, parent
-  ID remapping, duplicate/short/weak rejection, Whole structure parents,
-  mixed pair/step contributions and pair loss;
-- minimum three contributing frames (not elapsed span), single-frame opt-in,
-  and isolation of paused inspection from overlapping parent/child events;
-- angular wrapping across ±180°;
-- class layout, metric names/paths, torsion sign and minimum image,
-  pseudorotation (North and South), missing backbone atoms, 3DNA groove
-  indices and helix chains;
-- within-state baselines (including robust/circular and constant minority
-  states), source/destination residence filtering, spikes, missing data, range
-  boundaries, irregular timestamps and state-switch CSV provenance;
-- measurement-span indices and boundary rejection, defining-atom identity,
-  exact step midframes, native dihedral/value agreement and degree units for
-  the linearly treated pucker amplitude;
-- Median/MAD robustness;
-- independent baseline/detection intervals, full-range equivalence, circular
-  and robust references, absent-state sigma coverage and invalid/empty intervals;
-- native timeline periods as reference/search windows, reversed/clipped bounds,
-  following windows, markers, edits and missing IDs;
-- the events CSV and the baseline method/interval columns in parameter CSV.
+See [test/README.md](../test/README.md) for additional test details. Automated
+tests do not replace GUI inspection.

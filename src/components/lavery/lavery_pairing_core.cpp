@@ -360,6 +360,182 @@ uint16_t evaluate_pair_contacts(uint8_t* count, const PairChemistry& pair,
     return evaluate_contacts(count, pair, state, bond_keys(bonds));
 }
 
+static bool compute_3dna_pair(Values* values, BasePairFrame* midpoint, BaseFrame a, BaseFrame b,
+                             const md_unitcell_t* cell) {
+    vec3_t delta = vec3_sub(b.origin, a.origin);
+    if (cell) md_util_min_image_vec3(&delta, 1, cell);
+    b.origin = vec3_add(a.origin, delta);
+    if (vec3_dot(a.z, b.z) < 0.0f) {
+        b.y = vec3_mul1(b.y, -1.0f);
+        b.z = vec3_mul1(b.z, -1.0f);
+    }
+    return compute_3dna_step(values, {b.origin,b.x,b.y,b.z}, {a.origin,a.x,a.y,a.z}, midpoint);
+}
+
+bool analyze_3dna_pair_step(ThreeDnaPairStepAnalysis* out, const md_system_t& sys,
+                            const md_system_state_t& state, const std::vector<BaseTopology>& bases,
+                            const std::vector<Pair>& pairs, const std::vector<StepIndex>& steps,
+                            const PairingValidator& validator, PairValuePolicy policy) {
+    if (!out || validator.chemistry().size() != pairs.size() ||
+        (policy != PairValues_RequireGoodQuality && policy != PairValues_ReferenceWithQualityFlags)) {
+        MD_LOG_ERROR("Lavery: invalid 3DNA pair/step analysis output, pairing topology, or value policy");
+        return false;
+    }
+    for (const auto& pair : pairs) if (pair.a >= bases.size() || pair.b >= bases.size()) {
+        MD_LOG_ERROR("Lavery: invalid nucleotide index for 3DNA pair/step analysis");
+        return false;
+    }
+    for (const auto& step : steps) if (step.a >= pairs.size() || step.b >= pairs.size()) {
+        MD_LOG_ERROR("Lavery: invalid step index for 3DNA pair/step analysis");
+        return false;
+    }
+    ThreeDnaPairStepAnalysis result;
+    Values missing;
+    std::fill(std::begin(missing.metric), std::end(missing.metric), std::numeric_limits<float>::quiet_NaN());
+    result.pair_frames.resize(pairs.size());
+    result.pair_values.assign(pairs.size(), missing);
+    result.step_values.assign(steps.size(), missing);
+    result.step_quality.assign(steps.size(), Quality_AdjacentPair);
+    std::vector<uint8_t> contacts;
+    if (!validator.evaluate(result.pair_quality, contacts, state)) return false;
+    std::vector<BaseFrame> frames;
+    std::vector<uint16_t> base_quality;
+    std::vector<uint8_t> pair_available(pairs.size(), 0);
+    if (!extract_3dna_base_frames(frames, sys, state, bases, &base_quality)) return false;
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto pair = pairs[p];
+        auto& quality = result.pair_quality[p];
+        quality |= base_quality[pair.a] | base_quality[pair.b];
+        if (!(base_quality[pair.a] | base_quality[pair.b]) &&
+            (policy == PairValues_ReferenceWithQualityFlags || quality == Quality_Good))
+            quality |= pair_quality(frames[pair.a], frames[pair.b], &state.unitcell);
+        if ((base_quality[pair.a] | base_quality[pair.b]) ||
+            (policy == PairValues_RequireGoodQuality && quality != Quality_Good)) continue;
+        Values cehs = missing;
+        if (!compute_3dna_pair(&cehs, &result.pair_frames[p], frames[pair.a], frames[pair.b], &state.unitcell)) {
+            quality |= Quality_AmbiguousTransform;
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) {
+            result.pair_values[p].metric[Shear+k] = cehs.metric[Shift+k];
+            result.pair_values[p].metric[Buckle+k] = cehs.metric[Tilt+k];
+        }
+        pair_available[p] = 1;
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        const auto step = steps[s];
+        auto& quality = result.step_quality[s];
+        quality = result.pair_quality[step.a] | result.pair_quality[step.b];
+        if (!pair_available[step.a] || !pair_available[step.b] ||
+            (policy == PairValues_RequireGoodQuality && quality != Quality_Good)) {
+            quality |= Quality_AdjacentPair;
+            continue;
+        }
+        auto a = result.pair_frames[step.a], b = result.pair_frames[step.b];
+        vec3_t delta = vec3_sub(b.origin, a.origin);
+        md_util_min_image_vec3(&delta, 1, &state.unitcell);
+        b.origin = vec3_add(a.origin, delta);
+        Values values = missing;
+        if (!compute_3dna_step(&values, a, b)) {
+            quality |= Quality_AmbiguousTransform;
+            continue;
+        }
+        for (int k = Tilt; k <= (int)Rise; ++k) result.step_values[s].metric[k] = values.metric[k];
+    }
+    *out = std::move(result);
+    return true;
+}
+
+static bool apply_3dna_helical(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
+                           const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                           const std::vector<StepIndex>& steps) {
+    if (!out || out->pair_values.size() != pairs.size() || out->pair_quality.size() != pairs.size() ||
+        out->pair_frames.size() != pairs.size() || out->step_values.size() != steps.size() ||
+        out->step_quality.size() != steps.size()) {
+        MD_LOG_ERROR("Lavery: invalid input for 3DNA-style parameters");
+        return false;
+    }
+    std::vector<BaseFrame> frames;
+    std::vector<uint16_t> quality;
+    if (!extract_3dna_base_frames(frames, sys, state, bases, &quality)) return false;
+    out->helical_pair_frames.assign(pairs.size(), {});
+    out->helical_quality.assign(steps.size(), Quality_AdjacentPair);
+    std::vector<uint16_t> pair_flags = out->pair_quality;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto pair = pairs[p];
+        if (pair.a >= frames.size() || pair.b >= frames.size()) {
+            MD_LOG_ERROR("Lavery: invalid nucleotide index for 3DNA-style parameters");
+            return false;
+        }
+        pair_flags[p] |= quality[pair.a] | quality[pair.b];
+        if (pair_flags[p]) continue;
+        Values v = {};
+        if (!compute_3dna_pair(&v, &out->helical_pair_frames[p], frames[pair.a], frames[pair.b], &state.unitcell)) {
+            pair_flags[p] |= Quality_AmbiguousTransform;
+            continue;
+        }
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        const auto step = steps[s];
+        if (step.a >= pairs.size() || step.b >= pairs.size()) {
+            MD_LOG_ERROR("Lavery: invalid step index for 3DNA-style parameters");
+            return false;
+        }
+        auto& quality_flags = out->helical_quality[s];
+        quality_flags = out->step_quality[s] | pair_flags[step.a] | pair_flags[step.b];
+        for (int k = XDisplacement; k <= (int)HelicalTwist; ++k) out->step_values[s].metric[k] = nan;
+        if (quality_flags) {
+            quality_flags |= Quality_AdjacentPair;
+            continue;
+        }
+        BasePairFrame a = out->helical_pair_frames[step.a], b = out->helical_pair_frames[step.b];
+        vec3_t delta = vec3_sub(b.origin, a.origin);
+        md_util_min_image_vec3(&delta, 1, &state.unitcell);
+        b.origin = vec3_add(a.origin, delta);
+        if (!compute_helical_step(&out->step_values[s], a, b)) quality_flags |= Quality_AmbiguousTransform;
+    }
+    return true;
+}
+
+static void apply_groove_widths(FrameAnalysis* out, const md_system_state_t& state,
+                                const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                                const std::vector<StepIndex>& steps, GrooveWidthPolicy policy) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const vec3_t none = {nan, nan, nan};
+    auto coord = [&](int32_t atom) { return atom >= 0 ? md_state_coord(&state, atom) : none; };
+    std::vector<int64_t> step_from(pairs.size(), -1);
+    for (size_t s = steps.size(); s-- > 0;) if (steps[s].a < pairs.size()) step_from[steps[s].a] = (int64_t)s;
+    std::vector<vec3_t> p1, p2, c1, c2;
+    std::vector<float> minor, major;
+    for (const auto& chain : helix_chains(pairs.size(), steps)) {
+        const size_t n = chain.size();
+        const uint32_t strand = bases[pairs[chain[0]].a].strand;
+        p1.assign(n, none);
+        p2.assign(n, none);
+        c1.assign(n, none);
+        c2.assign(n, none);
+        for (size_t k = 0; k < n; ++k) {
+            const auto& a = bases[pairs[chain[k]].a];
+            const auto& b = bases[pairs[chain[k]].b];
+            if ((a.strand == strand) == (b.strand == strand)) continue;
+            const auto& first = a.strand == strand ? a : b;
+            const auto& second = a.strand == strand ? b : a;
+            p1[k] = coord(first.backbone[BB_P]); p2[k] = coord(second.backbone[BB_P]);
+            c1[k] = coord(first.backbone[BB_C1]); c2[k] = coord(second.backbone[BB_C1]);
+        }
+        minor.assign(n, nan);
+        major.assign(n, nan);
+        groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n, &state.unitcell, c1.data(), c2.data(), policy);
+        for (size_t k = 0; k + 1 < n; ++k) {
+            const int64_t s = step_from[chain[k]];
+            if (s < 0 || steps[s].b != chain[k + 1]) continue;
+            out->step_values[s].metric[MinorGroove] = minor[k];
+            out->step_values[s].metric[MajorGroove] = major[k];
+        }
+    }
+}
+
 bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
                     const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
                     const std::vector<StepIndex>& steps, const PairingValidator& validator) {
@@ -379,6 +555,8 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
     std::vector<BaseFrame> frames;
     std::vector<uint16_t> base_quality;
     if (!extract_base_frames(frames, sys, state, bases, &base_quality)) return false;
+    std::vector<BasePairFrame> orientation_frames(pairs.size());
+    std::vector<uint8_t> orientation_valid(pairs.size(), 0);
     for (size_t p = 0; p < pairs.size(); ++p) {
         const auto pair = pairs[p];
         if (pair.a >= bases.size() || pair.b >= bases.size()) {
@@ -388,12 +566,28 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
         uint16_t geometry = 0;
         BasePairFrame frame;
         Values values;
+        if (!base_quality[pair.a] && !base_quality[pair.b]) {
+            auto b = frames[pair.b];
+            vec3_t delta = vec3_sub(b.origin, frames[pair.a].origin);
+            md_util_min_image_vec3(&delta, 1, &state.unitcell);
+            b.origin = vec3_add(frames[pair.a].origin, delta);
+            Values unused;
+            orientation_valid[p] = compute_base_pair(&unused, &orientation_frames[p], frames[pair.a], b, pair.reversed);
+        }
         const bool present = compute_present_base_pair(&values, &frame, &geometry,
             frames[pair.a], frames[pair.b], &state.unitcell, pair.reversed);
         out->pair_quality[p] |= geometry | base_quality[pair.a] | base_quality[pair.b];
         if (present && out->pair_quality[p] == Quality_Good) {
             out->pair_values[p] = values;
             out->pair_frames[p] = frame;
+        }
+    }
+    out->pair_inversions = curves_pair_inversions(orientation_frames, orientation_valid, steps, &state.unitcell);
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        if (out->pair_quality[p] != Quality_Good) continue;
+        if (out->pair_inversions[p] > 0) {
+            out->pair_values[p].metric[Shear] = -out->pair_values[p].metric[Shear];
+            out->pair_values[p].metric[Buckle] = -out->pair_values[p].metric[Buckle];
         }
     }
     for (size_t s = 0; s < steps.size(); ++s) {
@@ -413,7 +607,13 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
         md_util_min_image_vec3(&delta, 1, &state.unitcell);
         b.origin = vec3_add(a.origin, delta);
         Values values;
-        if (compute_step(&values, a, b)) out->step_values[s] = values;
+        if (compute_step(&values, a, b)) {
+            if (out->pair_inversions[step.a] > 0) {
+                values.metric[Rise] = -values.metric[Rise];
+                values.metric[Twist] = -values.metric[Twist];
+            }
+            out->step_values[s] = values;
+        }
         else quality |= Quality_AmbiguousTransform;
     }
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -447,33 +647,493 @@ bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_s
     std::vector<uint8_t> switched;
     if (!detect_partner_switches(&switched, frames, pairs, geometry, &state.unitcell)) return false;
     for (size_t p = 0; p < pairs.size(); ++p) if (switched[p]) out->pairing_states[p] = Pairing_PartnerSwitch;
-    // Groove widths from phosphorus positions along each helix; strand I is the strand of the first pair's base a.
-    std::vector<int64_t> step_from(pairs.size(), -1);
-    for (size_t s = steps.size(); s-- > 0;) if (steps[s].a < pairs.size()) step_from[steps[s].a] = (int64_t)s;
-    std::vector<vec3_t> p1, p2;
-    std::vector<float> minor, major;
-    for (const auto& chain : helix_chains(pairs.size(), steps)) {
-        const size_t n = chain.size();
-        const uint32_t strand = bases[pairs[chain[0]].a].strand;
-        p1.assign(n, none);
-        p2.assign(n, none);
-        for (size_t k = 0; k < n; ++k) {
-            const auto& a = bases[pairs[chain[k]].a];
-            const auto& b = bases[pairs[chain[k]].b];
-            if (a.strand == strand && b.strand != strand) { p1[k] = coord(a.backbone[BB_P]); p2[k] = coord(b.backbone[BB_P]); }
-            else if (b.strand == strand && a.strand != strand) { p1[k] = coord(b.backbone[BB_P]); p2[k] = coord(a.backbone[BB_P]); }
-        }
-        minor.assign(n, nan);
-        major.assign(n, nan);
-        groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n, &state.unitcell);
-        for (size_t k = 0; k + 1 < n; ++k) {
-            const int64_t s = step_from[chain[k]];
-            if (s < 0 || steps[s].b != chain[k + 1]) continue;
-            out->step_values[s].metric[MinorGroove] = minor[k];
-            out->step_values[s].metric[MajorGroove] = major[k];
+    apply_groove_widths(out, state, bases, pairs, steps, Groove_DirectFallback);
+    if (!apply_3dna_helical(out, sys, state, bases, pairs, steps)) return false;
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        if (out->pair_quality[p] == Quality_Good && out->pair_inversions[p] < 0) {
+            out->pair_quality[p] |= Quality_AmbiguousTransform;
+            out->pair_values[p] = missing;
+            out->pair_frames[p] = {};
         }
     }
     return true;
+}
+
+static bool antiparallel_helix_steps(const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                                     const std::vector<StepIndex>& steps) {
+    for (const auto& pair : pairs) if (pair.a >= bases.size() || pair.b >= bases.size()) {
+        MD_LOG_ERROR("Lavery: invalid nucleotide index in helix topology");
+        return false;
+    }
+    std::vector<uint8_t> incoming(pairs.size(), 0), outgoing(pairs.size(), 0);
+    for (const auto& step : steps) {
+        if (step.a >= pairs.size() || step.b >= pairs.size()) {
+            MD_LOG_ERROR("Lavery: invalid helix step index");
+            return false;
+        }
+        const auto a = pairs[step.a], b = pairs[step.b];
+        const auto& a0 = bases[a.a]; const auto& b0 = bases[b.a];
+        const auto& a1 = bases[a.b]; const auto& b1 = bases[b.b];
+        if (a0.strand != b0.strand || a1.strand != b1.strand || a0.strand == a1.strand ||
+            a0.chain_order == UINT32_MAX || b0.chain_order == UINT32_MAX ||
+            a1.chain_order == UINT32_MAX || b1.chain_order == UINT32_MAX ||
+            b0.chain_order != a0.chain_order + 1 || a1.chain_order != b1.chain_order + 1 ||
+            outgoing[step.a]++ || incoming[step.b]++) {
+            MD_LOG_ERROR("Lavery: geometry requires non-circular antiparallel helix steps");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool initialize_curves_trajectory(CurvesTrajectoryAnalysis* out, size_t frames, size_t pair_count,
+                                  const std::vector<StepIndex>& steps,
+                                  const CurvesFrameAnalysis& first_frame) {
+    if (!out || !frames ||
+        first_frame.frame.pair_values.size() != pair_count || first_frame.frame.step_values.size() != steps.size()) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ trajectory dimensions");
+        return false;
+    }
+    CurvesTrajectoryAnalysis result;
+    result.frames = frames;
+    result.pairs = pair_count;
+    result.steps = steps.size();
+    result.helices.reserve(first_frame.helices.size());
+    std::vector<uint8_t> seen_pairs(pair_count, 0), seen_steps(steps.size(), 0);
+    size_t groove_count = 0;
+    for (const auto& geometry : first_frame.helices) {
+        const size_t n = geometry.pairs.size();
+        if (n < 2) {
+            MD_LOG_ERROR("Lavery: invalid Curves+ helix length for trajectory storage");
+            return false;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            const uint32_t pair = geometry.pairs[i];
+            if (pair >= pair_count || seen_pairs[pair]) {
+                MD_LOG_ERROR("Lavery: invalid or duplicate pair in Curves+ trajectory helix");
+                return false;
+            }
+            seen_pairs[pair] = 1;
+            if (i + 1 == n) continue;
+            size_t match = steps.size();
+            for (size_t s = 0; s < steps.size(); ++s) {
+                if (steps[s].a == pair && steps[s].b == geometry.pairs[i + 1]) {
+                    match = s;
+                    break;
+                }
+            }
+            if (match == steps.size() || seen_steps[match]) {
+                MD_LOG_ERROR("Lavery: missing or duplicate Curves+ helix step in trajectory layout");
+                return false;
+            }
+            seen_steps[match] = 1;
+        }
+        CurvesTrajectoryAnalysis::Helix layout;
+        layout.pairs = geometry.pairs;
+        for (size_t i = 0; i + 1 < n; ++i) {
+            const auto pair = geometry.pairs[i];
+            size_t match = steps.size();
+            for (size_t s = 0; s < steps.size(); ++s)
+                if (steps[s].a == pair && steps[s].b == geometry.pairs[i + 1]) { match = s; break; }
+            layout.steps.push_back(match);
+        }
+        layout.groove_offset = groove_count;
+        layout.groove_count = n >= 4 ? 2 * n - 3 : 0;
+        if (!geometry.grooves.empty() && geometry.grooves.size() != layout.groove_count) {
+            MD_LOG_ERROR("Lavery: inconsistent Curves+ groove count in first trajectory frame");
+            return false;
+        }
+        if (geometry.axis_quality == Quality_Good &&
+            (geometry.axis.size() != n || geometry.pair_parameters.size() != n ||
+             geometry.step_parameters.size() != n - 1)) {
+            MD_LOG_ERROR("Lavery: incomplete Curves+ axis geometry in first trajectory frame");
+            return false;
+        }
+        if (geometry.groove_quality == Quality_Good && layout.groove_count &&
+            geometry.grooves.size() != layout.groove_count) {
+            MD_LOG_ERROR("Lavery: incomplete Curves+ grooves in first trajectory frame");
+            return false;
+        }
+        groove_count += layout.groove_count;
+        result.helices.push_back(std::move(layout));
+    }
+    if (std::find(seen_steps.begin(), seen_steps.end(), uint8_t(0)) != seen_steps.end()) {
+        MD_LOG_ERROR("Lavery: Curves+ trajectory contains steps outside ordered helices");
+        return false;
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    result.pair_axis.assign(frames * pair_count, {nan, nan, nan, nan, nan});
+    result.step_axis.assign(frames * steps.size(), {nan, nan});
+    result.grooves.resize(frames * groove_count);
+    for (size_t f = 0; f < frames; ++f) {
+        for (const auto& helix : result.helices)
+            for (size_t g = 0; g < helix.groove_count; ++g)
+                result.grooves[f * groove_count + helix.groove_offset + g] =
+                    {1.5f + 0.5f * (float)g, nan, nan, nan, nan};
+    }
+    result.axis_quality.assign(frames * result.helices.size(), Quality_Good);
+    result.groove_quality.assign(frames * result.helices.size(), Quality_Good);
+    *out = std::move(result);
+    return true;
+}
+
+bool store_curves_trajectory_frame(CurvesTrajectoryAnalysis* trajectory, size_t frame,
+                                   const CurvesFrameAnalysis& analysis) {
+    if (!trajectory || frame >= trajectory->frames ||
+        analysis.helices.size() != trajectory->helices.size() ||
+        analysis.frame.pair_values.size() != trajectory->pairs ||
+        analysis.frame.step_values.size() != trajectory->steps) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ frame for trajectory storage");
+        return false;
+    }
+    size_t groove_count = 0;
+    for (const auto& helix : trajectory->helices) groove_count += helix.groove_count;
+    std::vector<uint8_t> seen_pairs(trajectory->pairs, 0), seen_steps(trajectory->steps, 0);
+    for (size_t h = 0; h < trajectory->helices.size(); ++h) {
+        const auto& layout = trajectory->helices[h];
+        const auto& geometry = analysis.helices[h];
+        const size_t n = layout.pairs.size();
+        if (n < 2 || layout.steps.size() != n - 1 || geometry.pairs != layout.pairs ||
+            (!geometry.grooves.empty() && geometry.grooves.size() != layout.groove_count) ||
+            (geometry.axis_quality == Quality_Good &&
+             (geometry.axis.size() != n || geometry.pair_parameters.size() != n ||
+              geometry.step_parameters.size() != n - 1)) ||
+            (geometry.groove_quality == Quality_Good && layout.groove_count &&
+             geometry.grooves.size() != layout.groove_count)) {
+            MD_LOG_ERROR("Lavery: Curves+ frame geometry does not match trajectory layout");
+            return false;
+        }
+        for (uint32_t pair : layout.pairs) {
+            if (pair >= trajectory->pairs || seen_pairs[pair]++) {
+                MD_LOG_ERROR("Lavery: invalid or duplicate pair in Curves+ trajectory frame");
+                return false;
+            }
+        }
+        for (size_t step : layout.steps) {
+            if (step >= trajectory->steps || seen_steps[step]++) {
+                MD_LOG_ERROR("Lavery: invalid or duplicate step in Curves+ trajectory frame");
+                return false;
+            }
+        }
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const size_t pair_offset = frame * trajectory->pairs;
+    const size_t step_offset = frame * trajectory->steps;
+    const size_t groove_offset = frame * groove_count;
+    const size_t helix_offset = frame * trajectory->helices.size();
+    std::fill(trajectory->pair_axis.begin() + pair_offset, trajectory->pair_axis.begin() + pair_offset + trajectory->pairs,
+              CurvesPairAxisParameters{nan, nan, nan, nan, nan});
+    std::fill(trajectory->step_axis.begin() + step_offset, trajectory->step_axis.begin() + step_offset + trajectory->steps,
+              CurvesStepAxisParameters{nan, nan});
+    for (size_t h = 0; h < trajectory->helices.size(); ++h) {
+        const auto& layout = trajectory->helices[h];
+        const auto& geometry = analysis.helices[h];
+        trajectory->axis_quality[helix_offset + h] = geometry.axis_quality;
+        trajectory->groove_quality[helix_offset + h] = geometry.groove_quality;
+        if (geometry.axis_quality == Quality_Good) {
+            for (size_t i = 0; i < layout.pairs.size(); ++i)
+                trajectory->pair_axis[pair_offset + layout.pairs[i]] = geometry.pair_parameters[i];
+            for (size_t i = 0; i < layout.steps.size(); ++i)
+                trajectory->step_axis[step_offset + layout.steps[i]] = geometry.step_parameters[i];
+        }
+        if (geometry.groove_quality == Quality_Good) {
+            std::copy(geometry.grooves.begin(), geometry.grooves.end(),
+                      trajectory->grooves.begin() + groove_offset + layout.groove_offset);
+        } else {
+            for (size_t i = 0; i < layout.groove_count; ++i)
+                trajectory->grooves[groove_offset + layout.groove_offset + i] =
+                    {1.5f + 0.5f * (float)i, nan, nan, nan, nan};
+        }
+    }
+    return true;
+}
+
+bool analyze_3dna_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
+                        const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                        const std::vector<StepIndex>& steps, const PairingValidator& validator) {
+    if (!out) {
+        MD_LOG_ERROR("Lavery: invalid 3DNA frame analysis output");
+        return false;
+    }
+    if (!antiparallel_helix_steps(bases, pairs, steps)) return false;
+    ThreeDnaPairStepAnalysis dna;
+    if (!analyze_3dna_pair_step(&dna, sys, state, bases, pairs, steps, validator,
+                                PairValues_ReferenceWithQualityFlags)) return false;
+    FrameAnalysis result;
+    if (!analyze_frame(&result, sys, state, bases, pairs, steps, validator)) return false;
+    result.pair_frames = dna.pair_frames;
+    result.helical_pair_frames = dna.pair_frames;
+    result.pair_values = std::move(dna.pair_values);
+    result.step_values = std::move(dna.step_values);
+    result.pair_quality = std::move(dna.pair_quality);
+    result.step_quality = std::move(dna.step_quality);
+    result.helical_quality = result.step_quality;
+    result.pair_inversions.clear();
+    for (size_t s = 0; s < steps.size(); ++s) {
+        if (!std::isfinite(result.step_values[s].metric[Tilt])) continue;
+        auto a = result.pair_frames[steps[s].a], b = result.pair_frames[steps[s].b];
+        vec3_t delta = vec3_sub(b.origin, a.origin);
+        md_util_min_image_vec3(&delta, 1, &state.unitcell);
+        b.origin = vec3_add(a.origin, delta);
+        if (!compute_helical_step(&result.step_values[s], a, b))
+            result.helical_quality[s] |= Quality_AmbiguousTransform;
+    }
+    apply_groove_widths(&result, state, bases, pairs, steps, Groove_3DnaRefined);
+    *out = std::move(result);
+    return true;
+}
+
+bool analyze_curves_helices(std::vector<CurvesHelixGeometry>* out, const md_system_t& sys,
+                            const md_system_state_t& state, const std::vector<BaseTopology>& bases,
+                            const std::vector<Pair>& pairs, const std::vector<StepIndex>& steps) {
+    if (!out) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ helix output");
+        return false;
+    }
+    if (!antiparallel_helix_steps(bases, pairs, steps)) return false;
+    std::vector<BaseFrame> frames;
+    std::vector<uint16_t> quality;
+    if (!extract_base_frames(frames, sys, state, bases, &quality)) return false;
+    std::vector<CurvesHelixGeometry> result;
+    for (const auto& chain : helix_chains(pairs.size(), steps)) {
+        CurvesHelixGeometry helix;
+        helix.pairs = chain;
+        const size_t n = chain.size();
+        std::vector<BaseFrame> first, second;
+        std::vector<BasePairFrame> midpoints;
+        first.reserve(n); second.reserve(n); midpoints.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            const auto pair = pairs[chain[i]];
+            helix.axis_quality |= quality[pair.a] | quality[pair.b];
+            if (helix.axis_quality) break;
+            auto a = frames[pair.a], b = frames[pair.b];
+            if (i) {
+                vec3_t delta = vec3_sub(a.origin, first.back().origin);
+                md_util_min_image_vec3(&delta, 1, &state.unitcell);
+                const vec3_t shift = vec3_sub(vec3_add(first.back().origin, delta), a.origin);
+                a.origin = vec3_add(a.origin, shift);
+                a.groove_reference = vec3_add(a.groove_reference, shift);
+            }
+            vec3_t delta = vec3_sub(b.origin, a.origin);
+            md_util_min_image_vec3(&delta, 1, &state.unitcell);
+            const vec3_t shift = vec3_sub(vec3_add(a.origin, delta), b.origin);
+            b.origin = vec3_add(b.origin, shift);
+            b.groove_reference = vec3_add(b.groove_reference, shift);
+            if (i) {
+                vec3_t link = vec3_sub(b.origin, second.back().origin);
+                vec3_t nearest = link;
+                md_util_min_image_vec3(&nearest, 1, &state.unitcell);
+                if (vec3_length(vec3_sub(nearest, link)) > 0.01f) {
+                    helix.axis_quality |= Quality_AmbiguousTransform;
+                    break;
+                }
+            }
+            BasePairFrame midpoint;
+            Values unused;
+            if (!compute_base_pair(&unused, &midpoint, a, b, pair.reversed)) {
+                helix.axis_quality |= Quality_AmbiguousTransform;
+                break;
+            }
+            first.push_back(a); second.push_back(b); midpoints.push_back(midpoint);
+        }
+        if (!helix.axis_quality) {
+            std::vector<StepIndex> adjacent;
+            for (uint32_t i = 0; i + 1 < n; ++i) adjacent.push_back({i, i + 1});
+            const std::vector<uint8_t> available(n, 1);
+            const auto inversions = curves_pair_inversions(midpoints, available, adjacent);
+            if (!curves_duplex_axis(&helix.axis, first, second, midpoints) ||
+                !curves_pair_axis_parameters(&helix.pair_parameters, midpoints, helix.axis, inversions) ||
+                !curves_step_axis_parameters(&helix.step_parameters, midpoints, helix.axis, inversions)) {
+                helix.axis_quality |= Quality_AmbiguousTransform;
+                helix.axis.clear();
+                helix.pair_parameters.clear();
+                helix.step_parameters.clear();
+            }
+        }
+        helix.groove_quality = helix.axis_quality;
+        if (!helix.axis_quality) {
+            std::array<std::vector<vec3_t>, 2> phosphates, backbones, depths;
+            for (size_t i = 0; i < n; ++i) {
+                const auto pair = pairs[chain[i]];
+                depths[0].push_back(first[i].groove_reference);
+                depths[1].push_back(second[i].groove_reference);
+                for (int side = 0; side < 2; ++side) {
+                    if ((!side && i == 0) || (side && i + 1 == n)) continue;
+                    const uint32_t base = side ? pair.b : pair.a;
+                    const int32_t atom = bases[base].backbone[BB_P];
+                    if (atom < 0) {
+                        helix.groove_quality |= Quality_MissingAtoms;
+                        continue;
+                    }
+                    vec3_t delta = vec3_sub(md_state_coord(&state, atom), frames[base].origin);
+                    md_util_min_image_vec3(&delta, 1, &state.unitcell);
+                    phosphates[side].push_back(vec3_add(side ? second[i].origin : first[i].origin, delta));
+                }
+            }
+            if (!helix.groove_quality &&
+                (!curves_groove_backbone(&backbones[0], phosphates[0]) ||
+                 !curves_groove_backbone(&backbones[1], phosphates[1]) ||
+                 !curves_grooves(&helix.grooves, backbones[0], backbones[1], midpoints, helix.axis, depths[0], depths[1]))) {
+                helix.groove_quality |= Quality_AmbiguousTransform;
+            }
+        }
+        result.push_back(std::move(helix));
+    }
+    *out = std::move(result);
+    return true;
+}
+
+bool analyze_curves_frame(CurvesFrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
+                          const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                          const std::vector<StepIndex>& steps, const PairingValidator& validator) {
+    if (!out) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ frame analysis output");
+        return false;
+    }
+    CurvesFrameAnalysis result;
+    if (!analyze_curves_helices(&result.helices, sys, state, bases, pairs, steps) ||
+        !analyze_frame(&result.frame, sys, state, bases, pairs, steps, validator)) return false;
+    auto& frame = result.frame;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Values missing;
+    std::fill(std::begin(missing.metric), std::end(missing.metric), nan);
+    std::vector<BaseFrame> base_frames;
+    std::vector<uint16_t> base_quality, contact_quality;
+    std::vector<PairingEvidence> evidence;
+    if (!extract_base_frames(base_frames, sys, state, bases, &base_quality) ||
+        !validator.evaluate(contact_quality, frame.contacts, state, &evidence)) return false;
+    frame.pair_quality = contact_quality;
+    frame.pair_values.assign(pairs.size(), missing);
+    frame.pair_frames.assign(pairs.size(), {});
+    std::vector<uint8_t> available(pairs.size(), 0);
+    std::vector<uint16_t> geometry(pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto pair = pairs[p];
+        geometry[p] = pair_quality(base_frames[pair.a], base_frames[pair.b], &state.unitcell) |
+                      base_quality[pair.a] | base_quality[pair.b];
+        frame.pair_quality[p] |= geometry[p];
+        if (base_quality[pair.a] || base_quality[pair.b]) continue;
+        auto b = base_frames[pair.b];
+        vec3_t delta = vec3_sub(b.origin, base_frames[pair.a].origin);
+        md_util_min_image_vec3(&delta, 1, &state.unitcell);
+        b.origin = vec3_add(base_frames[pair.a].origin, delta);
+        if (!compute_base_pair(&frame.pair_values[p], &frame.pair_frames[p],
+                               base_frames[pair.a], b, pair.reversed)) {
+            frame.pair_quality[p] |= Quality_AmbiguousTransform;
+            frame.pair_values[p] = missing;
+            continue;
+        }
+        available[p] = 1;
+    }
+    frame.pair_inversions = curves_pair_inversions(frame.pair_frames, available, steps, &state.unitcell);
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        if (!available[p]) continue;
+        if (frame.pair_inversions[p] < 0) {
+            frame.pair_quality[p] |= Quality_AmbiguousTransform;
+            frame.pair_values[p] = missing;
+        } else if (frame.pair_inversions[p] > 0) {
+            frame.pair_values[p].metric[Shear] = -frame.pair_values[p].metric[Shear];
+            frame.pair_values[p].metric[Buckle] = -frame.pair_values[p].metric[Buckle];
+        }
+    }
+    frame.step_values.assign(steps.size(), missing);
+    frame.step_quality.assign(steps.size(), Quality_Good);
+    for (size_t s = 0; s < steps.size(); ++s) {
+        const auto step = steps[s];
+        frame.step_quality[s] = frame.pair_quality[step.a] | frame.pair_quality[step.b];
+        if (!available[step.a] || !available[step.b] || frame.pair_inversions[step.a] < 0) {
+            frame.step_quality[s] |= Quality_AdjacentPair;
+            continue;
+        }
+        auto a = frame.pair_frames[step.a], b = frame.pair_frames[step.b];
+        vec3_t delta = vec3_sub(b.origin, a.origin);
+        md_util_min_image_vec3(&delta, 1, &state.unitcell);
+        b.origin = vec3_add(a.origin, delta);
+        if (!compute_step(&frame.step_values[s], a, b)) {
+            frame.step_quality[s] |= Quality_AmbiguousTransform;
+            continue;
+        }
+        if (frame.pair_inversions[step.a] > 0) {
+            frame.step_values[s].metric[Rise] = -frame.step_values[s].metric[Rise];
+            frame.step_values[s].metric[Twist] = -frame.step_values[s].metric[Twist];
+        }
+    }
+    frame.helical_pair_frames.clear();
+    frame.helical_quality.clear();
+    for (auto& values : frame.step_values) {
+        values.metric[MinorGroove] = values.metric[MajorGroove] = nan;
+        for (int id = XDisplacement; id <= (int)HelicalTwist; ++id) values.metric[id] = nan;
+    }
+    std::vector<uint8_t> previous(2 * pairs.size()), next(2 * pairs.size());
+    for (const auto& step : steps) {
+        for (int side = 0; side < 2; ++side) {
+            const auto& pa = pairs[step.a]; const auto& pb = pairs[step.b];
+            const auto& a = bases[side ? pa.b : pa.a];
+            const auto& b = bases[side ? pb.b : pb.a];
+            if (a.chain_order < b.chain_order) {
+                next[2*step.a + side] = 1;
+                previous[2*step.b + side] = 1;
+            } else {
+                previous[2*step.a + side] = 1;
+                next[2*step.b + side] = 1;
+            }
+        }
+    }
+    for (size_t p = 0; p < pairs.size(); ++p) for (int side = 0; side < 2; ++side) {
+        const auto& base = bases[side ? pairs[p].b : pairs[p].a];
+        vec3_t atoms[BB_Count];
+        uint32_t present = 0;
+        for (int k = 0; k < BB_Count; ++k) {
+            const int32_t atom = base.backbone[k];
+            atoms[k] = atom >= 0 ? md_state_coord(&state, atom) : vec3_t{nan, nan, nan};
+            if (atom >= 0) present |= 1u << k;
+        }
+        const size_t member = 2*p + side;
+        compute_curves_nucleotide(&frame.nucleotide_values[member], atoms, &state.unitcell,
+                                  &frame.nucleotide_quality[member], present,
+                                  previous[member], next[member]);
+    }
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        frame.pairing_states[p] = classify_pairing(evidence[p], frame.nucleotide_values[2*p].metric[Chi],
+                                                    frame.nucleotide_values[2*p+1].metric[Chi], geometry[p]);
+    }
+    std::vector<uint8_t> switched;
+    if (!detect_partner_switches(&switched, base_frames, pairs, geometry, &state.unitcell)) return false;
+    for (size_t p = 0; p < pairs.size(); ++p) if (switched[p]) frame.pairing_states[p] = Pairing_PartnerSwitch;
+    *out = std::move(result);
+    return true;
+}
+
+bool analyze_convention_frame(ConventionFrameAnalysis* out, AnalysisConvention convention,
+                              const md_system_t& sys, const md_system_state_t& state,
+                              const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                              const std::vector<StepIndex>& steps, const PairingValidator& validator) {
+    if (!out) {
+        MD_LOG_ERROR("Lavery: invalid convention frame output");
+        return false;
+    }
+    switch (convention) {
+    case AnalysisConvention::LegacyMixed: {
+        FrameAnalysis result;
+        if (!analyze_frame(&result, sys, state, bases, pairs, steps, validator)) return false;
+        *out = std::move(result);
+        return true;
+    }
+    case AnalysisConvention::Curves: {
+        CurvesFrameAnalysis result;
+        if (!analyze_curves_frame(&result, sys, state, bases, pairs, steps, validator)) return false;
+        *out = std::move(result);
+        return true;
+    }
+    case AnalysisConvention::ThreeDna: {
+        FrameAnalysis result;
+        if (!analyze_3dna_frame(&result, sys, state, bases, pairs, steps, validator)) return false;
+        *out = std::move(result);
+        return true;
+    }
+    }
+    MD_LOG_ERROR("Lavery: unknown analysis convention");
+    return false;
 }
 
 } // namespace lavery

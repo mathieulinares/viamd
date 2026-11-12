@@ -56,6 +56,23 @@ static const ReferenceBase references[] = {
       {-1.57773f,-0.32139f,0.19302f}}},
 };
 
+// Ring coordinates from classic 3DNA v2.4 Atomic_*.pdb; see 3dna-license.txt.
+// Atom order follows references above, omitting C1'.
+static const vec3_t dna_references[][9] = {
+    {{-1.291f,4.498f,0}, {-1.267f,3.124f,0}, {0.024f,4.897f,0},
+     {-0.668f,0.532f,0}, {-1.912f,1.023f,0}, {-2.320f,2.290f,0},
+     {0.071f,2.771f,0}, {0.369f,1.398f,0}, {0.877f,3.902f,0}},
+    {{-1.289f,4.551f,0}, {-1.265f,3.177f,0}, {0.023f,4.962f,0},
+     {-0.700f,0.641f,0}, {-1.999f,1.087f,0}, {-2.342f,2.364f,0.001f},
+     {0.071f,2.833f,0}, {0.424f,1.460f,0}, {0.870f,3.969f,0}},
+    {{-1.285f,4.542f,0}, {-1.472f,3.158f,0}, {-0.023f,5.068f,0},
+     {-0.391f,2.344f,0}, {0.837f,2.868f,0}, {1.056f,4.275f,0}},
+    {{-1.284f,4.500f,0}, {-1.462f,3.135f,0}, {-0.024f,5.057f,0},
+     {-0.298f,2.407f,0}, {0.994f,2.897f,0}, {1.106f,4.338f,0}},
+    {{-1.284f,4.500f,0}, {-1.462f,3.131f,0}, {-0.024f,5.053f,0},
+     {-0.302f,2.397f,0}, {0.989f,2.884f,0}, {1.089f,4.311f,0}},
+};
+
 static vec3_t normalize_or_zero(vec3_t v) {
     const float len = vec3_length(v);
     return len > 1.0e-6f ? vec3_mul1(v, 1.0f / len) : vec3_zero();
@@ -142,7 +159,8 @@ const char* quality_description(uint16_t flag) {
     case Quality_NoPairContacts: return "No canonical H-bond remains, or fewer than two canonical heavy-atom contacts without hydrogens";
     case Quality_NoncanonicalPair: return "Not a supported A-T/U or G-C pair, or canonical contact atoms are missing";
     case Quality_DegenerateNucleotide: return "Undefined nucleotide geometry (collinear torsion or zero-amplitude pucker phase)";
-    case Quality_UnusualBond: return "Warning: defining heavy-atom bond outside 1.0-2.1 Angstrom; finite measurement retained";
+    case Quality_UnusualBond: return "Warning: defining heavy-atom bond outside 1.0-2.1 Angstrom";
+    case Quality_ReferenceBondBreak: return "Curves+ torsion unavailable: defining bond exceeds 2.5 Angstrom";
     case Quality_PoorPuckerFit: return "Warning: sugar ring Fourier-fit RMS residual above 5 degrees; finite measurement retained";
     default: return "Good";
     }
@@ -572,7 +590,7 @@ std::string csv_sample(const CsvSample& s) {
         metric_uses_degrees(s.metric) ? "deg" : "Angstrom", s.value, std::isfinite(s.value) ? 1 : 0, s.quality);
     row += buf;
     std::string reason;
-    for (uint16_t bit = 1; bit <= Quality_Last; bit <<= 1) {
+    for (uint16_t bit = 1; bit && bit <= Quality_Last; bit <<= 1) {
         if (s.quality & bit) {
             if (!reason.empty()) reason += "; ";
             reason += quality_description(bit);
@@ -595,6 +613,87 @@ std::string csv_sample(const CsvSample& s) {
         s.reference_scope == Reference_HelixHistory ? "helix_history" : "own_history");
     row += std::string(buf)+csv_quote(s.reference_source)+"\n";
     return row;
+}
+
+const char* csv_curves_trajectory_header() {
+    return "run,frame,helix,quantity,member,level,x_displacement,y_displacement,inclination,tip,axis_bend,rise,twist,W12,D12,W21,D21,axis_quality,groove_quality\n";
+}
+
+std::string csv_curves_trajectory_frame(const std::string& run, const CurvesTrajectoryAnalysis& trajectory,
+                                        size_t frame, bool include_header) {
+    if (run.empty() || !trajectory.frames || frame >= trajectory.frames ||
+        trajectory.pair_axis.size() != trajectory.frames * trajectory.pairs ||
+        trajectory.step_axis.size() != trajectory.frames * trajectory.steps ||
+        trajectory.axis_quality.size() != trajectory.frames * trajectory.helices.size() ||
+        trajectory.groove_quality.size() != trajectory.frames * trajectory.helices.size() ||
+        trajectory.grooves.size() % trajectory.frames) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ trajectory CSV input");
+        return {};
+    }
+    const size_t groove_members = trajectory.grooves.size() / trajectory.frames;
+    std::string output;
+    if (include_header) output = csv_curves_trajectory_header();
+    auto number = [](float value) {
+        if (!std::isfinite(value)) return std::string{};
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "%.9g", value);
+        return std::string(buffer);
+    };
+    auto row = [&](size_t helix, const char* quantity, const std::string& member, const std::string& level,
+                   const std::string& x, const std::string& y, const std::string& inclination,
+                   const std::string& tip, const std::string& bend, const std::string& rise,
+                   const std::string& twist, const std::string& width12, const std::string& depth12,
+                   const std::string& width21, const std::string& depth21) {
+        const size_t quality = frame * trajectory.helices.size() + helix;
+        char indices[64];
+        snprintf(indices, sizeof(indices), ",%zu,%zu,", frame, helix + 1);
+        output += csv_quote(run) + indices + quantity + "," + csv_quote(member) + "," + level + "," +
+            x + "," + y + "," + inclination + "," + tip + "," + bend + "," + rise + "," + twist + "," +
+            width12 + "," + depth12 + "," + width21 + "," + depth21 + "," +
+            std::to_string(trajectory.axis_quality[quality]) + "," +
+            std::to_string(trajectory.groove_quality[quality]) + "\n";
+    };
+    for (size_t h = 0; h < trajectory.helices.size(); ++h) {
+        const auto& helix = trajectory.helices[h];
+        if (helix.pairs.size() < 2 || helix.steps.size() != helix.pairs.size() - 1 ||
+            helix.groove_offset > groove_members || helix.groove_count > groove_members - helix.groove_offset) {
+            MD_LOG_ERROR("Lavery: invalid Curves+ helix layout in trajectory CSV");
+            return {};
+        }
+        for (size_t i = 0; i < helix.pairs.size(); ++i) {
+            const size_t pair = helix.pairs[i];
+            if (pair >= trajectory.pairs) {
+                MD_LOG_ERROR("Lavery: invalid pair index in Curves+ trajectory CSV");
+                return {};
+            }
+            const auto& v = trajectory.pair_axis[frame * trajectory.pairs + pair];
+            const std::string label = helix.pair_labels.size() == helix.pairs.size()
+                ? helix.pair_labels[i] : "bp_" + std::to_string(pair + 1);
+            row(h, "pair_axis", label, "",
+                number(v.x_displacement), number(v.y_displacement), number(v.inclination),
+                number(v.tip), number(v.axis_bend), "", "", "", "", "", "");
+        }
+        for (size_t i = 0; i < helix.steps.size(); ++i) {
+            const size_t step = helix.steps[i];
+            if (step >= trajectory.steps) {
+                MD_LOG_ERROR("Lavery: invalid step index in Curves+ trajectory CSV");
+                return {};
+            }
+            const auto& v = trajectory.step_axis[frame * trajectory.steps + step];
+            const std::string label = helix.step_labels.size() == helix.steps.size()
+                ? helix.step_labels[i] : "step_" + std::to_string(helix.pairs[i] + 1) + "_" +
+                    std::to_string(helix.pairs[i + 1] + 1);
+            row(h, "inter_axis", label, "",
+                "", "", "", "", "", number(v.rise), number(v.twist), "", "", "", "");
+        }
+        for (size_t i = 0; i < helix.groove_count; ++i) {
+            const auto& v = trajectory.grooves[frame * groove_members + helix.groove_offset + i];
+            row(h, "groove", "sample_" + std::to_string(i + 1), number(v.level),
+                "", "", "", "", "", "", "", number(v.width12), number(v.depth12),
+                number(v.width21), number(v.depth21));
+        }
+    }
+    return output;
 }
 
 double sample_cell_edge(size_t edge, const float* times, size_t count) {
@@ -831,6 +930,71 @@ bool extract_base_frames(std::vector<BaseFrame>& out, const md_system_t&, const 
         const vec3_t x = vec3_cross(y, normal);
         BaseFrame frame = {vec3_add(nitrogen, vec3_mul1(offset, 4.702f)),
                            x, y, normal, base.component, base.strand, origin};
+        frame.groove_reference = fitted(3);
+        if (valid_frame(frame)) {
+            out[i] = frame;
+            if (quality) (*quality)[i] = Quality_Good;
+        }
+    }
+    return true;
+}
+
+bool extract_3dna_base_frames(std::vector<BaseFrame>& out, const md_system_t& sys,
+                              const md_system_state_t& state, const std::vector<BaseTopology>& topology,
+                              std::vector<uint16_t>* quality) {
+    out.assign(topology.size(), BaseFrame{});
+    if (quality) quality->assign(topology.size(), Quality_DegenerateBase);
+    for (size_t i = 0; i < topology.size(); ++i) {
+        const auto& base = topology[i];
+        if (base.reference < 0 || (size_t)base.reference >= std::size(references)) {
+            if (quality) (*quality)[i] = Quality_UnsupportedBase;
+            continue;
+        }
+        const size_t count = references[base.reference].count - 1;
+        if (base.ring.size() < 3 || base.atoms.empty() || base.fit_atoms.size() != count + 1) {
+            if (quality) (*quality)[i] = Quality_MissingAtoms;
+            continue;
+        }
+        size_t ref_index = (size_t)base.reference;
+        if (ref_index == 3) {
+            const md_str_t residue = md_system_residue_name(&sys, base.component);
+            std::string name(residue.ptr, residue.len);
+            if (name.size() > 1 && (name.back() == '3' || name.back() == '5')) name.pop_back();
+            if (name == "U" || name == "RU" || name == "DU" || name == "URA") ref_index = 4;
+            else if (name != "T" && name != "RT" && name != "DT" && name != "THY") {
+                if (quality) (*quality)[i] = Quality_UnsupportedBase;
+                continue;
+            }
+        }
+        const vec3_t anchor = md_state_coord(&state, base.ring[0]);
+        auto position = [&](uint32_t atom) {
+            vec3_t delta = vec3_sub(md_state_coord(&state, atom), anchor);
+            md_util_min_image_vec3(&delta, 1, &state.unitcell);
+            return vec3_add(anchor, delta);
+        };
+        vec3_t center = {};
+        for (uint32_t atom : base.atoms) center = vec3_add(center, position(atom));
+        center = vec3_mul1(center, 1.0f / (float)base.atoms.size());
+        vec3_t actual[9] = {}, centers[2] = {};
+        bool finite = true;
+        for (size_t k = 0; k < count; ++k) {
+            actual[k] = position(base.fit_atoms[k + 1]);
+            finite &= std::isfinite(actual[k].x) && std::isfinite(actual[k].y) && std::isfinite(actual[k].z);
+            centers[0] = vec3_add(centers[0], dna_references[ref_index][k]);
+            centers[1] = vec3_add(centers[1], actual[k]);
+        }
+        if (!finite) {
+            if (quality) (*quality)[i] = Quality_NonfiniteCoordinates;
+            continue;
+        }
+        if (vec3_length(vec3_cross(vec3_sub(actual[0], actual[1]), vec3_sub(actual[2], actual[1]))) < 1.0e-4f) continue;
+        centers[0] = vec3_mul1(centers[0], 1.0f / (float)count);
+        centers[1] = vec3_mul1(centers[1], 1.0f / (float)count);
+        const vec3_t* coords[] = {dna_references[ref_index], actual};
+        const mat3_t fit = mat3_transpose(mat3_optimal_rotation(coords, nullptr, nullptr, count, centers));
+        BaseFrame frame = {vec3_sub(centers[1], mat3_mul_vec3(fit, centers[0])),
+                           mat3_mul_vec3(fit, {1, 0, 0}), mat3_mul_vec3(fit, {0, 1, 0}),
+                           mat3_mul_vec3(fit, {0, 0, 1}), base.component, base.strand, center};
         if (valid_frame(frame)) {
             out[i] = frame;
             if (quality) (*quality)[i] = Quality_Good;
@@ -981,6 +1145,322 @@ bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, B
     return true;
 }
 
+std::vector<int8_t> curves_pair_inversions(const std::vector<BasePairFrame>& frames,
+    const std::vector<uint8_t>& valid, const std::vector<StepIndex>& steps, const md_unitcell_t* cell) {
+    std::vector<int8_t> inverted(frames.size(), -1);
+    if (valid.size() != frames.size()) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ inversion frame validity");
+        return inverted;
+    }
+    for (const auto& chain : helix_chains(frames.size(), steps)) {
+        for (size_t i = 0; i + 1 < chain.size(); ++i) {
+            const auto a = chain[i], b = chain[i + 1];
+            if (!valid[a] || !valid[b]) continue;
+            vec3_t delta = vec3_sub(frames[b].origin, frames[a].origin);
+            if (cell) md_util_min_image_vec3(&delta, 1, cell);
+            const float dot = vec3_dot(delta, frames[b].z);
+            if (std::isfinite(dot)) inverted[a] = dot < 0.0f;
+        }
+        inverted[chain.back()] = inverted[chain[chain.size() - 2]];
+    }
+    return inverted;
+}
+
+bool curves_duplex_axis(std::vector<CurvesAxisPoint>* out, const std::vector<BaseFrame>& strand1,
+                        const std::vector<BaseFrame>& strand2, const std::vector<BasePairFrame>& midpoints) {
+    if (!out || midpoints.size() < 2 || strand1.size() != midpoints.size() || strand2.size() != midpoints.size()) {
+        MD_LOG_ERROR("Lavery: invalid input for duplex axis");
+        return false;
+    }
+    const size_t n = midpoints.size();
+    auto finite = [](vec3_t v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    std::vector<vec3_t> directions(n), points(n);
+    std::vector<size_t> counts(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        const auto& m = midpoints[i];
+        if (!valid_frame({m.origin, m.x, m.y, m.z}) || !valid_frame(strand1[i]) || !valid_frame(strand2[i]))
+            return false;
+    }
+    for (size_t i = 0; i + 1 < n; ++i) {
+        for (const auto* strand : {&strand1, &strand2}) {
+            const BaseFrame& a = (*strand)[i];
+            const BaseFrame& b = (*strand)[i+1];
+            const vec3_t skew = vec3_mul1(vec3_add(vec3_add(vec3_cross(a.x, b.x),
+                vec3_cross(a.y, b.y)), vec3_cross(a.z, b.z)), 0.5f);
+            const float sine = vec3_length(skew);
+            const float cosine = std::clamp((vec3_dot(a.x, b.x) + vec3_dot(a.y, b.y) +
+                                            vec3_dot(a.z, b.z) - 1.0f) * 0.5f, -1.0f, 1.0f);
+            // A vanishing or half-turn rotation does not define a numerically stable screw axis.
+            if (sine < 1.0e-6f || cosine < -0.999999f) return false;
+            const vec3_t axis = vec3_div1(skew, sine);
+            const vec3_t displacement = vec3_sub(b.origin, a.origin);
+            const vec3_t perpendicular = vec3_sub(displacement, vec3_mul1(axis, vec3_dot(displacement, axis)));
+            const float cotangent = (1.0f + cosine) / sine;
+            const vec3_t point = vec3_add(vec3_mul1(vec3_add(a.origin, b.origin), 0.5f),
+                                           vec3_mul1(vec3_cross(axis, perpendicular), 0.5f * cotangent));
+            if (!finite(axis) || !finite(point)) return false;
+            for (size_t j : {i, i+1}) {
+                directions[j] = vec3_add(directions[j], axis);
+                points[j] = vec3_add(points[j], vec3_add(point,
+                    vec3_mul1(axis, vec3_dot(vec3_sub(midpoints[j].origin, point), axis))));
+                ++counts[j];
+            }
+        }
+    }
+    std::vector<CurvesAxisPoint> local(n);
+    for (size_t i = 0; i < n; ++i) {
+        const vec3_t direction = normalize_or_zero(directions[i]);
+        if (vec3_length(direction) < 0.5f || !counts[i]) return false;
+        const vec3_t mean = vec3_div1(points[i], (float)counts[i]);
+        local[i] = {vec3_add(mean, vec3_mul1(direction, vec3_dot(vec3_sub(midpoints[i].origin, mean), direction))),
+                    direction};
+        if (!finite(local[i].origin)) return false;
+    }
+    std::vector<CurvesAxisPoint> result(n);
+    for (size_t i = 0; i < n; ++i) {
+        vec3_t direction = {}, point = {};
+        float weight_sum = 0;
+        const size_t first = i > 4 ? i - 4 : 0;
+        const size_t last = std::min(n - 1, i + 4);
+        for (size_t j = first; j <= last; ++j) {
+            const float offset = (float)((int64_t)j - (int64_t)i);
+            const float weight = 1.0f - offset * offset / 25.0f;
+            direction = vec3_add(direction, vec3_mul1(local[j].direction, weight));
+            const vec3_t projected = vec3_add(local[j].origin, vec3_mul1(local[j].direction,
+                vec3_dot(vec3_sub(midpoints[i].origin, local[j].origin), local[j].direction)));
+            point = vec3_add(point, vec3_mul1(projected, weight));
+            weight_sum += weight;
+        }
+        direction = normalize_or_zero(direction);
+        if (vec3_length(direction) < 0.5f || weight_sum <= 0) return false;
+        point = vec3_div1(point, weight_sum);
+        result[i] = {vec3_add(point, vec3_mul1(direction,
+            vec3_dot(vec3_sub(midpoints[i].origin, point), direction))), direction};
+        if (!finite(result[i].origin)) return false;
+    }
+    *out = std::move(result);
+    return true;
+}
+
+static bool aligned_curves_axis_frame(BasePairFrame* out, vec3_t* rotation,
+                                       const BasePairFrame& m, const CurvesAxisPoint& a) {
+    const float length = vec3_length(a.direction);
+    if (!valid_frame({m.origin, m.x, m.y, m.z}) ||
+        !std::isfinite(a.origin.x) || !std::isfinite(a.origin.y) || !std::isfinite(a.origin.z) ||
+        !std::isfinite(length) || std::fabs(length - 1.0f) > 1.0e-3f) return false;
+    const vec3_t cross = vec3_cross(m.z, a.direction);
+    const float sine = vec3_length(cross);
+    const float cosine = std::clamp(vec3_dot(m.z, a.direction), -1.0f, 1.0f);
+    if (sine < 1e-6f && cosine < 0) return false;
+    const float angle = std::atan2(sine, cosine);
+    const vec3_t hinge = sine > 1e-6f ? vec3_div1(cross, sine) : vec3_t{1, 0, 0};
+    const vec3_t x = angle > 1e-6f ? quat_mul_vec3(quat_axis_angle(hinge, angle), m.x) : m.x;
+    *out = {a.origin, x, vec3_cross(a.direction, x), a.direction};
+    *rotation = vec3_mul1(hinge, -angle * RAD_TO_DEG);
+    return true;
+}
+
+bool curves_pair_axis_parameters(std::vector<CurvesPairAxisParameters>* out,
+                                 const std::vector<BasePairFrame>& midpoints,
+                                 const std::vector<CurvesAxisPoint>& axis,
+                                 const std::vector<int8_t>& inversions) {
+    if (!out || midpoints.empty() || axis.size() != midpoints.size() || inversions.size() != midpoints.size()) {
+        MD_LOG_ERROR("Lavery: invalid input for pair-axis parameters");
+        return false;
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::vector<CurvesPairAxisParameters> result;
+    result.reserve(midpoints.size());
+    for (size_t i = 0; i < midpoints.size(); ++i) {
+        const auto& m = midpoints[i];
+        const auto& a = axis[i];
+        BasePairFrame frame;
+        vec3_t rotation;
+        if (inversions[i] < 0 || inversions[i] > 1 || !aligned_curves_axis_frame(&frame, &rotation, m, a))
+            return false;
+        const vec3_t delta = vec3_sub(m.origin, a.origin);
+        CurvesPairAxisParameters p = {vec3_dot(delta, frame.x), vec3_dot(delta, frame.y),
+                                      vec3_dot(rotation, frame.x), vec3_dot(rotation, frame.y), nan};
+        if (inversions[i]) {
+            p.x_displacement = -p.x_displacement;
+            p.inclination = -p.inclination;
+            p.tip = (float)wrap_degrees((double)p.tip - 180.0);
+        }
+        if (i) {
+            const float dot = std::clamp(vec3_dot(axis[i-1].direction, a.direction), -1.0f, 1.0f);
+            p.axis_bend = std::acos(dot) * RAD_TO_DEG;
+        }
+        if (!std::isfinite(p.x_displacement) || !std::isfinite(p.y_displacement) ||
+            !std::isfinite(p.inclination) || !std::isfinite(p.tip) ||
+            (i && !std::isfinite(p.axis_bend))) return false;
+        result.push_back(p);
+    }
+    *out = std::move(result);
+    return true;
+}
+
+bool curves_step_axis_parameters(std::vector<CurvesStepAxisParameters>* out,
+                                 const std::vector<BasePairFrame>& midpoints,
+                                 const std::vector<CurvesAxisPoint>& axis,
+                                 const std::vector<int8_t>& inversions) {
+    if (!out || midpoints.size() < 2 || axis.size() != midpoints.size() || inversions.size() != midpoints.size()) {
+        MD_LOG_ERROR("Lavery: invalid input for inter-axis parameters");
+        return false;
+    }
+    std::vector<BasePairFrame> frames(midpoints.size());
+    for (size_t i = 0; i < frames.size(); ++i) {
+        vec3_t rotation;
+        if (inversions[i] < 0 || inversions[i] > 1 ||
+            !aligned_curves_axis_frame(&frames[i], &rotation, midpoints[i], axis[i])) return false;
+    }
+    std::vector<CurvesStepAxisParameters> result;
+    result.reserve(frames.size() - 1);
+    for (size_t i = 0; i + 1 < frames.size(); ++i) {
+        const auto& a = frames[i];
+        const auto& b = frames[i+1];
+        BasePairFrame frame;
+        float translation[3], rotation[3];
+        if (!rigid_parameters(&frame, translation, rotation,
+                              {a.origin, a.x, a.y, a.z}, {b.origin, b.x, b.y, b.z})) return false;
+        const float sign = inversions[i] ? -1.0f : 1.0f;
+        result.push_back({sign * translation[2], (float)wrap_degrees(sign * rotation[2])});
+    }
+    *out = std::move(result);
+    return true;
+}
+
+bool curves_groove_backbone(std::vector<vec3_t>* out, const std::vector<vec3_t>& phosphates) {
+    if (!out || phosphates.size() < 3) {
+        MD_LOG_ERROR("Lavery: invalid input for groove backbone");
+        return false;
+    }
+    auto finite = [](vec3_t v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    const size_t n = phosphates.size();
+    for (const auto& p : phosphates) if (!finite(p)) {
+        MD_LOG_ERROR("Lavery: nonfinite phosphate for groove backbone");
+        return false;
+    }
+    std::vector<vec3_t> tangents(n);
+    for (size_t i = 1; i + 1 < n; ++i) {
+        const vec3_t u = vec3_sub(phosphates[i], phosphates[i-1]);
+        const vec3_t v = vec3_sub(phosphates[i+1], phosphates[i-1]);
+        const vec3_t normal = vec3_cross(u, v);
+        const float normal2 = vec3_dot(normal, normal);
+        if (!std::isfinite(normal2) || normal2 < 1e-10f) {
+            MD_LOG_ERROR("Lavery: degenerate phosphate geometry for groove backbone");
+            return false;
+        }
+        const vec3_t center = vec3_add(phosphates[i-1], vec3_div1(
+            vec3_add(vec3_mul1(vec3_cross(v, normal), vec3_dot(u, u)),
+                     vec3_mul1(vec3_cross(normal, u), vec3_dot(v, v))), 2.0f * normal2));
+        auto tangent = [&](size_t index) {
+            return normalize_or_zero(vec3_cross(normal, vec3_sub(phosphates[index], center)));
+        };
+        tangents[i] = tangent(i);
+        if (i == 1) tangents[0] = tangent(0);
+        if (i + 2 == n) tangents[n-1] = tangent(n-1);
+    }
+    std::vector<vec3_t> result;
+    result.reserve((n - 1) * 10 + 1);
+    for (size_t i = 0; i + 1 < n; ++i) {
+        const vec3_t a = phosphates[i], b = phosphates[i+1];
+        const float length = vec3_length(vec3_sub(b, a));
+        if (!std::isfinite(length) || length < 1e-6f ||
+            vec3_length(tangents[i]) < 0.5f || vec3_length(tangents[i+1]) < 0.5f) {
+            MD_LOG_ERROR("Lavery: invalid phosphate interval for groove backbone");
+            return false;
+        }
+        for (int j = 0; j < 10; ++j) {
+            const float t = (float)j / 10.0f, t2 = t*t, t3 = t2*t;
+            const vec3_t p = vec3_add(
+                vec3_add(vec3_mul1(a, 2*t3 - 3*t2 + 1), vec3_mul1(b, -2*t3 + 3*t2)),
+                vec3_add(vec3_mul1(tangents[i], length * (t3 - 2*t2 + t)),
+                         vec3_mul1(tangents[i+1], length * (t3 - t2))));
+            if (!finite(p)) {
+                MD_LOG_ERROR("Lavery: nonfinite interpolated groove backbone");
+                return false;
+            }
+            result.push_back(p);
+        }
+    }
+    result.push_back(phosphates.back());
+    *out = std::move(result);
+    return true;
+}
+
+bool curves_grooves(std::vector<CurvesGrooveSample>* out,
+                    const std::vector<vec3_t>& backbone1, const std::vector<vec3_t>& backbone2,
+                    const std::vector<BasePairFrame>& midpoints, const std::vector<CurvesAxisPoint>& axis,
+                    const std::vector<vec3_t>& depth1, const std::vector<vec3_t>& depth2) {
+    const size_t n = midpoints.size();
+    if (!out || n < 4 || axis.size() != n || depth1.size() != n || depth2.size() != n ||
+        backbone1.size() != (n - 2) * 10 + 1 || backbone2.size() != backbone1.size()) {
+        MD_LOG_ERROR("Lavery: invalid input for Curves+ groove analysis");
+        return false;
+    }
+    auto finite = [](vec3_t v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    for (const auto* backbone : {&backbone1, &backbone2})
+        for (vec3_t p : *backbone) if (!finite(p)) {
+            MD_LOG_ERROR("Lavery: nonfinite Curves+ groove backbone");
+            return false;
+        }
+    std::vector<BasePairFrame> axis_frames(n);
+    for (size_t i = 0; i < n; ++i) {
+        vec3_t unused;
+        if (!finite(depth1[i]) || !finite(depth2[i]) ||
+            !aligned_curves_axis_frame(&axis_frames[i], &unused, midpoints[i], axis[i])) {
+            MD_LOG_ERROR("Lavery: invalid Curves+ groove depth reference or axis frame");
+            return false;
+        }
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const int64_t count = (int64_t)backbone1.size();
+    std::vector<CurvesGrooveSample> result;
+    result.reserve(2 * n - 3);
+    for (size_t q = 0; q < 2 * n - 3; ++q) {
+        const bool pair_level = (q % 2) != 0;
+        const size_t lower = pair_level ? (q + 1) / 2 : q / 2;
+        vec3_t axis_origin = axis_frames[lower].origin;
+        vec3_t dyad = axis_frames[lower].x;
+        vec3_t base_center = vec3_mul1(vec3_add(depth1[lower], depth2[lower]), 0.5f);
+        if (!pair_level) {
+            axis_origin = vec3_mul1(vec3_add(axis_origin, axis_frames[lower+1].origin), 0.5f);
+            dyad = normalize_or_zero(vec3_add(dyad, axis_frames[lower+1].x));
+            base_center = vec3_mul1(vec3_add(base_center,
+                vec3_mul1(vec3_add(depth1[lower+1], depth2[lower+1]), 0.5f)), 0.5f);
+            if (vec3_length(dyad) < 0.5f) {
+                MD_LOG_ERROR("Lavery: degenerate Curves+ groove dyad");
+                return false;
+            }
+        }
+        CurvesGrooveSample sample = {1.5f + 0.5f * (float)q, nan, nan, nan, nan};
+        float best[2] = {100.0f, 100.0f};
+        const int64_t center = (int64_t)q * 5;
+        for (int64_t i = center - 50; i <= center + 50; ++i) {
+            const int64_t j = 2 * center - i;
+            if (i < 2 || j < 2 || i >= count - 2 || j >= count - 2) continue;
+            auto distance = [&](int64_t a, int64_t b) {
+                return vec3_length(vec3_sub(backbone1[(size_t)a], backbone2[(size_t)b]));
+            };
+            const float width = distance(i, j);
+            if (!(width < distance(i-1, j+1) && width < distance(i+1, j-1)) || width - 5.8f >= 52.0f)
+                continue;
+            const vec3_t center_point = vec3_mul1(vec3_add(backbone1[(size_t)i], backbone2[(size_t)j]), 0.5f);
+            const float side = vec3_dot(vec3_sub(center_point, axis_origin), vec3_mul1(dyad, -1.0f));
+            if (side == 0) continue;
+            const int which = side > 0 ? 0 : 1;
+            if (width >= best[which]) continue;
+            best[which] = width;
+            const float depth = vec3_length(vec3_sub(center_point, base_center)) - 3.5f;
+            if (which == 0) { sample.width12 = width - 5.8f; sample.depth12 = depth; }
+            else { sample.width21 = width - 5.8f; sample.depth21 = depth; }
+        }
+        result.push_back(sample);
+    }
+    *out = std::move(result);
+    return true;
+}
+
 bool landmark_frames(std::vector<BasePairFrame>& pair_frames, std::vector<BasePairFrame>& step_frames,
                      const std::vector<BaseFrame>& bases, const std::vector<Pair>& pairs,
                      const std::vector<StepIndex>& steps, const md_unitcell_t* cell) {
@@ -1034,6 +1514,35 @@ static float signed_angle(vec3_t a, vec3_t b, vec3_t reference) {
     return std::atan2(vec3_dot(vec3_cross(a, b), reference), vec3_dot(a, b));
 }
 
+bool compute_3dna_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, BasePairFrame* midpoint) {
+    if (!out) return false;
+    const BaseFrame fa = {a.origin, a.x, a.y, a.z}, fb = {b.origin, b.x, b.y, b.z};
+    if (!valid_frame(fa) || !valid_frame(fb)) return false;
+    const vec3_t hinge_raw = vec3_cross(a.z, b.z);
+    const float sine = vec3_length(hinge_raw);
+    const float cosine = std::clamp(vec3_dot(a.z, b.z), -1.0f, 1.0f);
+    if (sine < 1.0e-6f && cosine < 0.0f) return false;
+    const float bend = std::atan2(sine, cosine);
+    const vec3_t hinge = sine >= 1.0e-6f ? vec3_mul1(hinge_raw, 1.0f / sine) : a.x;
+    const vec3_t z = normalize_or_zero(rotate_about(b.z, hinge, -0.5f * bend));
+    const vec3_t y1 = rotate_about(a.y, hinge, 0.5f * bend);
+    const vec3_t y2 = rotate_about(b.y, hinge, -0.5f * bend);
+    const float twist = signed_angle(y1, y2, z);
+    const vec3_t y = normalize_or_zero(rotate_about(y1, z, 0.5f * twist));
+    const vec3_t x = normalize_or_zero(vec3_cross(y, z));
+    const vec3_t delta = vec3_sub(b.origin, a.origin);
+    const float phi = bend > 1.0e-6f ? signed_angle(hinge, y, z) : 0.0f;
+    out->metric[Shift] = vec3_dot(delta, x);
+    out->metric[Slide] = vec3_dot(delta, y);
+    out->metric[Rise] = vec3_dot(delta, z);
+    out->metric[Tilt] = bend * std::sin(phi) * RAD_TO_DEG;
+    out->metric[Roll] = bend * std::cos(phi) * RAD_TO_DEG;
+    out->metric[Twist] = twist * RAD_TO_DEG;
+    if (midpoint) *midpoint = {vec3_mul1(vec3_add(a.origin, b.origin), 0.5f), x, y, z};
+    compute_helical_step(out, a, b);
+    return true;
+}
+
 bool compute_helical_step(Values* out, const BasePairFrame& a, const BasePairFrame& b,
                           BasePairFrame* helical, vec3_t axis_points[2]) {
     if (!out) return false;
@@ -1052,9 +1561,9 @@ bool compute_helical_step(Values* out, const BasePairFrame& a, const BasePairFra
     axis = vec3_div1(axis, length);
     // Rotate each pair frame about its hinge so that its z coincides with the axis.
     auto align = [&](const BasePairFrame& f, vec3_t* x, vec3_t* y, vec3_t* hinge) {
-        const float tip_inclination = std::acos(std::clamp(vec3_dot(axis, f.z), -1.0f, 1.0f));
         *hinge = vec3_cross(axis, f.z);
         const float h = vec3_length(*hinge);
+        const float tip_inclination = std::atan2(h, vec3_dot(axis, f.z));
         if (h < 1.0e-6f) { *x = f.x; *y = f.y; *hinge = {}; return 0.0f; }
         *hinge = vec3_div1(*hinge, h);
         *x = rotate_about(f.x, *hinge, -tip_inclination);
@@ -1170,6 +1679,19 @@ const char* class_csv_name(int cls) {
     return cls >= 0 && cls < Class_Count ? names[cls] : "";
 }
 
+uint32_t convention_available_metric_mask(AnalysisConvention convention) {
+    switch (convention) {
+    case AnalysisConvention::LegacyMixed:
+    case AnalysisConvention::ThreeDna:
+        return ALL_METRIC_PARAMETERS;
+    case AnalysisConvention::Curves:
+        return ALL_METRIC_PARAMETERS & ~HELICAL_PARAMETERS &
+            ~(1u << MinorGroove) & ~(1u << MajorGroove);
+    }
+    MD_LOG_ERROR("Lavery: unknown analysis convention for metric availability");
+    return 0;
+}
+
 int metric_state_count(Metric metric) {
     switch (metric) {
     case Phase: case EpsilonZeta: case Chi: return 2;
@@ -1241,8 +1763,26 @@ void pseudorotation(const float nu[5], float* phase, float* amplitude) {
     if (amplitude) *amplitude = (float)(std::sqrt(y * y + x * x) / (2.0 * (std::sin(36.0 * rad) + std::sin(72.0 * rad))));
 }
 
-void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell,
-                        NucleotideQuality* quality, uint32_t present_atoms) {
+void fourier_pseudorotation(const float nu[5], float* phase, float* amplitude) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    if (phase) *phase = nan;
+    if (amplitude) *amplitude = nan;
+    for (int i = 0; i < 5; ++i) if (!std::isfinite(nu[i])) return;
+    constexpr double rad = 3.14159265358979323846 / 180.0;
+    double a = 0, b = 0;
+    for (int j = 0; j < 5; ++j) {
+        a += 0.4 * nu[j] * std::cos(144.0 * (j - 2) * rad);
+        b -= 0.4 * nu[j] * std::sin(144.0 * (j - 2) * rad);
+    }
+    double p = std::atan2(b, a) / rad;
+    if (p < 0) p += 360.0;
+    if (phase) *phase = (float)p;
+    if (amplitude) *amplitude = (float)std::hypot(a, b);
+}
+
+static void compute_nucleotide_impl(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell,
+                                    NucleotideQuality* quality, uint32_t present_atoms, PuckerDefinition pucker,
+                                    bool curves_zero_phase) {
     if (!out || !atoms) return;
     NucleotideQuality flags = {};
     auto t = [&](uint16_t& q, int a, int b, int c, int d) {
@@ -1273,7 +1813,8 @@ void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unit
         t(ring_quality, BB_C1, BB_C2, BB_C3, BB_C4), t(ring_quality, BB_C2, BB_C3, BB_C4, BB_O4),
         t(ring_quality, BB_C3, BB_C4, BB_O4, BB_C1),
     };
-    pseudorotation(nu, &out->metric[Phase], &out->metric[Amplitude]);
+    if (pucker == Pucker_Fourier) fourier_pseudorotation(nu, &out->metric[Phase], &out->metric[Amplitude]);
+    else pseudorotation(nu, &out->metric[Phase], &out->metric[Amplitude]);
     if (std::isfinite(out->metric[Amplitude])) {
         double a = 0, b = 0;
         constexpr double rad = 3.14159265358979323846/180.0;
@@ -1289,7 +1830,8 @@ void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unit
         if (std::sqrt(residual2/5) > 5.0) ring_quality |= Quality_PoorPuckerFit;
     }
     flags[Phase-Alpha] = flags[Amplitude-Alpha] = ring_quality;
-    if (out->metric[Amplitude] < 1e-4f) {
+    if (curves_zero_phase && out->metric[Amplitude] == 0.0f) out->metric[Phase] = 0.0f;
+    if (!curves_zero_phase && out->metric[Amplitude] < 1e-4f) {
         out->metric[Phase] = std::numeric_limits<float>::quiet_NaN();
         flags[Phase-Alpha] |= Quality_DegenerateNucleotide;
     }
@@ -1300,7 +1842,86 @@ void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unit
     if (quality) *quality = flags;
 }
 
-void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p2, size_t n, const md_unitcell_t* cell) {
+void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell,
+                        NucleotideQuality* quality, uint32_t present_atoms, PuckerDefinition pucker) {
+    compute_nucleotide_impl(out, atoms, cell, quality, present_atoms, pucker, false);
+}
+
+void compute_curves_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell,
+                               NucleotideQuality* quality, uint32_t present_atoms,
+                               bool previous_selected, bool next_selected) {
+    if (!out || !atoms) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ nucleotide input");
+        return;
+    }
+    if (!previous_selected) present_atoms &= ~(1u << BB_PrevO3);
+    if (!next_selected) present_atoms &= ~((1u << BB_NextP) | (1u << BB_NextO5));
+    NucleotideQuality flags;
+    compute_nucleotide_impl(out, atoms, cell, &flags, present_atoms, Pucker_Fourier, true);
+    BaseTopology slots;
+    for (int k = 0; k < BB_Count; ++k) slots.backbone[k] = k;
+    for (int id = Alpha; id <= (int)Chi; ++id) {
+        const auto indices = nucleotide_torsion_atoms(slots, (Metric)id);
+        for (size_t j = 1; j < indices.size(); ++j) {
+            const int a = indices[j-1], b = indices[j];
+            if ((present_atoms & (1u << a)) && (present_atoms & (1u << b)) &&
+                finite3(atoms[a]) && finite3(atoms[b]) && vec3_length(bond(atoms[a], atoms[b], cell)) > 2.5f) {
+                flags[id-Alpha] |= Quality_ReferenceBondBreak;
+                out->metric[id] = std::numeric_limits<float>::quiet_NaN();
+                break;
+            }
+        }
+    }
+    if (!std::isfinite(out->metric[Epsilon]) || !std::isfinite(out->metric[Zeta]))
+        out->metric[EpsilonZeta] = std::numeric_limits<float>::quiet_NaN();
+    flags[EpsilonZeta-Alpha] = flags[Epsilon-Alpha] | flags[Zeta-Alpha];
+    if (quality) *quality = flags;
+}
+
+bool groove_span(vec3_t* delta, const vec3_t* p1, const vec3_t* p2, const vec3_t* c1, const vec3_t* c2,
+                 size_t n, size_t i, size_t j, const md_unitcell_t* cell) {
+    if (!delta || !p1 || !p2 || i >= n || j >= n || !finite3(p1[i]) || !finite3(p2[j])) return false;
+    if (!cell || !(cell->flags & MD_UNITCELL_PBC_ALL)) {
+        *delta = vec3_sub(p2[j], p1[i]);
+        return true;
+    }
+    if (!c1 || !c2) return false;
+    const int direction = i <= j ? 1 : -1;
+    bool found = false;
+    vec3_t span = {};
+    for (size_t k = i;; k = (size_t)((long)k + direction)) {
+        if (finite3(p1[k]) && finite3(p2[k]) && finite3(c1[k]) && finite3(c2[k])) {
+            vec3_t result = {};
+            bool valid = true;
+            for (size_t m = i; m != k; m = (size_t)((long)m + direction)) {
+                const size_t next = (size_t)((long)m + direction);
+                if (!finite3(p1[m]) || !finite3(p1[next])) { valid = false; break; }
+                result = vec3_add(result, bond(p1[m], p1[next], cell));
+            }
+            if (valid) {
+                result = vec3_add(result, bond(p1[k], c1[k], cell));
+                result = vec3_add(result, bond(c1[k], c2[k], cell));
+                result = vec3_add(result, bond(c2[k], p2[k], cell));
+                for (size_t m = k; m != j; m = (size_t)((long)m + direction)) {
+                    const size_t next = (size_t)((long)m + direction);
+                    if (!finite3(p2[m]) || !finite3(p2[next])) { valid = false; break; }
+                    result = vec3_add(result, bond(p2[m], p2[next], cell));
+                }
+                if (valid) {
+                    if (found && vec3_length(vec3_sub(result, span)) > 0.01f) return false;
+                    span = result;
+                    found = true;
+                }
+            }
+        }
+        if (k == j) break;
+    }
+    if (found) *delta = span;
+    return found;
+}
+
+void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p2, size_t n,
+                   const md_unitcell_t* cell, const vec3_t* c1, const vec3_t* c2, GrooveWidthPolicy policy) {
     if (!minor || !major || n < 2 || !p1 || !p2) return;
     const float nan = std::numeric_limits<float>::quiet_NaN();
     constexpr float offset = 5.8f; // phosphate van der Waals diameter, as in Curves / El Hassan & Calladine
@@ -1315,16 +1936,20 @@ void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p
     auto dist = [&](long i, long j) -> float {
         vec3_t a, b, a0, a1, b0, b1;
         if (!phosphate(p1, i, &a) || !phosphate(p2, j, &b)) return nan;
-        const vec3_t pp = bond(b, a, cell);
+        vec3_t pp;
+        if (!groove_span(&pp, p1, p2, c1, c2, n, (size_t)i - 1, (size_t)j - 1, cell)) return nan;
         const float direct = vec3_length(pp);
         if (!phosphate(p1, i - 1, &a0) || !phosphate(p1, i + 1, &a1) ||
-            !phosphate(p2, j - 1, &b0) || !phosphate(p2, j + 1, &b1)) return direct;
-        const vec3_t da = bond(a0, a1, cell), db = bond(b0, b1, cell);
+            !phosphate(p2, j - 1, &b0) || !phosphate(p2, j + 1, &b1))
+            return policy == Groove_3DnaRefined ? nan : direct;
+        const vec3_t da = vec3_add(bond(a0, a, cell), bond(a, a1, cell));
+        const vec3_t db = vec3_add(bond(b0, b, cell), bond(b, b1, cell));
         const float la = vec3_length(da), lb = vec3_length(db);
-        if (la < 1.0e-6f || lb < 1.0e-6f || direct < 1.0e-6f) return direct;
+        if (la < 1.0e-6f || lb < 1.0e-6f || direct < 1.0e-6f)
+            return policy == Groove_3DnaRefined ? nan : direct;
         const vec3_t mean = vec3_add(vec3_div1(da, la), vec3_div1(db, lb));
         const float lm = vec3_length(mean);
-        if (lm < 1.0e-6f) return direct;
+        if (lm < 1.0e-6f) return policy == Groove_3DnaRefined ? nan : direct;
         const float cosine = std::clamp(vec3_dot(mean, pp) / (lm * direct), -1.0f, 1.0f);
         return direct * std::sqrt(std::max(0.0f, 1.0f - cosine * cosine));
     };
@@ -1332,6 +1957,10 @@ void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p
         for (Metric metric : {MinorGroove, MajorGroove}) {
             const auto indices = groove_phosphate_indices(metric, s, n);
             float width = 0;
+            if (policy == Groove_3DnaRefined && (s < 3 || n - s < 5)) {
+                (metric == MinorGroove ? minor[s] : major[s]) = nan;
+                continue;
+            }
             for (size_t k = 0; k < indices.count; ++k) {
                 const auto& index = indices.indices[k];
                 width += dist(index[0] + 1, index[1] + 1);

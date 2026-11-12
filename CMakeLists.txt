@@ -366,6 +366,7 @@ endif()
 # files. On Linux this puts data under bin/, which suits a self-contained install prefix but not
 # a system-wide one; that would need a share/ lookup in the code as well.
 install(TARGETS viamd DESTINATION bin)
+install(FILES src/components/lavery/3dna-license.txt DESTINATION share/licenses/viamd)
 
 if (UNIX AND NOT APPLE)
     # Linux metadata
@@ -481,4 +482,3 @@ if (TARGET viamd_copy_basis)
         endif()
     endforeach()
 endif()
-

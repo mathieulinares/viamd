@@ -19,6 +19,7 @@
 #include <climits>
 #include <cstdio>
 #include <limits>
+#include <tuple>
 
 namespace lavery {
 bool workflow_reference_statistics(MetricStatistics* out, const std::vector<float>& current, size_t members,
@@ -283,6 +284,335 @@ bool load_external_reference(ExternalReference* out, const std::string& path, st
     result.fingerprint=std::to_string(fingerprint);
     *out = std::move(result);
     return true;
+}
+
+bool load_curves_geometry_reference(ExternalCurvesGeometryReference* out, const std::string& path,
+                                    std::string* error) {
+    if (!out) return fail(error,"Missing Curves+ geometry reference output");
+    *out = {};
+    if (error) error->clear();
+    std::ifstream input(path,std::ios::binary);
+    if (!input) return fail(error,"Cannot open Curves+ geometry CSV: "+path);
+    std::vector<std::string> row;
+    std::string parse_error;
+    if (!csv_record(input,row,parse_error)) return fail(error,"Cannot read Curves+ geometry CSV header: "+parse_error);
+    if (!row.empty() && row[0].starts_with("\xEF\xBB\xBF")) row[0].erase(0,3);
+    std::map<std::string,size_t> headers;
+    for (size_t i=0;i<row.size();++i)
+        if (!headers.emplace(row[i],i).second) return fail(error,"Duplicate CSV column: "+row[i]);
+    static const char* required[] = {"run","frame","helix","quantity","member","level",
+        "x_displacement","y_displacement","inclination","tip","axis_bend","rise","twist",
+        "W12","D12","W21","D21","axis_quality","groove_quality"};
+    for (const char* name : required)
+        if (!headers.count(name)) return fail(error,std::string("Missing Curves+ geometry CSV column: ")+name);
+    const size_t width=row.size();
+    uint64_t fingerprint=0x435552564553ULL;
+    auto hash_record=[&]() {
+        for (const auto& field : row) {
+            const size_t length=field.size();
+            fingerprint=md_hash64(&length,sizeof(length),fingerprint);
+            fingerprint=md_hash64(field.data(),field.size(),fingerprint);
+        }
+    };
+    hash_record();
+    static const char* quantity_columns[] = {"x_displacement","y_displacement","inclination","tip","axis_bend",
+        "rise","twist","W12","D12","W21","D21"};
+    ExternalCurvesGeometryReference result;
+    result.path=path;
+    std::map<std::tuple<size_t,std::string,int>,size_t> series_ids;
+    std::set<std::pair<size_t,size_t>> frame_series;
+    struct PendingSample {
+        size_t frame, series;
+        std::array<float,CurvesGeometryQuantity_Count> values;
+    };
+    std::vector<PendingSample> pending;
+    while (csv_record(input,row,parse_error)) {
+        if (row.size()==1 && row[0].empty()) continue;
+        if (row.size()!=width) return fail(error,"Curves+ geometry CSV record has wrong number of columns");
+        hash_record();
+        const auto get=[&](const char* name) -> const std::string& { return row[headers.at(name)]; };
+        if (get("run").empty()) return fail(error,"Curves+ geometry CSV has an empty run label");
+        if (!result.records) result.run=get("run");
+        if (get("run")!=result.run) return fail(error,"Curves+ geometry CSV contains multiple runs");
+        size_t frame=0, helix=0, axis_quality=0, groove_quality=0;
+        if (!unsigned_number(get("frame"),frame) || frame==SIZE_MAX ||
+            !unsigned_number(get("helix"),helix) || !helix ||
+            !unsigned_number(get("axis_quality"),axis_quality) || axis_quality>UINT16_MAX ||
+            !unsigned_number(get("groove_quality"),groove_quality) || groove_quality>UINT16_MAX)
+            return fail(error,"Invalid Curves+ geometry frame, helix or quality value");
+        const std::string& kind=get("quantity");
+        const int group=kind=="pair_axis" ? 0 : kind=="inter_axis" ? 1 : kind=="groove" ? 2 : -1;
+        if (group<0) return fail(error,"Unknown Curves+ geometry quantity group: "+kind);
+        float level=std::numeric_limits<float>::quiet_NaN();
+        if (group==2) {
+            const auto& text=get("level");
+            const auto parsed=std::from_chars(text.data(),text.data()+text.size(),level);
+            if (text.empty() || parsed.ec!=std::errc() || parsed.ptr!=text.data()+text.size() || !std::isfinite(level))
+                return fail(error,"Invalid groove level in Curves+ geometry CSV");
+        } else if (!get("level").empty()) return fail(error,"Unexpected level for non-groove Curves+ geometry row");
+        if (get("member").empty()) return fail(error,"Curves+ geometry CSV member label is empty");
+        auto [series_it,inserted]=series_ids.emplace(std::make_tuple(helix,get("member"),group),result.series.size());
+        if (inserted) {
+            CurvesGeometryReferenceSeries series;
+            series.helix=helix;
+            series.category=group;
+            series.member=get("member");
+            series.level=level;
+            result.series.push_back(std::move(series));
+        }
+        const size_t series_id=series_it->second;
+        auto& series=result.series[series_id];
+        if (group==2) {
+            if (!std::isfinite(series.level) || std::fabs(series.level-level)>1.0e-5f)
+                return fail(error,"Curves+ groove member level changes within the CSV");
+        } else if (std::isfinite(series.level)) return fail(error,"Curves+ member category changes within the CSV");
+        if (!frame_series.emplace(frame,series_id).second)
+            return fail(error,"Duplicate Curves+ geometry sample (frame/helix/member)");
+        const size_t first_allowed=group==0 ? 0 : group==1 ? 5 : 7;
+        const size_t end_allowed=group==0 ? 5 : group==1 ? 7 : CurvesGeometryQuantity_Count;
+        const bool quality_good=group==2 ? groove_quality==Quality_Good : axis_quality==Quality_Good;
+        PendingSample sample{frame,series_id,{}};
+        sample.values.fill(std::numeric_limits<float>::quiet_NaN());
+        for (size_t q=0;q<CurvesGeometryQuantity_Count;++q) {
+            const auto& text=get(quantity_columns[q]);
+            if (q<first_allowed || q>=end_allowed) {
+                if (!text.empty()) return fail(error,"Unexpected quantity value in Curves+ geometry row");
+                continue;
+            }
+            if (text.empty() || !quality_good) continue;
+            float value=0;
+            const auto parsed=std::from_chars(text.data(),text.data()+text.size(),value);
+            if (parsed.ec!=std::errc() || parsed.ptr!=text.data()+text.size() || !std::isfinite(value))
+                return fail(error,"Invalid Curves+ geometry value");
+            sample.values[q]=value;
+        }
+        result.frames=std::max(result.frames,frame+1);
+        pending.push_back(std::move(sample));
+        ++result.records;
+    }
+    if (!parse_error.empty() || input.bad()) return fail(error,"Curves+ geometry CSV read failed: "+parse_error);
+    if (!result.records) return fail(error,"Curves+ geometry CSV has no samples");
+    if (result.frames>result.records)
+        return fail(error,"Curves+ geometry CSV frame indices are implausibly sparse");
+    for (auto& series : result.series) for (auto& samples : series.values)
+        samples.assign(result.frames,std::numeric_limits<float>::quiet_NaN());
+    for (const auto& sample : pending) for (size_t q=0;q<CurvesGeometryQuantity_Count;++q)
+        if (std::isfinite(sample.values[q])) result.series[sample.series].values[q][sample.frame]=sample.values[q];
+    result.fingerprint=std::to_string(fingerprint);
+    *out=std::move(result);
+    return true;
+}
+
+bool curves_geometry_reference_statistics(MemberStatistics* out, const ExternalCurvesGeometryReference& reference,
+                                          size_t helix, const std::string& member, int quantity, float level) {
+    if (!out || quantity<0 || quantity>=CurvesGeometryQuantity_Count || !reference.records ||
+        !reference.frames || member.empty() || !helix ||
+        (quantity>=CurvesGrooveW12 && !std::isfinite(level))) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ geometry reference statistics input");
+        return false;
+    }
+    *out={};
+    const int group=quantity>=CurvesGrooveW12 ? 2 : quantity>=CurvesInterAxisRise ? 1 : 0;
+    const CurvesGeometryReferenceSeries* match=nullptr;
+    for (const auto& series : reference.series) {
+        if (series.helix!=helix || series.category!=group || series.member!=member ||
+            (group==2) != std::isfinite(series.level) ||
+            (group==2 && std::fabs(series.level-level)>1.0e-5f)) continue;
+        if (match) {
+            MD_LOG_ERROR("Lavery: ambiguous Curves+ geometry reference member mapping");
+            return false;
+        }
+        match=&series;
+    }
+    if (!match) return true;
+    const bool angular=quantity==CurvesAxisInclination || quantity==CurvesAxisTip ||
+        quantity==CurvesAxisBend || quantity==CurvesInterAxisTwist;
+    std::vector<MemberStatistics> summary;
+    if (!sequence_statistics(&summary,match->values[quantity],1,angular)) return false;
+    *out=summary[0];
+    return true;
+}
+
+bool detect_curves_geometry_events(std::vector<CurvesGeometryEvent>* out,
+    const CurvesTrajectoryAnalysis& trajectory, const CurvesGeometryEventOptions& options,
+    const std::atomic<bool>* cancel) {
+    if (!out) return fail(nullptr,"Missing Curves+ geometry events output");
+    out->clear();
+    const size_t frames=trajectory.frames;
+    const uint32_t all_quantities=(1u<<CurvesGeometryQuantity_Count)-1u;
+    if (!frames || trajectory.helices.empty() || trajectory.pair_axis.size()!=frames*trajectory.pairs ||
+        trajectory.step_axis.size()!=frames*trajectory.steps ||
+        trajectory.axis_quality.size()!=frames*trajectory.helices.size() ||
+        trajectory.groove_quality.size()!=frames*trajectory.helices.size() ||
+        trajectory.grooves.size()%frames || !options.quantities || (options.quantities&~all_quantities) ||
+        !std::isfinite(options.sigma) || options.sigma<=0 ||
+        !std::isfinite(options.hysteresis) || options.hysteresis<0 ||
+        options.baseline_first>=options.baseline_end || options.baseline_end>frames ||
+        options.first_frame>options.last_frame || options.last_frame>=frames || !options.min_frames)
+        return fail(nullptr,"Invalid Curves+ geometry event configuration");
+    if (!std::isfinite(options.min_duration) || options.min_duration<0 ||
+        !std::isfinite(options.max_gap_duration) || options.max_gap_duration<0 ||
+        (!options.times.empty() && options.times.size()!=frames))
+        return fail(nullptr,"Invalid Curves+ geometry event time configuration");
+    for (size_t f=0;f<options.times.size();++f)
+        if (!std::isfinite(options.times[f]) || (f && options.times[f]<=options.times[f-1]))
+            return fail(nullptr,"Curves+ geometry event times must increase strictly");
+    const float continuation=std::max(0.5f,options.sigma-options.hysteresis);
+    const size_t groove_members=trajectory.grooves.size()/frames;
+    auto angle_quantity=[](int quantity) {
+        return quantity==CurvesAxisInclination || quantity==CurvesAxisTip ||
+            quantity==CurvesAxisBend || quantity==CurvesInterAxisTwist;
+    };
+    auto quantity_value=[](const CurvesTrajectoryAnalysis& data,size_t frame,size_t helix,
+                           size_t member,int quantity,size_t groove_count) {
+        if (quantity>=CurvesGrooveW12) {
+            const auto& value=data.grooves[frame*groove_count+
+                data.helices[helix].groove_offset+member];
+            const float values[]={value.width12,value.depth12,value.width21,value.depth21};
+            return values[quantity-CurvesGrooveW12];
+        }
+        if (quantity>=CurvesInterAxisRise) {
+            const auto& value=data.step_axis[frame*data.steps+data.helices[helix].steps[member]];
+            return quantity==CurvesInterAxisRise ? value.rise : value.twist;
+        }
+        const auto& value=data.pair_axis[frame*data.pairs+data.helices[helix].pairs[member]];
+        const float values[]={value.x_displacement,value.y_displacement,value.inclination,value.tip,value.axis_bend};
+        return values[quantity-CurvesAxisXDisplacement];
+    };
+    for (size_t h=0;h<trajectory.helices.size();++h) {
+        if (cancel && cancel->load()) { out->clear(); return true; }
+        const auto& helix=trajectory.helices[h];
+        if (helix.pairs.size()<2 || helix.steps.size()+1!=helix.pairs.size() ||
+            helix.groove_offset>groove_members || helix.groove_count>groove_members-helix.groove_offset)
+            return fail(nullptr,"Invalid Curves+ helix layout for event detection");
+        for (size_t pair : helix.pairs) if (pair>=trajectory.pairs)
+            return fail(nullptr,"Curves+ event pair index is out of range");
+        for (size_t step : helix.steps) if (step>=trajectory.steps)
+            return fail(nullptr,"Curves+ event step index is out of range");
+        for (int quantity=0;quantity<CurvesGeometryQuantity_Count;++quantity) {
+            if (!(options.quantities&(1u<<quantity))) continue;
+            const size_t members=quantity>=CurvesGrooveW12 ? helix.groove_count :
+                quantity>=CurvesInterAxisRise ? helix.steps.size() : helix.pairs.size();
+            for (size_t m=0;m<members;++m) {
+                if (cancel && cancel->load()) { out->clear(); return true; }
+                const bool groove=quantity>=CurvesGrooveW12;
+                const bool step=quantity>=CurvesInterAxisRise && !groove;
+                const std::string label=groove ? "sample_"+std::to_string(m+1) :
+                    step ? (helix.step_labels.size()==helix.steps.size() ? helix.step_labels[m] :
+                        "step_"+std::to_string(helix.pairs[m]+1)+"_"+std::to_string(helix.pairs[m+1]+1)) :
+                    helix.pair_labels.size()==helix.pairs.size() ? helix.pair_labels[m] :
+                        "bp_"+std::to_string(helix.pairs[m]+1);
+                const float level=groove ? trajectory.grooves[helix.groove_offset+m].level :
+                    std::numeric_limits<float>::quiet_NaN();
+                std::vector<float> samples(frames,std::numeric_limits<float>::quiet_NaN());
+                for (size_t f=0;f<frames;++f) {
+                    const size_t quality=f*trajectory.helices.size()+h;
+                    const uint16_t flags=quantity>=CurvesGrooveW12
+                        ? trajectory.groove_quality[quality] : trajectory.axis_quality[quality];
+                    if (flags==Quality_Good) samples[f]=quantity_value(trajectory,f,h,m,quantity,groove_members);
+                }
+                MemberStatistics reference;
+                if (options.reference) {
+                    if (!curves_geometry_reference_statistics(&reference,*options.reference,h+1,label,quantity,level))
+                        return fail(nullptr,"Could not map Curves+ geometry event reference");
+                } else {
+                    std::vector<MemberStatistics> baseline;
+                    if (!sequence_statistics(&baseline,samples,1,angle_quantity(quantity),
+                            options.baseline_first,options.baseline_end))
+                        return fail(nullptr,"Could not calculate Curves+ event baseline");
+                    reference=baseline[0];
+                }
+                if (reference.count<2 || !std::isfinite(reference.sd) || reference.sd<=1e-8) continue;
+                CurvesGeometryEvent active;
+                bool started=false,strong=false;
+                size_t pending_gap=0;
+                auto finish=[&]() {
+                    const double duration=options.times.empty() ? (double)(active.end-active.begin+1) :
+                        options.times[active.end]-options.times[active.begin];
+                    if (started && strong && active.outlier_frames>=options.min_frames &&
+                        (options.min_duration==0 || duration>=options.min_duration)) out->push_back(active);
+                    active={};
+                    started=false;
+                    strong=false;
+                    pending_gap=0;
+                };
+                for (size_t f=options.first_frame;f<=options.last_frame;++f) {
+                    if (cancel && cancel->load()) { out->clear(); return true; }
+                    if (!std::isfinite(samples[f])) { finish(); continue; }
+                    const float z=reference.zscore(samples[f]);
+                    const float magnitude=std::fabs(z);
+                    if (std::isfinite(z) && magnitude>=continuation) {
+                        if (!started) {
+                            started=true;
+                            active.helix=h+1;
+                            active.quantity=quantity;
+                            active.member=label;
+                            active.level=groove ? trajectory.grooves[helix.groove_offset+m].level :
+                                std::numeric_limits<float>::quiet_NaN();
+                            active.begin=f;
+                        }
+                        pending_gap=0;
+                        active.end=f;
+                        ++active.outlier_frames;
+                        if (magnitude>=options.sigma) strong=true;
+                        if (magnitude>std::fabs(active.peak_z)) {
+                            active.peak=f;
+                            active.peak_z=z;
+                        }
+                    } else if (started && (options.times.empty() ? pending_gap<options.max_gap :
+                        options.times[f]-options.times[active.end]<=options.max_gap_duration)) {
+                        ++pending_gap;
+                    } else finish();
+                }
+                finish();
+            }
+        }
+    }
+    std::stable_sort(out->begin(),out->end(),[](const CurvesGeometryEvent& a,const CurvesGeometryEvent& b) {
+        if (a.begin!=b.begin) return a.begin<b.begin;
+        if (a.helix!=b.helix) return a.helix<b.helix;
+        if (a.quantity!=b.quantity) return a.quantity<b.quantity;
+        return a.member<b.member;
+    });
+    return true;
+}
+
+const char* csv_curves_geometry_event_header() {
+    return "run,helix,quantity,member,level,begin_frame,end_frame,peak_frame,begin_time,end_time,peak_time,time_unit,outlier_frames,peak_signed_z\n";
+}
+
+std::string csv_curves_geometry_event_row(const std::string& run,const CurvesGeometryEvent& event,
+                                          const float* times,const char* time_unit,size_t frame_count) {
+    static const char* quantities[]={"axis_x_displacement","axis_y_displacement","axis_inclination",
+        "axis_tip","axis_bend","inter_axis_rise","inter_axis_twist",
+        "groove_W12","groove_D12","groove_W21","groove_D21"};
+    if (run.empty() || !time_unit || !*time_unit || event.quantity<0 ||
+        event.quantity>=CurvesGeometryQuantity_Count ||
+        !event.helix || event.member.empty() || event.begin>event.end || event.peak<event.begin ||
+        event.peak>event.end || !std::isfinite(event.peak_z)) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ geometry event CSV row");
+        return {};
+    }
+    if (times && (event.end>=frame_count || !std::isfinite(times[event.begin]) ||
+        !std::isfinite(times[event.end]) || !std::isfinite(times[event.peak]))) {
+        MD_LOG_ERROR("Lavery: invalid Curves+ geometry event CSV time values");
+        return {};
+    }
+    char values[256];
+    snprintf(values,sizeof(values),",%zu,%s,",event.helix,quantities[event.quantity]);
+    std::string row=csv_quote(run)+values+csv_quote(event.member)+",";
+    if (std::isfinite(event.level)) {
+        char level[64];
+        snprintf(level,sizeof(level),"%.9g",event.level);
+        row+=level;
+    }
+    snprintf(values,sizeof(values),",%zu,%zu,%zu,%.9g,%.9g,%.9g,",
+        event.begin,event.end,event.peak,times ? (double)times[event.begin] : (double)event.begin,
+        times ? (double)times[event.end] : (double)event.end,
+        times ? (double)times[event.peak] : (double)event.peak);
+    row+=values+csv_quote(time_unit);
+    snprintf(values,sizeof(values),",%zu,%.9g\n",event.outlier_frames,event.peak_z);
+    return row+values;
 }
 
 std::vector<int> match_reference_members(const std::vector<ReferenceMember>& source, const std::vector<std::string>& ids) {

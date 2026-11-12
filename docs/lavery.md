@@ -30,11 +30,39 @@ workflows, scientific interpretation and validation record.
 
 Each frame produces one value per member and parameter, or no value when the
 geometry is invalid. Quality flags explain why a value is missing or suspicious.
+This table lists the shared metric fields in Legacy mixed mode and the
+corresponding selectable analysis paths. Choose **Analysis convention** in the
+Lavery sidebar to switch modes; switching recomputes the trajectory.
+
+| Mode | Pair and step | Helical and groove | Additional Curves+ outputs |
+|---|---|---|---|
+| Legacy mixed | Curves+-style | 3DNA-style | None |
+| Curves+ | Curves+-style | 3DNA helical/refined-groove fields unavailable | Pair-level axis parameters, inter-axis step rise/twist, and four half-level groove channels |
+| 3DNA | 3DNA-style | 3DNA-style | None |
+
+Nucleotide torsions are atom-defined in all three modes; the pucker algorithm
+differs between Curves+ and the other paths. Curves+ axis and groove outputs
+have distinct member levels and are published separately; they are available
+in the Curves+ profile, attributes and dedicated CSV. The profile can show the
+selected frame or mean and population SD over the whole trajectory or a
+selected period. The profile can also import that dedicated CSV as a reference:
+series are matched by the 1-based helix, exact member label, quantity and
+(for grooves) half-level. Angular reference means use circular statistics.
+Unmatched members remain absent; they are never filled with zero. This mapping
+is separate from the generic Lavery parameter-reference mapping. Curves+
+geometry also has its own native event detector, parameter selection, event
+table and CSV export. It uses quality-valid samples, the Detection tolerance,
+hysteresis and time range, and a per-feature mean/SD baseline from the selected
+trajectory interval or imported geometry reference. Reference matching is exact;
+unmatched features are ignored. Missing-quality samples break events.
+Geometry feature events are not spatially merged with one another or with
+metric events, and their table/export is separate from the generic event list.
 
 The step parameter selectors are organised into **Step (local frame)**,
-**Helical (local axis)** and **Grooves**. Event parameters, advanced aggregate
-selection, representative feature selection and Export's measurement picker use
-the same groups, with an all/none checkbox for each group. These are presentation
+**Helical (local axis)** and **Grooves**. Advanced aggregate selection,
+representative feature selection and Export's measurement picker use the same
+groups, with an all/none checkbox for each group. Event parameters displays
+Pair, Step, Nucleotide, Helical and Grooves in that order. These are presentation
 groups, not new member classes:
 all still use the same step positions, event members and CSV columns. Groove
 widths remain phosphate-based measurements independent of the displayed axis.
@@ -253,6 +281,11 @@ inherited from the parent pair.
 | Pucker phase P, amplitude τm | Altona–Sundaralingam pseudorotation from ν0..ν4 |
 | Epsilon − Zeta | BI (< 0°) / BII (> 0°) indicator |
 
+VIAMD uses this single pucker definition throughout analysis and exports. It
+matches classic 3DNA's definition; Curves+ uses a Fourier definition, so its
+phase and amplitude need not be numerically identical. See the
+[pucker comparison](lavery-validation.md#current-combined-pipeline-results).
+
 The neighbouring O3′(i−1), P(i+1) and O5′(i+1) are used only when an O3′–P
 bond exists, so Alpha is missing at a 5′ end and Epsilon/Zeta at a 3′ end.
 Torsions use minimum-image bond vectors. Amplitude is linear; all other
@@ -307,6 +340,11 @@ back to the direct P–P distance. The 5.8 Å phosphate diameter is subtracted
 (3DNA reports widths without it). Steps too close to a helix end, or with a
 missing P in the pair itself, have no value. Grooves are computed from the
 phosphates even when the step itself is flagged by quality checks.
+With periodic coordinates, the phosphate span is reconstructed from local
+backbone links and paired C1′ atoms rather than a single minimum-image P–P
+vector. If the necessary links are missing or give inconsistent periodic
+images, the width is unavailable. This assumes each local link can be
+resolved by the minimum-image convention.
 
 **Local helical parameters.** Each step also reports the 3DNA local helical
 parameters (Lu & Olson 2003, `helical_par`): the local helical axis is
@@ -315,9 +353,27 @@ frame is tilted onto it. Helical twist and helical rise are the screw rotation
 and translation along that axis; X/Y-displacement locate pair 1's origin
 relative to the axis; Inclination and Tip are the pair tilt about its x- and
 y-axis. With zero helical twist the axis is undefined, and the mean pair normal
-is used. These parameters re-express the same two frames as the six step
-parameters, so they are **excluded from the default Event parameters** to avoid
-counting one deformation twice; tick them under **Inter** to detect on them.
+is used. VIAMD defaults to the Legacy mixed pipeline: Curves+-style pair and
+step values with 3DNA-style helical and groove values. Use the **Analysis
+convention** selector to choose the fully separate Curves+ or 3DNA calculation
+paths; their unavailable metrics and topology limitations are shown explicitly.
+Curves+ axis and groove values are stored separately and available in a
+dedicated profile, attributes and CSV; their event and reference workflows use
+separate native geometry paths, not the shared metric slots. Classic 3DNA may
+detect different pairs or use different orientations for distorted pairs, so
+exact agreement is not guaranteed. See the [validation results](lavery-validation.md).
+For each frame Curves+ reverses Shear and Buckle, and the following step's
+Rise and Twist, when the displacement to the next pair points against that
+pair's normal. The last pair uses the preceding step's orientation. These
+values can therefore change sign abruptly in distorted structures. If the
+orientation cannot be determined, the affected pair values are unavailable.
+CSV exports identify these conventions in the `run` field. Older or third-party
+CSVs may differ; check their conventions before comparing. The selected mode
+is stored in the workspace. Older workspaces and CSVs from before per-frame
+orientation also receive a warning.
+Helical and step parameters describe related pair-to-pair geometry using
+different frames. Helical parameters are **excluded from the default Event
+parameters** to reduce redundant detections; tick them under **Helical** to include them.
 On the 1RNA fixture they show the A-form signature (X-displacement ≈ −4 Å,
 Inclination ≈ +18°, Helical rise ≈ 2.7 Å).
 
@@ -426,10 +482,9 @@ Watson-Crick contacts. Otherwise A-T/U and G-C default to Watson-Crick and G-T/U
 to wobble; unsupported identities are excluded (logged). Non-Watson-Crick pairs
 carry a label tag such as `[wobble]` or `[reverse WC]`. For a wobble or reverse
 pair the state is evaluated against its own family; incompatible geometry
-without its contacts is Unpaired, anything else Other. **Reverse pairs** flip
-base b's x and y axes so that intra-pair parameters stay near zero (3DNA instead
-reports Opening near 180°); steps touching a reverse pair are therefore
-convention-dependent and not comparable with 3DNA. These are evidence-based
+without its contacts is Unpaired, anything else Other. For pair parameters,
+**reverse pairs** flip base b's x and y axes so that intra-pair parameters stay
+near zero, unlike the 3DNA convention. These are evidence-based
 annotations, not a comprehensive base-pair taxonomy or binding-energy model.
 
 Both source and destination must meet **Pairing min residence** (default 200 ps,
@@ -544,7 +599,7 @@ not insert/remove reason paragraphs above the timeline and distribution.
   **Detection** can be collapsed while working in other tabs. When expanded,
   it exposes Tolerance, Min duration / Min frames, Baseline range and
   Detection range. Its collapsed subsections are
-  *Event parameters* (the three-class parameter grid; the header names the subset),
+  *Event parameters* (the grouped dropdowns; the header names the subset),
   *Advanced detection* (baseline, neighbourhood or whole structure,
   hierarchy and burst extra, hysteresis, bridge gaps, Time in ns,
   count any selected parameter) and *Visual feedback*.
@@ -1071,8 +1126,8 @@ step or nucleotide) in one frame. A sample takes part when one of the following 
   as strong even when no intra-base-pair parameter is selected.
 
 **Event parameters** selects the parameters, independently of the class shown in the
-plots. **Pairing disruption** is located in the Intra column, below the six geometric
-parameters, and is enabled by default. It is independent of the column's
+plots. **Pairing disruption** is separate from the six geometric parameters
+in the Pair group and is enabled by default. It is independent of the group's
 parameter toggle and **Use plotted parameters**. Disabling it removes broken
 pairs as event contributors; their invalid parameters remain excluded.
 Pairing disruption requires a finite baseline sample for that particular pair in either
@@ -1090,9 +1145,11 @@ gap; hover the chemistry label for the explicit disruption reasons. This is not
 a state label for the entire event. Detection thresholds,
 chemistry assignments, workspace `EventPairLoss` and CSV `lost` fields are unchanged.
 
-The parameter grid (Intra, Inter and Nucleotide columns) picks any subset;
-a column header toggles the whole class and shows a
-mixed state when only part of it is selected. The collapsed section header
+The parameter dropdowns pick any subset in Pair, Step, Nucleotide, Helical and
+Grooves order. Group checkboxes toggle their parameters and show a mixed state
+when only part is selected. Each dropdown displays its selection count.
+Curves+-style and 3DNA-style labels indicate the automatically applied
+conventions; they are not choices. The collapsed section header
 names the subset (or the selected parameter count). **Use plotted parameters** copies
 the class and parameter(s) of the count plot. With nothing selected, only pair
 losses (if on) form events. The CSV `scope` column is `all`, `intra`, `inter`,
@@ -1546,8 +1603,8 @@ Only one parameter has detailed measurement annotations at a time:
   pseudorotation quantities; phase also identifies North/South. Neither is
   misrepresented as an ordinary atom angle. Amplitude has degree units but
   retains linear (not circular) statistics.
-- **Pair/step parameters:** reference axes at the exact local midpoint frame,
-  with a signed translation arrow or rotation-vector component arc. These
+- **Pair/step parameters:** reference axes at the local midpoint frame,
+  with a signed translation arrow or schematic rotation-component arc. These
   diagrams are explicitly labelled as local-frame components, not ordinary
   interatomic distances or angles. Local helical parameters use the 3DNA
   helical mid-step frame (z along the local helical axis) instead and are
@@ -1961,6 +2018,7 @@ must be rebuilt after loading/recomputing a trajectory.
 |---|---|---|
 | DetectionEnabled | bool; disables sigma/event detection and its transient feedback, not raw or state analysis | 1 |
 | MetricLayout | int, parameter numbering of the saved workspace; written first; absent = 0 (before the helical parameters) | 1 |
+| AnalysisConvention | int, selected convention mode (0 mixed legacy, 1 Curves+, 2 3DNA) | 0 |
 | ShowWindow, ShowHeatmap, SyncViewport, CompareAll, ShowAxis, SignedOverlay, OverlayHalo, AggregateOutliers | bool | - |
 | AxisKind | int, 0 Smoothed midpoint / 1 Local helical (3DNA) | 0 |
 | SelectedParameters | bit mask, class-local (bit k = k-th parameter of the plotted class) | 16383 |
@@ -2172,8 +2230,8 @@ extraction. Headless checks cover plot geometry, shared Timeline interactions,
 series visibility and the feedback meshes' triangle geometry, normals and picking.
 These checks do not replace GUI acceptance or establish physical event significance.
 
-The [scientific validation record](./lavery-validation.md) retains the independent
-Curves+ comparisons, optional local-trajectory protocol and sensitivity results.
+The [scientific validation record](./lavery-validation.md) summarizes independent
+Curves+ and classic 3DNA comparisons and optional local-trajectory checks.
 See [test/README.md](../test/README.md) for fixture details and optional commands.
 Remaining scientific questions stay under [Future improvements](#future-improvements).
 
@@ -2191,9 +2249,8 @@ Remaining scientific validation and possible analysis extensions:
 - Compare groove widths using explicitly matched definitions. VIAMD's 3DNA
   refined phosphorus widths are not Curves+ curvilinear widths, so equality
   cannot be assumed.
-- Validate the local helical parameters and refined grooves against 3DNA
-  output on the same structures; they are currently checked against exact
-  screw geometry and the A-form signature of the 1RNA fixture only.
+- Extend independent comparisons to more conformations and investigate
+  orientation conventions in distorted and noncanonical pairs.
 
 ### Analysis and performance
 

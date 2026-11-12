@@ -7,9 +7,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <functional>
+#include <limits>
 #include <vector>
 #include <array>
+#include <atomic>
 #include <string>
+#include <variant>
 
 struct md_system_t;
 struct md_system_state_t;
@@ -76,7 +79,7 @@ inline constexpr StepParameterGroup STEP_PARAMETER_GROUPS[] = {
     {"Helical (local axis)", XDisplacement, HelicalTwist},
     {"Grooves", MinorGroove, MajorGroove},
 };
-// Default detection family: helical parameters re-express Tilt/Roll/Twist/Shift/Slide/Rise.
+// Helical parameters describe related step geometry, so exclude them by default.
 constexpr uint32_t DEFAULT_EVENT_PARAMETERS = ((1u << Metric_Count) - 1u) & ~HELICAL_PARAMETERS;
 constexpr uint32_t ALL_METRIC_PARAMETERS = (1u << Metric_Count) - 1u;
 uint32_t restore_event_parameters(uint32_t mask, bool legacy);
@@ -97,6 +100,10 @@ struct BaseFrame {
     uint32_t strand = 0;
     // Ring centroid for partner detection; the fitted reference origin is distinct.
     vec3_t center = origin;
+    // Fitted C8 (purines) or C6 (pyrimidines), used for Curves+ groove depth.
+    vec3_t groove_reference = {std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::quiet_NaN()};
 };
 
 // Frame-0 pairing family of a tracked pair. Parameters are measured only while its own contacts are present.
@@ -114,8 +121,8 @@ struct Pair {
     uint32_t a = 0;
     uint32_t b = 0;
     uint8_t type = PairType_WatsonCrick;
-    // Parallel base normals at frame 0: base b's x and y are reversed instead of its y and z, so an ideal
-    // reverse pair has near-zero intra-pair parameters. Not the 3DNA convention (which reports Opening near 180).
+    // Curves+ pair parameters reverse base b's x and y for parallel frame-0 normals.
+    // The 3DNA-style helical frames determine normal alignment per frame instead.
     bool reversed = false;
 };
 
@@ -161,8 +168,9 @@ enum SampleQuality : uint16_t {
     Quality_DegenerateNucleotide = 1 << 12,
     Quality_UnusualBond = 1 << 13,
     Quality_PoorPuckerFit = 1 << 14,
+    Quality_ReferenceBondBreak = 1 << 15,
 };
-constexpr uint16_t Quality_Last = Quality_PoorPuckerFit;
+constexpr uint16_t Quality_Last = Quality_ReferenceBondBreak;
 constexpr uint16_t Quality_NucleotideWarnings = Quality_UnusualBond | Quality_PoorPuckerFit;
 using NucleotideQuality = std::array<uint16_t, 10>; // Alpha..EpsilonZeta, per parameter
 
@@ -184,6 +192,9 @@ std::vector<BaseTopology> gather_bases(const md_system_t& sys);
 bool extract_base_frames(std::vector<BaseFrame>& out, const md_system_t& sys,
                          const md_system_state_t& state, const std::vector<BaseTopology>& topology,
                          std::vector<uint16_t>* quality = nullptr);
+bool extract_3dna_base_frames(std::vector<BaseFrame>& out, const md_system_t& sys,
+                              const md_system_state_t& state, const std::vector<BaseTopology>& topology,
+                              std::vector<uint16_t>* quality = nullptr);
 std::vector<StepIndex> gather_steps(const md_system_t& sys, const std::vector<BaseTopology>& bases,
                                    const Pair* pairs, size_t pair_count);
 
@@ -260,7 +271,7 @@ struct MemberStatistics {
 };
 
 double wrap_degrees(double value); // [-180, 180)
-// Exact angle between adjacent pair normals from this implementation's rotation-vector components.
+// Exact angle between adjacent pair normals from Curves+-style rotation-vector components.
 float step_bend_degrees(float tilt, float roll, float twist);
 // Percent indicators; unavailable samples remain NaN. Occupancy is their per-position mean.
 bool bend_profile_samples(std::vector<float>* bend, std::vector<float>* candidates,
@@ -381,18 +392,38 @@ const char* metric_state_name(Metric metric, int state);
 float torsion(vec3_t a, vec3_t b, vec3_t c, vec3_t d, const md_unitcell_t* cell = nullptr);
 // Altona-Sundaralingam pseudorotation from nu0..nu4 (degrees): phase in [0, 360) and amplitude.
 void pseudorotation(const float nu[5], float* phase, float* amplitude);
+// Fourier pseudorotation from nu0..nu4, using the same ring torsion ordering.
+void fourier_pseudorotation(const float nu[5], float* phase, float* amplitude);
+enum PuckerDefinition : uint8_t {
+    Pucker_AltonaSundaralingam,
+    Pucker_Fourier,
+};
 // Fills Alpha..EpsilonZeta and optional per-parameter quality; present_atoms distinguishes absent
 // topology atoms from nonfinite coordinates. Distortion warnings retain finite values.
 // A zero-amplitude sugar has undefined phase but retains its finite amplitude.
 void compute_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell = nullptr,
-                        NucleotideQuality* quality = nullptr, uint32_t present_atoms = (1u << BB_Count)-1);
+                        NucleotideQuality* quality = nullptr, uint32_t present_atoms = (1u << BB_Count)-1,
+                        PuckerDefinition pucker = Pucker_AltonaSundaralingam);
+// Curves+ uses selected-strand neighbours, omits torsions with a defining bond > 2.5 A,
+// and reports zero phase for exactly zero Fourier pucker amplitude.
+void compute_curves_nucleotide(Values* out, const vec3_t atoms[BB_Count], const md_unitcell_t* cell,
+                               NucleotideQuality* quality, uint32_t present_atoms,
+                               bool previous_selected, bool next_selected);
 // 3DNA refined P-P groove widths (El Hassan & Calladine 1998) minus 5.8 A, for the n - 1 steps of one helix
 // of n consecutive pairs. p1/p2: phosphorus of the strand I / strand II nucleotide of each pair (non-finite
 // when missing). Minor (1-based step i) = mean(w(P1(i+2), P2(i-2)), w(P1(i+3), P2(i-1))), major = w(P1(i-1), P2(i+2));
 // w is the P-P distance times sin(angle to the mean backbone direction P(k+1) - P(k-1) of both strands), or the
-// direct distance when a flanking phosphate is missing. NaN when an index falls outside the helix.
+// direct distance when a flanking phosphate is missing. Periodic spans are reconstructed through local
+// phosphate and C1' links; insufficient or inconsistent links produce NaN.
+enum GrooveWidthPolicy : uint8_t {
+    Groove_DirectFallback,
+    Groove_3DnaRefined, // antiparallel helix; no direct-distance fallback or terminal refinement
+};
 void groove_widths(float* minor, float* major, const vec3_t* p1, const vec3_t* p2, size_t n,
-                   const md_unitcell_t* cell = nullptr);
+                   const md_unitcell_t* cell = nullptr, const vec3_t* c1 = nullptr, const vec3_t* c2 = nullptr,
+                   GrooveWidthPolicy policy = Groove_DirectFallback);
+bool groove_span(vec3_t* delta, const vec3_t* p1, const vec3_t* p2, const vec3_t* c1, const vec3_t* c2,
+                 size_t n, size_t i, size_t j, const md_unitcell_t* cell);
 // Pair chains linked by steps (step.a -> step.b), each in helix order.
 std::vector<std::vector<uint32_t>> helix_chains(size_t pair_count, const std::vector<StepIndex>& steps);
 // One helix ID per pair, step or nucleotide; pooled references never mix helices.
@@ -667,6 +698,144 @@ bool pair_is_present(const BaseFrame& a, const BaseFrame& b, const md_unitcell_t
 bool compute_base_pair(Values* out, BasePairFrame* pair_frame, const BaseFrame& a, const BaseFrame& b,
                        bool reversed = false);
 
+// Curves+ inversion per pair: 0 normal, 1 inverted, -1 when the required adjacent frame is unavailable.
+std::vector<int8_t> curves_pair_inversions(const std::vector<BasePairFrame>& frames,
+    const std::vector<uint8_t>& valid, const std::vector<StepIndex>& steps, const md_unitcell_t* cell = nullptr);
+
+struct CurvesAxisPoint {
+    vec3_t origin = {};
+    vec3_t direction = {};
+};
+// Internal, non-circular duplex axis. Inputs must be whole and in helix order; invalid
+// or singular base transforms return false, without publishing a partial axis.
+bool curves_duplex_axis(std::vector<CurvesAxisPoint>* out,
+                        const std::vector<BaseFrame>& strand1, const std::vector<BaseFrame>& strand2,
+                        const std::vector<BasePairFrame>& midpoints);
+struct CurvesPairAxisParameters {
+    float x_displacement, y_displacement, inclination, tip, axis_bend;
+};
+// Pair-level axis parameters, distinct from 3DNA's step-level helical parameters.
+// The first axis-bend value is NaN. Unknown inversion or singular geometry returns false.
+bool curves_pair_axis_parameters(std::vector<CurvesPairAxisParameters>* out,
+                                 const std::vector<BasePairFrame>& midpoints,
+                                 const std::vector<CurvesAxisPoint>& axis,
+                                 const std::vector<int8_t>& inversions);
+struct CurvesStepAxisParameters {
+    float rise, twist;
+};
+// Inter-axis rise and twist, one value per consecutive pair in an ordered, whole helix.
+bool curves_step_axis_parameters(std::vector<CurvesStepAxisParameters>* out,
+                                 const std::vector<BasePairFrame>& midpoints,
+                                 const std::vector<CurvesAxisPoint>& axis,
+                                 const std::vector<int8_t>& inversions);
+// Internal non-circular groove backbone geometry; ordered, whole phosphate coordinates.
+// Each adjacent phosphate interval contains ten subdivisions. Missing or degenerate
+// geometry returns false without modifying the output.
+bool curves_groove_backbone(std::vector<vec3_t>* out, const std::vector<vec3_t>& phosphates);
+struct CurvesGrooveSample {
+    float level;
+    float width12, depth12, width21, depth21;
+};
+// Non-circular duplex; backbone samples and all axis/base coordinates must use the same whole image.
+// Samples are ordered by half-level, starting at 1.5. Missing grooves have NaN width and depth.
+bool curves_grooves(std::vector<CurvesGrooveSample>* out,
+                    const std::vector<vec3_t>& backbone1, const std::vector<vec3_t>& backbone2,
+                    const std::vector<BasePairFrame>& midpoints, const std::vector<CurvesAxisPoint>& axis,
+                    const std::vector<vec3_t>& depth1, const std::vector<vec3_t>& depth2);
+struct CurvesHelixGeometry {
+    std::vector<uint32_t> pairs;
+    std::vector<CurvesAxisPoint> axis;
+    std::vector<CurvesPairAxisParameters> pair_parameters;
+    std::vector<CurvesStepAxisParameters> step_parameters;
+    std::vector<CurvesGrooveSample> grooves;
+    uint16_t axis_quality = Quality_Good;
+    uint16_t groove_quality = Quality_Good;
+};
+struct CurvesFrameAnalysis;
+struct CurvesTrajectoryAnalysis {
+    struct Helix {
+        std::vector<uint32_t> pairs;
+        std::vector<size_t> steps;
+        std::vector<std::string> pair_labels, step_labels;
+        size_t groove_offset = 0, groove_count = 0;
+    };
+    size_t frames = 0, pairs = 0, steps = 0;
+    std::vector<Helix> helices;
+    std::vector<CurvesPairAxisParameters> pair_axis; // frame-major, one per pair
+    std::vector<CurvesStepAxisParameters> step_axis; // frame-major, one per step
+    std::vector<CurvesGrooveSample> grooves;          // frame-major, packed by helix
+    std::vector<uint16_t> axis_quality, groove_quality; // frame-major, one per helix
+};
+enum CurvesGeometryQuantity : int {
+    CurvesAxisXDisplacement,
+    CurvesAxisYDisplacement,
+    CurvesAxisInclination,
+    CurvesAxisTip,
+    CurvesAxisBend,
+    CurvesInterAxisRise,
+    CurvesInterAxisTwist,
+    CurvesGrooveW12,
+    CurvesGrooveD12,
+    CurvesGrooveW21,
+    CurvesGrooveD21,
+    CurvesGeometryQuantity_Count,
+};
+struct CurvesGeometryReferenceSeries {
+    size_t helix = 0; // 1-based, as written in the dedicated CSV
+    int category = 0; // pair axis, inter-axis step, groove
+    std::string member;
+    float level = std::numeric_limits<float>::quiet_NaN();
+    std::array<std::vector<float>, CurvesGeometryQuantity_Count> values;
+};
+struct ExternalCurvesGeometryReference {
+    std::string path, run, fingerprint;
+    size_t frames = 0, records = 0;
+    std::vector<CurvesGeometryReferenceSeries> series;
+};
+struct CurvesGeometryEvent {
+    size_t helix = 0; // 1-based
+    int quantity = CurvesAxisXDisplacement;
+    std::string member;
+    float level = std::numeric_limits<float>::quiet_NaN();
+    size_t begin = 0, end = 0, peak = 0, outlier_frames = 0;
+    float peak_z = 0;
+};
+struct CurvesGeometryEventOptions {
+    uint32_t quantities = (1u << CurvesGeometryQuantity_Count) - 1u;
+    float sigma = 2.5f, hysteresis = 0.5f;
+    size_t baseline_first = 0, baseline_end = SIZE_MAX;
+    size_t first_frame = 0, last_frame = SIZE_MAX;
+    size_t min_frames = 1, max_gap = 0;
+    double min_duration = 0, max_gap_duration = 0;
+    std::vector<double> times;
+    const ExternalCurvesGeometryReference* reference = nullptr;
+};
+bool detect_curves_geometry_events(std::vector<CurvesGeometryEvent>* out,
+    const CurvesTrajectoryAnalysis& trajectory, const CurvesGeometryEventOptions& options,
+    const std::atomic<bool>* cancel = nullptr);
+const char* csv_curves_geometry_event_header();
+std::string csv_curves_geometry_event_row(const std::string& run, const CurvesGeometryEvent& event,
+                                          const float* times = nullptr, const char* time_unit = "frame",
+                                          size_t frame_count = 0);
+bool initialize_curves_trajectory(CurvesTrajectoryAnalysis* out, size_t frames, size_t pairs,
+                                  const std::vector<StepIndex>& steps,
+                                  const CurvesFrameAnalysis& first_frame);
+bool store_curves_trajectory_frame(CurvesTrajectoryAnalysis* trajectory, size_t frame,
+                                   const CurvesFrameAnalysis& analysis);
+const char* csv_curves_trajectory_header();
+std::string csv_curves_trajectory_frame(const std::string& run, const CurvesTrajectoryAnalysis& trajectory,
+                                        size_t frame, bool include_header);
+bool load_curves_geometry_reference(ExternalCurvesGeometryReference* out, const std::string& path,
+                                    std::string* error);
+bool curves_geometry_reference_statistics(MemberStatistics* out, const ExternalCurvesGeometryReference& reference,
+                                          size_t helix, const std::string& member, int quantity,
+                                          float level = std::numeric_limits<float>::quiet_NaN());
+// Internal ordered antiparallel, non-circular helices. Coordinates are reconstructed from local periodic links.
+// Invalid topology returns false without modifying output; unavailable geometry is reported per helix.
+bool analyze_curves_helices(std::vector<CurvesHelixGeometry>* out, const md_system_t& sys,
+                            const md_system_state_t& state, const std::vector<BaseTopology>& bases,
+                            const std::vector<Pair>& pairs, const std::vector<StepIndex>& steps);
+
 // Trajectory evaluation: reject absent fixed partners and clear stale values/frames.
 bool compute_present_base_pair(Values* out, BasePairFrame* pair_frame, uint16_t* quality,
                                const BaseFrame& a, const BaseFrame& b, const md_unitcell_t* cell = nullptr,
@@ -748,15 +917,53 @@ uint16_t evaluate_pair_contacts(uint8_t* count, const PairChemistry& pair,
 
 struct FrameAnalysis {
     std::vector<BasePairFrame> pair_frames;
+    std::vector<BasePairFrame> helical_pair_frames;
+    std::vector<int8_t> pair_inversions;
     std::vector<Values> pair_values, step_values, nucleotide_values; // nucleotide member 2p + side
     std::vector<uint16_t> pair_quality, step_quality;
+    std::vector<uint16_t> helical_quality;
     std::vector<NucleotideQuality> nucleotide_quality;
     std::vector<uint8_t> contacts;
     std::vector<PairingState> pairing_states;
 };
+struct CurvesFrameAnalysis {
+    FrameAnalysis frame;
+    std::vector<CurvesHelixGeometry> helices;
+};
+struct ThreeDnaPairStepAnalysis {
+    std::vector<BasePairFrame> pair_frames;
+    std::vector<Values> pair_values, step_values;
+    std::vector<uint16_t> pair_quality, step_quality;
+};
+enum PairValuePolicy : uint8_t {
+    PairValues_RequireGoodQuality,
+    PairValues_ReferenceWithQualityFlags,
+};
+// Internal 3DNA-style pair/step path; not yet a complete application convention.
+bool analyze_3dna_pair_step(ThreeDnaPairStepAnalysis* out, const md_system_t& sys,
+                            const md_system_state_t& state, const std::vector<BaseTopology>& bases,
+                            const std::vector<Pair>& pairs, const std::vector<StepIndex>& steps,
+                            const PairingValidator& validator,
+                            PairValuePolicy policy = PairValues_RequireGoodQuality);
 bool analyze_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
                     const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
                     const std::vector<StepIndex>& steps, const PairingValidator& validator);
+// Internal 3DNA path for non-circular antiparallel helix chains; not yet used by the application.
+bool analyze_3dna_frame(FrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
+                        const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                        const std::vector<StepIndex>& steps, const PairingValidator& validator);
+// Internal Curves+ frame with separate pair/axis and half-level groove output.
+bool analyze_curves_frame(CurvesFrameAnalysis* out, const md_system_t& sys, const md_system_state_t& state,
+                          const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                          const std::vector<StepIndex>& steps, const PairingValidator& validator);
+enum class AnalysisConvention : uint8_t { LegacyMixed, Curves, ThreeDna };
+uint32_t convention_available_metric_mask(AnalysisConvention convention);
+using ConventionFrameAnalysis = std::variant<CurvesFrameAnalysis, FrameAnalysis>;
+// Publishes a frame only on success; mode-specific geometry remains distinct.
+bool analyze_convention_frame(ConventionFrameAnalysis* out, AnalysisConvention convention,
+                              const md_system_t& sys, const md_system_state_t& state,
+                              const std::vector<BaseTopology>& bases, const std::vector<Pair>& pairs,
+                              const std::vector<StepIndex>& steps, const PairingValidator& validator);
 
 struct AxisPath {
     std::vector<vec3_t> points;
@@ -777,6 +984,9 @@ bool publish_series(md_attributes_t* table, const std::string& run, const char* 
 
 // The six step values use consecutive pair midpoint frames; also fills the local helical parameters.
 bool compute_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, BasePairFrame* midpoint = nullptr);
+
+// CEHS step parameters for 3DNA-style pair frames; ambiguous antiparallel normals are rejected.
+bool compute_3dna_step(Values* out, const BasePairFrame& a, const BasePairFrame& b, BasePairFrame* midpoint = nullptr);
 
 // Positional guides only: ignore pairing/contact quality, but leave unconstructible frames zeroed.
 bool landmark_frames(std::vector<BasePairFrame>& pair_frames, std::vector<BasePairFrame>& step_frames,

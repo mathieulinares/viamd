@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <md_gro.h>
 #include <md_system.h>
@@ -32,6 +34,231 @@ UTEST(lavery_core, step_parameter_groups_partition_existing_step_metrics_without
     const uint32_t local_helical=HELICAL_PARAMETERS>>class_first_metric(Class_Step);
     EXPECT_EQ((CLASS_LOCAL_ALL&~local_helical)|local_helical,CLASS_LOCAL_ALL);
     EXPECT_EQ((ALL_METRIC_PARAMETERS&~HELICAL_PARAMETERS)|HELICAL_PARAMETERS,ALL_METRIC_PARAMETERS);
+}
+
+UTEST(lavery_core, convention_metric_availability_excludes_only_incompatible_curves_fields) {
+    EXPECT_EQ(convention_available_metric_mask(AnalysisConvention::LegacyMixed), ALL_METRIC_PARAMETERS);
+    EXPECT_EQ(convention_available_metric_mask(AnalysisConvention::ThreeDna), ALL_METRIC_PARAMETERS);
+    const uint32_t curves = convention_available_metric_mask(AnalysisConvention::Curves);
+    EXPECT_EQ(curves & HELICAL_PARAMETERS, 0u);
+    EXPECT_EQ(curves & ((1u << MinorGroove) | (1u << MajorGroove)), 0u);
+    EXPECT_EQ(curves & ((1u << (Metric_Count)) - 1u),
+              ALL_METRIC_PARAMETERS & ~HELICAL_PARAMETERS & ~((1u << MinorGroove) | (1u << MajorGroove)));
+}
+
+UTEST(lavery_core, curves_geometry_csv_reference_preserves_labels_quantities_and_statistics) {
+    const auto path=std::filesystem::temp_directory_path()/
+        ("viamd_curves_reference_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".csv");
+    auto csv_row=[](std::vector<std::string> fields) {
+        std::string line;
+        for (size_t i=0;i<fields.size();++i) {
+            if (i) line+=',';
+            line+=fields[i];
+        }
+        return line+'\n';
+    };
+    auto base_row=[](const char* frame,const char* kind,const char* member,const char* level) {
+        std::vector<std::string> fields(19);
+        fields[0]="\"reference, run\""; fields[1]=frame; fields[2]="1"; fields[3]=kind;
+        fields[4]=member; fields[5]=level;
+        fields[17]="0"; fields[18]="0";
+        return fields;
+    };
+    std::string csv=csv_curves_trajectory_header();
+    auto pair0=base_row("0","pair_axis","\"bp 1: A / T\"","");
+    pair0[6]="1"; pair0[7]="2"; pair0[8]="179"; pair0[9]="4";
+    csv+=csv_row(std::move(pair0));
+    auto pair1=base_row("1","pair_axis","\"bp 1: A / T\"","");
+    pair1[6]="3"; pair1[7]="4"; pair1[8]="-179"; pair1[9]="6";
+    csv+=csv_row(std::move(pair1));
+    auto invalid_pair=base_row("2","pair_axis","\"bp 1: A / T\"","");
+    invalid_pair[6]="99"; invalid_pair[17]="1";
+    csv+=csv_row(std::move(invalid_pair));
+    auto step=base_row("0","inter_axis","\"bp 1: A / T\"","");
+    step[11]="3.2"; step[12]="34";
+    csv+=csv_row(std::move(step));
+    auto groove=base_row("0","groove","sample_1","1.5");
+    groove[13]="4.1"; groove[14]="2.2"; groove[15]="5.1"; groove[16]="3.2";
+    csv+=csv_row(std::move(groove));
+    {
+        std::ofstream file(path,std::ios::binary);
+        ASSERT_TRUE((bool)file);
+        file << csv;
+        ASSERT_TRUE((bool)file);
+    }
+    ExternalCurvesGeometryReference reference;
+    std::string error;
+    ASSERT_TRUE(load_curves_geometry_reference(&reference,path.string(),&error));
+    EXPECT_EQ(reference.records,(size_t)5);
+    EXPECT_EQ(reference.frames,(size_t)3);
+    EXPECT_TRUE(reference.run=="reference, run");
+    MemberStatistics stats;
+    ASSERT_TRUE(curves_geometry_reference_statistics(&stats,reference,1,"bp 1: A / T",CurvesAxisXDisplacement));
+    EXPECT_EQ(stats.count,(size_t)2);
+    EXPECT_NEAR(stats.mean,2.0,1e-6);
+    EXPECT_NEAR(stats.sd,1.0,1e-6);
+    ASSERT_TRUE(curves_geometry_reference_statistics(&stats,reference,1,"bp 1: A / T",CurvesAxisInclination));
+    EXPECT_NEAR(std::fabs(stats.mean),180.0,1e-5);
+    EXPECT_NEAR(stats.sd,1.0,1e-5);
+    ASSERT_TRUE(curves_geometry_reference_statistics(&stats,reference,1,"bp 1: A / T",CurvesInterAxisTwist));
+    EXPECT_NEAR(stats.mean,34.0,1e-6);
+    ASSERT_TRUE(curves_geometry_reference_statistics(&stats,reference,1,"sample_1",CurvesGrooveW12,1.5f));
+    EXPECT_NEAR(stats.mean,4.1,1e-6);
+    ASSERT_TRUE(curves_geometry_reference_statistics(&stats,reference,2,"bp 1: A / T",CurvesAxisXDisplacement));
+    EXPECT_EQ(stats.count,(size_t)0);
+    std::filesystem::remove(path);
+}
+
+UTEST(lavery_core, curves_geometry_csv_reference_rejects_duplicate_samples) {
+    const auto path=std::filesystem::temp_directory_path()/
+        ("viamd_curves_duplicate_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".csv");
+    {
+        std::ofstream file(path,std::ios::binary);
+        ASSERT_TRUE((bool)file);
+        file << csv_curves_trajectory_header();
+        std::vector<std::string> fields(19);
+        fields[0]="run"; fields[1]="0"; fields[2]="1"; fields[3]="pair_axis"; fields[4]="bp_1";
+        fields[6]="1"; fields[7]="2"; fields[8]="3"; fields[9]="4"; fields[10]="5";
+        fields[17]="0"; fields[18]="0";
+        for (int i=0;i<2;++i) {
+            for (size_t j=0;j<fields.size();++j) {
+                if (j) file << ',';
+                file << fields[j];
+            }
+            file << '\n';
+        }
+    }
+    ExternalCurvesGeometryReference reference;
+    std::string error;
+    EXPECT_FALSE(load_curves_geometry_reference(&reference,path.string(),&error));
+    EXPECT_TRUE(error.find("Duplicate Curves+ geometry sample")!=std::string::npos);
+    std::filesystem::remove(path);
+}
+
+static CurvesTrajectoryAnalysis curves_event_trajectory() {
+    CurvesTrajectoryAnalysis trajectory;
+    trajectory.frames=12;
+    trajectory.pairs=2;
+    trajectory.steps=1;
+    CurvesTrajectoryAnalysis::Helix helix;
+    helix.pairs={0,1};
+    helix.steps={0};
+    helix.pair_labels={"bp_1","bp_2"};
+    helix.step_labels={"step_1_2"};
+    trajectory.helices.push_back(std::move(helix));
+    trajectory.pair_axis.resize(trajectory.frames*trajectory.pairs);
+    trajectory.step_axis.resize(trajectory.frames*trajectory.steps);
+    trajectory.axis_quality.assign(trajectory.frames,Quality_Good);
+    trajectory.groove_quality.assign(trajectory.frames,Quality_Good);
+    const float baseline[]={0,1,-1,0,1,-1,0,1};
+    for (size_t f=0;f<8;++f) trajectory.pair_axis[f*2].x_displacement=baseline[f];
+    trajectory.pair_axis[8*2].x_displacement=3;
+    trajectory.pair_axis[9*2].x_displacement=3;
+    return trajectory;
+}
+
+UTEST(lavery_core, curves_geometry_events_keep_native_members_gaps_thresholds_and_csv_shape) {
+    auto trajectory=curves_event_trajectory();
+    CurvesGeometryEventOptions options;
+    options.quantities=1u<<CurvesAxisXDisplacement;
+    options.sigma=2;
+    options.hysteresis=.5f;
+    options.baseline_first=0;
+    options.baseline_end=8;
+    options.first_frame=0;
+    options.last_frame=11;
+    options.min_frames=2;
+    std::vector<CurvesGeometryEvent> events;
+    ASSERT_TRUE(detect_curves_geometry_events(&events,trajectory,options));
+    ASSERT_EQ(events.size(),(size_t)1);
+    EXPECT_EQ(events[0].helix,(size_t)1);
+    EXPECT_EQ(events[0].quantity,(int)CurvesAxisXDisplacement);
+    EXPECT_TRUE(events[0].member=="bp_1");
+    EXPECT_EQ(events[0].begin,(size_t)8);
+    EXPECT_EQ(events[0].end,(size_t)9);
+    EXPECT_EQ(events[0].peak,(size_t)8);
+    EXPECT_EQ(events[0].outlier_frames,(size_t)2);
+    EXPECT_TRUE(events[0].peak_z>2);
+    const std::string row=csv_curves_geometry_event_row("native,run",events[0]);
+    EXPECT_TRUE(row.find("\"native,run\",1,axis_x_displacement,\"bp_1\",,8,9,8,8,9,8,\"frame\",2,") == 0);
+    const float times[]={0,1,2,3,4,5,6,7,8,9};
+    const std::string timed_row=csv_curves_geometry_event_row("native,run",events[0],times,"ps",10);
+    EXPECT_TRUE(timed_row.find(",8,9,8,\"ps\",2,") != std::string::npos);
+    EXPECT_TRUE(csv_curves_geometry_event_row("native,run",events[0],times,"ps",9).empty());
+
+    trajectory.axis_quality[9]=Quality_Separation;
+    options.min_frames=1;
+    options.max_gap=3;
+    ASSERT_TRUE(detect_curves_geometry_events(&events,trajectory,options));
+    ASSERT_EQ(events.size(),(size_t)1);
+    EXPECT_EQ(events[0].begin,(size_t)8);
+    EXPECT_EQ(events[0].end,(size_t)8);
+
+    options.quantities=0;
+    EXPECT_FALSE(detect_curves_geometry_events(&events,trajectory,options));
+    EXPECT_TRUE(events.empty());
+}
+
+UTEST(lavery_core, curves_geometry_events_apply_physical_duration_and_circular_baselines) {
+    auto trajectory=curves_event_trajectory();
+    for (size_t f=0;f<trajectory.frames;++f) {
+        trajectory.pair_axis[f*2].inclination=f<8 ? (f%2 ? -179.0f : 179.0f) :
+            f<10 ? 150.0f : 179.0f;
+    }
+    CurvesGeometryEventOptions options;
+    options.quantities=1u<<CurvesAxisInclination;
+    options.sigma=2;
+    options.hysteresis=.5f;
+    options.baseline_first=0;
+    options.baseline_end=8;
+    options.first_frame=8;
+    options.last_frame=11;
+    options.min_frames=1;
+    options.times.resize(trajectory.frames);
+    for (size_t f=0;f<options.times.size();++f) options.times[f]=(double)f*2;
+    options.min_duration=3;
+    options.max_gap_duration=2;
+    std::vector<CurvesGeometryEvent> events;
+    ASSERT_TRUE(detect_curves_geometry_events(&events,trajectory,options));
+    EXPECT_TRUE(events.empty());
+    options.min_duration=0;
+    ASSERT_TRUE(detect_curves_geometry_events(&events,trajectory,options));
+    ASSERT_EQ(events.size(),(size_t)1);
+    EXPECT_EQ(events[0].quantity,(int)CurvesAxisInclination);
+    EXPECT_EQ(events[0].begin,(size_t)8);
+    EXPECT_EQ(events[0].end,(size_t)9);
+}
+
+UTEST(lavery_core, curves_geometry_events_can_use_exactly_mapped_external_baselines) {
+    auto trajectory=curves_event_trajectory();
+    for (size_t f=0;f<8;++f) trajectory.pair_axis[f*2].x_displacement=0;
+    ExternalCurvesGeometryReference external;
+    external.records=8;
+    external.frames=8;
+    CurvesGeometryReferenceSeries series;
+    series.helix=1;
+    series.member="bp_1";
+    series.values[CurvesAxisXDisplacement]={0,1,-1,0,1,-1,0,1};
+    external.series.push_back(std::move(series));
+    CurvesGeometryEventOptions options;
+    options.quantities=1u<<CurvesAxisXDisplacement;
+    options.sigma=2;
+    options.hysteresis=.5f;
+    options.baseline_first=0;
+    options.baseline_end=8;
+    options.first_frame=0;
+    options.last_frame=11;
+    options.min_frames=2;
+    options.reference=&external;
+    std::vector<CurvesGeometryEvent> events;
+    ASSERT_TRUE(detect_curves_geometry_events(&events,trajectory,options));
+    ASSERT_EQ(events.size(),(size_t)1);
+    EXPECT_TRUE(events[0].member=="bp_1");
+    EXPECT_EQ(events[0].begin,(size_t)8);
+    EXPECT_EQ(events[0].end,(size_t)9);
+    external.series[0].member="other_member";
+    ASSERT_TRUE(detect_curves_geometry_events(&events,trajectory,options));
+    EXPECT_TRUE(events.empty());
 }
 
 UTEST(lavery_core, workspace_event_mask_preserves_current_subsets_and_legacy_migration) {
@@ -2418,6 +2645,11 @@ UTEST(lavery_core, computes_zero_step_rotation_and_rise) {
     ASSERT_NEAR(values.metric[Tilt], 0.0f, 1.0e-5f);
     ASSERT_NEAR(values.metric[Roll], 0.0f, 1.0e-5f);
     ASSERT_NEAR(values.metric[Twist], 0.0f, 1.0e-5f);
+    ASSERT_TRUE(compute_3dna_step(&values, a, b));
+    ASSERT_NEAR(values.metric[Rise], 3.4f, 1.0e-5f);
+    ASSERT_NEAR(values.metric[Tilt], 0.0f, 1.0e-5f);
+    ASSERT_NEAR(values.metric[Roll], 0.0f, 1.0e-5f);
+    ASSERT_NEAR(values.metric[Twist], 0.0f, 1.0e-5f);
 }
 
 UTEST(lavery_core, computes_pair_separation_as_stretch) {
@@ -2452,8 +2684,10 @@ UTEST(lavery_core, singular_and_improper_frames_are_rejected) {
     b.y = {0, -1, 0};
     Values values;
     EXPECT_FALSE(compute_step(&values, a, b));
+    EXPECT_FALSE(compute_3dna_step(&values, a, b));
     b.z = {0, 0, -1};
     EXPECT_FALSE(compute_step(&values, a, b));
+    EXPECT_FALSE(compute_3dna_step(&values, a, b));
 }
 
 UTEST(lavery_core, separated_or_invalid_fixed_partners_are_not_present) {
@@ -2480,6 +2714,9 @@ UTEST(lavery_core, rigid_world_motion_does_not_change_parameters) {
     ASSERT_TRUE(compute_step(&before, a, b));
     ASSERT_TRUE(compute_step(&after, moved(a), moved(b)));
     for (uint32_t k = Tilt; k <= Rise; ++k) EXPECT_NEAR(before.metric[k], after.metric[k], 0.002f);
+    ASSERT_TRUE(compute_3dna_step(&before, a, b));
+    ASSERT_TRUE(compute_3dna_step(&after, moved(a), moved(b)));
+    for (uint32_t k = Tilt; k <= HelicalTwist; ++k) EXPECT_NEAR(before.metric[k], after.metric[k], 0.002f);
     auto strand1 = [](const BasePairFrame& f) -> BaseFrame { return {f.origin, f.x, f.y, f.z}; };
     auto strand2 = [](const BasePairFrame& f) -> BaseFrame {
         return {f.origin, f.x, vec3_mul1(f.y, -1), vec3_mul1(f.z, -1)};
@@ -2566,6 +2803,22 @@ UTEST(lavery_core, pseudorotation_recovers_north_and_south_puckers) {
     EXPECT_EQ(metric_state(Phase, std::numeric_limits<float>::quiet_NaN()), -1);
 }
 
+UTEST(lavery_core, fourier_pseudorotation_handles_phase_and_missing_torsions) {
+    for (const float expected : {18.0f, 162.0f, 350.0f}) {
+        float nu[5];
+        for (int j = 0; j < 5; ++j) nu[j] = 38.0f * std::cos((expected + 144.0f * (j - 2)) * 3.14159265f / 180.0f);
+        float phase = 0, amplitude = 0;
+        fourier_pseudorotation(nu, &phase, &amplitude);
+        EXPECT_NEAR(phase, expected, 0.01f);
+        EXPECT_NEAR(amplitude, 38.0f, 0.01f);
+    }
+    float missing[5] = {0, 0, NAN, 0, 0};
+    float phase = 0, amplitude = 0;
+    fourier_pseudorotation(missing, &phase, &amplitude);
+    EXPECT_TRUE(std::isnan(phase));
+    EXPECT_TRUE(std::isnan(amplitude));
+}
+
 UTEST(lavery_core, nucleotide_values_handle_missing_atoms) {
     const float nan = std::numeric_limits<float>::quiet_NaN();
     vec3_t atoms[BB_Count];
@@ -2602,6 +2855,14 @@ UTEST(lavery_core, nucleotide_quality_distinguishes_missing_nonfinite_and_parame
     auto atoms = nucleotide_quality_coordinates();
     Values values;
     NucleotideQuality quality;
+    Values fourier;
+    NucleotideQuality fourier_quality;
+    compute_nucleotide(&values, atoms.data(), nullptr, &quality);
+    compute_nucleotide(&fourier, atoms.data(), nullptr, &fourier_quality, (1u << BB_Count)-1, Pucker_Fourier);
+    for (int k = Alpha; k <= (int)Chi; ++k) {
+        EXPECT_EQ(values.metric[k], fourier.metric[k]);
+        EXPECT_EQ(quality[k-Alpha], fourier_quality[k-Alpha]);
+    }
     compute_nucleotide(&values, atoms.data(), nullptr, &quality, ((1u << BB_Count)-1) & ~(1u << BB_C2));
     EXPECT_TRUE(quality[Phase-Alpha] & Quality_MissingAtoms);
     EXPECT_TRUE(quality[Amplitude-Alpha] & Quality_MissingAtoms);
@@ -2609,12 +2870,22 @@ UTEST(lavery_core, nucleotide_quality_distinguishes_missing_nonfinite_and_parame
     EXPECT_TRUE(std::isnan(values.metric[Phase]));
     EXPECT_TRUE(std::isnan(values.metric[Amplitude]));
     EXPECT_TRUE(std::isfinite(values.metric[Gamma]));
+    compute_nucleotide(&fourier, atoms.data(), nullptr, &fourier_quality,
+                       ((1u << BB_Count)-1) & ~(1u << BB_C2), Pucker_Fourier);
+    EXPECT_TRUE(fourier_quality[Phase-Alpha] & Quality_MissingAtoms);
+    EXPECT_TRUE(fourier_quality[Amplitude-Alpha] & Quality_MissingAtoms);
+    EXPECT_TRUE(std::isnan(fourier.metric[Phase]));
+    EXPECT_TRUE(std::isnan(fourier.metric[Amplitude]));
     atoms[BB_C2].x = std::numeric_limits<float>::quiet_NaN();
     compute_nucleotide(&values, atoms.data(), nullptr, &quality);
     EXPECT_TRUE(quality[Phase-Alpha] & Quality_NonfiniteCoordinates);
     EXPECT_FALSE(quality[Phase-Alpha] & Quality_MissingAtoms);
     EXPECT_FALSE(quality[Chi-Alpha] & Quality_NonfiniteCoordinates);
     EXPECT_TRUE(std::isfinite(values.metric[Chi]));
+    compute_nucleotide(&fourier, atoms.data(), nullptr, &fourier_quality, (1u << BB_Count)-1, Pucker_Fourier);
+    EXPECT_TRUE(fourier_quality[Phase-Alpha] & Quality_NonfiniteCoordinates);
+    EXPECT_TRUE(std::isnan(fourier.metric[Phase]));
+    EXPECT_TRUE(std::isnan(fourier.metric[Amplitude]));
 }
 
 UTEST(lavery_core, nucleotide_quality_keeps_warning_values_and_explains_degenerate_torsions) {
@@ -2637,6 +2908,51 @@ UTEST(lavery_core, nucleotide_quality_keeps_warning_values_and_explains_degenera
     EXPECT_TRUE(std::isnan(values.metric[EpsilonZeta]));
 }
 
+UTEST(lavery_core, curves_nucleotide_restricts_neighbours_and_long_bonds) {
+    auto atoms = nucleotide_quality_coordinates();
+    atoms[BB_P] = {0, 0, 0};
+    atoms[BB_PrevO3] = {2.5f, 0, 0};
+    atoms[BB_O5] = {0, 1, 0};
+    atoms[BB_C5] = {0, 1, 1};
+    Values curves, legacy;
+    NucleotideQuality quality;
+    constexpr uint32_t all = (1u << BB_Count) - 1;
+    compute_curves_nucleotide(&curves, atoms.data(), nullptr, &quality, all, true, true);
+    EXPECT_TRUE(std::isfinite(curves.metric[Alpha]));
+    const float whole_alpha = curves.metric[Alpha];
+    const auto cell = md_unitcell_from_extent(30, 30, 30);
+    atoms[BB_PrevO3].x += 30.0f;
+    compute_curves_nucleotide(&curves, atoms.data(), &cell, &quality, all, true, true);
+    EXPECT_NEAR(curves.metric[Alpha], whole_alpha, 1e-4f);
+    atoms[BB_PrevO3].x -= 30.0f;
+    atoms[BB_PrevO3].x = 2.501f;
+    compute_curves_nucleotide(&curves, atoms.data(), nullptr, &quality, all, true, true);
+    EXPECT_TRUE(std::isnan(curves.metric[Alpha]));
+    EXPECT_TRUE(quality[Alpha-Alpha] & Quality_ReferenceBondBreak);
+    CsvSample broken;
+    broken.metric = Alpha;
+    broken.value = curves.metric[Alpha];
+    broken.quality = quality[Alpha-Alpha];
+    EXPECT_NE(csv_sample(broken).find(quality_description(Quality_ReferenceBondBreak)), std::string::npos);
+    compute_nucleotide(&legacy, atoms.data());
+    EXPECT_TRUE(std::isfinite(legacy.metric[Alpha]));
+    compute_curves_nucleotide(&curves, atoms.data(), nullptr, &quality, all, false, false);
+    EXPECT_TRUE(std::isnan(curves.metric[Alpha]));
+    EXPECT_TRUE(quality[Alpha-Alpha] & Quality_MissingAtoms);
+    EXPECT_TRUE(std::isnan(curves.metric[Epsilon]));
+    EXPECT_TRUE(std::isnan(curves.metric[Zeta]));
+    EXPECT_TRUE(std::isnan(curves.metric[EpsilonZeta]));
+    EXPECT_TRUE(quality[EpsilonZeta-Alpha] & Quality_MissingAtoms);
+    EXPECT_TRUE(std::isfinite(curves.metric[Beta]));
+    EXPECT_TRUE(std::isfinite(curves.metric[Phase]));
+    atoms[BB_NextP] = vec3_add(atoms[BB_O3], vec3_t{2.6f, 0, 0});
+    compute_curves_nucleotide(&curves, atoms.data(), nullptr, &quality, all, true, true);
+    EXPECT_TRUE(std::isnan(curves.metric[Epsilon]));
+    EXPECT_TRUE(std::isnan(curves.metric[Zeta]));
+    EXPECT_TRUE(std::isnan(curves.metric[EpsilonZeta]));
+    EXPECT_TRUE(quality[EpsilonZeta-Alpha] & Quality_ReferenceBondBreak);
+}
+
 UTEST(lavery_core, planar_sugar_has_zero_amplitude_but_no_defined_phase) {
     auto atoms = nucleotide_quality_coordinates();
     for (int slot : {BB_C1, BB_C2, BB_C3, BB_C4, BB_O4}) atoms[slot].z = 0;
@@ -2644,6 +2960,13 @@ UTEST(lavery_core, planar_sugar_has_zero_amplitude_but_no_defined_phase) {
     NucleotideQuality quality;
     compute_nucleotide(&values, atoms.data(), nullptr, &quality);
     EXPECT_TRUE(std::isnan(values.metric[Phase]));
+    Values curves;
+    NucleotideQuality curves_quality;
+    compute_curves_nucleotide(&curves, atoms.data(), nullptr, &curves_quality,
+                              (1u << BB_Count)-1, true, true);
+    EXPECT_NEAR(curves.metric[Amplitude], 0.0f, 1e-6f);
+    EXPECT_NEAR(curves.metric[Phase], 0.0f, 1e-6f);
+    EXPECT_FALSE(curves_quality[Phase-Alpha] & Quality_DegenerateNucleotide);
     EXPECT_TRUE(quality[Phase-Alpha] & Quality_DegenerateNucleotide);
     EXPECT_NEAR(values.metric[Amplitude], 0.0f, 1e-4f);
     EXPECT_FALSE(quality[Amplitude-Alpha] & Quality_DegenerateNucleotide);
@@ -2726,9 +3049,249 @@ UTEST(lavery_core, groove_widths_use_3dna_phosphorus_indices) {
     EXPECT_TRUE(std::isnan(major[1])); // step 2 uses P2(4)
 }
 
+UTEST(lavery_core, refined_3dna_grooves_require_reference_flanks_and_geometry) {
+    constexpr size_t n = 12;
+    std::array<vec3_t, n> p1, p2;
+    for (size_t i = 0; i < n; ++i) {
+        p1[i] = {(float)i, 0, 0};
+        p2[i] = {(float)i, 10, 0};
+    }
+    std::array<float, n - 1> minor, major;
+    groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n,
+                  nullptr, nullptr, nullptr, Groove_3DnaRefined);
+    for (size_t s = 0; s < n - 1; ++s) {
+        if (s >= 3 && n - s >= 5) {
+            EXPECT_NEAR(minor[s], 4.2f, 1e-4f);
+            EXPECT_NEAR(major[s], 4.2f, 1e-4f);
+        } else {
+            EXPECT_TRUE(std::isnan(minor[s]));
+            EXPECT_TRUE(std::isnan(major[s]));
+        }
+    }
+    p2[2].x = std::numeric_limits<float>::quiet_NaN();
+    groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n,
+                  nullptr, nullptr, nullptr, Groove_3DnaRefined);
+    EXPECT_TRUE(std::isnan(minor[3]));
+    EXPECT_TRUE(std::isfinite(major[3]));
+    EXPECT_TRUE(std::isfinite(major[4]));
+    p2[2] = {2, 10, 0};
+    p1[3] = p1[1];
+    groove_widths(minor.data(), major.data(), p1.data(), p2.data(), n,
+                  nullptr, nullptr, nullptr, Groove_3DnaRefined);
+    EXPECT_TRUE(std::isnan(major[3]));
+}
+
+UTEST(lavery_core, curves_inversion_uses_next_pair_and_terminal_inherits_previous) {
+    std::vector<BasePairFrame> frames(5);
+    for (auto& f : frames) f.z = {0, 0, 1};
+    frames[0].origin = {0, 0, 29};
+    frames[1].origin = {0, 0, 2};
+    frames[2].origin = {0, 0, 1};
+    frames[3].origin = {0, 0, 6};
+    const auto cell = md_unitcell_from_extent(30, 30, 30);
+    const std::vector<StepIndex> steps = {{0, 1}, {1, 2}, {2, 3}};
+    auto inversion = curves_pair_inversions(frames, {1, 1, 1, 1, 1}, steps, &cell);
+    ASSERT_EQ(inversion.size(), (size_t)5);
+    EXPECT_EQ(inversion[0], 0);
+    EXPECT_EQ(inversion[1], 1);
+    EXPECT_EQ(inversion[2], 0);
+    EXPECT_EQ(inversion[3], 0);
+    EXPECT_EQ(inversion[4], -1);
+    inversion = curves_pair_inversions(frames, {1, 1, 1, 0, 1}, steps, &cell);
+    EXPECT_EQ(inversion[1], 1);
+    EXPECT_EQ(inversion[2], -1);
+    EXPECT_EQ(inversion[3], -1);
+}
+
+UTEST(lavery_core, groove_spans_follow_connected_duplex_across_periodic_images) {
+    const size_t n = 8;
+    std::vector<vec3_t> p1(n), p2(n), c1(n), c2(n);
+    for (size_t k = 0; k < n; ++k) {
+        p1[k] = {(float)k * 8, 0, 0};
+        p2[k] = {(float)k * 8 + 8, 12, 0};
+        c1[k] = {(float)k * 8 + 2, 4, 0};
+        c2[k] = {(float)k * 8 + 6, 8, 0};
+    }
+    float whole_minor[n], whole_major[n], periodic_minor[n], periodic_major[n];
+    float strict_minor[n], strict_major[n], wrapped_strict_minor[n], wrapped_strict_major[n];
+    groove_widths(whole_minor, whole_major, p1.data(), p2.data(), n);
+    groove_widths(strict_minor, strict_major, p1.data(), p2.data(), n, nullptr, nullptr, nullptr, Groove_3DnaRefined);
+    const auto cell = md_unitcell_from_extent(30, 30, 30);
+    for (size_t k = 0; k < n; ++k) {
+        for (auto* coordinates : {&p1, &p2, &c1, &c2}) {
+            (*coordinates)[k].x += (k % 3 - 1.0f) * 30;
+            (*coordinates)[k].y += (k % 2 ? 30.0f : -30.0f);
+        }
+    }
+    groove_widths(periodic_minor, periodic_major, p1.data(), p2.data(), n, &cell, c1.data(), c2.data());
+    groove_widths(wrapped_strict_minor, wrapped_strict_major, p1.data(), p2.data(), n,
+                  &cell, c1.data(), c2.data(), Groove_3DnaRefined);
+    for (size_t k = 0; k + 1 < n; ++k) {
+        if (std::isfinite(whole_minor[k])) EXPECT_NEAR(periodic_minor[k], whole_minor[k], 1e-4);
+        if (std::isfinite(whole_major[k])) EXPECT_NEAR(periodic_major[k], whole_major[k], 1e-4);
+        EXPECT_EQ(std::isfinite(strict_minor[k]), std::isfinite(wrapped_strict_minor[k]));
+        EXPECT_EQ(std::isfinite(strict_major[k]), std::isfinite(wrapped_strict_major[k]));
+        if (std::isfinite(strict_minor[k])) EXPECT_NEAR(wrapped_strict_minor[k], strict_minor[k], 1e-4);
+        if (std::isfinite(strict_major[k])) EXPECT_NEAR(wrapped_strict_major[k], strict_major[k], 1e-4);
+    }
+    vec3_t delta;
+    ASSERT_TRUE(groove_span(&delta, p1.data(), p2.data(), c1.data(), c2.data(), n, 2, 5, &cell));
+    EXPECT_NEAR(delta.x, 32.0f, 1e-4);
+    EXPECT_NEAR(delta.y, 12.0f, 1e-4);
+    c2[3].x += 12.0f;
+    EXPECT_FALSE(groove_span(&delta, p1.data(), p2.data(), c1.data(), c2.data(), n, 2, 5, &cell));
+    c2[3].x -= 12.0f;
+    c1[2].x = NAN;
+    ASSERT_TRUE(groove_span(&delta, p1.data(), p2.data(), c1.data(), c2.data(), n, 2, 5, &cell));
+    EXPECT_NEAR(delta.x, 32.0f, 1e-4);
+    c1[3].x = c1[4].x = c1[5].x = NAN;
+    EXPECT_FALSE(groove_span(&delta, p1.data(), p2.data(), c1.data(), c2.data(), n, 2, 5, &cell));
+    groove_widths(periodic_minor, periodic_major, p1.data(), p2.data(), n, &cell, c1.data(), c2.data());
+    EXPECT_TRUE(std::isnan(periodic_major[3]));
+}
+
+UTEST(lavery_core, groove_spans_support_triclinic_periodic_images) {
+    const size_t n = 8;
+    std::vector<vec3_t> p1(n), p2(n), c1(n), c2(n);
+    for (size_t k = 0; k < n; ++k) {
+        p1[k] = {(float)k * 4, 1, 2};
+        p2[k] = {(float)k * 4 + 8, 13, 2};
+        c1[k] = {(float)k * 4 + 2, 5, 2};
+        c2[k] = {(float)k * 4 + 6, 9, 2};
+    }
+    float whole_minor[n], whole_major[n], periodic_minor[n], periodic_major[n];
+    groove_widths(whole_minor, whole_major, p1.data(), p2.data(), n);
+    const auto cell = md_unitcell_from_basis_parameters(30, 30, 30, 6, 4, 3);
+    for (size_t k = 0; k < n; ++k) {
+        for (auto* coordinates : {&p1, &p2, &c1, &c2}) {
+            (*coordinates)[k] = vec3_add((*coordinates)[k], k % 2 ? vec3_t{6, 30, 0} : vec3_t{-4, -3, -30});
+        }
+    }
+    groove_widths(periodic_minor, periodic_major, p1.data(), p2.data(), n, &cell, c1.data(), c2.data());
+    for (size_t k = 0; k + 1 < n; ++k) {
+        if (std::isfinite(whole_minor[k])) EXPECT_NEAR(periodic_minor[k], whole_minor[k], 1e-4);
+        if (std::isfinite(whole_major[k])) EXPECT_NEAR(periodic_major[k], whole_major[k], 1e-4);
+    }
+}
+
 static vec3_t rodrigues(vec3_t v, vec3_t axis, float degrees) {
     const float a = degrees * 3.14159265358979f / 180.0f, c = std::cos(a), s = std::sin(a);
     return vec3_add(vec3_add(vec3_mul1(v, c), vec3_mul1(vec3_cross(axis, v), s)), vec3_mul1(axis, vec3_dot(axis, v) * (1 - c)));
+}
+
+UTEST(lavery_core, curves_groove_backbone_is_rigid_invariant_and_rejects_bad_geometry) {
+    std::vector<vec3_t> phosphates;
+    for (int i = 0; i < 6; ++i) {
+        const vec3_t p = rodrigues({10, 0, 0}, {0, 0, 1}, i * 30.0f);
+        phosphates.push_back(p);
+    }
+    std::vector<vec3_t> backbone;
+    ASSERT_TRUE(curves_groove_backbone(&backbone, phosphates));
+    ASSERT_EQ(backbone.size(), (size_t)51);
+    for (size_t i = 0; i < phosphates.size(); ++i)
+        EXPECT_NEAR(vec3_length(vec3_sub(backbone[i * 10], phosphates[i])), 0.0f, 1e-5);
+    const vec3_t rotation_axis = vec3_normalize(vec3_t{1, 2, 3});
+    const vec3_t shift = {5, -3, 10};
+    auto transform = [&](vec3_t p) { return vec3_add(rodrigues(p, rotation_axis, 43.0f), shift); };
+    auto moved = phosphates;
+    for (auto& p : moved) p = transform(p);
+    std::vector<vec3_t> moved_backbone;
+    ASSERT_TRUE(curves_groove_backbone(&moved_backbone, moved));
+    for (size_t i = 0; i < backbone.size(); ++i)
+        EXPECT_NEAR(vec3_length(vec3_sub(moved_backbone[i], transform(backbone[i]))), 0.0f, 2e-5);
+    moved[2] = moved[1];
+    EXPECT_FALSE(curves_groove_backbone(&moved_backbone, moved));
+    EXPECT_EQ(moved_backbone.size(), backbone.size());
+    EXPECT_NEAR(vec3_length(vec3_sub(moved_backbone[5], transform(backbone[5]))), 0.0f, 2e-5);
+    moved[2].x = NAN;
+    EXPECT_FALSE(curves_groove_backbone(&moved_backbone, moved));
+    std::vector<vec3_t> collinear = {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}};
+    EXPECT_FALSE(curves_groove_backbone(&moved_backbone, collinear));
+}
+
+UTEST(lavery_core, curves_duplex_axis_recovers_ideal_axis_and_rejects_singular_frames) {
+    std::vector<BaseFrame> a, b;
+    std::vector<BasePairFrame> midpoints;
+    for (int i = 0; i < 8; ++i) {
+        const vec3_t x = rodrigues({1, 0, 0}, {0, 0, 1}, i * 34.0f);
+        const vec3_t y = rodrigues({0, 1, 0}, {0, 0, 1}, i * 34.0f);
+        const vec3_t origin = {2, -3, i * 3.2f};
+        a.push_back({vec3_add(origin, vec3_mul1(x, 4)), x, y, {0, 0, 1}});
+        b.push_back({vec3_sub(origin, vec3_mul1(x, 4)), x, y, {0, 0, 1}});
+        midpoints.push_back({origin, x, y, {0, 0, 1}});
+    }
+    std::vector<CurvesAxisPoint> axis;
+    ASSERT_TRUE(curves_duplex_axis(&axis, a, b, midpoints));
+    ASSERT_EQ(axis.size(), midpoints.size());
+    for (size_t i = 0; i < axis.size(); ++i) {
+        EXPECT_NEAR(vec3_length(vec3_sub(axis[i].origin, midpoints[i].origin)), 0.0f, 1e-4);
+        EXPECT_NEAR(vec3_length(vec3_sub(axis[i].direction, vec3_t{0, 0, 1})), 0.0f, 1e-4);
+    }
+    std::vector<int8_t> inversion(axis.size(), 0);
+    std::vector<CurvesPairAxisParameters> parameters;
+    ASSERT_TRUE(curves_pair_axis_parameters(&parameters, midpoints, axis, inversion));
+    EXPECT_TRUE(std::isnan(parameters[0].axis_bend));
+    for (size_t i = 0; i < axis.size(); ++i) {
+        EXPECT_NEAR(parameters[i].x_displacement, 0.0f, 1e-4);
+        EXPECT_NEAR(parameters[i].y_displacement, 0.0f, 1e-4);
+        EXPECT_NEAR(parameters[i].inclination, 0.0f, 1e-4);
+        EXPECT_NEAR(parameters[i].tip, 0.0f, 1e-4);
+        if (i) EXPECT_NEAR(parameters[i].axis_bend, 0.0f, 1e-4);
+    }
+    inversion[2] = 1;
+    ASSERT_TRUE(curves_pair_axis_parameters(&parameters, midpoints, axis, inversion));
+    EXPECT_NEAR(std::fabs(parameters[2].tip), 180.0f, 1e-4);
+    inversion[2] = -1;
+    EXPECT_FALSE(curves_pair_axis_parameters(&parameters, midpoints, axis, inversion));
+    EXPECT_NEAR(std::fabs(parameters[2].tip), 180.0f, 1e-4);
+    inversion[2] = 0;
+    auto opposite = axis;
+    opposite[1].direction = vec3_mul1(opposite[1].direction, -1.0f);
+    EXPECT_FALSE(curves_pair_axis_parameters(&parameters, midpoints, opposite, inversion));
+    std::vector<CurvesStepAxisParameters> step_parameters;
+    ASSERT_TRUE(curves_step_axis_parameters(&step_parameters, midpoints, axis, inversion));
+    ASSERT_EQ(step_parameters.size(), axis.size() - 1);
+    for (const auto& step : step_parameters) {
+        EXPECT_NEAR(step.rise, 3.2f, 1e-4);
+        EXPECT_NEAR(step.twist, 34.0f, 1e-4);
+    }
+    inversion[2] = 1;
+    ASSERT_TRUE(curves_step_axis_parameters(&step_parameters, midpoints, axis, inversion));
+    EXPECT_NEAR(step_parameters[2].rise, -3.2f, 1e-4);
+    EXPECT_NEAR(step_parameters[2].twist, -34.0f, 1e-4);
+    EXPECT_NEAR(step_parameters[1].rise, 3.2f, 1e-4);
+    inversion[2] = -1;
+    EXPECT_FALSE(curves_step_axis_parameters(&step_parameters, midpoints, axis, inversion));
+    EXPECT_NEAR(step_parameters[2].rise, -3.2f, 1e-4);
+    inversion[2] = 0;
+    EXPECT_FALSE(curves_step_axis_parameters(&step_parameters, midpoints, opposite, inversion));
+    const vec3_t rotation_axis = vec3_normalize(vec3_t{1, 2, 3});
+    const vec3_t translation = {9, -4, 7};
+    auto rotate = [&](vec3_t v) { return rodrigues(v, rotation_axis, 43.0f); };
+    for (auto* strand : {&a, &b}) for (auto& f : *strand) {
+        f.origin = vec3_add(rotate(f.origin), translation);
+        f.x = rotate(f.x); f.y = rotate(f.y); f.z = rotate(f.z);
+    }
+    for (auto& f : midpoints) {
+        f.origin = vec3_add(rotate(f.origin), translation);
+        f.x = rotate(f.x); f.y = rotate(f.y); f.z = rotate(f.z);
+    }
+    std::vector<CurvesAxisPoint> transformed;
+    ASSERT_TRUE(curves_duplex_axis(&transformed, a, b, midpoints));
+    for (size_t i = 0; i < axis.size(); ++i) {
+        EXPECT_NEAR(vec3_length(vec3_sub(transformed[i].origin, vec3_add(rotate(axis[i].origin), translation))), 0.0f, 1e-4);
+        EXPECT_NEAR(vec3_length(vec3_sub(transformed[i].direction, rotate(axis[i].direction))), 0.0f, 1e-4);
+    }
+    a[1].x = a[0].x; a[1].y = a[0].y; a[1].z = a[0].z;
+    EXPECT_FALSE(curves_duplex_axis(&transformed, a, b, midpoints));
+    EXPECT_EQ(transformed.size(), axis.size());
+    EXPECT_NEAR(vec3_length(vec3_sub(transformed[0].origin, vec3_add(rotate(axis[0].origin), translation))), 0.0f, 1e-4);
+    a[1].x = vec3_mul1(a[0].x, -1.0f);
+    a[1].y = vec3_mul1(a[0].y, -1.0f);
+    a[1].z = a[0].z;
+    EXPECT_FALSE(curves_duplex_axis(&transformed, a, b, midpoints));
+    a[1].origin.x = NAN;
+    EXPECT_FALSE(curves_duplex_axis(&transformed, a, b, midpoints));
 }
 
 // Pair k of an ideal helix about the global z axis: displaced by (dx, dy), tilted about a hinge in the
@@ -2774,6 +3337,25 @@ UTEST(lavery_core, local_helical_parameters_recover_an_ideal_screw) {
     EXPECT_NEAR(values.metric[HelicalTwist], 0.0f, 1e-4f);
     EXPECT_FALSE(compute_helical_step(&values, a, BasePairFrame{}));
     EXPECT_TRUE(std::isnan(values.metric[HelicalRise]));
+}
+
+UTEST(lavery_core, local_helical_parameters_preserve_small_inclination_and_tip) {
+    for (float tilt : {0.005f, 0.02f, 0.08f}) {
+        for (float rotation : {0.0f, 37.0f, 117.0f}) {
+            auto a = ideal_helical_pair(0, -1.0f, 0.2f, -tilt, tilt * 0.6f, 33.0f, 3.4f);
+            auto b = ideal_helical_pair(1, -1.0f, 0.2f, -tilt, tilt * 0.6f, 33.0f, 3.4f);
+            for (auto* frame : {&a, &b}) {
+                frame->origin = rodrigues(frame->origin, {0, 1, 0}, rotation);
+                frame->x = rodrigues(frame->x, {0, 1, 0}, rotation);
+                frame->y = rodrigues(frame->y, {0, 1, 0}, rotation);
+                frame->z = rodrigues(frame->z, {0, 1, 0}, rotation);
+            }
+            Values values;
+            ASSERT_TRUE(compute_helical_step(&values, a, b));
+            EXPECT_NEAR(values.metric[Inclination], -tilt, 0.0001f);
+            EXPECT_NEAR(values.metric[Tip], tilt * 0.6f, 0.0001f);
+        }
+    }
 }
 
 UTEST(lavery_core, helical_axis_follows_local_screw_axes_and_splits_gaps) {

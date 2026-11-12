@@ -297,7 +297,7 @@ bool publish_series(md_attributes_t* table, const std::string& run, const char* 
         .flags = MD_ATTRIBUTE_FLAG_TEMPORAL,
         .unit = unit,
         .label = md_str_from_cstr(label),
-        .description = MD_STR_INIT("Canonical fixed partners; per-frame geometric and canonical-contact validity; fitted Tsukuba/Curves+ intra/step convention"),
+        .description = MD_STR_INIT("Fixed frame-0 pair identities; per-frame geometric and contact validity; values follow the selected Lavery convention"),
         .data = data,
         .byte_size = bytes,
     };

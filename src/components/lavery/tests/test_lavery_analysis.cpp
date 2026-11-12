@@ -18,8 +18,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include "data/lavery_rna_curves_reference.h"
+#include "data/lavery_1rna_3dna_frames.h"
 
 using namespace lavery;
 
@@ -65,6 +67,23 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     ASSERT_TRUE(extract_base_frames(base_frames, sys, state, bases));
     std::vector<Pair> pairs(bases.size());
     pairs.resize(detect_pairs(pairs.data(), pairs.size(), base_frames.data(), base_frames.size(), &state.unitcell));
+    PairingValidator first_validator;
+    std::vector<uint16_t> first_quality;
+    std::vector<uint8_t> first_contacts;
+    std::vector<PairingEvidence> first_evidence;
+    ASSERT_TRUE(first_validator.initialize(sys, bases, pairs));
+    ASSERT_TRUE(first_validator.evaluate(first_quality, first_contacts, state, &first_evidence));
+    // Match the application's frame-0 pair typing and orientation before gathering steps.
+    size_t retained = 0;
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const bool parallel = vec3_dot(base_frames[pairs[p].a].z, base_frames[pairs[p].b].z) > 0.0f;
+        const PairType type = identify_pair_type(first_validator.chemistry()[p], first_evidence[p], parallel);
+        if (type == PairType_Count) continue;
+        pairs[p].type = (uint8_t)type;
+        pairs[p].reversed = type == PairType_ReverseWatsonCrick;
+        pairs[retained++] = pairs[p];
+    }
+    pairs.resize(retained);
     ASSERT_GT(pairs.size(), (size_t)0);
     const auto steps = gather_steps(sys, bases, pairs.data(), pairs.size());
     const auto chains = helix_chains(pairs.size(), steps);
@@ -109,7 +128,8 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         }
         EXPECT_TRUE(input.eof());
         for (int id = 0; id < (int)Metric_Count; ++id) {
-            EXPECT_EQ(records[id], id == MinorGroove || id == MajorGroove ? (size_t)0 : reference[id].size());
+            EXPECT_EQ(records[id], id == MinorGroove || id == MajorGroove || (HELICAL_PARAMETERS & (1u << id))
+                ? (size_t)0 : reference[id].size());
         }
     }
     const char* snapshot_dir = std::getenv("VIAMD_LAVERY_VALIDATION_EXPORT");
@@ -129,7 +149,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
     if (snapshot_dir) {
         exported_values.open(std::filesystem::path(snapshot_dir)/"viamd.csv");
         ASSERT_TRUE(exported_values.good());
-        exported_values << "frame,class,member,metric,value\n";
+        exported_values << "frame,class,member,metric,value,quality\n" << std::setprecision(9);
         std::ofstream pairing(std::filesystem::path(snapshot_dir)/"pairing.txt");
         ASSERT_TRUE(pairing.good());
         for (size_t c = 0; c < chains.size(); ++c) {
@@ -206,6 +226,51 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         ASSERT_TRUE(evidence_file.good());
         evidence_file << "frame,pair,quality,canonical_contacts\n";
     }
+    std::ofstream dna_pair_step_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_3DNA_PAIR_STEP")) {
+        dna_pair_step_file.open(path);
+        ASSERT_TRUE(dna_pair_step_file.good());
+        dna_pair_step_file << "frame,class,member,a,b,metric,value,quality\n" << std::setprecision(9);
+    }
+    std::ofstream dna_groove_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_3DNA_GROOVES")) {
+        dna_groove_file.open(path);
+        ASSERT_TRUE(dna_groove_file.good());
+        dna_groove_file << "frame,member,metric,value\n" << std::setprecision(9);
+    }
+    std::ofstream dna_nucleotide_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_3DNA_NUCLEOTIDES")) {
+        dna_nucleotide_file.open(path);
+        ASSERT_TRUE(dna_nucleotide_file.good());
+        dna_nucleotide_file << "frame,member,metric,value,quality\n" << std::setprecision(9);
+    }
+    std::ofstream axis_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_CURVES_AXIS")) {
+        ASSERT_EQ(chains.size(), (size_t)1);
+        axis_file.open(path);
+        ASSERT_TRUE(axis_file.good());
+        axis_file << "frame,pair,ux,uy,uz,x,y,z,xdisp,ydisp,inclin,tip,bend,hrise,htwist\n" << std::setprecision(9);
+    }
+    std::ofstream curves_groove_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_CURVES_GROOVES")) {
+        ASSERT_EQ(chains.size(), (size_t)1);
+        curves_groove_file.open(path);
+        ASSERT_TRUE(curves_groove_file.good());
+        curves_groove_file << "frame,index,level,width12,depth12,width21,depth21\n" << std::setprecision(9);
+    }
+    std::ofstream curves_nucleotide_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_CURVES_NUCLEOTIDES")) {
+        ASSERT_GT(chains.size(), (size_t)0);
+        curves_nucleotide_file.open(path);
+        ASSERT_TRUE(curves_nucleotide_file.good());
+        curves_nucleotide_file << "frame,class,member,metric,value,quality\n" << std::setprecision(9);
+    }
+    std::ofstream curves_pair_step_file;
+    if (const char* path = std::getenv("VIAMD_LAVERY_VALIDATION_CURVES_PAIR_STEP")) {
+        curves_pair_step_file.open(path);
+        ASSERT_TRUE(curves_pair_step_file.good());
+        curves_pair_step_file << "frame,class,member,metric,value,quality\n" << std::setprecision(9);
+    }
     std::vector<uint16_t> pair_quality;
     std::array<std::array<size_t, 4>, 10> nucleotide_quality_counts = {};
     double analysis_ms = 0;
@@ -214,6 +279,98 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         FrameAnalysis result;
         const auto analysis_begin = std::chrono::steady_clock::now();
         ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
+        CurvesFrameAnalysis curves_frame;
+        if (curves_nucleotide_file.is_open() || curves_pair_step_file.is_open() ||
+            axis_file.is_open() || curves_groove_file.is_open())
+            ASSERT_TRUE(analyze_curves_frame(&curves_frame, sys, state, bases, pairs, steps, validator));
+        if (curves_pair_step_file.is_open()) {
+            for (size_t p = 0; p < pairs.size(); ++p)
+                for (int id = Buckle; id <= (int)Stagger; ++id)
+                    curves_pair_step_file << f << ",0," << p << ',' << id << ','
+                                          << curves_frame.frame.pair_values[p].metric[id] << ','
+                                          << curves_frame.frame.pair_quality[p] << '\n';
+            for (size_t s = 0; s < steps.size(); ++s)
+                for (int id = Tilt; id <= (int)Rise; ++id)
+                    curves_pair_step_file << f << ",1," << s << ',' << id << ','
+                                          << curves_frame.frame.step_values[s].metric[id] << ','
+                                          << curves_frame.frame.step_quality[s] << '\n';
+            ASSERT_TRUE(curves_pair_step_file.good());
+        }
+        if (curves_nucleotide_file.is_open()) {
+            for (size_t p = 0; p < pairs.size(); ++p) {
+                for (int side = 0; side < 2; ++side) {
+                    const auto& nucleotide = curves_frame.frame.nucleotide_values[2*p + side];
+                    const auto& quality = curves_frame.frame.nucleotide_quality[2*p + side];
+                    for (int id = Alpha; id <= (int)EpsilonZeta; ++id)
+                        curves_nucleotide_file << f << ",2," << 2*p+side << ',' << id << ','
+                                               << nucleotide.metric[id] << ',' << quality[id-Alpha] << '\n';
+                }
+            }
+            ASSERT_TRUE(curves_nucleotide_file.good());
+        }
+        FrameAnalysis dna;
+        if (dna_pair_step_file.is_open() || dna_groove_file.is_open() || dna_nucleotide_file.is_open())
+            ASSERT_TRUE(analyze_3dna_frame(&dna, sys, state, bases, pairs, steps, validator));
+        if (dna_nucleotide_file.is_open()) {
+            for (size_t member = 0; member < dna.nucleotide_values.size(); ++member)
+                for (int id = Alpha; id <= (int)EpsilonZeta; ++id)
+                    dna_nucleotide_file << f << ',' << member << ',' << id << ','
+                                        << dna.nucleotide_values[member].metric[id] << ','
+                                        << dna.nucleotide_quality[member][id-Alpha] << '\n';
+            ASSERT_TRUE(dna_nucleotide_file.good());
+        }
+        if (dna_pair_step_file.is_open()) {
+            for (size_t p = 0; p < pairs.size(); ++p)
+                for (int id = Buckle; id <= (int)Stagger; ++id)
+                    dna_pair_step_file << f << ",0," << p << ',' << bases[pairs[p].a].component+1 << ','
+                        << bases[pairs[p].b].component+1 << ',' << id << ',' << dna.pair_values[p].metric[id]
+                        << ',' << dna.pair_quality[p] << '\n';
+            for (size_t s = 0; s < steps.size(); ++s)
+                for (int id = Tilt; id <= (int)Rise; ++id)
+                    dna_pair_step_file << f << ",1," << s << ',' << steps[s].a << ',' << steps[s].b << ','
+                        << id << ',' << dna.step_values[s].metric[id] << ',' << dna.step_quality[s] << '\n';
+            for (size_t s = 0; s < steps.size(); ++s)
+                for (int id = XDisplacement; id <= (int)HelicalTwist; ++id)
+                    dna_pair_step_file << f << ",1," << s << ',' << steps[s].a << ',' << steps[s].b << ','
+                        << id << ',' << dna.step_values[s].metric[id] << ',' << dna.helical_quality[s] << '\n';
+            ASSERT_TRUE(dna_pair_step_file.good());
+        }
+        if (dna_groove_file.is_open()) {
+            std::vector<int64_t> step_from(pairs.size(), -1);
+            for (size_t s = 0; s < steps.size(); ++s) step_from[steps[s].a] = (int64_t)s;
+            const vec3_t missing = {NAN, NAN, NAN};
+            auto position = [&](int32_t atom) { return atom >= 0 ? state.xyz[atom] : missing; };
+            for (const auto& chain : chains) {
+                std::vector<vec3_t> p1, p2, c1, c2;
+                for (uint32_t p : chain) {
+                    const auto& a = bases[pairs[p].a];
+                    const auto& b = bases[pairs[p].b];
+                    p1.push_back(position(a.backbone[BB_P]));
+                    p2.push_back(position(b.backbone[BB_P]));
+                    c1.push_back(position(a.backbone[BB_C1]));
+                    c2.push_back(position(b.backbone[BB_C1]));
+                }
+                std::vector<float> minor(chain.size() - 1), major(chain.size() - 1);
+                groove_widths(minor.data(), major.data(), p1.data(), p2.data(), chain.size(),
+                              &state.unitcell, c1.data(), c2.data(), Groove_3DnaRefined);
+                for (size_t i = 0; i + 1 < chain.size(); ++i) {
+                    ASSERT_GE(step_from[chain[i]], 0);
+                    ASSERT_EQ(steps[step_from[chain[i]]].b, chain[i+1]);
+                    const auto& calculated = dna.step_values[(size_t)step_from[chain[i]]];
+                    for (int id : {MinorGroove, MajorGroove}) {
+                        const float expected = id == MinorGroove ? minor[i] : major[i];
+                        const float actual = calculated.metric[id];
+                        EXPECT_EQ(std::isfinite(actual), std::isfinite(expected));
+                        if (std::isfinite(expected)) EXPECT_NEAR(actual, expected, 1e-5f);
+                    }
+                    dna_groove_file << f << ',' << step_from[chain[i]] << ',' << (int)MinorGroove << ','
+                                    << calculated.metric[MinorGroove] << '\n'
+                                    << f << ',' << step_from[chain[i]] << ',' << (int)MajorGroove << ','
+                                    << calculated.metric[MajorGroove] << '\n';
+                }
+            }
+            ASSERT_TRUE(dna_groove_file.good());
+        }
         ASSERT_EQ(result.pairing_states.size(), pairs.size());
         if (evidence_file.is_open()) for (size_t p=0; p<pairs.size(); ++p)
             evidence_file << f << ',' << p+1 << ',' << result.pair_quality[p] << ',' << (unsigned)result.contacts[p] << '\n';
@@ -244,18 +401,20 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             ASSERT_EQ(rows.size(), members[cls]);
             for (size_t m=0; m<rows.size(); ++m) {
                 values[id].push_back(rows[m].metric[id]);
-                sample_quality[id].push_back(cls==Class_Nucleotide ? result.nucleotide_quality[m][id-Alpha] :
+                sample_quality[id].push_back((HELICAL_PARAMETERS & (1u << id)) ? result.helical_quality[m] :
+                    cls==Class_Nucleotide ? result.nucleotide_quality[m][id-Alpha] :
                     cls==Class_Step ? result.step_quality[m] : result.pair_quality[m]);
             }
             if (sample_file.is_open()) for (size_t m=0; m<rows.size(); ++m) {
                 auto sample=member_sample(cls,m,f);
                 sample.metric=(Metric)id;
                 sample.value=rows[m].metric[id];
-                sample.quality=cls==Class_Nucleotide ? result.nucleotide_quality[m][id-Alpha] :
+                sample.quality=(HELICAL_PARAMETERS & (1u << id)) ? result.helical_quality[m] :
+                    cls==Class_Nucleotide ? result.nucleotide_quality[m][id-Alpha] :
                     cls==Class_Step ? result.step_quality[m] : result.pair_quality[m];
                 sample_file << csv_sample(sample);
             }
-            if (curves_dir && id != MinorGroove && id != MajorGroove) {
+            if (curves_dir && id != MinorGroove && id != MajorGroove && !(HELICAL_PARAMETERS & (1u << id))) {
                 for (size_t m = 0; m < rows.size(); ++m) {
                     float actual = rows[m].metric[id];
                     const float expected = reference[id][f*rows.size()+m];
@@ -276,11 +435,12 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
             }
             if (snapshot_dir) {
                 for (size_t m = 0; m < rows.size(); ++m) {
-                    exported_values << f << ',' << (int)cls << ',' << m << ',' << id << ',' << rows[m].metric[id] << '\n';
+                    exported_values << f << ',' << (int)cls << ',' << m << ',' << id << ',' << rows[m].metric[id]
+                                    << ',' << sample_quality[id][f*rows.size()+m] << '\n';
                 }
             }
         }
-        if (snapshot_dir) {
+        if (snapshot_dir || axis_file.is_open() || curves_groove_file.is_open()) {
             std::vector<vec3_t> whole_xyz(state.xyz, state.xyz+state.num_atoms);
             auto whole = state;
             whole.xyz = whole_xyz.data();
@@ -309,15 +469,102 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                     EXPECT_EQ(std::isfinite(original), std::isfinite(rows[m].metric[id]));
                     if (std::isfinite(original)) {
                         const double delta = rows[m].metric[id]-original;
-                        EXPECT_NEAR(metric_is_angular((Metric)id) ? std::remainder(delta, 360.0) : delta, 0.0, 0.003);
+                        const double difference = metric_is_angular((Metric)id) ? std::remainder(delta, 360.0) : delta;
+                        if (std::fabs(difference) > 0.003)
+                            printf("Unwrapped mismatch frame=%zu class=%d member=%zu metric=%s periodic=%.9g whole=%.9g delta=%.9g\n",
+                                   f, (int)cls, m, metric_name((Metric)id), original, rows[m].metric[id], difference);
+                        EXPECT_NEAR(difference, 0.0, 0.003);
                     }
                 }
             }
-            const auto path = (std::filesystem::path(snapshot_dir)/("frame_"+std::to_string(f)+".pdb")).string();
-            md_file_t file = {};
-            ASSERT_TRUE(md_file_open(&file, md_str_from_cstr(path.c_str()), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE));
-            ASSERT_TRUE(md_pdb_system_write_state_to_file(file, &sys, &whole, nullptr, whole.num_atoms, 0));
-            ASSERT_TRUE(md_file_close(&file));
+            if (axis_file.is_open() || curves_groove_file.is_open()) {
+                std::vector<BaseFrame> axis_bases;
+                ASSERT_TRUE(extract_base_frames(axis_bases, sys, whole, bases));
+                std::vector<BaseFrame> a, b;
+                std::vector<BasePairFrame> midpoint;
+                bool valid = true;
+                for (uint32_t p : chains[0]) {
+                    a.push_back(axis_bases[pairs[p].a]);
+                    b.push_back(axis_bases[pairs[p].b]);
+                    BasePairFrame frame;
+                    Values unused;
+                    if (!compute_base_pair(&unused, &frame, a.back(), b.back(), pairs[p].reversed)) valid = false;
+                    midpoint.push_back(frame);
+                }
+                std::vector<CurvesAxisPoint> axis;
+                if (valid) valid = curves_duplex_axis(&axis, a, b, midpoint);
+                std::vector<StepIndex> adjacent;
+                for (uint32_t i = 0; i + 1 < midpoint.size(); ++i) adjacent.push_back({i, i + 1});
+                const std::vector<uint8_t> available(midpoint.size(), valid ? 1 : 0);
+                const auto inversion = curves_pair_inversions(midpoint, available, adjacent);
+                std::vector<CurvesPairAxisParameters> pair_axis;
+                std::vector<CurvesStepAxisParameters> step_axis;
+                const bool valid_params = valid && curves_pair_axis_parameters(&pair_axis, midpoint, axis, inversion) &&
+                                          curves_step_axis_parameters(&step_axis, midpoint, axis, inversion);
+                const auto& integrated = curves_frame.helices;
+                ASSERT_EQ(integrated.size(), (size_t)1);
+                ASSERT_TRUE(integrated[0].pairs == chains[0]);
+                ASSERT_EQ(integrated[0].axis_quality == Quality_Good, valid_params);
+                vec3_t image_shift = {};
+                if (valid_params) {
+                    ASSERT_EQ(integrated[0].axis.size(), axis.size());
+                    image_shift = vec3_sub(axis[0].origin, integrated[0].axis[0].origin);
+                    for (size_t i = 0; i < axis.size(); ++i) {
+                        EXPECT_NEAR(vec3_length(vec3_sub(integrated[0].axis[i].direction, axis[i].direction)), 0.0f, 0.003f);
+                        EXPECT_NEAR(vec3_length(vec3_sub(vec3_add(integrated[0].axis[i].origin, image_shift),
+                                                         axis[i].origin)), 0.0f, 0.003f);
+                    }
+                }
+                if (axis_file.is_open()) {
+                    for (size_t i = 0; i < chains[0].size(); ++i) {
+                        const vec3_t u = valid_params ? integrated[0].axis[i].direction : vec3_t{NAN, NAN, NAN};
+                        const vec3_t p = valid_params ? vec3_add(integrated[0].axis[i].origin, image_shift) : vec3_t{NAN, NAN, NAN};
+                        axis_file << f << ',' << chains[0][i] << ',' << u.x << ',' << u.y << ',' << u.z << ','
+                                  << p.x << ',' << p.y << ',' << p.z << ','
+                                  << (valid_params ? integrated[0].pair_parameters[i].x_displacement : NAN) << ','
+                                  << (valid_params ? integrated[0].pair_parameters[i].y_displacement : NAN) << ','
+                                  << (valid_params ? integrated[0].pair_parameters[i].inclination : NAN) << ','
+                                  << (valid_params ? integrated[0].pair_parameters[i].tip : NAN) << ','
+                                  << (valid_params ? integrated[0].pair_parameters[i].axis_bend : NAN) << ','
+                                  << (valid_params && i < integrated[0].step_parameters.size() ? integrated[0].step_parameters[i].rise : NAN) << ','
+                                  << (valid_params && i < integrated[0].step_parameters.size() ? integrated[0].step_parameters[i].twist : NAN) << '\n';
+                    }
+                    ASSERT_TRUE(axis_file.good());
+                }
+                if (curves_groove_file.is_open()) {
+                    std::array<std::vector<vec3_t>, 2> phosphates, backbones, depth;
+                    for (size_t i = 0; i < chains[0].size(); ++i) {
+                        const auto pair = pairs[chains[0][i]];
+                        depth[0].push_back(axis_bases[pair.a].groove_reference);
+                        depth[1].push_back(axis_bases[pair.b].groove_reference);
+                        for (int side = 0; side < 2; ++side) {
+                            if ((!side && i == 0) || (side && i + 1 == chains[0].size())) continue;
+                            const auto& base = bases[side ? pair.b : pair.a];
+                            const int32_t atom = base.backbone[BB_P];
+                            phosphates[side].push_back(atom >= 0 ? whole.xyz[atom] : vec3_t{NAN, NAN, NAN});
+                        }
+                    }
+                    std::vector<CurvesGrooveSample> grooves;
+                    const bool groove_valid = valid && curves_groove_backbone(&backbones[0], phosphates[0]) &&
+                        curves_groove_backbone(&backbones[1], phosphates[1]) &&
+                        curves_grooves(&grooves, backbones[0], backbones[1], midpoint, axis, depth[0], depth[1]);
+                    ASSERT_EQ(integrated[0].groove_quality == Quality_Good, groove_valid);
+                    for (size_t i = 0; i < 2 * chains[0].size() - 3; ++i) {
+                        const CurvesGrooveSample v = groove_valid ? integrated[0].grooves[i] :
+                            CurvesGrooveSample{1.5f + 0.5f * (float)i, NAN, NAN, NAN, NAN};
+                        curves_groove_file << f << ',' << i << ',' << v.level << ',' << v.width12 << ',' << v.depth12
+                                           << ',' << v.width21 << ',' << v.depth21 << '\n';
+                    }
+                    ASSERT_TRUE(curves_groove_file.good());
+                }
+            }
+            if (snapshot_dir) {
+                const auto path = (std::filesystem::path(snapshot_dir)/("frame_"+std::to_string(f)+".pdb")).string();
+                md_file_t file = {};
+                ASSERT_TRUE(md_file_open(&file, md_str_from_cstr(path.c_str()), MD_FILE_WRITE | MD_FILE_CREATE | MD_FILE_TRUNCATE));
+                ASSERT_TRUE(md_pdb_system_write_state_to_file(file, &sys, &whole, nullptr, whole.num_atoms, 0));
+                ASSERT_TRUE(md_file_close(&file));
+            }
         }
         const md_script_vis_ctx_t ctx = {.sys = &sys, .state = &state};
         const size_t n = f % (2*pairs.size());
@@ -341,12 +588,23 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         }
         for (const auto& chain : chains) {
             const auto strand = bases[pairs[chain[0]].a].strand;
-            auto phosphate = [&](uint32_t p, bool second) {
+            auto atom = [&](uint32_t p, bool second, int backbone) {
                 const auto pair = pairs[p];
                 const auto& a = bases[pair.a];
                 const auto& b = bases[pair.b];
-                return ((a.strand == strand) != second ? a : b).backbone[BB_P];
+                return ((a.strand == strand) != second ? a : b).backbone[backbone];
             };
+            auto phosphate = [&](uint32_t p, bool second) { return atom(p, second, BB_P); };
+            const vec3_t missing = {NAN, NAN, NAN};
+            std::vector<vec3_t> p1(chain.size()), p2(chain.size()), c1(chain.size()), c2(chain.size());
+            for (size_t i = 0; i < chain.size(); ++i) {
+                auto coord = [&](bool second, int backbone) {
+                    const int32_t index = atom(chain[i], second, backbone);
+                    return index < 0 ? missing : state.xyz[index];
+                };
+                p1[i] = coord(false, BB_P); p2[i] = coord(true, BB_P);
+                c1[i] = coord(false, BB_C1); c2[i] = coord(true, BB_C1);
+            }
             for (size_t s = 0; s < steps.size(); ++s) {
                 const auto it = std::find(chain.begin(), chain.end(), steps[s].a);
                 if (it == chain.end()) continue;
@@ -360,9 +618,37 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                         const int32_t a = phosphate(chain[spans.indices[i][0]], false);
                         const int32_t b = phosphate(chain[spans.indices[i][1]], true);
                         if (a < 0 || b < 0) { valid = false; break; }
-                        vec3_t d = vec3_sub(state.xyz[b], state.xyz[a]);
-                        md_util_min_image_vec3(&d, 1, &state.unitcell);
-                        sum += vec3_length(d);
+                        const size_t ia = spans.indices[i][0], ib = spans.indices[i][1];
+                        vec3_t d;
+                        if (!groove_span(&d, p1.data(), p2.data(), c1.data(), c2.data(), chain.size(), ia, ib, &state.unitcell)) {
+                            valid = false; break;
+                        }
+                        double width = vec3_length(d);
+                        if (ia > 0 && ia+1 < chain.size() && ib > 0 && ib+1 < chain.size()) {
+                            const int32_t a0 = phosphate(chain[ia-1], false), a1 = phosphate(chain[ia+1], false);
+                            const int32_t b0 = phosphate(chain[ib-1], true), b1 = phosphate(chain[ib+1], true);
+                            if (a0 >= 0 && a1 >= 0 && b0 >= 0 && b1 >= 0) {
+                                vec3_t da0 = vec3_sub(state.xyz[a], state.xyz[a0]);
+                                vec3_t da1 = vec3_sub(state.xyz[a1], state.xyz[a]);
+                                vec3_t db0 = vec3_sub(state.xyz[b], state.xyz[b0]);
+                                vec3_t db1 = vec3_sub(state.xyz[b1], state.xyz[b]);
+                                md_util_min_image_vec3(&da0, 1, &state.unitcell);
+                                md_util_min_image_vec3(&da1, 1, &state.unitcell);
+                                md_util_min_image_vec3(&db0, 1, &state.unitcell);
+                                md_util_min_image_vec3(&db1, 1, &state.unitcell);
+                                const vec3_t da = vec3_add(da0, da1), db = vec3_add(db0, db1);
+                                const float la = vec3_length(da), lb = vec3_length(db);
+                                if (la >= 1e-6f && lb >= 1e-6f && width >= 1e-6) {
+                                    const vec3_t mean = vec3_add(vec3_div1(da, la), vec3_div1(db, lb));
+                                    const float lm = vec3_length(mean);
+                                    if (lm >= 1e-6f) {
+                                        const double projection = vec3_dot(d, mean) / lm;
+                                        width = std::sqrt(std::max(0.0, width*width-projection*projection));
+                                    }
+                                }
+                            }
+                        }
+                        sum += width;
                         char expression[96];
                         snprintf(expression, sizeof(expression), "distance(%d,%d);", a+1, b+1);
                         ASSERT_TRUE(md_script_vis_clear(&vis));
@@ -370,7 +656,9 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
                             MD_SCRIPT_VISUALIZE_GEOMETRY | MD_SCRIPT_VISUALIZE_TEXT));
                         ASSERT_EQ(md_array_size(vis.text), (size_t)1);
                         const double distance = vis.text[0].value * md_unit_scale(vis.text[0].unit) / md_unit_scale(md_unit_angstrom());
-                        EXPECT_NEAR(distance, vec3_length(d), 0.0001);
+                        vec3_t nearest = vec3_sub(state.xyz[b], state.xyz[a]);
+                        md_util_min_image_vec3(&nearest, 1, &state.unitcell);
+                        EXPECT_NEAR(distance, vec3_length(nearest), 0.0001);
                         ++distance_checks;
                     }
                     if (valid) {
@@ -522,7 +810,7 @@ UTEST(lavery_core, optional_local_trajectory_measurement_validation) {
         }
     }
     if (curves_dir) for (int id = 0; id < (int)Metric_Count; ++id) {
-        if (id == MinorGroove || id == MajorGroove) continue;
+        if (id == MinorGroove || id == MajorGroove || (HELICAL_PARAMETERS & (1u << id))) continue;
         EXPECT_GT(reference_checks[id], (size_t)0);
         printf("Independent Curves+ %s%s: %zu checks, max difference %.6f %s\n",
             metric_name((Metric)id), id == Phase || id == Amplitude ? " (Fourier convention)" : "",
@@ -1051,6 +1339,63 @@ UTEST(lavery_core, production_frame_analysis_checks_chemistry_and_recovers_after
     md_arena_allocator_destroy(alloc);
 }
 
+UTEST(lavery_core, production_frame_analysis_applies_curves_inversion_to_pair_and_step_values) {
+    auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(16));
+    md_system_t sys = {.alloc = alloc};
+    md_system_state_t state = {.alloc = alloc};
+    ASSERT_TRUE(md_gro_system_init_from_file(&sys, &state, MD_STR_LIT(VIAMD_TEST_DATA_DIR "/nucl-dna.gro"), nullptr));
+    ASSERT_TRUE(md_util_system_infer(&sys, &state, MD_UTIL_INFER_ALL, nullptr));
+    const auto bases = gather_bases(sys);
+    std::vector<BaseFrame> frames;
+    ASSERT_TRUE(extract_base_frames(frames, sys, state, bases));
+    std::vector<Pair> pairs(bases.size());
+    pairs.resize(detect_pairs(pairs.data(), pairs.size(), frames.data(), frames.size(), &state.unitcell));
+    const auto steps = gather_steps(sys, bases, pairs.data(), pairs.size());
+    PairingValidator validator;
+    ASSERT_TRUE(validator.initialize(sys, bases, pairs));
+    FrameAnalysis original;
+    ASSERT_TRUE(analyze_frame(&original, sys, state, bases, pairs, steps, validator));
+    const size_t s = 50;
+    ASSERT_LT(s, steps.size());
+    const auto step = steps[s];
+    ASSERT_EQ(original.pair_quality[step.a], (uint16_t)Quality_Good);
+    ASSERT_EQ(original.pair_quality[step.b], (uint16_t)Quality_Good);
+    vec3_t delta = vec3_sub(original.pair_frames[step.b].origin, original.pair_frames[step.a].origin);
+    md_util_min_image_vec3(&delta, 1, &state.unitcell);
+    const vec3_t normal = original.pair_frames[step.b].z;
+    const float projection = vec3_dot(delta, normal);
+    ASSERT_GT(projection, 1.0f);
+    const vec3_t shift = vec3_mul1(normal, -2.0f * projection);
+    for (uint32_t base_index : {pairs[step.b].a, pairs[step.b].b}) {
+        const auto range = md_system_residue_atom_range(&sys, bases[base_index].component);
+        for (uint32_t atom = range.beg; atom < range.end; ++atom) state.xyz[atom] = vec3_add(state.xyz[atom], shift);
+    }
+    FrameAnalysis result;
+    ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
+    ASSERT_EQ(result.pair_quality[step.a], (uint16_t)Quality_Good);
+    ASSERT_EQ(result.step_quality[s], (uint16_t)Quality_Good);
+    ASSERT_EQ(result.pair_inversions[step.a], 1);
+    ASSERT_TRUE(extract_base_frames(frames, sys, state, bases));
+    const auto pair = pairs[step.a];
+    BasePairFrame raw_pair;
+    Values raw_pair_values;
+    uint16_t quality;
+    ASSERT_TRUE(compute_present_base_pair(&raw_pair_values, &raw_pair, &quality,
+        frames[pair.a], frames[pair.b], &state.unitcell, pair.reversed));
+    EXPECT_NEAR(result.pair_values[step.a].metric[Shear], -raw_pair_values.metric[Shear], 1e-5);
+    EXPECT_NEAR(result.pair_values[step.a].metric[Buckle], -raw_pair_values.metric[Buckle], 1e-5);
+    auto next = result.pair_frames[step.b];
+    delta = vec3_sub(next.origin, raw_pair.origin);
+    md_util_min_image_vec3(&delta, 1, &state.unitcell);
+    next.origin = vec3_add(raw_pair.origin, delta);
+    Values raw_step_values;
+    ASSERT_TRUE(compute_step(&raw_step_values, raw_pair, next));
+    EXPECT_NEAR(result.step_values[s].metric[Rise], -raw_step_values.metric[Rise], 1e-5);
+    EXPECT_NEAR(result.step_values[s].metric[Twist], -raw_step_values.metric[Twist], 1e-5);
+    EXPECT_NEAR(result.step_values[s].metric[Roll], raw_step_values.metric[Roll], 1e-5);
+    md_arena_allocator_destroy(alloc);
+}
+
 UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_for_all_12_parameters) {
     auto* alloc = md_arena_allocator_create(md_get_heap_allocator(), MD_MEGABYTES(4));
     md_system_t sys = {.alloc = alloc};
@@ -1072,11 +1417,335 @@ UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_f
     FrameAnalysis result;
     ASSERT_TRUE(analyze_frame(&result, sys, state, bases, pairs, steps, validator));
     for (auto pairing : result.pairing_states) EXPECT_EQ(pairing, Pairing_Unavailable);
+    // Curves+ v3.0nc, test=.t.: smoothed axis directions and points, printed to 0.01.
+    const float rna_curves_axis[14][6] = {
+        {0.33f,0.51f,-0.79f,6.81f,7.03f,21.15f},
+        {0.33f,0.52f,-0.79f,7.58f,8.64f,18.96f},
+        {0.32f,0.52f,-0.79f,8.48f,10.55f,16.57f},
+        {0.32f,0.52f,-0.79f,9.15f,12.09f,14.78f},
+        {0.31f,0.51f,-0.80f,9.95f,13.92f,12.52f},
+        {0.30f,0.51f,-0.81f,10.60f,15.68f,10.36f},
+        {0.29f,0.48f,-0.83f,11.19f,17.07f,8.34f},
+        {0.29f,0.45f,-0.85f,11.80f,18.19f,6.35f},
+        {0.30f,0.41f,-0.86f,12.50f,19.25f,4.18f},
+        {0.31f,0.38f,-0.87f,13.31f,20.17f,1.90f},
+        {0.32f,0.34f,-0.88f,14.21f,20.91f,-0.50f},
+        {0.33f,0.32f,-0.89f,15.10f,21.55f,-2.78f},
+        {0.34f,0.29f,-0.89f,16.34f,22.24f,-5.56f},
+        {0.35f,0.26f,-0.90f,17.48f,22.61f,-7.80f},
+    };
+    std::vector<BaseFrame> axis_strand1, axis_strand2;
+    for (const auto& pair : pairs) {
+        axis_strand1.push_back(frames[pair.a]);
+        axis_strand2.push_back(frames[pair.b]);
+    }
+    std::vector<CurvesAxisPoint> curves_axis;
+    ASSERT_TRUE(curves_duplex_axis(&curves_axis, axis_strand1, axis_strand2, result.pair_frames));
+    ASSERT_EQ(curves_axis.size(), pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p)
+        for (size_t k = 0; k < 3; ++k) {
+            EXPECT_NEAR(curves_axis[p].direction.elem[k], rna_curves_axis[p][k], 0.0052f);
+            EXPECT_NEAR(curves_axis[p].origin.elem[k], rna_curves_axis[p][k+3], 0.0052f);
+        }
+    const float rna_pair_axis[14][5] = {
+        {-2.20f,-0.48f,15.4f,5.8f,NAN}, {-2.80f,-0.30f,12.8f,1.5f,0.7f},
+        {-3.48f,-0.53f,12.8f,7.1f,0.3f}, {-3.27f,-0.68f,19.2f,0.2f,0.5f},
+        {-3.83f,-0.66f,15.2f,4.7f,0.7f}, {-4.01f,0.24f,19.0f,0.6f,0.9f},
+        {-3.89f,0.06f,21.3f,1.4f,1.8f}, {-4.06f,-0.17f,25.0f,0.7f,2.3f},
+        {-3.94f,-0.44f,22.2f,1.9f,2.1f}, {-4.23f,0.18f,19.9f,-3.2f,2.5f},
+        {-3.48f,-0.44f,20.6f,1.9f,2.1f}, {-4.23f,-0.13f,16.4f,-6.0f,1.6f},
+        {-3.86f,0.34f,13.5f,1.1f,1.7f}, {-3.15f,0.84f,7.7f,0.1f,1.8f},
+    };
+    std::vector<CurvesPairAxisParameters> axis_parameters;
+    ASSERT_TRUE(curves_pair_axis_parameters(&axis_parameters, result.pair_frames, curves_axis, result.pair_inversions));
+    ASSERT_EQ(axis_parameters.size(), pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto& v = axis_parameters[p];
+        EXPECT_NEAR(v.x_displacement, rna_pair_axis[p][0], 0.0052f);
+        EXPECT_NEAR(v.y_displacement, rna_pair_axis[p][1], 0.0052f);
+        EXPECT_NEAR(v.inclination, rna_pair_axis[p][2], 0.051f);
+        EXPECT_NEAR(v.tip, rna_pair_axis[p][3], 0.051f);
+        if (p) EXPECT_NEAR(v.axis_bend, rna_pair_axis[p][4], 0.051f);
+        else EXPECT_TRUE(std::isnan(v.axis_bend));
+    }
+    const float rna_inter_axis[13][2] = {
+        {2.81f,35.5f}, {3.17f,33.0f}, {2.44f,28.8f}, {3.00f,32.6f},
+        {2.83f,37.5f}, {2.51f,30.7f}, {2.37f,31.9f}, {2.51f,33.2f},
+        {2.59f,37.9f}, {2.67f,24.0f}, {2.52f,35.1f}, {3.11f,36.7f},
+        {2.51f,36.4f},
+    };
+    std::vector<CurvesStepAxisParameters> step_axis;
+    ASSERT_TRUE(curves_step_axis_parameters(&step_axis, result.pair_frames, curves_axis, result.pair_inversions));
+    ASSERT_EQ(step_axis.size(), steps.size());
+    for (size_t s = 0; s < steps.size(); ++s) {
+        EXPECT_NEAR(step_axis[s].rise, rna_inter_axis[s][0], 0.0052f);
+        EXPECT_NEAR(step_axis[s].twist, rna_inter_axis[s][1], 0.051f);
+    }
+    // Curves+ v3.0nc ref_B.pdb sampled backbone coordinates, printed to 0.001 A.
+    const size_t backbone_indices[] = {0, 5, 10, 25, 50, 75, 100, 115, 120};
+    const vec3_t rna_backbone[2][9] = {
+        {{14.592f,13.271f,22.144f}, {16.209f,12.052f,19.947f}, {17.215f,10.889f,17.385f},
+         {15.882f,8.439f,9.171f}, {6.866f,14.003f,0.471f}, {7.631f,27.234f,0.342f},
+         {20.701f,29.211f,-1.910f}, {26.885f,23.933f,-4.895f}, {27.769f,21.738f,-6.433f}},
+        {{6.812f,-1.758f,18.092f}, {4.904f,-0.653f,16.333f}, {3.084f,1.008f,14.959f},
+         {-0.705f,8.561f,13.649f}, {4.769f,21.283f,16.020f}, {17.871f,20.966f,12.798f},
+         {18.808f,12.718f,2.176f}, {13.933f,12.786f,-5.225f}, {12.020f,14.052f,-7.052f}},
+    };
+    std::array<std::vector<vec3_t>, 2> groove_backbones;
+    for (int side = 0; side < 2; ++side) {
+        std::vector<vec3_t> phosphates;
+        for (size_t i = 0; i + 1 < pairs.size(); ++i) {
+            const auto pair = pairs[side == 0 ? i + 1 : i];
+            const int32_t atom = bases[side == 0 ? pair.a : pair.b].backbone[BB_P];
+            ASSERT_GE(atom, 0);
+            phosphates.push_back(state.xyz[atom]);
+        }
+        auto& backbone = groove_backbones[side];
+        ASSERT_TRUE(curves_groove_backbone(&backbone, phosphates));
+        ASSERT_EQ(backbone.size(), (size_t)121);
+        for (size_t i = 0; i < std::size(backbone_indices); ++i)
+            for (int k = 0; k < 3; ++k)
+                EXPECT_NEAR(backbone[backbone_indices[i]].elem[k], rna_backbone[side][i].elem[k], 0.0007f);
+    }
+    const float rna_grooves[25][4] = {
+        {NAN,NAN,NAN,NAN}, {NAN,NAN,NAN,NAN}, {NAN,NAN,NAN,NAN},
+        {10.2f,1.0f,NAN,NAN}, {9.7f,1.1f,NAN,NAN}, {9.6f,1.2f,NAN,NAN},
+        {9.7f,1.2f,NAN,NAN}, {9.8f,1.1f,6.1f,8.7f}, {9.9f,1.0f,5.6f,8.8f},
+        {10.3f,0.6f,4.8f,9.1f}, {10.5f,0.4f,4.0f,9.1f}, {10.5f,0.0f,3.1f,9.2f},
+        {10.3f,0.2f,2.5f,9.3f}, {10.4f,0.0f,2.1f,9.5f}, {10.4f,0.3f,2.1f,9.5f},
+        {10.5f,0.2f,2.4f,9.8f}, {10.6f,0.7f,2.8f,9.6f}, {10.8f,0.6f,NAN,NAN},
+        {10.5f,0.7f,NAN,NAN}, {9.9f,0.8f,NAN,NAN}, {9.5f,1.2f,NAN,NAN},
+        {9.6f,1.3f,NAN,NAN}, {NAN,NAN,NAN,NAN}, {NAN,NAN,NAN,NAN}, {NAN,NAN,NAN,NAN},
+    };
+    std::vector<vec3_t> depth1, depth2;
+    for (const auto& pair : pairs) {
+        depth1.push_back(frames[pair.a].groove_reference);
+        depth2.push_back(frames[pair.b].groove_reference);
+    }
+    std::vector<CurvesGrooveSample> grooves;
+    ASSERT_TRUE(curves_grooves(&grooves, groove_backbones[0], groove_backbones[1],
+                               result.pair_frames, curves_axis, depth1, depth2));
+    ASSERT_EQ(grooves.size(), std::size(rna_grooves));
+    for (size_t i = 0; i < grooves.size(); ++i) {
+        EXPECT_NEAR(grooves[i].level, 1.5f + 0.5f * i, 1e-5f);
+        const float got[] = {grooves[i].width12, grooves[i].depth12, grooves[i].width21, grooves[i].depth21};
+        for (size_t k = 0; k < 4; ++k) {
+            EXPECT_EQ(std::isfinite(got[k]), std::isfinite(rna_grooves[i][k]));
+            if (std::isfinite(rna_grooves[i][k])) EXPECT_NEAR(got[k], rna_grooves[i][k], 0.051f);
+        }
+    }
+    std::vector<CurvesHelixGeometry> integrated_helices;
+    ASSERT_TRUE(analyze_curves_helices(&integrated_helices, sys, state, bases, pairs, steps));
+    ASSERT_EQ(integrated_helices.size(), (size_t)1);
+    ASSERT_EQ(integrated_helices[0].axis_quality, (uint16_t)Quality_Good);
+    ASSERT_EQ(integrated_helices[0].groove_quality, (uint16_t)Quality_Good);
+    ASSERT_EQ(integrated_helices[0].axis.size(), curves_axis.size());
+    ASSERT_EQ(integrated_helices[0].grooves.size(), grooves.size());
+    for (size_t i = 0; i < curves_axis.size(); ++i) {
+        EXPECT_NEAR(vec3_length(vec3_sub(integrated_helices[0].axis[i].origin, curves_axis[i].origin)), 0.0f, 1e-4f);
+        EXPECT_NEAR(vec3_length(vec3_sub(integrated_helices[0].axis[i].direction, curves_axis[i].direction)), 0.0f, 1e-4f);
+    }
+    for (size_t i = 0; i < grooves.size(); ++i) {
+        const auto& g = integrated_helices[0].grooves[i];
+        const float got[] = {g.width12, g.depth12, g.width21, g.depth21};
+        const float expected[] = {grooves[i].width12, grooves[i].depth12, grooves[i].width21, grooves[i].depth21};
+        for (size_t k = 0; k < 4; ++k) {
+            EXPECT_EQ(std::isfinite(got[k]), std::isfinite(expected[k]));
+            if (std::isfinite(expected[k])) EXPECT_NEAR(got[k], expected[k], 1e-4f);
+        }
+    }
+    std::vector<CurvesHelixGeometry> missing_groove;
+    // Curves+ rejects grooves when an internal or required endpoint phosphate is absent.
+    for (uint32_t base : {pairs[1].a, pairs[2].a, pairs[9].a, pairs[13].a,
+                          pairs[0].b, pairs[8].b, pairs[12].b}) {
+        auto missing_phosphate_bases = bases;
+        missing_phosphate_bases[base].backbone[BB_P] = -1;
+        ASSERT_TRUE(analyze_curves_helices(&missing_groove, sys, state, missing_phosphate_bases, pairs, steps));
+        ASSERT_EQ(missing_groove.size(), (size_t)1);
+        EXPECT_EQ(missing_groove[0].axis_quality, (uint16_t)Quality_Good);
+        EXPECT_TRUE(missing_groove[0].groove_quality & Quality_MissingAtoms);
+        EXPECT_TRUE(missing_groove[0].grooves.empty());
+    }
+    auto two_bases = bases;
+    for (auto base : bases) {
+        base.strand += 100;
+        two_bases.push_back(std::move(base));
+    }
+    auto two_pairs = pairs;
+    for (auto pair : pairs) {
+        pair.a += (uint32_t)bases.size();
+        pair.b += (uint32_t)bases.size();
+        two_pairs.push_back(pair);
+    }
+    auto two_steps = steps;
+    for (auto step : steps) {
+        step.a += (uint32_t)pairs.size();
+        step.b += (uint32_t)pairs.size();
+        two_steps.push_back(step);
+    }
+    two_bases[bases.size() + pairs[2].a].backbone[BB_P] = -1;
+    ASSERT_TRUE(analyze_curves_helices(&missing_groove, sys, state, two_bases, two_pairs, two_steps));
+    ASSERT_EQ(missing_groove.size(), (size_t)2);
+    EXPECT_EQ(missing_groove[0].axis_quality, (uint16_t)Quality_Good);
+    EXPECT_EQ(missing_groove[0].groove_quality, (uint16_t)Quality_Good);
+    EXPECT_EQ(missing_groove[0].grooves.size(), grooves.size());
+    EXPECT_EQ(missing_groove[1].axis_quality, (uint16_t)Quality_Good);
+    EXPECT_TRUE(missing_groove[1].groove_quality & Quality_MissingAtoms);
+    EXPECT_TRUE(missing_groove[1].grooves.empty());
+    auto bad_fit_bases = bases;
+    bad_fit_bases[pairs[2].a].fit_atoms[0] = bad_fit_bases[pairs[2].a].fit_atoms[1];
+    ASSERT_TRUE(analyze_curves_helices(&missing_groove, sys, state, bad_fit_bases, pairs, steps));
+    EXPECT_NE(missing_groove[0].axis_quality, (uint16_t)Quality_Good);
+    EXPECT_TRUE(missing_groove[0].axis.empty());
+    EXPECT_TRUE(missing_groove[0].grooves.empty());
+    auto invalid_curves_steps = steps;
+    invalid_curves_steps[0].a = (uint32_t)pairs.size();
+    EXPECT_FALSE(analyze_curves_helices(&integrated_helices, sys, state, bases, pairs, invalid_curves_steps));
+    EXPECT_EQ(integrated_helices[0].axis.size(), curves_axis.size());
+    CurvesFrameAnalysis curves_frame;
+    ASSERT_TRUE(analyze_curves_frame(&curves_frame, sys, state, bases, pairs, steps, validator));
+    ASSERT_EQ(curves_frame.helices.size(), (size_t)1);
+    EXPECT_TRUE(curves_frame.frame.helical_pair_frames.empty());
+    EXPECT_TRUE(curves_frame.frame.helical_quality.empty());
+    ASSERT_EQ(curves_frame.frame.pair_values.size(), pairs.size());
+    ASSERT_EQ(curves_frame.frame.nucleotide_values.size(), 2*pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        for (int id = Buckle; id <= (int)Stagger; ++id)
+            EXPECT_NEAR(curves_frame.frame.pair_values[p].metric[id], result.pair_values[p].metric[id], 1e-5f);
+        for (int side = 0; side < 2; ++side) {
+            const auto& base = bases[side ? pairs[p].b : pairs[p].a];
+            const auto expected = curves_fourier_pucker(base, state);
+            const auto& actual = curves_frame.frame.nucleotide_values[2*p + side];
+            EXPECT_NEAR(std::remainder(actual.metric[Phase] - expected[0], 360.0f), 0.0f, 1e-4f);
+            EXPECT_NEAR(actual.metric[Amplitude], expected[1], 1e-4f);
+        }
+    }
+    for (const auto& step : curves_frame.frame.step_values) {
+        EXPECT_TRUE(std::isnan(step.metric[MinorGroove]));
+        EXPECT_TRUE(std::isnan(step.metric[MajorGroove]));
+        for (int id = XDisplacement; id <= (int)HelicalTwist; ++id) EXPECT_TRUE(std::isnan(step.metric[id]));
+    }
+    EXPECT_FALSE(analyze_curves_frame(&curves_frame, sys, state, bases, pairs, invalid_curves_steps, validator));
+    EXPECT_EQ(curves_frame.frame.pair_values.size(), pairs.size());
+    CurvesTrajectoryAnalysis curves_trajectory;
+    ASSERT_TRUE(initialize_curves_trajectory(&curves_trajectory, 2, pairs.size(), steps, curves_frame));
+    ASSERT_EQ(curves_trajectory.pair_axis.size(), pairs.size() * 2);
+    ASSERT_EQ(curves_trajectory.step_axis.size(), steps.size() * 2);
+    ASSERT_EQ(curves_trajectory.grooves.size(), curves_frame.helices[0].grooves.size() * 2);
+    ASSERT_TRUE(store_curves_trajectory_frame(&curves_trajectory, 0, curves_frame));
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        EXPECT_NEAR(curves_trajectory.pair_axis[p].tip, curves_frame.helices[0].pair_parameters[p].tip, 1e-5f);
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        EXPECT_NEAR(curves_trajectory.step_axis[s].twist, curves_frame.helices[0].step_parameters[s].twist, 1e-5f);
+    }
+    for (size_t g = 0; g < curves_frame.helices[0].grooves.size(); ++g) {
+        EXPECT_NEAR(curves_trajectory.grooves[g].level, curves_frame.helices[0].grooves[g].level, 1e-5f);
+        if (std::isfinite(curves_frame.helices[0].grooves[g].width12))
+            EXPECT_NEAR(curves_trajectory.grooves[g].width12, curves_frame.helices[0].grooves[g].width12, 1e-5f);
+        else
+            EXPECT_TRUE(std::isnan(curves_trajectory.grooves[g].width12));
+    }
+    const std::string curves_csv = csv_curves_trajectory_frame("curves,run", curves_trajectory, 0, true);
+    EXPECT_TRUE(curves_csv.find(csv_curves_trajectory_header()) == 0);
+    EXPECT_TRUE(curves_csv.find("\"curves,run\",0,1,pair_axis,\"bp_1\"") != std::string::npos);
+    EXPECT_TRUE(curves_csv.find(",groove,\"sample_1\",1.5,") != std::string::npos);
+    EXPECT_TRUE((size_t)std::count(curves_csv.begin(), curves_csv.end(), '\n') ==
+                1 + pairs.size() + steps.size() + curves_frame.helices[0].grooves.size());
+    CurvesFrameAnalysis no_groove_frame = curves_frame;
+    no_groove_frame.helices[0].groove_quality = Quality_MissingAtoms;
+    no_groove_frame.helices[0].grooves.clear();
+    ASSERT_TRUE(store_curves_trajectory_frame(&curves_trajectory, 1, no_groove_frame));
+    EXPECT_EQ(curves_trajectory.axis_quality[1], (uint16_t)Quality_Good);
+    EXPECT_EQ(curves_trajectory.groove_quality[1], (uint16_t)Quality_MissingAtoms);
+    EXPECT_TRUE(std::isfinite(curves_trajectory.pair_axis[pairs.size()].tip));
+    EXPECT_TRUE(std::isnan(curves_trajectory.grooves[curves_frame.helices[0].grooves.size()].width12));
+    CurvesFrameAnalysis invalid_layout_frame = curves_frame;
+    invalid_layout_frame.helices[0].pairs[0] = (uint32_t)pairs.size();
+    EXPECT_FALSE(store_curves_trajectory_frame(&curves_trajectory, 1, invalid_layout_frame));
+    EXPECT_EQ(curves_trajectory.groove_quality[1], (uint16_t)Quality_MissingAtoms);
+    const vec3_t shift = {12.0f, -7.0f, 4.0f};
+    auto rotate = [](vec3_t p) { return vec3_t{-p.y, p.x, p.z}; };
+    auto transform = [&](vec3_t p) { return vec3_add(rotate(p), shift); };
+    auto shifted_backbones = groove_backbones;
+    auto shifted_midpoints = result.pair_frames;
+    auto shifted_axis = curves_axis;
+    auto shifted_depth1 = depth1, shifted_depth2 = depth2;
+    for (auto& backbone : shifted_backbones) for (auto& p : backbone) p = transform(p);
+    for (auto& midpoint : shifted_midpoints) {
+        midpoint.origin = transform(midpoint.origin);
+        midpoint.x = rotate(midpoint.x);
+        midpoint.y = rotate(midpoint.y);
+        midpoint.z = rotate(midpoint.z);
+    }
+    for (auto& point : shifted_axis) {
+        point.origin = transform(point.origin);
+        point.direction = rotate(point.direction);
+    }
+    for (auto* depth : {&shifted_depth1, &shifted_depth2}) for (auto& p : *depth) p = transform(p);
+    std::vector<CurvesGrooveSample> shifted_grooves;
+    ASSERT_TRUE(curves_grooves(&shifted_grooves, shifted_backbones[0], shifted_backbones[1],
+                               shifted_midpoints, shifted_axis, shifted_depth1, shifted_depth2));
+    for (size_t i = 0; i < grooves.size(); ++i) {
+        const float got[] = {shifted_grooves[i].width12, shifted_grooves[i].depth12,
+                             shifted_grooves[i].width21, shifted_grooves[i].depth21};
+        const float expected[] = {grooves[i].width12, grooves[i].depth12, grooves[i].width21, grooves[i].depth21};
+        for (size_t k = 0; k < 4; ++k) {
+            EXPECT_EQ(std::isfinite(got[k]), std::isfinite(expected[k]));
+            if (std::isfinite(expected[k])) EXPECT_NEAR(got[k], expected[k], 1e-4);
+        }
+    }
+    const auto preserved = shifted_grooves;
+    shifted_backbones[0][0].x = NAN;
+    EXPECT_FALSE(curves_grooves(&shifted_grooves, shifted_backbones[0], shifted_backbones[1],
+                                shifted_midpoints, shifted_axis, shifted_depth1, shifted_depth2));
+    shifted_backbones[0][0] = transform(groove_backbones[0][0]);
+    shifted_depth1[0] = BaseFrame{}.groove_reference;
+    EXPECT_FALSE(curves_grooves(&shifted_grooves, shifted_backbones[0], shifted_backbones[1],
+                                shifted_midpoints, shifted_axis, shifted_depth1, shifted_depth2));
+    shifted_depth1[0] = transform(depth1[0]);
+    shifted_depth2.pop_back();
+    EXPECT_FALSE(curves_grooves(&shifted_grooves, shifted_backbones[0], shifted_backbones[1],
+                                shifted_midpoints, shifted_axis, shifted_depth1, shifted_depth2));
+    ASSERT_EQ(shifted_grooves.size(), preserved.size());
+    for (size_t i = 0; i < preserved.size(); ++i) {
+        const float got[] = {shifted_grooves[i].level, shifted_grooves[i].width12, shifted_grooves[i].depth12,
+                             shifted_grooves[i].width21, shifted_grooves[i].depth21};
+        const float expected[] = {preserved[i].level, preserved[i].width12, preserved[i].depth12,
+                                  preserved[i].width21, preserved[i].depth21};
+        for (size_t k = 0; k < 5; ++k) {
+            EXPECT_EQ(std::isfinite(got[k]), std::isfinite(expected[k]));
+            if (std::isfinite(expected[k])) EXPECT_EQ(got[k], expected[k]);
+        }
+    }
+    std::vector<vec3_t> flat_backbone(groove_backbones[0].size(), vec3_t{});
+    std::vector<CurvesGrooveSample> ambiguous_grooves;
+    ASSERT_TRUE(curves_grooves(&ambiguous_grooves, flat_backbone, flat_backbone,
+                               result.pair_frames, curves_axis, depth1, depth2));
+    ASSERT_EQ(ambiguous_grooves.size(), grooves.size());
+    for (const auto& sample : ambiguous_grooves) {
+        EXPECT_FALSE(std::isfinite(sample.width12));
+        EXPECT_FALSE(std::isfinite(sample.depth12));
+        EXPECT_FALSE(std::isfinite(sample.width21));
+        EXPECT_FALSE(std::isfinite(sample.depth21));
+    }
     for (const auto& base : bases) {
         ASSERT_LT(base.component, (uint32_t)28);
         const auto pucker = curves_fourier_pucker(base, state);
         EXPECT_NEAR(pucker[0], rna_curves_pucker[base.component][0], 0.06f);
         EXPECT_NEAR(pucker[1], rna_curves_pucker[base.component][1], 0.06f);
+        vec3_t atoms[BB_Count] = {};
+        uint32_t present = 0;
+        for (int k = 0; k < BB_Count; ++k) if (base.backbone[k] >= 0) {
+            atoms[k] = state.xyz[base.backbone[k]];
+            present |= 1u << k;
+        }
+        Values fourier;
+        NucleotideQuality quality;
+        compute_nucleotide(&fourier, atoms, &state.unitcell, &quality, present, Pucker_Fourier);
+        EXPECT_NEAR(std::remainder((double)fourier.metric[Phase] - rna_curves_pucker[base.component][0], 360.0), 0.0, 0.06);
+        EXPECT_NEAR(fourier.metric[Amplitude], rna_curves_pucker[base.component][1], 0.06f);
+        EXPECT_FALSE(quality[Phase-Alpha] & ~Quality_NucleotideWarnings);
     }
     for (size_t p = 0; p < pairs.size(); ++p) {
         EXPECT_FALSE(validator.chemistry()[p].uses_hydrogens);
@@ -1088,19 +1757,337 @@ UTEST(lavery_core, hydrogen_free_rna_1rna_matches_independent_curves_reference_f
         EXPECT_EQ(result.step_quality[s], (uint16_t)Quality_Good);
         for (int k = 0; k < 6; ++k) EXPECT_NEAR(result.step_values[s].metric[Tilt + k], rna_curves_step[s][k], k < 3 ? 0.06f : 0.006f);
     }
+    // 3DNA v2.4, find_pair + analyze, 1RNA: X/Y displacement, rise, inclination, tip, twist.
+    const float rna_3dna_helical[13][6] = {
+        {-1.62f,-0.23f,3.00f,8.05f,9.15f,35.13f},
+        {-4.32f,0.17f,2.81f,22.32f,4.51f,33.91f},
+        {-2.62f,-0.08f,2.90f,3.27f,-10.56f,29.47f},
+        {-4.57f,-0.87f,2.66f,23.67f,10.17f,33.14f},
+        {-2.60f,0.53f,3.02f,9.66f,-2.24f,38.21f},
+        {-4.68f,0.40f,2.49f,20.27f,-0.11f,30.30f},
+        {-4.45f,0.68f,2.38f,25.34f,-2.85f,32.41f},
+        {-4.88f,-0.99f,2.30f,29.95f,6.41f,33.35f},
+        {-3.00f,-0.00f,2.92f,16.56f,0.85f,37.58f},
+        {-7.03f,-1.24f,2.12f,34.24f,-7.35f,25.20f},
+        {-2.76f,0.64f,2.98f,5.81f,1.70f,34.82f},
+        {-4.14f,-0.20f,2.66f,23.21f,-0.26f,38.07f},
+        {-2.32f,-0.62f,2.49f,6.31f,10.56f,36.72f},
+    };
+    const float rna_3dna_grooves[7][2] = {
+        {15.4f,14.4f}, {15.7f,13.8f}, {16.1f,12.4f}, {16.3f,11.7f},
+        {16.3f,10.3f}, {16.5f,11.0f}, {16.1f,12.8f},
+    };
+    const float rna_3dna_steps[13][6] = {
+        {-0.33f,-0.57f,3.09f,-5.48f,4.82f,34.39f},
+        {-0.34f,-1.32f,3.52f,-2.57f,12.71f,31.41f},
+        {0.56f,-1.17f,2.91f,5.34f,1.66f,28.94f},
+        {-0.04f,-1.36f,3.50f,-5.62f,13.08f,30.00f},
+        {-0.23f,-1.20f,3.27f,1.46f,6.30f,37.68f},
+        {-0.20f,-1.47f,3.17f,0.06f,10.39f,28.51f},
+        {-0.24f,-1.27f,3.21f,1.54f,13.71f,29.39f},
+        {0.25f,-1.33f,3.41f,-3.52f,16.44f,28.91f},
+        {-0.04f,-1.07f,3.34f,-0.54f,10.53f,36.12f},
+        {0.90f,-1.41f,3.38f,3.02f,14.07f,20.75f},
+        {-0.47f,-1.36f,3.11f,-1.01f,3.47f,34.64f},
+        {0.15f,-1.50f,3.48f,0.17f,14.77f,35.18f},
+        {-0.06f,-1.19f,2.66f,-6.61f,3.95f,35.94f},
+    };
+    const float rna_3dna_pairs[14][6] = {
+        {-0.05f,-0.12f,0.01f,-4.90f,-28.80f,-0.60f},
+        {0.39f,-0.18f,0.13f,7.50f,-15.96f,0.65f},
+        {0.13f,-0.11f,0.15f,-3.38f,-17.65f,-3.06f},
+        {0.26f,-0.17f,-0.33f,10.74f,-20.03f,3.45f},
+        {-0.72f,-0.34f,0.35f,-1.52f,-16.45f,0.80f},
+        {0.44f,-0.24f,-0.03f,-0.20f,-18.75f,2.02f},
+        {0.08f,-0.11f,0.14f,0.21f,-18.58f,-1.16f},
+        {-0.28f,0.00f,-0.29f,5.12f,-18.95f,-3.06f},
+        {-0.49f,-0.21f,0.14f,1.28f,-23.69f,1.36f},
+        {0.05f,-0.16f,-0.01f,0.86f,-17.33f,-0.26f},
+        {-0.78f,-0.31f,-0.05f,-3.70f,-15.98f,0.30f},
+        {0.03f,-0.09f,0.07f,3.78f,-20.80f,-4.07f},
+        {-0.37f,-0.18f,-0.40f,-8.71f,-21.69f,4.34f},
+        {0.26f,-0.11f,0.78f,10.57f,-15.07f,-5.72f},
+    };
+    ThreeDnaPairStepAnalysis dna;
+    ASSERT_TRUE(analyze_3dna_pair_step(&dna, sys, state, bases, pairs, steps, validator));
+    ASSERT_EQ(dna.pair_values.size(), pairs.size());
+    ASSERT_EQ(dna.step_values.size(), steps.size());
+    EXPECT_FALSE(analyze_3dna_pair_step(&dna, sys, state, bases, pairs, steps, validator,
+                                        static_cast<PairValuePolicy>(255)));
+    EXPECT_EQ(dna.pair_values.size(), pairs.size());
+    EXPECT_EQ(dna.step_values.size(), steps.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        ASSERT_EQ(dna.pair_quality[p], (uint16_t)Quality_Good);
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_NEAR(dna.pair_values[p].metric[Shear+k], rna_3dna_pairs[p][k], 0.0055f);
+            EXPECT_NEAR(dna.pair_values[p].metric[Buckle+k], rna_3dna_pairs[p][k+3], 0.0055f);
+        }
+        EXPECT_TRUE(std::isnan(dna.pair_values[p].metric[Phase]));
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        ASSERT_EQ(dna.step_quality[s], (uint16_t)Quality_Good);
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_NEAR(dna.step_values[s].metric[Shift+k], rna_3dna_steps[s][k], 0.0055f);
+            EXPECT_NEAR(dna.step_values[s].metric[Tilt+k], rna_3dna_steps[s][k+3], 0.0055f);
+        }
+        EXPECT_TRUE(std::isnan(dna.step_values[s].metric[MinorGroove]));
+    }
+    std::vector<vec3_t> dna_p1(pairs.size()), dna_p2(pairs.size());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        const auto a = bases[pairs[p].a].backbone[BB_P];
+        const auto b = bases[pairs[p].b].backbone[BB_P];
+        const vec3_t missing = {NAN, NAN, NAN};
+        dna_p1[p] = a >= 0 ? state.xyz[a] : missing;
+        dna_p2[p] = b >= 0 ? state.xyz[b] : missing;
+    }
+    std::vector<float> dna_minor(steps.size()), dna_major(steps.size());
+    groove_widths(dna_minor.data(), dna_major.data(), dna_p1.data(), dna_p2.data(), pairs.size(),
+                  nullptr, nullptr, nullptr, Groove_3DnaRefined);
+    for (size_t s = 0; s < steps.size(); ++s) {
+        if (s >= 3 && s <= 9) {
+            EXPECT_NEAR(dna_minor[s], rna_3dna_grooves[s-3][0]-5.8f, 0.051f);
+            EXPECT_NEAR(dna_major[s], rna_3dna_grooves[s-3][1]-5.8f, 0.051f);
+        } else {
+            EXPECT_TRUE(std::isnan(dna_minor[s]));
+            EXPECT_TRUE(std::isnan(dna_major[s]));
+        }
+    }
+    FrameAnalysis dna_complete;
+    ASSERT_TRUE(analyze_3dna_frame(&dna_complete, sys, state, bases, pairs, steps, validator));
+    ASSERT_EQ(dna_complete.pair_values.size(), pairs.size());
+    ASSERT_EQ(dna_complete.step_values.size(), steps.size());
+    EXPECT_TRUE(dna_complete.pair_inversions.empty());
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        EXPECT_EQ(dna_complete.pair_quality[p], dna.pair_quality[p]);
+        for (int id = Buckle; id <= (int)Stagger; ++id)
+            EXPECT_NEAR(dna_complete.pair_values[p].metric[id], dna.pair_values[p].metric[id], 1e-5f);
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        EXPECT_EQ(dna_complete.step_quality[s], dna.step_quality[s]);
+        EXPECT_EQ(dna_complete.helical_quality[s], (uint16_t)Quality_Good);
+        for (int id = Tilt; id <= (int)Rise; ++id)
+            EXPECT_NEAR(dna_complete.step_values[s].metric[id], dna.step_values[s].metric[id], 1e-5f);
+        for (int k = 0; k < 6; ++k)
+            EXPECT_NEAR(dna_complete.step_values[s].metric[XDisplacement+k], rna_3dna_helical[s][k], 0.0055f);
+        EXPECT_EQ(std::isfinite(dna_complete.step_values[s].metric[MinorGroove]), std::isfinite(dna_minor[s]));
+        EXPECT_EQ(std::isfinite(dna_complete.step_values[s].metric[MajorGroove]), std::isfinite(dna_major[s]));
+        if (std::isfinite(dna_minor[s]))
+            EXPECT_NEAR(dna_complete.step_values[s].metric[MinorGroove], dna_minor[s], 1e-5f);
+        if (std::isfinite(dna_major[s]))
+            EXPECT_NEAR(dna_complete.step_values[s].metric[MajorGroove], dna_major[s], 1e-5f);
+    }
+    auto parallel_bases = bases;
+    parallel_bases[pairs[1].b].chain_order = parallel_bases[pairs[0].b].chain_order + 1;
+    EXPECT_FALSE(analyze_3dna_frame(&dna_complete, sys, state, parallel_bases, pairs, steps, validator));
+    EXPECT_EQ(dna_complete.pair_values.size(), pairs.size());
+    EXPECT_NEAR(dna_complete.step_values[3].metric[MinorGroove], dna_minor[3], 1e-5f);
+    auto branching = steps;
+    branching.push_back(steps[0]);
+    EXPECT_FALSE(analyze_3dna_frame(&dna_complete, sys, state, bases, pairs, branching, validator));
+    EXPECT_EQ(dna_complete.step_values.size(), steps.size());
+    ConventionFrameAnalysis selected;
+    ASSERT_TRUE(analyze_convention_frame(&selected, AnalysisConvention::Curves, sys, state, bases, pairs, steps, validator));
+    ASSERT_TRUE(std::holds_alternative<CurvesFrameAnalysis>(selected));
+    EXPECT_EQ(std::get<CurvesFrameAnalysis>(selected).helices[0].grooves.size(), grooves.size());
+    ASSERT_TRUE(analyze_convention_frame(&selected, AnalysisConvention::ThreeDna, sys, state, bases, pairs, steps, validator));
+    ASSERT_TRUE(std::holds_alternative<FrameAnalysis>(selected));
+    EXPECT_TRUE(std::get<FrameAnalysis>(selected).pair_inversions.empty());
+    EXPECT_NEAR(std::get<FrameAnalysis>(selected).step_values[3].metric[MinorGroove], dna_minor[3], 1e-5f);
+    ASSERT_TRUE(analyze_convention_frame(&selected, AnalysisConvention::LegacyMixed, sys, state, bases, pairs, steps, validator));
+    ASSERT_TRUE(std::holds_alternative<FrameAnalysis>(selected));
+    EXPECT_NEAR(std::get<FrameAnalysis>(selected).pair_values[0].metric[Buckle], result.pair_values[0].metric[Buckle], 1e-5f);
+    EXPECT_NEAR(std::get<FrameAnalysis>(selected).step_values[3].metric[MinorGroove],
+                result.step_values[3].metric[MinorGroove], 1e-5f);
+    EXPECT_FALSE(analyze_convention_frame(&selected, AnalysisConvention::Curves, sys, state, bases, pairs,
+                                          invalid_curves_steps, validator));
+    EXPECT_TRUE(std::holds_alternative<FrameAnalysis>(selected));
+    ASSERT_TRUE(analyze_convention_frame(&selected, AnalysisConvention::Curves, sys, state, bases, pairs, steps, validator));
+    ASSERT_TRUE(std::holds_alternative<CurvesFrameAnalysis>(selected));
+    EXPECT_TRUE(std::isnan(std::get<CurvesFrameAnalysis>(selected).frame.step_values[3].metric[MinorGroove]));
+    std::vector<BaseFrame> dna_frames;
+    ASSERT_TRUE(extract_3dna_base_frames(dna_frames, sys, state, bases));
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        ASSERT_EQ(bases[pairs[p].a].component, (uint32_t)p);
+        ASSERT_EQ(bases[pairs[p].b].component, (uint32_t)(27-p));
+        const auto& a = dna_frames[pairs[p].a];
+        auto b = dna_frames[pairs[p].b];
+        if (vec3_dot(a.z, b.z) < 0.0f) {
+            b.y = vec3_mul1(b.y, -1.0f);
+            b.z = vec3_mul1(b.z, -1.0f);
+        }
+        Values unused = {};
+        BasePairFrame pair_frame;
+        ASSERT_TRUE(compute_3dna_step(&unused, {b.origin,b.x,b.y,b.z}, {a.origin,a.x,a.y,a.z}, &pair_frame));
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_NEAR(unused.metric[Shift+k], rna_3dna_pairs[p][k], 0.015f);
+            EXPECT_NEAR(unused.metric[Tilt+k], rna_3dna_pairs[p][k+3], 0.03f);
+        }
+        const vec3_t got[] = {pair_frame.origin, pair_frame.x, pair_frame.y, pair_frame.z};
+        for (size_t axis = 0; axis < 4; ++axis)
+            for (size_t k = 0; k < 3; ++k)
+                EXPECT_NEAR(got[axis].elem[k], rna_3dna_frames[p][axis][k], 0.003f);
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        ASSERT_EQ(steps[s].a, (uint32_t)s);
+        ASSERT_EQ(steps[s].b, (uint32_t)(s+1));
+        auto reference_frame = [](size_t index) {
+            const auto& f = rna_3dna_frames[index];
+            return BasePairFrame{{f[0][0],f[0][1],f[0][2]}, {f[1][0],f[1][1],f[1][2]},
+                                 {f[2][0],f[2][1],f[2][2]}, {f[3][0],f[3][1],f[3][2]}};
+        };
+        Values matched_frames = {};
+        ASSERT_TRUE(compute_helical_step(&matched_frames, reference_frame(s), reference_frame(s+1)));
+        for (int k = 0; k < 6; ++k)
+            EXPECT_NEAR(matched_frames.metric[XDisplacement+k], rna_3dna_helical[s][k], 0.03f);
+        Values cehs = {};
+        ASSERT_TRUE(compute_3dna_step(&cehs, reference_frame(s), reference_frame(s+1)));
+        for (int k = 0; k < 3; ++k) {
+            EXPECT_NEAR(cehs.metric[Shift+k], rna_3dna_steps[s][k], 0.015f);
+            EXPECT_NEAR(cehs.metric[Tilt+k], rna_3dna_steps[s][k+3], 0.03f);
+        }
+        for (int k = 0; k < 6; ++k)
+            EXPECT_NEAR(result.step_values[s].metric[XDisplacement+k], rna_3dna_helical[s][k], 0.03f);
+        if (s == 0) {
+            Values curves_step = {};
+            ASSERT_TRUE(compute_step(&curves_step, reference_frame(s), reference_frame(s+1)));
+            EXPECT_NEAR(curves_step.metric[Tilt], -5.57f, 0.02f);
+            EXPECT_NEAR(curves_step.metric[Roll], 4.90f, 0.02f);
+            // Classic 3DNA reports tilt -5.48 and roll 4.82 for these same frames.
+            EXPECT_GT(std::fabs(curves_step.metric[Tilt] - (-5.48f)), 0.06f);
+            EXPECT_GT(std::fabs(curves_step.metric[Roll] - 4.82f), 0.06f);
+        }
+        if (s >= 3 && s <= 9) {
+            EXPECT_NEAR(result.step_values[s].metric[MinorGroove], rna_3dna_grooves[s-3][0]-5.8f, 0.051f);
+            EXPECT_NEAR(result.step_values[s].metric[MajorGroove], rna_3dna_grooves[s-3][1]-5.8f, 0.051f);
+        }
+    }
     const auto axis = compute_axis(result.pair_frames, steps, &state.unitcell);
     EXPECT_EQ(axis.offsets.size(), (size_t)2);
     EXPECT_EQ(axis.points.size(), (size_t)105);
     // A-form signature of the 3DNA local helical parameters: displaced and inclined pairs, small tip.
     float mean[Metric_Count] = {};
     for (const auto& step : result.step_values)
-        for (int k = XDisplacement; k <= HelicalTwist; ++k) mean[k] += step.metric[k] / steps.size();
+        for (int k = XDisplacement; k <= (int)HelicalTwist; ++k) mean[k] += step.metric[k] / steps.size();
     EXPECT_LT(mean[XDisplacement], -3.0f);
     EXPECT_NEAR(mean[YDisplacement], 0.0f, 0.5f);
     EXPECT_NEAR(mean[HelicalRise], 2.7f, 0.3f);
     EXPECT_GT(mean[Inclination], 12.0f);
     EXPECT_NEAR(mean[Tip], 0.0f, 3.0f);
     EXPECT_NEAR(mean[HelicalTwist], 33.0f, 3.0f);
+
+    auto degenerate_3dna_bases = bases;
+    auto& fit = degenerate_3dna_bases[pairs[0].a].fit_atoms;
+    fit[3] = fit[2];
+    FrameAnalysis degenerate;
+    ASSERT_TRUE(analyze_frame(&degenerate, sys, state, degenerate_3dna_bases, pairs, steps, validator));
+    ASSERT_EQ(degenerate.pair_quality[0], (uint16_t)Quality_Good);
+    ASSERT_EQ(degenerate.step_quality[0], (uint16_t)Quality_Good);
+    EXPECT_TRUE(degenerate.helical_quality[0] & Quality_DegenerateBase);
+    EXPECT_TRUE(std::isfinite(degenerate.step_values[0].metric[Twist]));
+    for (int k = XDisplacement; k <= (int)HelicalTwist; ++k)
+        EXPECT_TRUE(std::isnan(degenerate.step_values[0].metric[k]));
+
+    ThreeDnaPairStepAnalysis dna_degenerate;
+    ASSERT_TRUE(analyze_3dna_pair_step(&dna_degenerate, sys, state, degenerate_3dna_bases, pairs, steps, validator));
+    EXPECT_TRUE(dna_degenerate.pair_quality[0] & Quality_DegenerateBase);
+    EXPECT_TRUE(dna_degenerate.step_quality[0] & Quality_AdjacentPair);
+    for (int k = Buckle; k <= (int)Stagger; ++k)
+        EXPECT_TRUE(std::isnan(dna_degenerate.pair_values[0].metric[k]));
+    for (int k = Tilt; k <= (int)Rise; ++k)
+        EXPECT_TRUE(std::isnan(dna_degenerate.step_values[0].metric[k]));
+    EXPECT_EQ(dna_degenerate.pair_quality[1], (uint16_t)Quality_Good);
+    EXPECT_EQ(dna_degenerate.step_quality[1], (uint16_t)Quality_Good);
+    EXPECT_TRUE(std::isfinite(dna_degenerate.step_values[1].metric[Twist]));
+
+    auto degenerate_curves_bases = bases;
+    auto& curves_fit = degenerate_curves_bases[pairs[0].a].fit_atoms;
+    curves_fit[0] = curves_fit[1];
+    FrameAnalysis mixed_degenerate, independent_dna;
+    ASSERT_TRUE(analyze_frame(&mixed_degenerate, sys, state, degenerate_curves_bases, pairs, steps, validator));
+    ASSERT_NE(mixed_degenerate.pair_quality[0], (uint16_t)Quality_Good);
+    ASSERT_TRUE(analyze_3dna_frame(&independent_dna, sys, state, degenerate_curves_bases, pairs, steps, validator));
+    EXPECT_EQ(independent_dna.pair_quality[0], (uint16_t)Quality_Good);
+    EXPECT_EQ(independent_dna.helical_quality[0], (uint16_t)Quality_Good);
+    for (int id = Buckle; id <= (int)Stagger; ++id)
+        EXPECT_NEAR(independent_dna.pair_values[0].metric[id], dna.pair_values[0].metric[id], 1e-5f);
+    for (int id = XDisplacement; id <= (int)HelicalTwist; ++id)
+        EXPECT_NEAR(independent_dna.step_values[0].metric[id], rna_3dna_helical[0][id-XDisplacement], 0.0055f);
+
+    auto invalid_steps = steps;
+    invalid_steps[0].a = (uint32_t)pairs.size();
+    EXPECT_FALSE(analyze_3dna_pair_step(&dna_degenerate, sys, state, bases, pairs, invalid_steps, validator));
+    EXPECT_TRUE(dna_degenerate.pair_quality[0] & Quality_DegenerateBase);
+
+    state.unitcell = md_unitcell_from_extent(100, 100, 100);
+    ThreeDnaPairStepAnalysis whole, wrapped;
+    ASSERT_TRUE(analyze_3dna_pair_step(&whole, sys, state, bases, pairs, steps, validator));
+    CurvesFrameAnalysis whole_curves, wrapped_curves;
+    ASSERT_TRUE(analyze_curves_frame(&whole_curves, sys, state, bases, pairs, steps, validator));
+    const auto residue_atoms = md_system_residue_atom_range(&sys, bases[pairs[2].b].component);
+    for (uint32_t atom = residue_atoms.beg; atom < residue_atoms.end; ++atom) state.xyz[atom].x += 100.0f;
+    ASSERT_TRUE(analyze_3dna_pair_step(&wrapped, sys, state, bases, pairs, steps, validator));
+    ASSERT_TRUE(analyze_curves_frame(&wrapped_curves, sys, state, bases, pairs, steps, validator));
+    ASSERT_EQ(wrapped_curves.helices.size(), (size_t)1);
+    EXPECT_EQ(wrapped_curves.helices[0].axis_quality, (uint16_t)Quality_Good);
+    EXPECT_EQ(wrapped_curves.helices[0].groove_quality, (uint16_t)Quality_Good);
+    for (size_t i = 0; i < whole_curves.helices[0].axis.size(); ++i) {
+        EXPECT_NEAR(vec3_length(vec3_sub(wrapped_curves.helices[0].axis[i].origin,
+                                         whole_curves.helices[0].axis[i].origin)), 0.0f, 0.001f);
+        EXPECT_NEAR(vec3_length(vec3_sub(wrapped_curves.helices[0].axis[i].direction,
+                                         whole_curves.helices[0].axis[i].direction)), 0.0f, 0.001f);
+    }
+    for (size_t i = 0; i < whole_curves.helices[0].grooves.size(); ++i) {
+        const auto& a = whole_curves.helices[0].grooves[i];
+        const auto& b = wrapped_curves.helices[0].grooves[i];
+        const float expected[] = {a.width12, a.depth12, a.width21, a.depth21};
+        const float got[] = {b.width12, b.depth12, b.width21, b.depth21};
+        for (size_t k = 0; k < 4; ++k) {
+            EXPECT_EQ(std::isfinite(expected[k]), std::isfinite(got[k]));
+            if (std::isfinite(expected[k])) EXPECT_NEAR(expected[k], got[k], 0.001f);
+        }
+    }
+    for (size_t p = 0; p < pairs.size(); ++p) {
+        ASSERT_EQ(wrapped.pair_quality[p], whole.pair_quality[p]);
+        ASSERT_EQ(wrapped.pair_quality[p], (uint16_t)Quality_Good);
+        for (int k = Buckle; k <= (int)Stagger; ++k)
+            EXPECT_NEAR(wrapped.pair_values[p].metric[k], whole.pair_values[p].metric[k], 0.001f);
+    }
+    for (size_t s = 0; s < steps.size(); ++s) {
+        ASSERT_EQ(wrapped.step_quality[s], whole.step_quality[s]);
+        ASSERT_EQ(wrapped.step_quality[s], (uint16_t)Quality_Good);
+        for (int k = Tilt; k <= (int)Rise; ++k)
+            EXPECT_NEAR(wrapped.step_values[s].metric[k], whole.step_values[s].metric[k], 0.001f);
+    }
+    for (uint32_t atom = residue_atoms.beg; atom < residue_atoms.end; ++atom) state.xyz[atom].x -= 85.0f;
+    ThreeDnaPairStepAnalysis disrupted;
+    ASSERT_TRUE(analyze_3dna_pair_step(&disrupted, sys, state, bases, pairs, steps, validator));
+    EXPECT_NE(disrupted.pair_quality[2], (uint16_t)Quality_Good);
+    EXPECT_TRUE(disrupted.step_quality[1] & Quality_AdjacentPair);
+    EXPECT_TRUE(disrupted.step_quality[2] & Quality_AdjacentPair);
+    EXPECT_TRUE(std::isnan(disrupted.pair_values[2].metric[Shear]));
+    EXPECT_TRUE(std::isnan(disrupted.step_values[1].metric[Twist]));
+    EXPECT_EQ(disrupted.step_quality[3], (uint16_t)Quality_Good);
+    ThreeDnaPairStepAnalysis flagged;
+    ASSERT_TRUE(analyze_3dna_pair_step(&flagged, sys, state, bases, pairs, steps, validator,
+                                       PairValues_ReferenceWithQualityFlags));
+    EXPECT_NE(flagged.pair_quality[2], (uint16_t)Quality_Good);
+    EXPECT_TRUE(std::isfinite(flagged.pair_values[2].metric[Shear]));
+    EXPECT_TRUE(std::isfinite(flagged.step_values[1].metric[Twist]));
+    EXPECT_NE(flagged.step_quality[1], (uint16_t)Quality_Good);
+    FrameAnalysis reference_frame;
+    ASSERT_TRUE(analyze_3dna_frame(&reference_frame, sys, state, bases, pairs, steps, validator));
+    EXPECT_TRUE(std::isfinite(reference_frame.pair_values[2].metric[Shear]));
+    EXPECT_TRUE(std::isfinite(reference_frame.step_values[1].metric[Twist]));
+    EXPECT_TRUE(std::isfinite(reference_frame.step_values[1].metric[HelicalTwist]));
+    EXPECT_NE(reference_frame.pair_quality[2], (uint16_t)Quality_Good);
+    EXPECT_NE(reference_frame.helical_quality[1], (uint16_t)Quality_Good);
+    CurvesFrameAnalysis flagged_curves;
+    ASSERT_TRUE(analyze_curves_frame(&flagged_curves, sys, state, bases, pairs, steps, validator));
+    EXPECT_NE(flagged_curves.frame.pair_quality[2], (uint16_t)Quality_Good);
+    EXPECT_TRUE(std::isfinite(flagged_curves.frame.pair_values[2].metric[Shear]));
+    EXPECT_TRUE(std::isfinite(flagged_curves.frame.step_values[1].metric[Twist]));
+    EXPECT_TRUE(std::isnan(flagged_curves.frame.step_values[1].metric[HelicalTwist]));
+
     md_arena_allocator_destroy(alloc);
 }
 
