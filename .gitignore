@@ -45,3 +45,5 @@ ext/imgui/docs/
 ext/imgui/examples/
 ext/imgui/misc/
 ext/imgui/.*
+
+haddock/

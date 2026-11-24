@@ -89,6 +89,7 @@
 #include <viamd_event.h>
 #include <window_menu.h>
 #include <event.h>
+#include <components/haddock/haddock.h>
 
 #define COMPILATION_TIME_DELAY_IN_SECONDS 1.0
 #define NOTIFICATION_DISPLAY_TIME_IN_SECONDS 5.0
@@ -117,6 +118,9 @@ static void file_queue_push_dropped(ApplicationState* state, size_t num_files, c
         const std::string out_path = (std::filesystem::temp_directory_path() / out_name).string();
         const md_str_t out_str = {out_path.c_str(), out_path.size()};
         if (md_haddock_ensemble_write(out_str, pdbs.data(), pdbs.size(), md_get_heap_allocator())) {
+            std::vector<md_str_t> names;
+            for (md_str_t p : pdbs) names.push_back(md_path_stem(p));
+            haddock_ensemble_names_set(out_str, names.data(), names.size());
             file_queue_push(&state->file_queue, out_str, FileFlags_Temporary | FileFlags_DisableCacheWrite);
             for (size_t i = 0; i < num_files; ++i) {
                 if (!md_str_eq_ignore_case(md_path_ext(file_paths[i]), MD_STR_LIT("pdb"))) file_queue_push(&state->file_queue, file_paths[i], FileFlags_None);
