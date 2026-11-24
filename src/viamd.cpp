@@ -48,6 +48,8 @@
 #include <es_planes.h>
 #include <implot.h>
 #include <implot_internal.h>
+#include <filesystem>
+#include "components/haddock/haddock.h"
 
 md_float3x3_t mat3_PCA(const md_float4_t* xyzw, size_t count) {
     md_float3_t acc = md_float3_zero();
@@ -1508,8 +1510,19 @@ static void run_path_from_file(char* buf, size_t cap, md_str_t path) {
     buf[MD_MIN(len, cap - 1)] = '\0';
 }
 
+void ensemble_file_remove(ApplicationState* state) {
+    MD_ASSERT(state);
+    if (state->ensemble_path[0] == '\0') return;
+    std::error_code ec;
+    std::filesystem::remove(state->ensemble_path, ec);
+    state->ensemble_path[0] = '\0';
+}
+
 void free_trajectory_data(ApplicationState* state) {
     MD_ASSERT(state);
+
+    // The trajectory being freed reads its frames from the ensemble's file, so the file goes with it
+    ensemble_file_remove(state);
 
     // The orientation reference was read from this run's first frame. A run loaded in its place, on the
     // same topology, has a first frame of its own.
@@ -7700,6 +7713,10 @@ static bool file_is_map(md_str_t path) {
            md_str_eq_ignore_case(ext, MD_STR_LIT("ccp4"));
 }
 
+static bool file_is_restraints(md_str_t path) {
+    return md_str_eq_ignore_case(md_path_ext(path), MD_STR_LIT("tbl"));
+}
+
 void file_queue_push(FileQueue* queue, md_str_t path, FileFlags flags) {
     MD_ASSERT(queue);
     MD_ASSERT(!file_queue_full(queue));
@@ -7708,16 +7725,19 @@ void file_queue_push(FileQueue* queue, md_str_t path, FileFlags flags) {
 
     md_str_t ext = md_path_ext(path);
     loader::LoaderState detected = {};
-    if (!md_str_eq(ext, WORKSPACE_FILE_EXTENSION) && !file_is_map(path)) {
+    if (!md_str_eq(ext, WORKSPACE_FILE_EXTENSION) && !file_is_map(path) && !file_is_restraints(path)) {
         // By the contents where the extension does not tell (Amber's mdout, prmtop and inpcrd have none)
         loader::init(&detected, path, nullptr);
     }
-    if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION) || file_is_map(path) || detected.type != LoaderType_Undefined) {
+    if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION) || file_is_map(path) || file_is_restraints(path) || detected.type != LoaderType_Undefined) {
         LoaderFlags loader_flags = detected.flags;
         if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
             prio = 1;
         } else if (file_is_map(path)) {
             // A map stands on its own: it needs no system, so it is not held back by one
+            prio = 3;
+        } else if (file_is_restraints(path)) {
+            // Restraints are matched to the atoms of the system, so they go after it
             prio = 3;
         } else if (loader_flags & LoaderFlag_System) {
             prio = 2;
@@ -7771,6 +7791,8 @@ void file_queue_process(ApplicationState* state) {
 
         if (md_str_eq_ignore_case(ext, WORKSPACE_FILE_EXTENSION)) {
             load_workspace(state, e.path);
+        } else if (file_is_restraints(e.path)) {
+            haddock_restraints_load(state, e.path);
         } else if (file_is_map(e.path)) {
             char map_path[1024];
             md_str_copy_to_char_buf(map_path, sizeof(map_path), e.path);
@@ -7806,6 +7828,16 @@ void file_queue_process(ApplicationState* state) {
             } else {
                 loader_state.flags |= (e.flags & FileFlags_DisableCacheWrite) ? LoaderFlag_DisableCacheWrite : 0;
                 const LoadResult result = load_data_from_file(state, e.path, loader_state);
+                if (e.flags & FileFlags_Temporary) {
+                    if (result == LoadResult_System || result == LoadResult_Trajectory) {
+                        ensemble_file_remove(state);
+                        md_str_copy_to_char_buf(state->ensemble_path, sizeof(state->ensemble_path), e.path);
+                    } else {
+                        // Nothing reads the file now, so it goes at once
+                        std::error_code ec;
+                        std::filesystem::remove(std::string(e.path.ptr, e.path.len), ec);
+                    }
+                }
                 if (result == LoadResult_System || result == LoadResult_Trajectory) {
                     state->animation = {};
                     // @TODO @FIX: This should be captured and performed by the Event that signals when a new system is loaded.

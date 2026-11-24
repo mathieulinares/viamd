@@ -474,6 +474,8 @@ enum {
     FileFlags_None = 0,
     FileFlags_ShowDialogue = 1,
     FileFlags_DisableCacheWrite = 4,
+    // A file made for this session (an ensemble's combined PDB): removed once the trajectory it holds is freed
+    FileFlags_Temporary = 8,
 };
 
 typedef uint32_t FileFlags;
@@ -1572,6 +1574,8 @@ struct ApplicationState {
     // Or passed via the commandline. The files need to be processed in a certain order (topology before trajectory)
     // It also provides a way to chain the file load dialogue.
     FileQueue file_queue = {};
+    // The temporary file a trajectory reads its frames from, removed when the trajectory is freed
+    char ensemble_path[1024] = "";
 
     // --- CAMERA ---
     struct {
@@ -3449,6 +3453,8 @@ FileQueue::Entry file_queue_front(const FileQueue* queue);
 FileQueue::Entry file_queue_pop(FileQueue* queue);
 
 void file_queue_process(ApplicationState* state);
+// Removes the temporary file of an ensemble, if there is one. Its trajectory must no longer read it.
+void ensemble_file_remove(ApplicationState* state);
 
 // view
 // A good view of the atoms in mask (all of them when null), framed in region of the view (see ViewRegion and

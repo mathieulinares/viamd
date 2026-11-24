@@ -21,6 +21,7 @@
 #include <md_lammps.h>
 #include <md_pdb.h>
 #include <md_gto_int.h>
+#include <md_haddock.h>
 
 #include <core/md_log.h>
 #include <core/md_str.h>
@@ -75,6 +76,8 @@
 #include <stdio.h>
 #include <cmath>
 #include <string>
+#include <filesystem>
+#include <chrono>
 
 #include <viamd.h>
 #include <representation.h>
@@ -97,6 +100,36 @@
 
 // Global data for application
 // Grows mask by the atoms within radius (Angstrom) of those it holds, within viable_mask when given
+// Several PDB drops are one ensemble. They are combined into a single multi-model PDB in the temp folder, which then
+// loads as one system. Other drops, or a single PDB, are queued as they are.
+static void file_queue_push_dropped(ApplicationState* state, size_t num_files, const md_str_t file_paths[]) {
+    std::vector<md_str_t> pdbs;
+    for (size_t i = 0; i < num_files; ++i) {
+        if (md_str_eq_ignore_case(md_path_ext(file_paths[i]), MD_STR_LIT("pdb"))) pdbs.push_back(file_paths[i]);
+    }
+
+    if (pdbs.size() > 1) {
+        // A new name each time: the trajectory on screen may still read the file of the same ensemble dropped earlier
+        static uint64_t ensemble_count = 0;
+        const md_str_t stem = md_path_stem(pdbs[0]);
+        const std::string out_name = std::string(stem.ptr, stem.len) + "_ensemble_" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(ensemble_count++) + ".pdb";
+        const std::string out_path = (std::filesystem::temp_directory_path() / out_name).string();
+        const md_str_t out_str = {out_path.c_str(), out_path.size()};
+        if (md_haddock_ensemble_write(out_str, pdbs.data(), pdbs.size(), md_get_heap_allocator())) {
+            file_queue_push(&state->file_queue, out_str, FileFlags_Temporary | FileFlags_DisableCacheWrite);
+            for (size_t i = 0; i < num_files; ++i) {
+                if (!md_str_eq_ignore_case(md_path_ext(file_paths[i]), MD_STR_LIT("pdb"))) file_queue_push(&state->file_queue, file_paths[i], FileFlags_None);
+            }
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < num_files; ++i) {
+        file_queue_push(&state->file_queue, file_paths[i], FileFlags_None);
+    }
+}
+
 static void mask_grow_by_radius(md_bitmask_t* mask, const md_system_state_t* state, double radius, const md_bitset_t* viable_mask) {
     MD_ASSERT(mask);
     MD_ASSERT(state);
@@ -864,9 +897,7 @@ int main(int argc, char** argv) {
         ApplicationState* state = (ApplicationState*)user_data;
         MD_ASSERT(state);
 
-        for (size_t i = 0; i < num_files; ++i) {
-            file_queue_push(&state->file_queue, file_paths[i], FileFlags_None);
-        }
+        file_queue_push_dropped(state, num_files, file_paths);
     };
 
     VIAMD_LOG_DEBUG("Initializing framebuffer...");
@@ -1734,6 +1765,7 @@ int main(int argc, char** argv) {
     }
 
     interrupt_async_tasks(&state);
+    ensemble_file_remove(&state);
     script_vis_reset(&state);
     series_cache_free(&state);
 
