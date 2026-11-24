@@ -2126,17 +2126,39 @@ static void system_inferred_refresh(ApplicationState* app) {
 // The default representations, decided from what is now known of the system, in place of the placeholder shown while it
 // was inferred, unless it was changed or others were made meanwhile. However inference ended: published, or done again
 // on the main thread (system_inference_finish, as when a supplement or a run comes along before it is done).
+static bool is_map_representation(const Representation& rep) {
+    return rep.type == RepresentationType::ElectronicStructure && rep.electronic_structure.shown.source == ElectronicStructureSource::Map;
+}
+
+// A system placed on a map: the map's isosurface alpha is 80 of 255, and its optical density is 0.0003
+static void dim_map_under_system(ApplicationState* app) {
+    for (size_t i = 0; i < md_array_size(app->representation.reps); ++i) {
+        Representation& rep = app->representation.reps[i];
+        if (!is_map_representation(rep)) continue;
+        rep.electronic_structure.col_den.w = 80.0f / 255.0f;
+        rep.electronic_structure.iso_optical_density = 0.0003;
+    }
+}
+
 static void inference_defaults(ApplicationState* app) {
     SystemInference& inf = app->mold.inference;
     if (!inf.defaults_pending) return;
     inf.defaults_pending = false;
-    const size_t num_reps = md_array_size(app->representation.reps);
-    const Representation* rep = num_reps == 1 ? &app->representation.reps[0] : nullptr;
-    const bool untouched = rep && strcmp(rep->name, inf.placeholder_name) == 0 && rep->type == RepresentationType::SpaceFill &&
+    // The map shown is not part of the system, so the placeholder is the only representation of the system
+    const Representation* rep = nullptr;
+    size_t num_system_reps = 0;
+    for (size_t i = 0; i < md_array_size(app->representation.reps); ++i) {
+        const Representation& r = app->representation.reps[i];
+        if (is_map_representation(r)) continue;
+        ++num_system_reps;
+        rep = &r;
+    }
+    const bool untouched = num_system_reps == 1 && strcmp(rep->name, inf.placeholder_name) == 0 && rep->type == RepresentationType::SpaceFill &&
         rep->color_mapping == ColorMapping::Type && rep->enabled && rep->filter.text[0] == '\0' && rep->scale.x == 1.0f;
     if (untouched) {
-        remove_all_representations(app);
+        remove_system_representations(app);
         create_default_representations(app);
+        dim_map_under_system(app);
         recompute_atom_visibility_mask(app);
     }
 }
@@ -7855,6 +7877,7 @@ void file_queue_process(ApplicationState* state) {
                                 state->mold.inference.defaults_pending = true;
                             } else {
                                 create_default_representations(state);
+                                dim_map_under_system(state);
                             }
                         }
                         recompute_atom_visibility_mask(state);

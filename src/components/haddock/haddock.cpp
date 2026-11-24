@@ -12,6 +12,7 @@
 #include <md_system.h>
 #include <md_haddock.h>
 #include <md_map_fit.h>
+#include <md_clash.h>
 
 #include <viamd_event.h>
 #include <window_menu.h>
@@ -62,6 +63,66 @@ static std::vector<size_t> chain_a_calpha(const md_system_t& sys) {
         if (chain < 0 || md_str_eq(md_system_chain_id(&sys, (size_t)chain), chain_a) == false) continue;
         out.push_back(i);
     }
+    return out;
+}
+
+// The chain ids of a list separated by spaces or commas
+static std::vector<std::string> parse_chains(const std::string& txt) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : txt) {
+        if (c == ' ' || c == ',' || c == '\t') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static bool input_text(const char* label, std::string& txt) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", txt.c_str());
+    if (!ImGui::InputText(label, buf, sizeof(buf))) return false;
+    txt = buf;
+    return true;
+}
+
+// The atoms whose chain is in the list, or outside it when invert is set (so an empty list with invert is every atom)
+static std::vector<uint32_t> atoms_in_chains(const md_system_t& sys, const std::vector<std::string>& chains, bool invert) {
+    std::vector<uint32_t> out;
+    for (size_t i = 0; i < sys.atom.count; ++i) {
+        bool in = false;
+        const md_chain_idx_t chain = md_system_chain_find_by_atom_idx(&sys, i);
+        if (chain >= 0) {
+            const md_str_t id = md_system_chain_id(&sys, (size_t)chain);
+            for (const std::string& c : chains) {
+                if (c.size() == id.len && memcmp(c.data(), id.ptr, id.len) == 0) {
+                    in = true;
+                    break;
+                }
+            }
+        }
+        if (in != invert) out.push_back((uint32_t)i);
+    }
+    return out;
+}
+
+// Chain, residue number and atom name, as in ChimeraX (A 12 CA)
+static std::string atom_label(const md_system_t& sys, size_t i) {
+    std::string out;
+    const md_chain_idx_t chain = md_system_chain_find_by_atom_idx(&sys, i);
+    if (chain >= 0) {
+        const md_str_t id = md_system_chain_id(&sys, (size_t)chain);
+        out.assign(id.ptr, id.len);
+    }
+    const md_residue_idx_t res = md_system_residue_find_by_atom_idx(&sys, i);
+    if (res >= 0) out += " " + std::to_string(md_system_residue_seq_id(&sys, (size_t)res));
+    const md_str_t name = md_atom_name(&sys.atom, i);
+    out += " ";
+    out.append(name.ptr, name.len);
     return out;
 }
 
@@ -125,6 +186,11 @@ static void rotation_axis_angle(const float m[12], float axis[3], float* angle_d
     *angle_deg = angle * 180.0f / 3.14159265358979f;
 }
 
+struct Clash {
+    uint32_t atom[2];   // system atoms, the first in the fixed chains and the second in the moving chains
+    float overlap;      // van der Waals overlap (Å), after the hydrogen bond allowance
+};
+
 struct Haddock : viamd::EventHandler {
     ApplicationState* app_state = nullptr;
     std::vector<Restraint> restraints;
@@ -133,6 +199,18 @@ struct Haddock : viamd::EventHandler {
     bool show_lines = true;
     int hovered = -1;           // restraint under the mouse in the table, -1 when none
     bool highlighting = false;  // the shared highlight mask is set by this component
+
+    // The two molecules of a system, by chain id. The moving chains are fitted and checked for clashes against the
+    // fixed chains. With no moving chains, the fit moves the whole model and the clashes are every atom outside the fixed chains.
+    std::string fixed_chains = "A";
+    std::string moving_chains;
+    std::vector<Clash> clashes;
+    bool clashes_searched = false;
+    int64_t clash_frame = -1;   // the frame the clashes were found on
+    std::string clash_status;   // why the last search found no clashes to report
+    bool show_clashes = true;
+    int clash_revision = 0;     // the clash lines re-make the scene
+    std::string fit_status;     // why the last local fit was not applied
 
     // Map fit. The map is read from its file, since the loaded copy is kept transposed for display.
     md_mrc_t fit_map = {};
@@ -251,20 +329,31 @@ struct Haddock : viamd::EventHandler {
     void apply_fit(ApplicationState& state, int64_t frame) {
         if (fit_applied) reset_fit(state);
         const size_t n = state.mold.state.num_atoms;
+        fit_status.clear();
         if (n == 0 || frame < 0 || (size_t)frame >= models.size()) return;
 
+        // Only the moving atoms are fitted, so the fixed chains stay where they are
+        const std::vector<uint32_t> group = moving_atoms(state.mold.sys, true);
+        if (group.empty()) {
+            fit_status = "No atoms in the moving chains";
+            MD_LOG_ERROR("Haddock: %s", fit_status.c_str());
+            return;
+        }
+        const size_t ng = group.size();
+
         fit_original.assign(state.mold.state.xyz, state.mold.state.xyz + n);
-        std::vector<md_float3_t> moved(n);
+        std::vector<md_float3_t> sub(ng), moved(ng);
+        for (size_t k = 0; k < ng; ++k) sub[k] = fit_original[group[k]];
         ModelFit& m = models[frame];
-        m.fit_mean = md_map_fit_atoms_in_map(&fit_map, (const float*)fit_original.data(), (float*)moved.data(), n);
-        if (!md_map_fit_rigid_transform((const float*)fit_original.data(), (const float*)moved.data(), n, m.transform)) {
+        m.fit_mean = md_map_fit_atoms_in_map(&fit_map, (const float*)sub.data(), (float*)moved.data(), ng);
+        if (!md_map_fit_rigid_transform((const float*)sub.data(), (const float*)moved.data(), ng, m.transform)) {
             fit_original.clear();
             return;
         }
 
         double c0[3] = {0, 0, 0}, c1[3] = {0, 0, 0};
-        for (size_t i = 0; i < n; ++i) {
-            const float* a = &fit_original[i].x;
+        for (size_t i = 0; i < ng; ++i) {
+            const float* a = &sub[i].x;
             const float* b = &moved[i].x;
             for (int k = 0; k < 3; ++k) {
                 c0[k] += a[k];
@@ -273,13 +362,14 @@ struct Haddock : viamd::EventHandler {
         }
         double d2 = 0.0;
         for (int k = 0; k < 3; ++k) {
-            const double dk = (c1[k] - c0[k]) / (double)n;
+            const double dk = (c1[k] - c0[k]) / (double)ng;
             d2 += dk * dk;
         }
         m.fit_shift = std::sqrt(d2);
         m.fitted = true;
 
-        std::copy(moved.begin(), moved.end(), state.mold.state.xyz);
+        for (size_t k = 0; k < ng; ++k) state.mold.state.xyz[group[k]] = moved[k];
+        clear_clashes();
         fit_frame = frame;
         fit_applied = true;
         ++fit_revision;
@@ -294,6 +384,65 @@ struct Haddock : viamd::EventHandler {
         }
         fit_original.clear();
         fit_applied = false;
+        clear_clashes();
+    }
+
+    // The atoms of the moving chains. With none given, the fit uses the whole model and the clashes every atom outside the fixed chains.
+    std::vector<uint32_t> moving_atoms(const md_system_t& sys, bool fit) const {
+        const std::vector<std::string> mov = parse_chains(moving_chains);
+        if (!mov.empty()) return atoms_in_chains(sys, mov, false);
+        if (fit) return atoms_in_chains(sys, {}, true);
+        return atoms_in_chains(sys, parse_chains(fixed_chains), true);
+    }
+
+    void clear_clashes() {
+        clashes.clear();
+        clashes_searched = false;
+        ++clash_revision;
+    }
+
+    // Finds the clashes between the fixed and the moving chains on the coordinates shown
+    void find_clashes(ApplicationState& state) {
+        clear_clashes();
+        clash_status.clear();
+        const md_system_t& sys = state.mold.sys;
+        const std::vector<uint32_t> fixed = atoms_in_chains(sys, parse_chains(fixed_chains), false);
+        const std::vector<uint32_t> mov = moving_atoms(sys, false);
+        if (fixed.empty() || mov.empty()) {
+            clash_status = fixed.empty() ? "No atoms in the fixed chains" : "No atoms in the moving chains";
+            MD_LOG_ERROR("Haddock: %s", clash_status.c_str());
+            return;
+        }
+
+        std::vector<float> xa(3 * fixed.size()), xb(3 * mov.size());
+        std::vector<md_atomic_number_t> za(fixed.size()), zb(mov.size());
+        for (size_t k = 0; k < fixed.size(); ++k) {
+            const md_float3_t p = state.mold.state.xyz[fixed[k]];
+            xa[3 * k + 0] = p.x;
+            xa[3 * k + 1] = p.y;
+            xa[3 * k + 2] = p.z;
+            za[k] = md_atom_atomic_number(&sys.atom, fixed[k]);
+        }
+        for (size_t k = 0; k < mov.size(); ++k) {
+            const md_float3_t p = state.mold.state.xyz[mov[k]];
+            xb[3 * k + 0] = p.x;
+            xb[3 * k + 1] = p.y;
+            xb[3 * k + 2] = p.z;
+            zb[k] = md_atom_atomic_number(&sys.atom, mov[k]);
+        }
+
+        // ChimeraX clashes: an overlap of 0.6 Å, with 0.4 Å allowed for hydrogen bonds
+        std::vector<float> ra(fixed.size()), rb(mov.size());
+        md_clash_radii(xa.data(), za.data(), fixed.size(), ra.data());
+        md_clash_radii(xb.data(), zb.data(), mov.size(), rb.data());
+        const size_t num = md_clash_find(xa.data(), za.data(), ra.data(), fixed.size(), xb.data(), zb.data(), rb.data(), mov.size(), 0.6f, 0.4f, nullptr, 0);
+        std::vector<md_clash_pair_t> pairs(num);
+        md_clash_find(xa.data(), za.data(), ra.data(), fixed.size(), xb.data(), zb.data(), rb.data(), mov.size(), 0.6f, 0.4f, pairs.data(), num);
+        clashes.reserve(num);
+        for (const md_clash_pair_t& p : pairs) clashes.push_back({{fixed[p.a], mov[p.b]}, p.overlap});
+        clash_frame = current_frame(state);
+        clashes_searched = true;
+        ++clash_revision;
     }
 
     // Superposes every model onto the first one on the chain A C-alpha atoms (matchmaker #2 to #1/A). Only the
@@ -351,6 +500,7 @@ struct Haddock : viamd::EventHandler {
         const size_t n = state.mold.state.num_atoms;
         fit_original.assign(state.mold.state.xyz, state.mold.state.xyz + n);
         for (size_t i = 0; i < n; ++i) state.mold.state.xyz[i] = transform_point(models[frame].superpose, fit_original[i]);
+        clear_clashes();
         fit_frame = frame;
         fit_applied = true;
         ++fit_revision;
@@ -399,6 +549,8 @@ struct Haddock : viamd::EventHandler {
                 fit_applied = false;
                 fit_original.clear();
                 fit_frame = -1;
+                fit_status.clear();
+                clear_clashes();
                 break;
             case viamd::EventType_ViamdSystemFree:
                 unresolve();
@@ -415,7 +567,7 @@ struct Haddock : viamd::EventHandler {
                 // The overlay (RenderTransparent) is drawn with the scene: a hovered restraint must re-make it
                 MD_ASSERT(e.payload_type == viamd::EventPayloadType_RenderKey);
                 RenderKey* rk = (RenderKey*)e.payload;
-                const int32_t state_key[3] = {hovered, show_lines, fit_revision};
+                const int32_t state_key[5] = {hovered, show_lines, fit_revision, show_clashes, clash_revision};
                 rk->key = md_hash64(state_key, sizeof(state_key), rk->key);
                 break;
             }
@@ -430,6 +582,13 @@ struct Haddock : viamd::EventHandler {
 
     void draw_lines(const ApplicationState& state) {
         immediate::Scope scope(state.gfx.overlay, "haddock_restraints");
+        if (show_clashes) {
+            for (const Clash& c : clashes) {
+                md_float3_t a, b;
+                if (!atom_position(state, (int)c.atom[0], &a) || !atom_position(state, (int)c.atom[1], &b)) continue;
+                immediate::line(scope, a, b, immediate::COLOR_MAGENTA);
+            }
+        }
         for (int i = 0; i < (int)restraints.size(); ++i) {
             const Restraint& rs = restraints[i];
             md_float3_t a, b;
@@ -512,6 +671,38 @@ struct Haddock : viamd::EventHandler {
         }
     }
 
+    void draw_molecules() {
+        input_text("Fixed chains##molecules", fixed_chains);
+        input_text("Moving chains##molecules", moving_chains);
+        ImGui::TextDisabled("Chain ids separated by spaces. Empty moving chains: the fit moves the whole model, and the clashes are every atom outside the fixed chains.");
+        if (ImGui::Button("Find clashes")) find_clashes(*app_state);
+        ImGui::SameLine();
+        ImGui::Checkbox("Show clashes", &show_clashes);
+        if (!clash_status.empty()) ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.2f, 1.0f), "%s", clash_status.c_str());
+        if (!clashes_searched) {
+            ImGui::TextDisabled("Find the clashes between the fixed and the moving chains (ChimeraX defaults: overlap 0.6 A, hydrogen bond allowance 0.4 A).");
+            return;
+        }
+        ImGui::Text("%zu clashes between the fixed and the moving chains", clashes.size());
+        const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY;
+        if (!clashes.empty() && ImGui::BeginTable("##clashes", 3, flags, ImVec2(0, 240))) {
+            ImGui::TableSetupColumn("Fixed atom");
+            ImGui::TableSetupColumn("Moving atom");
+            ImGui::TableSetupColumn("Overlap (A)");
+            ImGui::TableHeadersRow();
+            for (const Clash& c : clashes) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(atom_label(app_state->mold.sys, c.atom[0]).c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(atom_label(app_state->mold.sys, c.atom[1]).c_str());
+                ImGui::TableNextColumn();
+                ImGui::Text("%.2f", c.overlap);
+            }
+            ImGui::EndTable();
+        }
+    }
+
     void draw_map_fit() {
         if (app_state->maps.empty()) {
             ImGui::TextDisabled("Drop a map (.mrc) to fit the models into it.");
@@ -552,6 +743,8 @@ struct Haddock : viamd::EventHandler {
         for (const ModelFit& m : models) num_scored += m.scored;
         ImGui::Text("%zu models, %zu scored. Click a row to show that model.", models.size(), num_scored);
         if (!score_status.empty()) ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.2f, 1.0f), "%s", score_status.c_str());
+        if (!fit_status.empty()) ImGui::TextColored(ImVec4(0.9f, 0.2f, 0.2f, 1.0f), "%s", fit_status.c_str());
+        ImGui::TextDisabled("Apply best fit moves: %s", moving_chains.empty() ? "the whole model" : ("chains " + moving_chains).c_str());
 
         // Ranked by correlation, the unscored models last
         std::vector<size_t> order(models.size());
@@ -622,6 +815,7 @@ struct Haddock : viamd::EventHandler {
 
     void draw_window() {
         hovered = -1;
+        if (clashes_searched && current_frame(*app_state) != clash_frame) clear_clashes();
         if (!show_window) {
             update_highlight();
             return;
@@ -630,6 +824,10 @@ struct Haddock : viamd::EventHandler {
             if (ImGui::BeginTabBar("##haddock")) {
                 if (ImGui::BeginTabItem("Restraints")) {
                     draw_restraints();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Molecules")) {
+                    draw_molecules();
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Map fit")) {
