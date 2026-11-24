@@ -418,6 +418,17 @@ void remove_all_representations(ApplicationState* state) {
     }
 }
 
+void remove_system_representations(ApplicationState* state) {
+    for (size_t i = md_array_size(state->representation.reps); i-- > 0;) {
+        const Representation& rep = state->representation.reps[i];
+        if (rep.type == RepresentationType::ElectronicStructure && rep.electronic_structure.shown.source == ElectronicStructureSource::Map) continue;
+        remove_representation(state, i);
+    }
+    while (md_array_size(state->representation.groups) > 0) {
+        free_group(state, md_array_size(state->representation.groups) - 1);
+    }
+}
+
 void recompute_atom_visibility_mask(ApplicationState* state) {
     MD_ASSERT(state);
     auto& mask = state->representation.visibility_mask;
@@ -947,7 +958,7 @@ static void update_representation(ApplicationState* state, Representation* rep) 
         rep->type_is_valid |= rep->sphere_fallback;
         break;
     case RepresentationType::ElectronicStructure:
-        rep->type_is_valid = electronic_structure_source_supported(es_source_mask(sys), rep->electronic_structure.shown.source);
+        rep->type_is_valid = electronic_structure_source_available(es_source_mask(sys), rep->electronic_structure.shown.source);
         if (rep->type_is_valid) {
             // what it waits for without blocking, asked again next frame
             again = !electronic_structure_representation_update(state, rep, colors);
@@ -2074,7 +2085,7 @@ static const char* const es_source_names[]           = { "MolecularOrbital", "Na
                                                          "DensityProperty", "ElectronLocalization", "LocalizedOrbitalLocator",
                                                          "ElectrostaticPotential", "EmbeddingPotential", "AverageLocalIonizationEnergy",
                                                          "LocalElectronAttachmentEnergy", "DensityScaleLength", "GostshypWallPotential",
-                                                         "GostshypEffectivePotential", "GostshypEnergyDensity" };
+                                                         "GostshypEffectivePotential", "GostshypEnergyDensity", "Map" };
 static const char* const es_spin_names[]             = { "None", "Alpha", "Beta", "Total", "Difference" };
 static const char* const es_nto_component_names[]    = { "Particle", "Hole" };
 static const char* const es_transition_component_names[] = { "Attachment", "Detachment", "Difference" };
@@ -2261,7 +2272,15 @@ static void read_field_params(viamd::Entries& e, viamd::PathPrefix p, FieldRef& 
 static void write_electronic_structure(viamd::serialization_state_t& s, viamd::PathPrefix p, const ElectronicStructureRepresentation& es, const md_system_t& sys) {
     const md_attributes_t* attributes = &sys.attributes;
     // The field shown, its keys those of the representation's block
-    write_field_ref(s, p, es.shown, sys);
+    if (es.shown.source == ElectronicStructureSource::Map) {
+        // A map is not a field: it is the index of a loaded map (the maps are written by the workspace)
+        viamd::write_enum(s, p("Source"), (int)es.shown.source, viamd::enum_names(es_source_names));
+        viamd::write_int(s, p("MapIdx"), es.map_idx);
+        viamd::write_bool(s, p("ZoneEnabled"), es.zone_enabled);
+        viamd::write_flt(s, p("ZoneRadius"), es.zone_radius);
+    } else {
+        write_field_ref(s, p, es.shown, sys);
+    }
     viamd::write_enum(s, p("Resolution"), (int)es.resolution, viamd::enum_names(volume_resolution_names));
     viamd::write_dbl(s, p("Iso"), es.iso_value);
     viamd::write_dbl(s, p("FieldIso"), es.field_iso_value);
@@ -2352,6 +2371,9 @@ static void read_electronic_structure(viamd::Entries& e, viamd::PathPrefix p, El
         electronic_structure_set_source_defaults(&es);
     } else if (viamd::get_enum(e, p("Source"), es.shown.source, viamd::enum_names(es_source_names))) {
         electronic_structure_set_source_defaults(&es);
+        viamd::get(e, p("MapIdx"), es.map_idx);
+        viamd::get(e, p("ZoneEnabled"), es.zone_enabled);
+        viamd::get(e, p("ZoneRadius"), es.zone_radius);
     }
     if (const md_str_t* v = viamd::get_value(e, MD_STR_LIT("ElectronicStructureField"))) {
         int field;
@@ -3177,9 +3199,14 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
             md_temp_scope_t temp = md_temp_begin();
             MD_DEFER { md_temp_end(temp); };
             md_array(FieldEntry) entries = nullptr;
-            const size_t n = field_catalog(&entries, state->mold.sys, md_temp_allocator(temp));
+            const size_t n_sys = field_catalog(&entries, state->mold.sys, md_temp_allocator(temp));
+            const size_t n = n_sys + field_map_catalog(&entries, state->maps.data(), state->maps.size(), md_temp_allocator(temp));
             char path[FIELD_PATH_MAX] = "";
-            field_path_of_source(path, sizeof(path), es.shown.source, es.shown.density_property_key, state->mold.sys);
+            if (es.shown.source == ElectronicStructureSource::Map) {
+                snprintf(path, sizeof(path), "map/%d", es.map_idx);
+            } else {
+                field_path_of_source(path, sizeof(path), es.shown.source, es.shown.density_property_key, state->mold.sys);
+            }
             // what it is: its label, a density property's its own
             md_str_t preview = md_str_from_cstr(electronic_structure_source_str[(int)es.shown.source]);
             for (size_t i = 0; i < n; ++i) {
@@ -3195,6 +3222,7 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
                     electronic_structure_set_source_defaults(&es);
                 }
                 if (e.source == ElectronicStructureSource::DensityProperty) es.shown.density_property_key = e.density_property_key;
+                if (e.source == ElectronicStructureSource::Map) es.map_idx = e.map_idx;
                 update_rep = true;
             }
         }
@@ -3574,6 +3602,19 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
             prop::row("resolution", mesh_mode ? "The size of the cells the surfaces are extracted at" : "The resolution of the volume the surfaces are drawn from");
             if (ImGui::Combo("##resolution", (int*)&es.resolution, volume_resolution_str, IM_ARRAYSIZE(volume_resolution_str))) {
                 update_rep = true;
+            }
+            prop::section_end();
+        }
+
+        if (es.shown.source == ElectronicStructureSource::Map && prop::section("Zone")) {
+            prop::row("zone", "Show the density only near the atoms the filter picks, like ChimeraX's zone");
+            update_rep |= ImGui::Checkbox("##zone", &es.zone_enabled);
+            if (es.zone_enabled) {
+                const RepresentationContext ctx = representation_context(*state, rep.node.parent);
+                prop::row("zone atoms");
+                update_rep |= filter_input("##zone_filter", &rep.filter, state->script.language, representation_filter_context(*state, ctx), 0, nullptr, "all (or atoms, or bonds: their atoms)");
+                prop::row("radius", "Distance from the atoms, in Å, that the density is kept within");
+                update_rep |= ImGui::SliderFloat("##zone_radius", &es.zone_radius, 0.5f, 20.0f, "%.1f Å");
             }
             prop::section_end();
         }

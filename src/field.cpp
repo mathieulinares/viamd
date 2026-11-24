@@ -94,6 +94,19 @@ size_t field_catalog(md_array(FieldEntry)* out, const md_system_t& sys, md_alloc
     return count;
 }
 
+size_t field_map_catalog(md_array(FieldEntry)* out, const MapVolume* maps, size_t num_maps, md_allocator_i* alloc) {
+    for (size_t i = 0; i < num_maps; ++i) {
+        FieldEntry e = {};
+        snprintf(e.path, sizeof(e.path), "map/%zu", i);
+        e.label = md_str_from_cstr(maps[i].name.c_str());
+        e.keywords = "map mrc density";
+        e.source = ElectronicStructureSource::Map;
+        e.map_idx = (int)i;
+        md_array_push(*out, e, alloc);
+    }
+    return num_maps;
+}
+
 size_t field_path_of_source(char* buf, size_t cap, ElectronicStructureSource source, md_attribute_id_t key, const md_system_t& sys) {
     if (source == ElectronicStructureSource::DensityProperty) {
         const md_attribute_t* attr = md_attributes_get(&sys.attributes, key);

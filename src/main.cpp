@@ -1128,13 +1128,16 @@ int main(int argc, char** argv) {
             // What is focused on is seen in the middle of what the windows leave in view, rather than behind them
             state.view.region = state.settings.focus_in_free_space ? main_view_uncovered_region(state, canvas_window) : ViewRegion{};
             ViewTransform reset_transform = {};
-            if (hit.depth < 1.0f) {
+            // A map surface is not a picked thing: a double-click on it is a double-click in the void
+            const bool on_map = hit.raw_idx == INVALID_PICKING_IDX && !state.maps.empty();
+            if (hit.depth < 1.0f && !on_map) {
                 reset_transform.distance = state.view.target.distance;
                 reset_transform.orientation = state.view.camera.orientation;
                 reset_transform.position = hit.world_pos + state.view.camera.orientation * md_float3_set(0, 0, state.view.target.distance);
             } else {
                 reset_view(&reset_transform, state.mold.state, &state.representation.visibility_mask, state.view.camera.fov_y, state.view.region,
-                           &state.mold.sys, state.view.assembly);
+                           &state.mold.sys, state.view.assembly, &state.maps);
+                state.view.trackball_param.max_distance = MD_MAX(state.view.trackball_param.max_distance, reset_transform.distance * 10.0f);
             }
             state.view.target = reset_transform;
         }

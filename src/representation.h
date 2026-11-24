@@ -29,6 +29,8 @@ Representation* clone_representation(ApplicationState* app, const Representation
 void remove_representation(ApplicationState* app, size_t idx);
 // The representations and the groups
 void remove_all_representations(ApplicationState* app);
+// As remove_all_representations, but keeps the map representations
+void remove_system_representations(ApplicationState* app);
 void create_default_representations(ApplicationState* app);
 
 Representation* find_representation(ApplicationState* app, uint32_t id);

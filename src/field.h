@@ -41,11 +41,14 @@ struct FieldEntry {
     ElectronicStructureSource source = {};
     md_attribute_id_t density_property_key = MD_ATTRIBUTE_INVALID;
     SurfaceFieldKind field_kind = SurfaceFieldKind::Count;  // the surface field it is, if it is one: what can colour
+    int map_idx = -1;                       // for ElectronicStructureSource::Map: the map (ApplicationState::maps)
 };
 
 // The fields the system has, in the order of the hierarchy, into *out (pushed). Their labels are borrowed from the
 // system's attributes: valid while it is.
 size_t field_catalog(md_array(FieldEntry)* out, const md_system_t& sys, md_allocator_i* alloc);
+// The loaded maps, one entry each after the system's, at "map/<index>" (pushed into *out)
+size_t field_map_catalog(md_array(FieldEntry)* out, const struct MapVolume* maps, size_t num_maps, md_allocator_i* alloc);
 
 // The label of a group of paths, the segments before a leaf ("es" Electronic Structure, "es/gostshyp" GOSTSHYP); the
 // segment itself for one without

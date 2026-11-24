@@ -2632,6 +2632,15 @@ void load_workspace(ApplicationState* data, md_str_t filename) {
             if (pending.version > WORKSPACE_VERSION) {
                 VIAMD_LOG_INFO("Workspace: written by a newer viamd (version %d, this one writes %d); what this one does not know is left out", pending.version, WORKSPACE_VERSION);
             }
+            // The maps of the workspace replace the ones loaded so far (its representations refer to them by index)
+            data->maps.clear();
+        } else if (md_str_eq(section, MD_STR_LIT("Map"))) {
+            while (viamd::next_entry(ident, arg, state)) {
+                if (md_str_eq(ident, MD_STR_LIT("Path"))) {
+                    const std::string path(arg.ptr, arg.len);
+                    if (map_load(data, path.c_str()) < 0) VIAMD_LOG_INFO("Workspace: could not load map '%s'", path.c_str());
+                }
+            }
         } else if (workspace_files_read(&pending.files, state, folder, temp_alloc)) {
             // The systems and their files
         } else if (md_str_eq(section, MD_STR_LIT("Animation"))) {
@@ -3247,6 +3256,12 @@ bool save_workspace(ApplicationState* app_state, md_str_t filename) {
     viamd::write_section_header(state, MD_STR_LIT("Windows"));
     for (size_t i = 0; i < num_workspace_windows; ++i) {
         viamd::write_bool(state, md_str_from_cstr(workspace_windows[i].name), *workspace_windows[i].show);
+    }
+
+    // The maps, in order: the representations refer to them by their index
+    for (const MapVolume& map : app_state->maps) {
+        viamd::write_section_header(state, MD_STR_LIT("Map"));
+        viamd::write_str(state, MD_STR_LIT("Path"), md_str_t{map.path.c_str(), map.path.size()});
     }
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdSerialize, viamd::EventPayloadType_SerializationState, &state);
@@ -4715,8 +4730,132 @@ static bool localization_gpu_evaluate(ApplicationState* state, uint32_t vol_tex,
 
 static bool es_evaluate_into(ApplicationState* state, const ElectronicStructureRepresentation& es, uint32_t tex_id, const md_grid_t& grid);
 
+// A map loaded into the workspace: its values transposed to x-fastest, the order of a volume's texture
+int map_load(ApplicationState* state, const char* path) {
+    md_mrc_t mrc = {};
+    if (!md_mrc_file_load(&mrc, md_str_from_cstr(path), md_get_heap_allocator())) {
+        return -1;
+    }
+    MapVolume map;
+    map.path = path;
+    const char* base = path;
+    for (const char* c = path; *c; ++c) {
+        if (*c == '/' || *c == '\\') base = c + 1;
+    }
+    map.name = base;
+
+    const size_t nx = (size_t)mrc.num_x;
+    const size_t ny = (size_t)mrc.num_y;
+    const size_t nz = (size_t)mrc.num_z;
+    map.values.resize(nx * ny * nz);
+    for (size_t z = 0; z < nz; ++z) {
+        for (size_t y = 0; y < ny; ++y) {
+            for (size_t x = 0; x < nx; ++x) {
+                map.values[x + nx * (y + ny * z)] = mrc.val[(x * ny + y) * nz + z];
+            }
+        }
+    }
+
+    map.info = mrc;
+    map.info.val = nullptr;
+    md_mrc_free(&mrc, md_get_heap_allocator());
+
+    state->maps.push_back(std::move(map));
+    return (int)state->maps.size() - 1;
+}
+
+// The values within radius (Å) of any of the atoms, the others set below the lowest value so no isovalue reaches them.
+// Voxel centres are at origin + i * voxel, in the frame of the atoms (Å).
+static std::vector<float> map_zone_values(const ApplicationState* state, const MapVolume& map, const md_bitset_t& atoms, float radius) {
+    const md_mrc_t& info = map.info;
+    const int nx = info.num_x;
+    const int ny = info.num_y;
+    const int nz = info.num_z;
+    const float vx = info.axis[0][0];
+    const float vy = info.axis[1][1];
+    const float vz = info.axis[2][2];
+
+    std::vector<uint8_t> inside((size_t)nx * ny * nz, 0);
+    const float r2 = radius * radius;
+    md_bitset_iter_t it = md_bitset_iter(atoms);
+    while (md_bitset_iter_next(&it)) {
+        const md_float3_t p = md_float3_set(state->mold.state.xyz[it.idx].x, state->mold.state.xyz[it.idx].y, state->mold.state.xyz[it.idx].z);
+        const int x0 = MD_MAX(0,      (int)ceilf ((p.x - radius - info.origin[0]) / vx));
+        const int x1 = MD_MIN(nx - 1, (int)floorf((p.x + radius - info.origin[0]) / vx));
+        const int y0 = MD_MAX(0,      (int)ceilf ((p.y - radius - info.origin[1]) / vy));
+        const int y1 = MD_MIN(ny - 1, (int)floorf((p.y + radius - info.origin[1]) / vy));
+        const int z0 = MD_MAX(0,      (int)ceilf ((p.z - radius - info.origin[2]) / vz));
+        const int z1 = MD_MIN(nz - 1, (int)floorf((p.z + radius - info.origin[2]) / vz));
+        for (int z = z0; z <= z1; ++z) {
+            const float dz = info.origin[2] + z * vz - p.z;
+            for (int y = y0; y <= y1; ++y) {
+                const float dy = info.origin[1] + y * vy - p.y;
+                for (int x = x0; x <= x1; ++x) {
+                    const float dx = info.origin[0] + x * vx - p.x;
+                    if (dx * dx + dy * dy + dz * dz <= r2) {
+                        inside[x + nx * (y + ny * z)] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    const float low = *std::min_element(map.values.begin(), map.values.end()) - 1.0f;
+    std::vector<float> zoned(map.values.size());
+    for (size_t i = 0; i < zoned.size(); ++i) {
+        zoned[i] = inside[i] ? map.values[i] : low;
+    }
+    return zoned;
+}
+
+// A map is the volume of its own grid, not of the system: its voxels are its origin and axes, in bohr as the grid is
+static bool map_evaluate(ApplicationState* state, Representation* rep, const ElectronicStructureRepresentation& es) {
+    if (es.map_idx < 0 || es.map_idx >= (int)state->maps.size()) return false;
+    const MapVolume& map = state->maps[es.map_idx];
+    const md_mrc_t& info = map.info;
+
+    // Zoned: the values of the density near the atoms the filter picks, where it is valid
+    std::vector<float> zoned;
+    if (es.zone_enabled) {
+        md_allocator_i* alloc = state->allocator.persistent;
+        const RepresentationContext ctx = representation_context(*state, rep->node.parent);
+        md_bitset_t atoms = md_bitset_empty_set();
+        if (filter_evaluate(&rep->filter, &atoms, state->script.language, representation_filter_context(*state, ctx), alloc)) {
+            zoned = map_zone_values(state, map, atoms, es.zone_radius);
+        }
+        md_bitset_free(&atoms, alloc);
+    }
+
+    // The origin of a map is its first voxel's centre, and a grid's is its corner
+    const float vx = info.axis[0][0];
+    const float vy = info.axis[1][1];
+    const float vz = info.axis[2][2];
+    const float bohr = (float)ANGSTROM_TO_BOHR;
+
+    md_grid_t grid = {};
+    grid.orientation = md_float3x3_ident();
+    grid.origin  = md_float3_set((info.origin[0] - 0.5f * vx) * bohr, (info.origin[1] - 0.5f * vy) * bohr, (info.origin[2] - 0.5f * vz) * bohr);
+    grid.spacing = md_float3_set(vx * bohr, vy * bohr, vz * bohr);
+    grid.dim[0] = info.num_x;
+    grid.dim[1] = info.num_y;
+    grid.dim[2] = info.num_z;
+
+    init_volume(&rep->electronic_structure.density_vol, grid, GL_R32F);
+    gl::set_texture_3D_data(rep->electronic_structure.density_vol.tex_id, 0, zoned.empty() ? map.values.data() : zoned.data(), GL_R32F);
+    volume::notify_data_changed(rep->electronic_structure.density_vol.tex_id);
+    rep->electronic_structure.grid = grid;
+    rep->electronic_structure.box_to_world = rep->electronic_structure.density_vol.texture_to_world;
+    rep->electronic_structure.has_box = true;
+    rep->electronic_structure.map_mean = info.mean;
+    rep->electronic_structure.map_rms = info.rms;
+    return true;
+}
+
 // es: what the volume is of
 static bool electronic_structure_evaluate(ApplicationState* state, Representation* rep, const ElectronicStructureRepresentation& es) {
+    if (es.shown.source == ElectronicStructureSource::Map) {
+        return map_evaluate(state, rep, es);
+    }
 
     const double samples_per_angstrom = volume_resolution_samples_per_angstrom[(int)electronic_structure_volume_resolution(es)];
 
@@ -5896,7 +6035,11 @@ bool electronic_structure_representation_update(ApplicationState* state, Represe
     // plane as it is, as while it is dragged)
     const bool needs_volume = !mesh_mode || !iso_display || es.coloring == SurfaceColoring::AtomColors;
     vol_hash = md_hash64(&needs_volume, sizeof(needs_volume), vol_hash);
-
+    if (es.shown.source == ElectronicStructureSource::Map) {
+        vol_hash = md_hash64(&es.zone_enabled, sizeof(es.zone_enabled), vol_hash);
+        vol_hash = md_hash64(&es.zone_radius, sizeof(es.zone_radius), vol_hash);
+        vol_hash = md_hash64(rep->filter.text, strlen(rep->filter.text), vol_hash);
+    }
     bool done = true;
     if (vol_hash != es.vol_hash) {
         bool ready = true;
@@ -6023,7 +6166,7 @@ bool electronic_structure_select_available_source(ElectronicStructureRepresentat
         return false;
     }
 
-    if (!electronic_structure_source_supported(mask, es->shown.source)) {
+    if (!electronic_structure_source_available(mask, es->shown.source)) {
         for (int n = 0; n < (int)ElectronicStructureSource::Count; ++n) {
             const ElectronicStructureSource source = (ElectronicStructureSource)n;
             if (electronic_structure_source_supported(mask, source)) {
@@ -7551,6 +7694,12 @@ bool file_queue_full(const FileQueue* queue) {
     return (queue->head + 1) % MD_COUNTOF(queue->arr) == queue->tail;
 }
 
+static bool file_is_map(md_str_t path) {
+    md_str_t ext = md_path_ext(path);
+    return md_str_eq_ignore_case(ext, MD_STR_LIT("mrc")) || md_str_eq_ignore_case(ext, MD_STR_LIT("map")) ||
+           md_str_eq_ignore_case(ext, MD_STR_LIT("ccp4"));
+}
+
 void file_queue_push(FileQueue* queue, md_str_t path, FileFlags flags) {
     MD_ASSERT(queue);
     MD_ASSERT(!file_queue_full(queue));
@@ -7559,14 +7708,17 @@ void file_queue_push(FileQueue* queue, md_str_t path, FileFlags flags) {
 
     md_str_t ext = md_path_ext(path);
     loader::LoaderState detected = {};
-    if (!md_str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
+    if (!md_str_eq(ext, WORKSPACE_FILE_EXTENSION) && !file_is_map(path)) {
         // By the contents where the extension does not tell (Amber's mdout, prmtop and inpcrd have none)
         loader::init(&detected, path, nullptr);
     }
-    if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION) || detected.type != LoaderType_Undefined) {
+    if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION) || file_is_map(path) || detected.type != LoaderType_Undefined) {
         LoaderFlags loader_flags = detected.flags;
         if (md_str_eq(ext, WORKSPACE_FILE_EXTENSION)) {
             prio = 1;
+        } else if (file_is_map(path)) {
+            // A map stands on its own: it needs no system, so it is not held back by one
+            prio = 3;
         } else if (loader_flags & LoaderFlag_System) {
             prio = 2;
         } else if (loader_flags & LoaderFlag_Temporal) {
@@ -7619,6 +7771,29 @@ void file_queue_process(ApplicationState* state) {
 
         if (md_str_eq_ignore_case(ext, WORKSPACE_FILE_EXTENSION)) {
             load_workspace(state, e.path);
+        } else if (file_is_map(e.path)) {
+            char map_path[1024];
+            md_str_copy_to_char_buf(map_path, sizeof(map_path), e.path);
+            // Like a system load, a map starts from a clean session. A system loaded afterwards is placed on top of it.
+            remove_all_representations(state);
+            state->maps.clear();
+            const int idx = map_load(state, map_path);
+            if (idx >= 0) {
+                Representation* rep = create_representation(state, RepresentationType::ElectronicStructure);
+                snprintf(rep->name, sizeof(rep->name), "map");
+                rep->enabled = true;
+                rep->electronic_structure.shown.source = ElectronicStructureSource::Map;
+                rep->electronic_structure.map_idx = idx;
+                electronic_structure_set_source_defaults(&rep->electronic_structure);
+                state->animation = {};
+                reset_view(&state->view.camera, state->mold.state, &state->representation.visibility_mask, state->view.camera.fov_y, state->view.region, nullptr, -1, &state->maps);
+                // The camera animates toward the target, so the target must be the new view too or the camera drifts back to the old one
+                state->view.target = state->view.camera;
+                // The zoom range comes from the system, which a map alone does not set: a map's box is framed farther off
+                state->view.trackball_param.max_distance = MD_MAX(state->view.trackball_param.max_distance, state->view.camera.distance * 10.0f);
+            } else {
+                MD_LOG_ERROR("failed to load map '%s'", map_path);
+            }
         } else {
             loader::LoaderState loader_state = {};
             loader::init(&loader_state, e.path, &state->mold.sys);
@@ -7638,7 +7813,7 @@ void file_queue_process(ApplicationState* state) {
                         md_bitmask_clear(&state->representation.visibility_mask);
 
                         if (!state->settings.keep_representations) {
-                            remove_all_representations(state);
+                            remove_system_representations(state);
                             if (system_inference_pending(*state)) {
                                 // The defaults are decided from what inference tells of the system (what its residues
                                 // are, its strands, its lipids): its atoms meanwhile
@@ -7653,7 +7828,8 @@ void file_queue_process(ApplicationState* state) {
                         recompute_atom_visibility_mask(state);
                         state->mold.interpolate_system_state = true;
                         state->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
-                        reset_view(&state->view.camera, state->mold.state, &state->representation.visibility_mask, state->view.camera.fov_y, state->view.region);
+                        reset_view(&state->view.camera, state->mold.state, &state->representation.visibility_mask, state->view.camera.fov_y, state->view.region, nullptr, -1, &state->maps);
+                        state->view.trackball_param.max_distance = MD_MAX(state->view.trackball_param.max_distance, state->view.camera.distance * 10.0f);
                     }
                 }
             }
@@ -7661,7 +7837,7 @@ void file_queue_process(ApplicationState* state) {
     }
 }
 
-void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask, float fov_y, const ViewRegion& region, const md_system_t* sys, int assembly) {
+void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask, float fov_y, const ViewRegion& region, const md_system_t* sys, int assembly, const std::vector<MapVolume>* maps) {
     MD_ASSERT(transform);
     if (!state.num_atoms) return;
 
@@ -7737,6 +7913,35 @@ void reset_view(ViewTransform* transform, const md_system_state_t& state, const 
     md_unitcell_A_extract(A.elem, &state.unitcell);
     const bool   has_cell    = (md_unitcell_flags(&state.unitcell) & (MD_UNITCELL_ORTHO | MD_UNITCELL_TRICLINIC)) != 0;
     const md_float3_t cell_offset = -md_float3x3_mul_float3(A, md_float3_set1(0.5f));
+
+    if (maps && !maps->empty()) {
+        // The atoms shown and the boxes of the maps, in the same frame as the atoms (see map_evaluate for the grid)
+        const size_t n_atoms = indices ? count : state.num_atoms;
+        md_array(md_float3_t) pts = 0;
+        md_array_ensure(pts, n_atoms + 8 * maps->size(), md_temp_allocator(temp));
+        for (size_t i = 0; i < n_atoms; ++i) {
+            const md_float3_t& p = state.xyz[indices ? indices[i] : (int32_t)i];
+            md_array_push(pts, p, md_temp_allocator(temp));
+        }
+        for (const MapVolume& map : *maps) {
+            const md_mrc_t& info = map.info;
+            const float num[3] = {(float)info.num_x, (float)info.num_y, (float)info.num_z};
+            for (int c = 0; c < 8; ++c) {
+                md_float3_t corner = {};
+                for (int k = 0; k < 3; ++k) {
+                    const float voxel = info.axis[k][k];
+                    const float first = info.origin[k] - 0.5f * voxel;
+                    const float last  = first + num[k] * voxel;
+                    corner.elem[k] = (c >> k) & 1 ? last : first;
+                }
+                md_array_push(pts, corner, md_temp_allocator(temp));
+            }
+        }
+        const size_t n = md_array_size(pts);
+        *transform = camera_compute_default_view(pts, n, nullptr, n, nullptr, fov_y, region);
+        transform->position = transform->position + cell_offset;
+        return;
+    }
 
     if (indices && count <= 4) {
         // A handful of atoms has no meaningful shape: center on them, keep the current orientation, fit the distance

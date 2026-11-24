@@ -11,10 +11,11 @@
 #include <plane.h>
 #include <transfer_function_widget.h>
 #include <md_gto.h>
+#include <md_mrc.h>
 #include <core/md_grid.h>
 #include <script_engine.h>
 #include <string>
-#include <md_gl.h>
+#include <vector>
 #include <md_infer.h>
 #include <md_chem.h>
 #include <md_edr.h>
@@ -186,6 +187,7 @@ enum class ElectronicStructureSource {
     GostshypWallPotential,      // of the GOSTSHYP wall of a run under pressure (gostshyp.h)
     GostshypEffectivePotential,
     GostshypEnergyDensity,
+    Map,                        // a map loaded into the workspace (MapVolume), not of the system: see ApplicationState::maps
     Count
 };
 
@@ -346,6 +348,7 @@ inline const char* electronic_structure_source_str[(int)ElectronicStructureSourc
     "GOSTSHYP Wall Potential",
     "GOSTSHYP Effective Potential",
     "GOSTSHYP Energy Density",
+    "Map (MRC)",
 };
 
 // The kind of surface field a source is evaluated as (surface_field.h): Count for those evaluated of orbitals and
@@ -754,8 +757,26 @@ struct FieldRef {
     md_attribute_id_t density_property_key = MD_ATTRIBUTE_INVALID;
 };
 
+// A map loaded into the workspace (md_mrc). Its values are kept x-fastest, the order the texture of a volume of its
+// dims takes them in; info holds the header's origin, axes, dims and stats, with info.val released.
+struct MapVolume {
+    std::string path;
+    std::string name;
+    md_mrc_t info = {};
+    std::vector<float> values;
+};
+
 struct ElectronicStructureRepresentation {
     Volume density_vol = {};
+    // The map shown (ApplicationState::maps) when the source is ElectronicStructureSource::Map, and the statistics its
+    // isovalues are sigma of (map_mean + iso_value * map_rms), copied when it is evaluated
+    int map_idx = -1;
+    double map_mean = 0.0;
+    double map_rms = 1.0;
+    // Zoning (maps): the density is kept within zone_radius (Å) of the atoms the representation's filter picks, and
+    // is cut outside them
+    bool zone_enabled = false;
+    float zone_radius = 4.0f;
     Volume color_vol   = {};
     // The analytic normals of density_vol (RGB10_A2, its dims), where its evaluation made them (es_normals_of): what the
     // raycast isosurfaces are shaded with
@@ -879,6 +900,11 @@ static inline bool electronic_structure_source_supported(ElectronicStructureSour
     return (mask & electronic_structure_source_flag(source)) != 0;
 }
 
+// Whether the source can be shown: a map is, whenever one is loaded (the system's mask has no bit for it)
+static inline bool electronic_structure_source_available(ElectronicStructureSourceFlags mask, ElectronicStructureSource source) {
+    return source == ElectronicStructureSource::Map || electronic_structure_source_supported(mask, source);
+}
+
 static inline bool electronic_structure_is_density_property(const ElectronicStructureRepresentation& rep) {
     return rep.shown.source == ElectronicStructureSource::DensityProperty;
 }
@@ -983,6 +1009,9 @@ static inline const char* electronic_structure_iso_value_tooltip(const Electroni
     if (electronic_structure_is_density_property(rep)) {
         return "User-defined isosurfaces for arbitrary density-property volumes.";
     }
+    if (rep.shown.source == ElectronicStructureSource::Map) {
+        return "Where the surface is: in sigma, that many rms above the map's mean";
+    }
     if (electronic_structure_source_field_kind(rep.shown.source) != SurfaceFieldKind::Count) {
         return electronic_structure_is_signed(rep) ?
             "Where the surfaces are: the field at +isovalue and -isovalue, in its unit" :
@@ -1014,7 +1043,10 @@ static inline void electronic_structure_iso_desc_init(IsoDesc* iso, const Electr
     }
 
     const bool field = electronic_structure_source_field_kind(rep.shown.source) != SurfaceFieldKind::Count;
-    const float iso_value = field ? (float)rep.field_iso_value : (float)rep.iso_value;
+    // A map's isovalue is in sigma: from its mean, in its rms
+    const bool map = rep.shown.source == ElectronicStructureSource::Map;
+    const float iso_value = field ? (float)rep.field_iso_value :
+                            map   ? (float)(rep.map_mean + rep.iso_value * rep.map_rms) : (float)rep.iso_value;
     const float iso_threshold = electronic_structure_uses_density_iso_squared(rep) ? iso_value * iso_value :
                                 electronic_structure_is_signed(rep) ? fabsf(iso_value) : iso_value;
 
@@ -1095,6 +1127,10 @@ static inline void electronic_structure_set_source_defaults(ElectronicStructureR
         // a field of the system as a whole: an isovalue in its unit
         rep->field_iso_value = surface_field_kind_info(fk).iso;
         rep->source_span = {};
+    }
+    if (rep->shown.source == ElectronicStructureSource::Map) {
+        // a map: an isovalue in sigma above its mean
+        rep->iso_value = 3.0;
     }
     if (rep->shown.source == ElectronicStructureSource::DensityProperty) {
         // The atoms' colours are not offered for a density property; a field is, as it is evaluated on the same grid
@@ -1451,6 +1487,9 @@ struct SystemInference {
 struct ApplicationState {
     // --- APPLICATION ---
     application::Context app {};
+
+    // The maps loaded into the workspace: the sources of the representations of ElectronicStructureSource::Map
+    std::vector<MapVolume> maps;
 
 #if MD_ENABLE_GPU
     md_gpu_device_t gpu_device = nullptr;
@@ -2806,6 +2845,7 @@ size_t density_properties_gather(DensityProperty out[], size_t cap, const md_sys
 // Which electronic structure sources this system can actually show. Asked of the attribute table on
 // the spot rather than cached: each source needs particular attributes, so their presence IS the
 // answer, and a second reader publishing them satisfies it without anyone being told.
+int map_load(ApplicationState* state, const char* path);
 ElectronicStructureSourceFlags es_source_mask(const md_system_t& sys);
 
 // Points an electronic structure representation at something this system carries. A source the
@@ -3414,10 +3454,11 @@ void file_queue_process(ApplicationState* state);
 // A good view of the atoms in mask (all of them when null), framed in region of the view (see ViewRegion and
 // camera_compute_default_view). fov_y is that of the camera that looks through it. With an assembly of sys (view.assembly,
 // -1 for none), of those atoms in the instances of each of its groups, in all of the copies of the group.
-void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask = nullptr, float fov_y = Camera().fov_y, const ViewRegion& region = {}, const md_system_t* sys = nullptr, int assembly = -1);
-static inline void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitmask_t* mask, float fov_y = Camera().fov_y, const ViewRegion& region = {}, const md_system_t* sys = nullptr, int assembly = -1) {
+// With maps, their boxes are framed along with the atoms.
+void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitset_t* mask = nullptr, float fov_y = Camera().fov_y, const ViewRegion& region = {}, const md_system_t* sys = nullptr, int assembly = -1, const std::vector<MapVolume>* maps = nullptr);
+static inline void reset_view(ViewTransform* transform, const md_system_state_t& state, const md_bitmask_t* mask, float fov_y = Camera().fov_y, const ViewRegion& region = {}, const md_system_t* sys = nullptr, int assembly = -1, const std::vector<MapVolume>* maps = nullptr) {
     const md_bitset_t members = md_bitmask_view(mask);
-    reset_view(transform, state, &members, fov_y, region, sys, assembly);
+    reset_view(transform, state, &members, fov_y, region, sys, assembly, maps);
 }
 
 // ASSEMBLIES (view.assembly). The groups of assembly asm_idx are [a.group_offset[asm_idx], a.group_offset[asm_idx + 1]),
