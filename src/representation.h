@@ -31,6 +31,8 @@ void remove_representation(ApplicationState* app, size_t idx);
 void remove_all_representations(ApplicationState* app);
 // As remove_all_representations, but keeps the map representations
 void remove_system_representations(ApplicationState* app);
+// Only the map representations, the system's are kept
+void remove_map_representations(ApplicationState* app);
 void create_default_representations(ApplicationState* app);
 
 Representation* find_representation(ApplicationState* app, uint32_t id);

@@ -476,6 +476,8 @@ enum {
     FileFlags_DisableCacheWrite = 4,
     // A file made for this session (an ensemble's combined PDB): removed once the trajectory it holds is freed
     FileFlags_Temporary = 8,
+    // The startup dataset: a placeholder, not something the user chose to keep on screen
+    FileFlags_DefaultDataset = 16,
 };
 
 typedef uint32_t FileFlags;
@@ -775,6 +777,7 @@ struct ElectronicStructureRepresentation {
     int map_idx = -1;
     double map_mean = 0.0;
     double map_rms = 1.0;
+    double map_max = 0.0; // Largest finite voxel value of the map, copied with the statistics above
     // Zoning (maps): the density is kept within zone_radius (Å) of the atoms the representation's filter picks, and
     // is cut outside them
     bool zone_enabled = false;
@@ -1576,6 +1579,7 @@ struct ApplicationState {
     FileQueue file_queue = {};
     // The temporary file a trajectory reads its frames from, removed when the trajectory is freed
     char ensemble_path[1024] = "";
+    bool system_is_default = false;     // The loaded system is the startup dataset
 
     // --- CAMERA ---
     struct {

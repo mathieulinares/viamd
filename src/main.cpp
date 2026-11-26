@@ -979,7 +979,7 @@ int main(int argc, char** argv) {
             if (md_path_is_valid(path)) {
                 // @NOTE: We want explicitly to disable writing of cache files for the default dataset
                 // The motivation is that the dataset may reside in a shared folder on the system that has no write access.
-                file_queue_push(&state.file_queue, path, FileFlags_DisableCacheWrite);
+                file_queue_push(&state.file_queue, path, FileFlags_DisableCacheWrite | FileFlags_DefaultDataset);
                 const script::Language lang = state.script.language;
                 const script::Language other = lang == script::Language::V2 ? script::Language::V1 : script::Language::V2;
                 state.editor.SetText(default_script(lang));

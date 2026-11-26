@@ -518,6 +518,47 @@ void render_imgui(Context* ctx) {
 
 void swap_buffers(Context* ctx) { glfwSwapBuffers((GLFWwindow*)ctx->window.ptr); }
 
+bool file_dialog_multiple(char* str_buf, size_t str_cap, md_str_t filter) {
+    md_temp_scope_t temp = md_temp_begin();
+    const nfdpathset_t* path_set = NULL;
+    MD_DEFER {
+        md_temp_end(temp);
+        if (path_set) NFD_PathSet_Free(path_set);
+    };
+
+    md_str_t zfilt = md_alloc_str(md_temp_allocator(temp), filter);
+    const nfdu8filteritem_t filter_item = { "Files", zfilt.ptr };
+    const nfdfiltersize_t filter_count = zfilt.len > 0 ? 1 : 0;
+
+    nfdwindowhandle_t win_handle{};
+    NFD_GetNativeWindowFromGLFWWindow((GLFWwindow*)data.internal_ctx.window.ptr, &win_handle);
+
+    nfdopendialogu8args_t args{};
+    args.filterList = filter_count ? &filter_item : NULL;
+    args.filterCount = filter_count;
+    args.parentWindow = win_handle;
+    args.title = "Open Files";
+    if (NFD_OpenDialogMultipleU8_With(&path_set, &args) != NFD_OKAY || !path_set) return false;
+
+    nfdpathsetsize_t count = 0;
+    if (NFD_PathSet_GetCount(path_set, &count) != NFD_OKAY) return false;
+
+    // Paths are joined with ';', the separator used by the caller's text input.
+    size_t len = 0;
+    str_buf[0] = '\0';
+    for (nfdpathsetsize_t i = 0; i < count; ++i) {
+        nfdu8char_t* path = NULL;
+        if (NFD_PathSet_GetPathU8(path_set, i, &path) != NFD_OKAY) continue;
+        int n = snprintf(str_buf + len, str_cap - len, "%s%s", len ? ";" : "", path);
+        NFD_PathSet_FreePathU8(path);
+        if (n < 0 || (size_t)n >= str_cap - len) break;
+        len += (size_t)n;
+    }
+    if (len == 0) return false;
+    md_chars_replace(str_buf, len, '\\', '/');
+    return true;
+}
+
 bool file_dialog(char* str_buf, size_t str_cap, FileDialogFlag flags, md_str_t filter) {    
     md_temp_scope_t temp = md_temp_begin();
     nfdu8char_t* out_path = NULL;
@@ -544,7 +585,9 @@ bool file_dialog(char* str_buf, size_t str_cap, FileDialogFlag flags, md_str_t f
     nfdwindowhandle_t win_handle{};
     NFD_GetNativeWindowFromGLFWWindow((GLFWwindow*)data.internal_ctx.window.ptr, &win_handle);
 
-    if (flags & FileDialogFlag_Open) {
+    if (flags & FileDialogFlag_Dir) {
+        result = NFD_PickFolderU8(&out_path, NULL);
+    } else if (flags & FileDialogFlag_Open) {
         nfdopendialogu8args_t args{};
         args.filterList = filter_list;
         args.filterCount = filter_count;

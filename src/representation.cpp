@@ -429,6 +429,16 @@ void remove_system_representations(ApplicationState* state) {
     }
 }
 
+// The groups stay: the system representations are kept and refer to them
+void remove_map_representations(ApplicationState* state) {
+    for (size_t i = md_array_size(state->representation.reps); i-- > 0;) {
+        const Representation& rep = state->representation.reps[i];
+        if (rep.type == RepresentationType::ElectronicStructure && rep.electronic_structure.shown.source == ElectronicStructureSource::Map) {
+            remove_representation(state, i);
+        }
+    }
+}
+
 void recompute_atom_visibility_mask(ApplicationState* state) {
     MD_ASSERT(state);
     auto& mask = state->representation.visibility_mask;
@@ -3594,7 +3604,18 @@ static bool draw_representations_window_electronic_structure(ApplicationState* s
                     update_rep |= ImGui::SliderScalar("##field_isovalue", ImGuiDataType_Double, &es.field_iso_value, &lo, &hi, fmt) && es.coloring == SurfaceColoring::Field;
                 } else {
                     prop::row("isovalue", electronic_structure_iso_value_tooltip(es));
-                    update_rep |= ImGui::SliderScalar("##isovalue", ImGuiDataType_Double, &es.iso_value, &iso_min, &iso_max, "%.4g", ImGuiSliderFlags_Logarithmic) && es.coloring == SurfaceColoring::Field;
+                    // a map's isovalue is in sigma: the live readout shows the same threshold in map units
+                    // The range of a map ends at its largest voxel, so the slider reaches every level the map has
+                    char iso_fmt[96] = "%.4g";
+                    double iso_hi = iso_max;
+                    if (es.shown.source == ElectronicStructureSource::Map) {
+                        const double map_units = es.map_mean + es.iso_value * es.map_rms;
+                        snprintf(iso_fmt, sizeof(iso_fmt), "%%.4g σ = %.4g map units", map_units);
+                        if (es.map_rms > 0.0 && es.map_max > es.map_mean) {
+                            iso_hi = MD_MAX(iso_min * 2.0, (es.map_max - es.map_mean) / es.map_rms);
+                        }
+                    }
+                    update_rep |= ImGui::SliderScalar("##isovalue", ImGuiDataType_Double, &es.iso_value, &iso_min, &iso_hi, iso_fmt, ImGuiSliderFlags_Logarithmic) && es.coloring == SurfaceColoring::Field;
                 }
                 prop::row("optical density", "Optical density of the isosurfaces: how much they absorb of what they enclose");
                 ImGui::SliderScalar("##optical_density", ImGuiDataType_Double, &es.iso_optical_density, &min_tau, &max_tau, "%.4f", ImGuiSliderFlags_Logarithmic);

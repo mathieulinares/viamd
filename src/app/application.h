@@ -67,4 +67,8 @@ enum {
 // filter is a null-terminated string containing comma separated extensions to be applied as a filter for the files: e.g. "jpg,png,bmp" to limit the scope of files to files with endings .jpg, .png or .bmp
 bool file_dialog(char* path_buf, size_t path_cap, FileDialogFlag flags, md_str_t filter = {});
 
+// Opens an open-file dialogue allowing several files to be selected.
+// The selected paths are written to str_buf separated by ';'.
+bool file_dialog_multiple(char* str_buf, size_t str_cap, md_str_t filter);
+
 }  // namespace application

@@ -2672,7 +2672,15 @@ void load_workspace(ApplicationState* data, md_str_t filename) {
         } else if (md_str_eq(section, MD_STR_LIT("Map"))) {
             while (viamd::next_entry(ident, arg, state)) {
                 if (md_str_eq(ident, MD_STR_LIT("Path"))) {
-                    const std::string path(arg.ptr, arg.len);
+                    // Resolve relative to the workspace folder (like the system files), so portable workspaces work
+                    md_str_t file;
+                    viamd::extract_str(file, arg);
+                    md_str_writer_t jw = md_str_writer_create(temp_alloc);
+                    if (!md_path_is_absolute(file)) jw += folder;
+                    jw += file;
+                    const md_str_t joined = md_str_writer_to_str(&jw);
+                    const md_str_t canonical = md_path_make_canonical(joined, temp_alloc);
+                    const std::string path = md_str_empty(canonical) ? std::string(joined.ptr, joined.len) : std::string(canonical.ptr, canonical.len);
                     if (map_load(data, path.c_str()) < 0) VIAMD_LOG_INFO("Workspace: could not load map '%s'", path.c_str());
                 }
             }
@@ -3108,6 +3116,10 @@ void load_workspace(ApplicationState* data, md_str_t filename) {
     plot_resolve_legacy_periods(data, data->timeline.subplots, PLOT_MAX_SUBPLOTS);
     plot_resolve_legacy_periods(data, data->distributions.subplots, PLOT_MAX_SUBPLOTS);
 
+    // A system placed on a map dims the map (optical density 0.0003, isosurface alpha 80/255) the same way a dropped
+    // map is, so a workspace-loaded map matches the default a dropped one has (the optical density is not serialized).
+    if (data->mold.sys.atom.count > 0) dim_map_under_system(data);
+
     viamd::event_system_broadcast_event(viamd::EventType_ViamdDeserializeEnd, viamd::EventPayloadType_DeserializationState, &state);
     data->timeline.periods.legacy_filter_id = 0;
 }
@@ -3293,10 +3305,13 @@ bool save_workspace(ApplicationState* app_state, md_str_t filename) {
         viamd::write_bool(state, md_str_from_cstr(workspace_windows[i].name), *workspace_windows[i].show);
     }
 
-    // The maps, in order: the representations refer to them by their index
+    // The maps, in order: the representations refer to them by their index. Written relative to the workspace, as the
+    // system files are, so a saved workspace carries to another machine; an absolute path is kept when none is found.
     for (const MapVolume& map : app_state->maps) {
         viamd::write_section_header(state, MD_STR_LIT("Map"));
-        viamd::write_str(state, MD_STR_LIT("Path"), md_str_t{map.path.c_str(), map.path.size()});
+        const md_str_t map_path = md_str_t{map.path.c_str(), map.path.size()};
+        md_str_t rel = md_path_make_relative(filename, map_path, temp_alloc);
+        viamd::write_str(state, MD_STR_LIT("Path"), md_str_empty(rel) ? map_path : rel);
     }
 
     viamd::event_system_broadcast_event(viamd::EventType_ViamdSerialize, viamd::EventPayloadType_SerializationState, &state);
@@ -4883,6 +4898,11 @@ static bool map_evaluate(ApplicationState* state, Representation* rep, const Ele
     rep->electronic_structure.has_box = true;
     rep->electronic_structure.map_mean = info.mean;
     rep->electronic_structure.map_rms = info.rms;
+    double map_max = -INFINITY;
+    for (float v : map.values) {
+        if (isfinite(v)) map_max = MD_MAX(map_max, (double)v);
+    }
+    rep->electronic_structure.map_max = isfinite(map_max) ? map_max : info.mean;
     return true;
 }
 
@@ -7818,8 +7838,9 @@ void file_queue_process(ApplicationState* state) {
         } else if (file_is_map(e.path)) {
             char map_path[1024];
             md_str_copy_to_char_buf(map_path, sizeof(map_path), e.path);
-            // Like a system load, a map starts from a clean session. A system loaded afterwards is placed on top of it.
-            remove_all_representations(state);
+            // The startup dataset is a placeholder: a map replaces it as a clean session. A system the user loaded is kept.
+            if (state->system_is_default) remove_all_representations(state);
+            else remove_map_representations(state);
             state->maps.clear();
             const int idx = map_load(state, map_path);
             if (idx >= 0) {
@@ -7829,6 +7850,7 @@ void file_queue_process(ApplicationState* state) {
                 rep->electronic_structure.shown.source = ElectronicStructureSource::Map;
                 rep->electronic_structure.map_idx = idx;
                 electronic_structure_set_source_defaults(&rep->electronic_structure);
+                if (!state->system_is_default && state->mold.sys.atom.count > 0) dim_map_under_system(state);
                 state->animation = {};
                 reset_view(&state->view.camera, state->mold.state, &state->representation.visibility_mask, state->view.camera.fov_y, state->view.region, nullptr, -1, &state->maps);
                 // The camera animates toward the target, so the target must be the new view too or the camera drifts back to the old one
@@ -7864,6 +7886,7 @@ void file_queue_process(ApplicationState* state) {
                     state->animation = {};
                     // @TODO @FIX: This should be captured and performed by the Event that signals when a new system is loaded.
                     if (result == LoadResult_System) {
+                        state->system_is_default = (e.flags & FileFlags_DefaultDataset) != 0;
                         md_bitmask_clear(&state->representation.visibility_mask);
 
                         if (!state->settings.keep_representations) {
@@ -7881,6 +7904,14 @@ void file_queue_process(ApplicationState* state) {
                             }
                         }
                         recompute_atom_visibility_mask(state);
+                        // A kept map is zoned around the atoms it was last evaluated with, and its hash does not
+                        // see the new system: evaluate it again
+                        for (size_t i = 0; i < md_array_size(state->representation.reps); ++i) {
+                            Representation& rep = state->representation.reps[i];
+                            if (rep.type == RepresentationType::ElectronicStructure && rep.electronic_structure.shown.source == ElectronicStructureSource::Map) {
+                                flag_representation_as_dirty(&rep);
+                            }
+                        }
                         state->mold.interpolate_system_state = true;
                         state->mold.dirty_gpu_buffers |= MolBit_ClearVelocity;
                         reset_view(&state->view.camera, state->mold.state, &state->representation.visibility_mask, state->view.camera.fov_y, state->view.region, nullptr, -1, &state->maps);
